@@ -1,0 +1,14 @@
+# Build artefacts
+src/waybeam
+src/*.o
+
+# Downloaded toolchains and firmware
+toolchain/
+firmware/
+
+# Editor / IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
