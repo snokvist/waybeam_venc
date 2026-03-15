@@ -69,11 +69,18 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 		return -1;
 	}
 
-	if (output->socket_handle < 0)
-		return -1;
-
 	if (venc_config_parse_server_uri(uri, host, sizeof(host), &port) != 0)
 		return -1;
+
+	/* Create socket on first use (startup with outgoing.enabled=false
+	 * skips socket creation; the API may set a server later). */
+	if (output->socket_handle < 0) {
+		output->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
+		if (output->socket_handle < 0) {
+			fprintf(stderr, "ERROR: [maruko] Unable to create UDP socket\n");
+			return -1;
+		}
+	}
 
 	output->dst.sin_family = AF_INET;
 	output->dst.sin_port = htons(port);

@@ -398,13 +398,23 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 	if (venc_config_parse_server_uri(uri, host, sizeof(host), &port) != 0)
 		return -1;
 
+	/* Create socket on first use (startup with outgoing.enabled=false
+	 * skips socket creation; the API may set a server later). */
+	if (output->socket_handle < 0) {
+		output->socket_handle = socket(AF_INET, SOCK_DGRAM, 0);
+		if (output->socket_handle < 0) {
+			fprintf(stderr, "ERROR: Unable to create UDP socket\n");
+			return -1;
+		}
+	}
+
 	output->dst.sin_family = AF_INET;
 	output->dst.sin_port = htons(port);
 	output->dst.sin_addr.s_addr = inet_addr(host);
-	if (output->connected_udp && output->socket_handle >= 0) {
+	if (output->connected_udp) {
 		if (connect(output->socket_handle, (struct sockaddr *)&output->dst,
 		    sizeof(output->dst)) != 0) {
-			fprintf(stderr, "WARNING: UDP re-connect to %s:%u failed (%d)\n",
+			fprintf(stderr, "WARNING: UDP connect to %s:%u failed (%d)\n",
 				host, port, errno);
 		}
 	}
