@@ -106,7 +106,7 @@ template is provided at `config/venc.default.json`.
   },
   "audio": {
     "enabled": false, "sampleRate": 16000, "channels": 1,
-    "codec": "pcm", "volume": 80, "mute": false
+    "codec": "g711a", "volume": 80, "mute": false
   },
   "imu": {
     "enabled": false, "i2cDevice": "/dev/i2c-1", "i2cAddr": "0x68",
@@ -382,15 +382,20 @@ Supported codecs: `"pcm"` (raw 16-bit), `"g711a"` (A-law), `"g711u"` (µ-law).
 **RTP payload types:** When streaming in RTP mode, venc uses standard static
 payload types when the sample rate matches the RFC 3551 standard:
 
-| Codec | Sample rate | RTP PT | Auto-detect |
-|-------|-------------|--------|-------------|
-| `g711u` | 8000 | 0 (PCMU) | Yes |
-| `g711a` | 8000 | 8 (PCMA) | Yes |
-| `pcm` | 44100 | 11 (L16 mono) | Yes |
-| any | other | 110 (dynamic) | No |
+| Codec | Sample rate | RTP PT | Notes |
+|-------|-------------|--------|-------|
+| `g711u` | 8000 | 0 (PCMU) | RFC 3551 standard |
+| `g711a` | 8000 | 8 (PCMA) | RFC 3551 standard |
+| `g711u` | non-8kHz | 112 | Dynamic, Waybeam convention |
+| `g711a` | non-8kHz | 113 | Dynamic, Waybeam convention |
+| `pcm` | 44100 | 11 (L16 mono) | RFC 3551 standard |
+| `pcm` | other | 110 | Dynamic PCM |
 
-G.711 at non-8kHz rates (e.g. the default 16kHz) is valid but non-standard
-and uses dynamic PT 110 — receivers must be configured to match.
+Sample rate range: 8000–48000 Hz (clamped by config parser). The
+recommended default is 16kHz G.711a for low-latency FPV audio.
+
+**Frame timing:** Each RTP packet contains `sample_rate / 50` samples
+(~20ms of audio). The RTP timestamp increments by this value per packet.
 
 #### Recording (Star6E only)
 

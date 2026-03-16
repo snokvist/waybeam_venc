@@ -1,5 +1,15 @@
 # History
 
+## [0.3.1] - 2026-03-16
+- Reduce G.711 audio latency: scale frame size to `sample_rate/50` (~20ms)
+  instead of hardcoded 320. Reduce MI_AI ring (frmNum 16→8), output port
+  depth (4,16)→(2,4), fnGetFrame timeout 100→50ms.
+- Add dynamic RTP payload types: PT=112 (PCMU non-8kHz), PT=113 (PCMA
+  non-8kHz). Standard PTs (0, 8, 11) still used when rate matches RFC 3551.
+- Clamp audio sample_rate to 8000-48000 in config parser.
+- Default audio codec changed from `pcm` to `g711a` in venc.default.json.
+- Add `slicesEnabled`/`sliceSize` fields to default config (off by default).
+
 ## [0.3.0] - 2026-03-15
 - Custom 3A thread for Star6E — replaces ISP internal AE/AWB with a
   dedicated 15 Hz thread (default, no config change needed):
