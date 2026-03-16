@@ -461,7 +461,7 @@ static void star6e_pipeline_fill_h26x_attr(i6_venc_attr_h26x *attr,
 
 static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	uint32_t bitrate, uint32_t framerate, uint32_t gop, PAYLOAD_TYPE_E codec,
-	int rc_mode, MI_VENC_CHN *chn)
+	int rc_mode, bool frame_lost_enabled, MI_VENC_CHN *chn)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bit_rate_bits = bitrate * 1024;
@@ -572,6 +572,24 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		fprintf(stderr, "ERROR: MI_VENC_StartRecvPic failed %d\n", ret);
 		MI_VENC_DestroyChn(*chn);
 		return ret;
+	}
+
+	/* Frame lost strategy — safety net to prevent pipeline stalls
+	 * when bitrate exceeds target.  Gated by config frameLost (default on).
+	 * Uses NORMAL mode (PSKIP not supported on Infinity6E kernel).
+	 * Threshold at 120% of configured bitrate: allows normal I-frame and
+	 * scene-change spikes, only drops during genuine encoder overflow. */
+	if (frame_lost_enabled) {
+		MI_VENC_ParamFrameLost_t lost = {
+			.bFrmLostOpen = 1,
+			.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL,
+			.u32FrmLostBpsThr = bit_rate_bits + bit_rate_bits / 5,
+			.u32EncFrmGaps = 0,
+		};
+		ret = MI_VENC_SetFrameLostStrategy(*chn, &lost);
+		if (ret != 0)
+			fprintf(stderr, "[venc] WARNING: SetFrameLostStrategy"
+				" failed %d\n", ret);
 	}
 
 	return 0;
@@ -1132,7 +1150,8 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		venc_fps = pconf.sensor_framerate;
 	ret = star6e_pipeline_start_venc(pconf.image_width, pconf.image_height,
 		pconf.venc_max_rate, venc_fps, pconf.venc_gop_size,
-		pconf.rc_codec, pconf.rc_mode, &state->venc_channel);
+		pconf.rc_codec, pconf.rc_mode,
+		vcfg->video0.frame_lost, &state->venc_channel);
 	if (ret != 0)
 		goto fail_vpe;
 
@@ -1189,7 +1208,7 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 
 	ret = star6e_pipeline_start_venc(state->image_width,
 		state->image_height, bitrate, fps, gop,
-		PT_H265, 3 /* CBR */, &d->channel);
+		PT_H265, 3 /* CBR */, true, &d->channel);
 	if (ret != 0) {
 		fprintf(stderr, "WARNING: dual VENC ch1 create failed (%d), "
 			"falling back to mirror mode\n", ret);

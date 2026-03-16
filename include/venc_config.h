@@ -55,9 +55,7 @@ typedef struct {
 	uint32_t bitrate;      /* kbps */
 	double gop_size;       /* seconds between keyframes; 0 = all-intra */
 	int qp_delta;          /* relative I/P QP delta, -12..12 */
-	bool slices_enabled;
-	uint32_t slice_size;
-	bool low_delay;
+	bool frame_lost;       /* enable frame-lost safety net */
 } VencConfigVideo;
 
 typedef struct {

@@ -178,10 +178,7 @@ assert_get "video0.size" size
 assert_get "video0.bitrate" uint
 assert_get "video0.gop_size" double
 assert_get "video0.qp_delta" int
-assert_get "video0.slices_enabled" bool
-assert_get "video0.slice_size" uint
-assert_get "video0.low_delay" bool
-
+assert_get "video0.frame_lost" bool
 # Outgoing
 assert_get "outgoing.enabled" bool
 assert_get "outgoing.server" string
@@ -445,7 +442,7 @@ section "18. RESTART-REQUIRED FIELDS (verify reinit_pending)"
 
 # These fields should return reinit_pending=true but we do NOT trigger
 # a restart here — that would tear down the pipeline. Just verify the flag.
-for field_val in "video0.rc_mode=cbr" "video0.slices_enabled=true" "video0.low_delay=false" \
+for field_val in "video0.rc_mode=cbr" "video0.frame_lost=true" \
                  "outgoing.stream_mode=rtp" "outgoing.max_payload_size=1400"; do
 	field="${field_val%%=*}"
 	value="${field_val#*=}"

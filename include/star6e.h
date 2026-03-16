@@ -424,6 +424,21 @@ MI_S32 MI_VENC_SetRcParam(MI_VENC_CHN chn, MI_VENC_RcParam_t *param);
 MI_S32 MI_VENC_RequestIdr(MI_VENC_CHN chn, MI_BOOL instant);
 MI_S32 MI_VENC_SetRoiCfg(MI_VENC_CHN chn, MI_VENC_RoiCfg_t *cfg);
 MI_S32 MI_VENC_GetRoiCfg(MI_VENC_CHN chn, MI_U32 idx, MI_VENC_RoiCfg_t *cfg);
+
+/* Frame lost strategy */
+typedef enum {
+	E_MI_VENC_FRMLOST_NORMAL = 0,
+	E_MI_VENC_FRMLOST_PSKIP  = 1,
+} MI_VENC_FrameLostMode_e;
+typedef struct {
+	MI_BOOL                  bFrmLostOpen;
+	MI_U32                   u32FrmLostBpsThr;
+	MI_VENC_FrameLostMode_e  eFrmLostMode;
+	MI_U32                   u32EncFrmGaps;
+} MI_VENC_ParamFrameLost_t;
+MI_S32 MI_VENC_SetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
+MI_S32 MI_VENC_GetFrameLostStrategy(MI_VENC_CHN chn, MI_VENC_ParamFrameLost_t *p);
+
 #if !defined(PLATFORM_MARUKO)
 MI_S32 MI_VENC_GetChnDevid(MI_VENC_CHN chn, MI_U32* device_id);
 #endif

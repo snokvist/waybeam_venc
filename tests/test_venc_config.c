@@ -56,10 +56,7 @@ static int test_defaults(void)
 	CHECK("defaults_bitrate", cfg.video0.bitrate == 8192);
 	CHECK("defaults_gop_size", cfg.video0.gop_size == 1.0);
 	CHECK("defaults_qp_delta", cfg.video0.qp_delta == -4);
-	CHECK("defaults_slices", cfg.video0.slices_enabled == true);
-	CHECK("defaults_slice_size", cfg.video0.slice_size == 4);
-	CHECK("defaults_low_delay", cfg.video0.low_delay == false);
-
+	CHECK("defaults_frame_lost", cfg.video0.frame_lost == true);
 	CHECK("defaults_enabled", cfg.outgoing.enabled == false);
 	CHECK("defaults_server", cfg.outgoing.server[0] == '\0');
 	CHECK("defaults_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
@@ -93,7 +90,7 @@ static int test_load_full_json(void)
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
-		"    \"slicesEnabled\": false, \"sliceSize\": 8, \"lowDelay\": true },"
+		"    \"frameLost\": false },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"targetPacketRate\": 500, \"sendFeedback\": true },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
@@ -127,9 +124,7 @@ static int test_load_full_json(void)
 	CHECK("load_bitrate", cfg.video0.bitrate == 4096);
 	CHECK("load_gop", cfg.video0.gop_size == 1);
 	CHECK("load_qp_delta", cfg.video0.qp_delta == -7);
-	CHECK("load_slices_off", cfg.video0.slices_enabled == false);
-	CHECK("load_slice_size", cfg.video0.slice_size == 8);
-	CHECK("load_low_delay", cfg.video0.low_delay == true);
+	CHECK("load_frame_lost_off", cfg.video0.frame_lost == false);
 	CHECK("load_enabled", cfg.outgoing.enabled == true);
 	CHECK("load_server", strcmp(cfg.outgoing.server, "udp://10.0.0.1:6000") == 0);
 	CHECK("load_stream_mode", strcmp(cfg.outgoing.stream_mode, "compact") == 0);
@@ -391,7 +386,6 @@ static int test_sample_config_file(void)
 	CHECK("sample_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
 	CHECK("sample_bitrate", cfg.video0.bitrate == 8192);
 	CHECK("sample_web_port", cfg.system.web_port == 80);
-	CHECK("sample_slices", cfg.video0.slices_enabled == true);
 	CHECK("sample_audio_off", cfg.audio.enabled == false);
 	CHECK("sample_audio_port", cfg.outgoing.audio_port == 5601);
 

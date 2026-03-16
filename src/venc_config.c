@@ -98,9 +98,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.bitrate = 8192;
 	cfg->video0.gop_size = 1.0;
 	cfg->video0.qp_delta = -4;
-	cfg->video0.slices_enabled = true;
-	cfg->video0.slice_size = 4;
-	cfg->video0.low_delay = false;
+	cfg->video0.frame_lost = true;
 
 	/* outgoing */
 	cfg->outgoing.enabled = false;
@@ -288,9 +286,7 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->qp_delta = json_get_int(obj, "qpDelta", v->qp_delta);
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
-	v->slices_enabled = json_get_bool(obj, "slicesEnabled", v->slices_enabled);
-	v->slice_size = (uint32_t)json_get_int(obj, "sliceSize", (int)v->slice_size);
-	v->low_delay = json_get_bool(obj, "lowDelay", v->low_delay);
+	v->frame_lost = json_get_bool(obj, "frameLost", v->frame_lost);
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -551,9 +547,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "bitrate", cfg->video0.bitrate);
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
-		cJSON_AddBoolToObject(vid, "slicesEnabled", cfg->video0.slices_enabled);
-		cJSON_AddNumberToObject(vid, "sliceSize", cfg->video0.slice_size);
-		cJSON_AddBoolToObject(vid, "lowDelay", cfg->video0.low_delay);
+		cJSON_AddBoolToObject(vid, "frameLost", cfg->video0.frame_lost);
 	}
 
 	/* outgoing */

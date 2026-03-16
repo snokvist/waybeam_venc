@@ -60,9 +60,6 @@ Planned `video.precrop` intent:
   - if requested crop/aspect cannot be satisfied from selected capture mode, fail fast.
 
 ### Encoder behavior
-- `encoder.slices_enabled`
-- `encoder.slice_size_lines`
-- `encoder.low_delay`
 - `encoder.roi_enabled`
 - `encoder.roi_qp`
 - `encoder.by_frame`
@@ -101,7 +98,7 @@ Planned `video.precrop` intent:
 - resolution (`video.output_resolution`, `video.capture_resolution`)
 - pre-crop behavior (`video.precrop`)
 - stream packetization mode (`stream.mode`)
-- low-delay/slice strategy changes
+- low-delay pipeline mode changes (future)
 
 ### Requires full pipeline restart
 - sensor capture resolution/fps mode re-selection

@@ -101,7 +101,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "exposure": 9, "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500 },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "slicesEnabled": true, "sliceSize": 4, "lowDelay": false },
+      "video0": { "codec": "h265", "rcMode": "cbr", "fps": 90, "size": "1920x1080", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "targetPacketRate": 0, "sendFeedback": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 }
     }
@@ -196,7 +196,7 @@ Error `404` — unknown field:
 Majestic-style camelCase aliases are also accepted for selected fields,
 including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `fpv.noiseLevel`, `isp.sensorBin`, `isp.awbMode`, `isp.awbCt`,
-`video0.rcMode`, `video0.gopSize`, `video0.qpDelta`, `video0.sliceSize`,
+`video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `outgoing.maxPayloadSize`, `outgoing.targetPacketRate`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
 

@@ -73,7 +73,7 @@ library's `MI_AI_GetFrame` when encoding is enabled.
   - 8 kHz mono: 64 kbps
 - CPU overhead: ~0% (measured on SSC30KQ at 8 kHz mono)
 - Standard telephony codec. Good voice quality at low bandwidth.
-- RTP payload type: 110 (dynamic)
+- RTP payload type: PT=8 at 8kHz (RFC 3551), PT=113 at other rates (Waybeam convention)
 
 ### g711u — G.711 μ-law
 
@@ -81,7 +81,7 @@ library's `MI_AI_GetFrame` when encoding is enabled.
 - 2:1 compression ratio. Slightly better SNR than A-law at low signal levels.
 - Bandwidth: same as g711a
 - CPU overhead: ~0% (measured on SSC30KQ at 8 kHz mono)
-- RTP payload type: 110 (dynamic)
+- RTP payload type: PT=0 at 8kHz (RFC 3551), PT=112 at other rates (Waybeam convention)
 
 ### Codec comparison
 
@@ -102,9 +102,9 @@ Standard RTP packetization with 12-byte header:
 | Field | Value |
 |-------|-------|
 | Version | 2 |
-| Payload type | 110 (dynamic, all codecs) |
+| Payload type | Per codec/rate (see PT table in README.md) |
 | SSRC | Random, distinct from video SSRC |
-| Timestamp | Increments by samples per frame (320 at default config) |
+| Timestamp | Increments by `sample_rate / 50` per frame (~20ms) |
 | Clock rate | Matches sample rate |
 
 Audio uses a separate SSRC from video, allowing receivers to demux streams
@@ -160,7 +160,7 @@ Microphone/I2S ─► MI_AI device ─► MI_AI channel ─► GetFrame loop
 ### Threading model
 
 Audio capture runs in a **separate thread** from the video streaming loop.
-`MI_AI_GetFrame` blocks with a 100ms timeout per call. The audio thread is
+`MI_AI_GetFrame` blocks with a 50ms timeout per call. The audio thread is
 created during `pipeline_start` and joined during `pipeline_stop`.
 
 Thread safety: the audio thread shares the video UDP socket (when

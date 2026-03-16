@@ -47,8 +47,8 @@ int stream_metrics_sample(StreamMetricsState *state,
 	sample->elapsed_ms = elapsed_ms;
 	sample->uptime_s = now->tv_sec - state->ts_start.tv_sec;
 	sample->fps = (unsigned int)((state->interval_frames * 1000L) / elapsed_ms);
-	sample->kbps = (unsigned int)((state->interval_bytes * 8000UL) /
-		((unsigned long)elapsed_ms * 1024UL));
+	sample->kbps = (unsigned int)(((unsigned long long)state->interval_bytes * 8000ULL) /
+		((unsigned long long)elapsed_ms * 1024ULL));
 	if (state->interval_frames > 0) {
 		sample->avg_bytes = (unsigned int)(state->interval_bytes /
 			state->interval_frames);
