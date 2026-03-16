@@ -34,7 +34,7 @@
     "server": "",
     "streamMode": "rtp",
     "maxPayloadSize": 1400,
-    "targetPacketRate": 850,
+    "targetPacketRate": 0,
     "sendFeedback": false,
     "audioPort": 5601,
     "sidecarPort": 5602
