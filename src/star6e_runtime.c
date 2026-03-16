@@ -551,12 +551,18 @@ static int star6e_runtime_restart_pipeline(Star6eRunnerContext *ctx,
 	}
 
 	/* Lock sensor to the mode that was running before teardown.
-	 * Switching sensor modes on a live reinit hangs the ISP. */
+	 * MI_SNR_SetRes to a larger mode D-states the MIPI PHY driver.
+	 * Confirmed: mode 1→3 (downsize) works, 3→1 (upsize) hangs. */
 	vcfg->sensor.index = prev_pad;
+	if (vcfg->sensor.mode != prev_mode) {
+		printf("> Reinit: sensor.mode %d -> %d blocked "
+			"(mode change requires process restart)\n",
+			prev_mode, vcfg->sensor.mode);
+	}
 	vcfg->sensor.mode = prev_mode;
 	if (prev_max_fps > 0 && vcfg->video0.fps > prev_max_fps) {
 		printf("> Reinit: clamping FPS %u -> %u "
-			"(sensor mode change not supported during reinit)\n",
+			"(limited by current sensor mode)\n",
 			vcfg->video0.fps, prev_max_fps);
 		vcfg->video0.fps = prev_max_fps;
 	}
