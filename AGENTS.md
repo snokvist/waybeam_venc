@@ -199,6 +199,27 @@ The preferred method for interactive testing uses the device's production
 JSON config (`/etc/venc.json`) and the HTTP API. This tests the actual
 runtime path including config parsing, pipeline init, and API controls.
 
+**Important:** The venc binary always loads `/etc/venc.json` — this path
+is hardcoded. There is no `-c` flag to override it at runtime.
+
+**Important:** Always use the `json_cli` binary on the target for JSON config
+edits. Do NOT use `sed` — it is unreliable on nested JSON (wrong key matches,
+encoding issues). `json_cli` is the only safe tool for modifying
+`/etc/venc.json` on the device.
+
+```bash
+# Set a field (creates key if absent, updates in-place if present)
+ssh root@<HOST> "json_cli /etc/venc.json set audio.codec opus"
+ssh root@<HOST> "json_cli /etc/venc.json set audio.enabled true"
+ssh root@<HOST> "json_cli /etc/venc.json set audio.sampleRate 48000"
+
+# Read a field
+ssh root@<HOST> "json_cli /etc/venc.json get audio.codec"
+
+# Verify the full audio section after edits
+ssh root@<HOST> "json_cli /etc/venc.json get audio"
+```
+
 ### Quick cycle
 
 ```bash
@@ -211,9 +232,9 @@ ssh root@<HOST> "killall venc; sleep 2"
 # 3. Deploy binary
 scp -O out/star6e/venc root@<HOST>:/usr/bin/venc
 
-# 4. (Optional) Modify config — use sed for one-shot changes
-ssh root@<HOST> "sed -i 's/\"legacyAe\": true/\"legacyAe\": false/' /etc/venc.json"
-ssh root@<HOST> "sed -i 's/\"verbose\": false/\"verbose\": true/' /etc/venc.json"
+# 4. (Optional) Modify config — always use json_cli, never sed
+ssh root@<HOST> "json_cli /etc/venc.json set legacyAe false"
+ssh root@<HOST> "json_cli /etc/venc.json set system.verbose true"
 
 # 5. Start venc as daemon with log capture
 ssh root@<HOST> "nohup venc > /tmp/venc.log 2>&1 &"
@@ -236,8 +257,8 @@ ssh root@<HOST> "wget -q -O- http://127.0.0.1/api/v1/ae"
 ssh root@<HOST> "grep 'limits updated' /tmp/venc.log"
 
 # 11. Cleanup — restore config and stop
-ssh root@<HOST> "sed -i 's/\"legacyAe\": false/\"legacyAe\": true/' /etc/venc.json"
-ssh root@<HOST> "sed -i 's/\"verbose\": true/\"verbose\": false/' /etc/venc.json"
+ssh root@<HOST> "json_cli /etc/venc.json set legacyAe true"
+ssh root@<HOST> "json_cli /etc/venc.json set system.verbose false"
 ssh root@<HOST> "killall venc"
 ```
 
