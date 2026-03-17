@@ -849,6 +849,51 @@ static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
  * causes a mutex deadlock.  ISP bin and exposure cap are safe to reapply. */
 static int g_isp_initialized = 0;
 
+/* Poll ISP channel readiness after VIF→VPE bind.  The ISP driver creates its
+ * channel asynchronously after the bind; issuing further binds or frame
+ * processing before it is ready produces continuous dmesg errors:
+ *   [MS_CAM_IspApiGet] ISP channel [0] have NOT been created
+ * This standalone helper dlopen/dlcloses libmi_isp.so so it can be called
+ * without the full ISP bin loading context. */
+static void wait_isp_channel_ready(void)
+{
+	typedef struct { int bFlag; } IspParaInitInfoParam;
+	typedef struct { IspParaInitInfoParam stParaAPI; } IspParaInitInfoType;
+	typedef int (*fn_get_para_init_t)(int, IspParaInitInfoType *);
+	void *handle;
+	fn_get_para_init_t fn;
+	int elapsed_ms = 0;
+
+	handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!handle) {
+		usleep(100 * 1000);
+		return;
+	}
+
+	fn = (fn_get_para_init_t)dlsym(handle, "MI_ISP_IQ_GetParaInitStatus");
+	if (!fn) {
+		usleep(100 * 1000);
+		dlclose(handle);
+		return;
+	}
+
+	while (elapsed_ms < 2000) {
+		IspParaInitInfoType info;
+
+		memset(&info, 0, sizeof(info));
+		if (fn(0, &info) == 0) {
+			printf("> ISP channel ready after %d ms\n", elapsed_ms);
+			dlclose(handle);
+			return;
+		}
+		usleep(1000);
+		elapsed_ms++;
+	}
+
+	fprintf(stderr, "WARNING: ISP channel readiness timeout after 2000 ms\n");
+	dlclose(handle);
+}
+
 /* Phase 3: assign port structs, issue all MI_SYS bind calls, init output,
  * video, ISP bin, exposure cap, cus3a, clocks, and audio. */
 static int bind_and_finalize_pipeline(Star6ePipelineState *state,
@@ -873,14 +918,17 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		.module  = I6_SYS_MOD_VENC, .device  = venc_device,
 		.channel = state->venc_channel, .port = 0 };
 
-	ret = MI_SYS_BindChnPort2(&state->vif_port, &state->vpe_port,
-		pconf->sensor_framerate, pconf->sensor_framerate,
-		I6_SYS_LINK_REALTIME, 0);
-	if (ret != 0) {
-		fprintf(stderr, "ERROR: MI_SYS_Bind VIF->VPE failed %d\n", ret);
-		return ret;
+	if (!state->bound_vif_vpe) {
+		ret = MI_SYS_BindChnPort2(&state->vif_port, &state->vpe_port,
+			pconf->sensor_framerate, pconf->sensor_framerate,
+			I6_SYS_LINK_REALTIME, 0);
+		if (ret != 0) {
+			fprintf(stderr, "ERROR: MI_SYS_Bind VIF->VPE failed %d\n", ret);
+			return ret;
+		}
+		state->bound_vif_vpe = 1;
+		wait_isp_channel_ready();
 	}
-	state->bound_vif_vpe = 1;
 
 	bind_src_fps = state->sensor.mode.maxFps ?
 		state->sensor.mode.maxFps : pconf->sensor_framerate;
