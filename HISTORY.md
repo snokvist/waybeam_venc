@@ -1,5 +1,38 @@
 # History
 
+## [0.3.2] - 2026-03-17
+- Fix SIGHUP reinit D-state: switch from full pipeline_stop/start to partial
+  teardown that keeps sensor/VIF/VPE running. The SigmaStar MIPI PHY does not
+  recover from MI_SNR_Disable/Enable cycles — partial teardown avoids touching
+  it entirely. VENC, output, audio, IMU/EIS are torn down and rebuilt; the
+  VIF→VPE REALTIME bind stays active across reinit.
+- Live resolution switching: `video0.size` API change now reconfigures the
+  pipeline in-process without a process restart.
+  - Same-aspect-ratio changes (e.g. 1920x1080 → 1280x720): VPE output port
+    resize only — VIF and VIF→VPE bind are untouched.
+  - Aspect-ratio changes (e.g. 1920x1080 → 1920x1440): full VIF crop
+    reconfiguration + VPE destroy/recreate. VIF device stays running;
+    MIPI PHY is never touched.
+  - Overscan correction applied during reinit precrop: uses `mode.output`
+    (usable area) rather than `plane.capt` (raw MIPI frame) for sensors that
+    report overscan in the MIPI frame dimensions.
+- Guard VIF→VPE bind in `bind_and_finalize_pipeline` to prevent double-bind
+  on reinit. Without the guard, re-binding an already-live VIF→VPE port
+  caused continuous `IspApiGet channel not created` dmesg errors.
+- ISP channel readiness poll (`star6e_pipeline_wait_isp_channel`) called
+  immediately after every new VIF→VPE bind. The ISP channel initialises
+  asynchronously after `MI_VPE_CreateChannel`; the poll (up to 2000 ms,
+  1 ms intervals) ensures the ISP is ready before the bin load and exposure
+  cap APIs probe it, eliminating `IspApiGet` dmesg errors on both cold boot
+  and AR-change reinit.
+- `__attribute__((flatten))` on `star6e_pipeline_reinit`: forces GCC -Os to
+  inline all static callees, preserving the stack layout that the SigmaStar
+  ISP driver requires for `MI_VPE_CreateChannel` to succeed.
+- Error-path state consistency in VIF+VPE reconfiguration: on failure after
+  VPE is destroyed, `MI_VIF_DisableDev` is called to leave the pipeline in a
+  cleanly-stopped state rather than a partially-configured one.
+- Details: `documentation/SIGHUP_REINIT.md`
+
 ## [0.3.1] - 2026-03-16
 - Reduce G.711 audio latency: scale frame size to `sample_rate/50` (~20ms)
   instead of hardcoded 320. Reduce MI_AI ring (frmNum 16→8), output port

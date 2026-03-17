@@ -28,6 +28,18 @@
   - Default mode; set `isp.legacyAe=true` to revert to ISP AE + handoff.
   - Configurable: target luma, convergence rate, gain ceiling, processing rate.
   - Details: `documentation/AE_AWB_CPU_TUNING.md`
+- Live reinit and resolution switching without process restart (v0.3.2):
+  - SIGHUP (`killall -1`) and `/api/v1/restart` reload config and rebuild
+    the pipeline in-process. The SigmaStar MIPI PHY is never cycled —
+    sensor/VIF/VPE are preserved, only VENC/output/audio are rebuilt.
+    Eliminates the previous D-state hang caused by `MI_SNR_Disable/Enable`.
+  - `video0.size` API change reconfigures the pipeline live:
+    - Same-AR resize (e.g. 1920x1080 → 1280x720): VPE output port update only.
+    - AR change (e.g. 1920x1080 → 1920x1440): VIF crop + VPE destroy/recreate.
+  - ISP channel readiness poll after every new VIF→VPE bind eliminates
+    "IspApiGet channel not created" dmesg errors on start and AR-change reinit.
+  - Sensor mode changes still require a full process restart.
+  - Details: `documentation/SIGHUP_REINIT.md`
 - Live FPS control via hardware bind decimation (v0.1.7):
   - `video0.fps` API changes rebind VPE→VENC with `sensor_maxFps:requested_fps` ratio.
   - VENC rate control `fpsNum` updated for correct bitrate allocation.
