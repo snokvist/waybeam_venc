@@ -3,6 +3,8 @@
 #include "star6e.h"
 
 #include <dlfcn.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -433,6 +435,19 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		fprintf(stderr, "[audio] ERROR: pthread_create failed\n");
 		state->running = 0;
 		return -1;
+	}
+	/* Elevate audio thread to SCHED_FIFO priority 1 (lowest RT level).
+	 * The thread spends most of its time blocking in MI_AI_GetFrame, so it
+	 * won't starve other threads.  This prevents SCHED_OTHER preemption by
+	 * the video encoder (e.g. during keyframe encoding) from pushing the
+	 * loop iteration past one 20ms DMA frame period, which triggers the
+	 * MI_AI "slow fetching" warning. */
+	{
+		struct sched_param sp;
+		sp.sched_priority = 1;
+		if (pthread_setschedparam(state->thread, SCHED_FIFO, &sp) != 0)
+			fprintf(stderr, "[audio] WARNING: could not set RT priority"
+				" (run as root?)\n");
 	}
 	state->started = 1;
 	return 0;
