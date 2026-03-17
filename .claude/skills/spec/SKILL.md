@@ -1,3 +1,15 @@
+---
+name: spec
+description: "Phase 1 planning — read docs, read source, write implementation plan"
+argument-hint: "<task-description>"
+user-invocable: true
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Bash
+---
+
 Phase 1: Spec (Plan)
 
 Before writing any code, produce a plan for the requested change.

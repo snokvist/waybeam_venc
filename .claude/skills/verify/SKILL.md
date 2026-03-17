@@ -1,3 +1,14 @@
+---
+name: verify
+description: "Phase 4 verification — lint check then full dual-backend build verification"
+user-invocable: true
+allowed-tools:
+  - Read
+  - Bash
+context:
+  - "!cat VERSION 2>/dev/null"
+---
+
 Phase 4: Verify
 
 Run the full verification pipeline and report results.

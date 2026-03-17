@@ -1,3 +1,14 @@
+---
+name: code-review
+description: "Adversarial code review — find bugs, style issues, SDK misuse, then challenge findings"
+user-invocable: true
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Bash
+---
+
 Adversarial Code Review
 
 Review the staged or recent changes with a critical eye.

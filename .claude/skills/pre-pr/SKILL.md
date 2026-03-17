@@ -1,3 +1,17 @@
+---
+name: pre-pr
+description: "Pre-PR pipeline — version bump check, changelog, lint, build, and diff summary"
+user-invocable: true
+allowed-tools:
+  - Read
+  - Bash
+  - Glob
+  - Grep
+context:
+  - "!cat VERSION 2>/dev/null"
+  - "!git diff --stat 2>/dev/null | tail -10"
+---
+
 Full pre-PR pipeline
 
 Run the complete spec-draft-simplify-verify pipeline check before opening a PR.

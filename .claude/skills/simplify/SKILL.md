@@ -1,3 +1,16 @@
+---
+name: simplify
+description: "Phase 3 review — find unnecessary code, abstractions, and dead paths, then simplify"
+user-invocable: true
+allowed-tools:
+  - Read
+  - Write
+  - Edit
+  - Bash
+  - Glob
+  - Grep
+---
+
 Phase 3: Simplify
 
 Review the recent changes and simplify them.
