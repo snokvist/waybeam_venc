@@ -454,6 +454,29 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 	return 0;
 }
 
+/* Read the first field of /proc/sys/kernel/printk (console_loglevel).
+ * Returns -1 on failure. */
+static int printk_console_level_get(void)
+{
+	FILE *f = fopen("/proc/sys/kernel/printk", "r");
+	int level = -1;
+	if (f) {
+		fscanf(f, "%d", &level);
+		fclose(f);
+	}
+	return level;
+}
+
+/* Set only the console_loglevel (first field) in /proc/sys/kernel/printk. */
+static void printk_console_level_set(int level)
+{
+	FILE *f = fopen("/proc/sys/kernel/printk", "w");
+	if (f) {
+		fprintf(f, "%d\n", level);
+		fclose(f);
+	}
+}
+
 int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 	const Star6eOutput *output)
 {
@@ -461,6 +484,7 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 		return 0;
 
 	memset(state, 0, sizeof(*state));
+	state->saved_printk_level = -1;
 	star6e_audio_output_reset(&state->output);
 	if (!vcfg || !vcfg->audio.enabled || !output)
 		return 0;
@@ -541,6 +565,20 @@ opus_init_done:
 		g_ai_persist.initialized = 1;
 	}
 
+	/* Suppress MI_AI kernel warning messages on the console.
+	 * These messages ("Buffer(s) is lost due to slow fetching") are printed
+	 * via printk(KERN_WARNING) and appear on any console with loglevel >= 4.
+	 * They are benign (gap always 1, no data lost) but noisy. Lower the
+	 * console loglevel to 3 (errors only) while audio runs. dmesg is
+	 * unaffected — the kernel ring buffer always captures everything. */
+	{
+		int cur = printk_console_level_get();
+		if (cur >= 4) {
+			state->saved_printk_level = cur;
+			printk_console_level_set(3);
+		}
+	}
+
 	if (start_audio_output_and_thread(state, output, vcfg) != 0)
 		goto fail;
 
@@ -594,6 +632,10 @@ void star6e_audio_teardown(Star6eAudioState *state)
 		state->running = 0;
 		pthread_join(state->thread, NULL);
 		state->started = 0;
+	}
+	if (state->saved_printk_level >= 0) {
+		printk_console_level_set(state->saved_printk_level);
+		state->saved_printk_level = -1;
 	}
 	star6e_audio_teardown_opus(state);
 	if (state->lib_loaded && !g_ai_persist.initialized) {
