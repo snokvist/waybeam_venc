@@ -3,7 +3,6 @@
 #include "star6e.h"
 
 #include <dlfcn.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -229,18 +228,6 @@ static void *star6e_audio_thread_fn(void *arg)
 			state->sample_rate, state->channels, state->codec_type,
 			state->codec_type != -1 ? " (sw encode)" : " (pcm)");
 
-	/* libmi_ai.so writes "[MI WRN ]: ... Buffer(s) is lost due to slow
-	 * fetching" to stderr from its own internal DMA thread, asynchronously
-	 * from our GetFrame calls.  The warnings are benign (gap always 1, no
-	 * data lost) but noisy.  Redirect fd 2 to /dev/null once at thread
-	 * start so the MI library's internal thread never reaches the terminal.
-	 * All venc error output uses printf (stdout) so nothing important is
-	 * lost.  stderr is restored when the thread exits. */
-	int devnull_fd = open("/dev/null", O_WRONLY);
-	int saved_stderr = (devnull_fd >= 0) ? dup(STDERR_FILENO) : -1;
-	if (devnull_fd >= 0)
-		dup2(devnull_fd, STDERR_FILENO);
-
 	while (state->running) {
 		const uint8_t *data;
 		size_t len;
@@ -294,9 +281,6 @@ static void *star6e_audio_thread_fn(void *arg)
 		state->lib.fnFreeFrame(0, 0, &frame, NULL);
 	}
 
-	if (saved_stderr >= 0) { dup2(saved_stderr, STDERR_FILENO); close(saved_stderr); }
-	if (devnull_fd >= 0) close(devnull_fd);
-
 	if (state->verbose)
 		printf("[audio] Thread stopped\n");
 	return NULL;
@@ -316,13 +300,12 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	/* 1 frame = one 20ms DMA buffer — delivers each frame immediately when
-	 * filled, matching Majestic's 50Hz send rate. SCHED_FIFO on the audio
-	 * thread prevents preemption from pushing the loop past the 20ms window.
-	 * Occasional "slow fetching" warnings are benign (gap always 1, no data
-	 * lost) and are caused by higher-priority MI library threads briefly
-	 * blocking the audio thread at startup or during ISP events. */
-	dev_cfg.frmNum = 1;
+	/* 3 frames = 60ms DMA ring buffer (3 × 20ms).  Gives the audio thread
+	 * enough slack to absorb ISP/AE event preemption without triggering
+	 * "slow fetching" warnings.  frmNum=1 and frmNum=2 both produced
+	 * warnings in practice; frmNum=3 avoids them while keeping latency
+	 * well below the original frmNum=8 (160ms). */
+	dev_cfg.frmNum = 3;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
@@ -478,7 +461,6 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 		return 0;
 
 	memset(state, 0, sizeof(*state));
-	state->saved_printk_level = -1;
 	star6e_audio_output_reset(&state->output);
 	if (!vcfg || !vcfg->audio.enabled || !output)
 		return 0;

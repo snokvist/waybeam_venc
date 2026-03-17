@@ -45,7 +45,6 @@ typedef struct {
 	AudioRing *rec_ring;   /* recording ring buffer (NULL if not recording) */
 	void *opus_lib;         /* dlopen handle for libopus.so (NULL if not Opus) */
 	void *opus_enc;         /* OpusEncoder* opaque handle (NULL if not Opus) */
-	int saved_printk_level; /* console printk level saved before audio start (-1 = not saved) */
 } Star6eAudioState;
 
 /** Initialize audio capture, encoder, and RTP output thread. */
