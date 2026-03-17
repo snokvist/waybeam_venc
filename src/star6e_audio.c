@@ -300,12 +300,13 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.rate = (int)state->sample_rate;
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
-	/* 2 frames = 40ms DMA ring buffer.  Each frame is one 20ms window so
-	 * frmNum=2 absorbs up to ~20ms of OS scheduling jitter without dropping
-	 * buffers.  frmNum=1 caused "slow fetching" warnings in practice because
-	 * any jitter > 20ms overwrote the single DMA slot before the thread
-	 * could read it. */
-	dev_cfg.frmNum = 2;
+	/* 1 frame = one 20ms DMA buffer — delivers each frame immediately when
+	 * filled, matching Majestic's 50Hz send rate. SCHED_FIFO on the audio
+	 * thread prevents preemption from pushing the loop past the 20ms window.
+	 * Occasional "slow fetching" warnings are benign (gap always 1, no data
+	 * lost) and are caused by higher-priority MI library threads briefly
+	 * blocking the audio thread at startup or during ISP events. */
+	dev_cfg.frmNum = 1;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
