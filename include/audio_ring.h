@@ -11,8 +11,8 @@
 #include <string.h>
 #include <pthread.h>
 
-/* Max PCM frame size: 320 samples × 2 bytes × 2 channels = 1280 */
-#define AUDIO_RING_PCM_MAX   1280
+/* Max PCM frame size: 960 samples × 2 bytes × 2 channels = 3840 (48kHz stereo 20ms) */
+#define AUDIO_RING_PCM_MAX   3840
 #define AUDIO_RING_CAPACITY  64
 
 typedef struct {

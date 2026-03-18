@@ -68,6 +68,7 @@ static struct {
 
 static void *stdout_filter_fn(void *arg)
 {
+	(void)arg;
 	int rfd = g_stdout_filter.pipe_read;
 	int wfd = g_stdout_filter.real_stdout;
 	char buf[1024];
@@ -120,9 +121,12 @@ static void stdout_filter_stop(void)
 	if (!g_stdout_filter.active)
 		return;
 	fflush(stdout);
+	/* Restore real stdout — this closes the pipe write end (fd 1 was the
+	 * only reference), causing the filter thread's read() to return EOF. */
 	dup2(g_stdout_filter.real_stdout, STDOUT_FILENO);
-	close(g_stdout_filter.pipe_read);
 	pthread_join(g_stdout_filter.thread, NULL);
+	/* Safe to close read end only after thread has exited. */
+	close(g_stdout_filter.pipe_read);
 	close(g_stdout_filter.real_stdout);
 	g_stdout_filter.active = 0;
 }
@@ -177,18 +181,6 @@ static void star6e_audio_lib_unload(Star6eAudioLib *lib)
 	if (lib->handle)
 		dlclose(lib->handle);
 	memset(lib, 0, sizeof(*lib));
-}
-
-/* The SSC30KQ I2S interface supports 8kHz and 16kHz (clock=1).
- * 48kHz is NOT supported — the hardware clock is not changed by the driver
- * when rates above 16kHz are requested, causing the actual capture rate to
- * remain at the hardware default and producing ~1000ms of buffering latency
- * when packNumPerFrm is calculated for 48kHz.
- * Valid sample rates: 8000, 16000. */
-static int star6e_audio_clock_for_rate(int rate)
-{
-	(void)rate;
-	return 1;
 }
 
 static int star6e_audio_volume_to_db(int volume)
@@ -377,7 +369,11 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
 	dev_cfg.chnNum = state->channels;
-	dev_cfg.i2s.clock = star6e_audio_clock_for_rate(dev_cfg.rate);
+	/* SDK reference (audio_all_test_case.c): MCLK disabled (clock=0); the
+	 * I2S master generates its own clock from internal PLL based on rate.
+	 * bSyncClock=1: I2S TX and RX share clock source. */
+	dev_cfg.i2s.clock = 0;
+	dev_cfg.i2s.syncRxClkOn = 1;
 
 	ret = state->lib.fnSetDeviceConfig(0, &dev_cfg);
 	if (ret != 0) {
@@ -391,7 +387,6 @@ static int start_ai_capture(Star6eAudioState *state, const VencConfig *vcfg)
 {
 	MI_SYS_ChnPort_t ai_port;
 	int ret;
-	stdout_filter_start();
 
 	ret = state->lib.fnEnableDevice(0);
 	if (ret != 0) {
@@ -507,7 +502,6 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 	return 0;
 }
 
-
 int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 	const Star6eOutput *output)
 {
@@ -568,6 +562,12 @@ int star6e_audio_init(Star6eAudioState *state, const VencConfig *vcfg,
 	}
 opus_init_done:
 
+	/* Install stdout filter before touching the MI AI library.  The
+	 * library's internal thread (ai0_P0_MAIN) writes "[MI WRN]" lines to
+	 * stdout at any time once the device is enabled — including on reinit
+	 * when the device stays enabled across the stop/start cycle. */
+	stdout_filter_start();
+
 	if (g_ai_persist.initialized) {
 		/* Reinit: restore persisted lib and device state, only restart
 		 * the output socket and capture thread. */
@@ -582,6 +582,7 @@ opus_init_done:
 	} else {
 		if (star6e_audio_lib_load(&state->lib) != 0) {
 			fprintf(stderr, "[audio] WARNING: audio enabled but libmi_ai.so not available\n");
+			stdout_filter_stop();
 			return 0;
 		}
 		state->lib_loaded = 1;
@@ -619,6 +620,7 @@ fail:
 		state->lib_loaded = 0;
 	}
 	star6e_audio_output_teardown(&state->output);
+	stdout_filter_stop();
 	fprintf(stderr, "[audio] WARNING: audio init failed, continuing without audio\n");
 	return 0;
 }
