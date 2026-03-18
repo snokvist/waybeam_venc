@@ -3,6 +3,7 @@
 #include "star6e.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -53,6 +54,79 @@ enum { AUDIO_TYPE_G711A = 0, AUDIO_TYPE_G711U = 1, AUDIO_TYPE_OPUS = 2 };
  * MMA pools and prints a kernel warning on every call regardless of
  * parameters.  Audio DMA uses the shared pool without measurable impact. */
 
+/* Stdout filter: libmi_ai.so's internal thread (ai0_P0_MAIN) writes "[MI WRN]"
+ * noise to stdout using ANSI yellow escape codes (\033[1;33m).  Normal venc
+ * output never starts with ESC.  The filter interposes fd 1 with a pipe and
+ * drops any line beginning with ESC (0x1B), forwarding everything else to the
+ * real stdout.  Installed at audio init; torn down at audio teardown. */
+static struct {
+	pthread_t thread;
+	int pipe_read;
+	int real_stdout;
+	int active;
+} g_stdout_filter;
+
+static void *stdout_filter_fn(void *arg)
+{
+	int rfd = g_stdout_filter.pipe_read;
+	int wfd = g_stdout_filter.real_stdout;
+	char buf[1024];
+	char line[1024];
+	int lpos = 0;
+	ssize_t n;
+
+	while ((n = read(rfd, buf, sizeof(buf))) > 0) {
+		for (ssize_t i = 0; i < n; i++) {
+			char c = buf[i];
+			if (lpos < (int)sizeof(line) - 1)
+				line[lpos++] = c;
+			if (c == '\n' || lpos == (int)sizeof(line) - 1) {
+				/* Discard lines beginning with ESC (MI library ANSI output) */
+				if (lpos > 0 && (unsigned char)line[0] != 0x1B)
+					(void)write(wfd, line, (size_t)lpos);
+				lpos = 0;
+			}
+		}
+	}
+	/* Flush any partial line */
+	if (lpos > 0 && (unsigned char)line[0] != 0x1B)
+		(void)write(wfd, line, (size_t)lpos);
+	return NULL;
+}
+
+static void stdout_filter_start(void)
+{
+	int pipefd[2];
+	if (pipe(pipefd) != 0)
+		return;
+	fflush(stdout);
+	g_stdout_filter.real_stdout = dup(STDOUT_FILENO);
+	g_stdout_filter.pipe_read = pipefd[0];
+	dup2(pipefd[1], STDOUT_FILENO);
+	close(pipefd[1]);
+	if (pthread_create(&g_stdout_filter.thread, NULL, stdout_filter_fn,
+	    NULL) != 0) {
+		/* Failed: restore and close */
+		dup2(g_stdout_filter.real_stdout, STDOUT_FILENO);
+		close(g_stdout_filter.real_stdout);
+		close(pipefd[0]);
+		return;
+	}
+	g_stdout_filter.active = 1;
+}
+
+static void stdout_filter_stop(void)
+{
+	if (!g_stdout_filter.active)
+		return;
+	fflush(stdout);
+	dup2(g_stdout_filter.real_stdout, STDOUT_FILENO);
+	close(g_stdout_filter.pipe_read);
+	pthread_join(g_stdout_filter.thread, NULL);
+	close(g_stdout_filter.real_stdout);
+	g_stdout_filter.active = 0;
+}
+
 /* Persists AI device state across reinit cycles.  After removing MI_SYS_Exit
  * from the reinit path, the kernel AI device/channel state survives pipeline
  * stop/start.  Re-initializing it triggers a CamOsMutexLock deadlock after
@@ -68,6 +142,7 @@ static int star6e_audio_lib_load(Star6eAudioLib *lib)
 {
 	memset(lib, 0, sizeof(*lib));
 	lib->handle = dlopen("libmi_ai.so", RTLD_NOW | RTLD_GLOBAL);
+
 	if (!lib->handle) {
 		fprintf(stderr, "[audio] Cannot load libmi_ai.so: %s\n", dlerror());
 		return -1;
@@ -316,6 +391,7 @@ static int start_ai_capture(Star6eAudioState *state, const VencConfig *vcfg)
 {
 	MI_SYS_ChnPort_t ai_port;
 	int ret;
+	stdout_filter_start();
 
 	ret = state->lib.fnEnableDevice(0);
 	if (ret != 0) {
@@ -404,8 +480,10 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		audio_ring_destroy(&state->cap_ring);
 		return -1;
 	}
-	/* Capture thread runs SCHED_FIFO so it is never preempted past one
-	 * 20ms DMA frame period by the video encoder or ISP threads. */
+	/* SCHED_FIFO priority 1 (minimum RT) is sufficient: the MI AI kernel
+	 * thread (ai0_P0_MAIN) signals frame-ready at SCHED_RR/98, and any
+	 * briefly-delayed fetch is handled by the 400ms DMA ring (frmNum=20).
+	 * Higher priorities (e.g. 90) were tested and made timing worse. */
 	{
 		struct sched_param sp;
 		sp.sched_priority = 1;
@@ -592,6 +670,7 @@ void star6e_audio_teardown(Star6eAudioState *state)
 		state->lib_loaded = 0;
 	}
 	star6e_audio_output_teardown(&state->output);
+	stdout_filter_stop();
 }
 
 int star6e_audio_apply_mute(Star6eAudioState *state, int muted)
