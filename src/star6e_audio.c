@@ -11,35 +11,6 @@
 #include <time.h>
 #include <unistd.h>
 
-typedef struct {
-	uint32_t _pad0[4];
-	uint16_t eModule;
-	uint16_t _pad1;
-	uint32_t u32Devid;
-	uint32_t u32PrivateHeapSize;
-} AudioDevPoolConf;
-
-typedef struct {
-	uint32_t _pad0[4];
-	uint16_t eModule;
-	uint16_t _pad1;
-	uint32_t u32Devid;
-	uint32_t u32Channel;
-	uint32_t u32Port;
-	uint32_t u32PrivateHeapSize;
-} AudioChnPortPoolConf;
-
-typedef struct {
-	uint32_t eConfigType;
-	char bCreate;
-	char _pad[3];
-	union {
-		uint8_t _pad[64];
-		AudioDevPoolConf stPreDevPrivPoolConfig;
-		AudioChnPortPoolConf stPreChnPortOutputPrivPool;
-	} uConfig;
-} AudioMMAPoolConfig;
-
 struct Star6eAudioDevConfig {
 	int rate;
 	int bit24On;
@@ -77,7 +48,10 @@ enum { AUDIO_TYPE_G711A = 0, AUDIO_TYPE_G711U = 1, AUDIO_TYPE_OPUS = 2 };
 /* OPUS_APPLICATION_AUDIO — optimum for most non-voice content at medium bitrates */
 #define OPUS_APPLICATION_AUDIO 2049
 
-extern int MI_SYS_ConfigPrivateMMAPool(AudioMMAPoolConfig *pstConf);
+/* MI_SYS_ConfigPrivateMMAPool is intentionally not called: on MMU-enabled
+ * platforms (including SSC30KQ) the kernel unconditionally disables private
+ * MMA pools and prints a kernel warning on every call regardless of
+ * parameters.  Audio DMA uses the shared pool without measurable impact. */
 
 /* Persists AI device state across reinit cycles.  After removing MI_SYS_Exit
  * from the reinit path, the kernel AI device/channel state survives pipeline
@@ -315,11 +289,6 @@ static void *star6e_audio_encode_fn(void *arg)
 static int configure_ai_device(Star6eAudioState *state)
 {
 	Star6eAudioDevConfig dev_cfg;
-	AudioMMAPoolConfig pool_cfg;
-	uint32_t dev_heap = 64 * 1024;
-	uint32_t buf_size;
-	uint32_t chn_heap;
-	int pool_ret;
 	int ret;
 
 	memset(&dev_cfg, 0, sizeof(dev_cfg));
@@ -327,43 +296,13 @@ static int configure_ai_device(Star6eAudioState *state)
 	dev_cfg.intf = 0;
 	dev_cfg.sound = (state->channels >= 2) ? 1 : 0;
 	/* 20 frames = 400ms DMA ring buffer.  Prevents data loss under ISP/AE
-	 * preemption.  NOTE: the "slow fetching" kernel warning fires whenever
-	 * the DMA write pointer is ahead by any amount (gap=1 always), and
-	 * cannot be suppressed from userspace regardless of frmNum. */
+	 * preemption. */
 	dev_cfg.frmNum = 20;
 	/* Scale frame size to maintain ~20ms per frame at any sample rate */
 	dev_cfg.packNumPerFrm = (unsigned int)(state->sample_rate / 50);
 	dev_cfg.codecChnNum = 0;
 	dev_cfg.chnNum = state->channels;
 	dev_cfg.i2s.clock = star6e_audio_clock_for_rate(dev_cfg.rate);
-
-	buf_size = dev_cfg.packNumPerFrm * 2 * state->channels * 2;
-	buf_size = ((buf_size + 4095) / 4096) * 4096;
-	chn_heap = buf_size * dev_cfg.frmNum * 2;
-
-	memset(&pool_cfg, 0, sizeof(pool_cfg));
-	pool_cfg.eConfigType = 2;
-	pool_cfg.bCreate = 1;
-	pool_cfg.uConfig.stPreDevPrivPoolConfig.eModule = 4;
-	pool_cfg.uConfig.stPreDevPrivPoolConfig.u32Devid = 0;
-	pool_cfg.uConfig.stPreDevPrivPoolConfig.u32PrivateHeapSize = dev_heap;
-	pool_ret = MI_SYS_ConfigPrivateMMAPool(&pool_cfg);
-	if (pool_ret != 0)
-		fprintf(stderr, "[audio] WARNING: ConfigPrivateMMAPool(dev) failed %d\n",
-			pool_ret);
-
-	memset(&pool_cfg, 0, sizeof(pool_cfg));
-	pool_cfg.eConfigType = 3;
-	pool_cfg.bCreate = 1;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.eModule = 4;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32Devid = 0;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32Channel = 0;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32Port = 0;
-	pool_cfg.uConfig.stPreChnPortOutputPrivPool.u32PrivateHeapSize = chn_heap;
-	pool_ret = MI_SYS_ConfigPrivateMMAPool(&pool_cfg);
-	if (pool_ret != 0)
-		fprintf(stderr, "[audio] WARNING: ConfigPrivateMMAPool(chn) failed %d\n",
-			pool_ret);
 
 	ret = state->lib.fnSetDeviceConfig(0, &dev_cfg);
 	if (ret != 0) {
@@ -471,8 +410,8 @@ static int start_audio_output_and_thread(Star6eAudioState *state,
 		struct sched_param sp;
 		sp.sched_priority = 1;
 		if (pthread_setschedparam(state->capture_thread, SCHED_FIFO,
-		    &sp) != 0)
-			fprintf(stderr, "[audio] WARNING: could not set RT priority"
+		    &sp) != 0 && state->verbose)
+			fprintf(stderr, "[audio] note: could not set RT priority"
 				" (run as root?)\n");
 	}
 
