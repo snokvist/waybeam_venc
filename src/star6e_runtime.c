@@ -669,6 +669,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		return -1;
 	}
 
+	/* Drain IMU FIFO and update EIS crop BEFORE GetStream so the
+	 * new crop position is latched by VPE for the frame currently
+	 * being captured, reducing stabilization latency by one frame. */
+	if (ps->imu)
+		imu_drain(ps->imu);
+	if (ps->eis)
+		eis_update(ps->eis);
+
 	ret = MI_VENC_GetStream(ps->venc_channel, &stream, 40);
 	if (ret != 0) {
 		if (ret == -EAGAIN || ret == EAGAIN) {
@@ -678,11 +686,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		fprintf(stderr, "ERROR: MI_VENC_GetStream failed %d\n", ret);
 		return ret;
 	}
-
-	if (ps->imu)
-		imu_drain(ps->imu);
-	if (ps->eis)
-		eis_update(ps->eis);
 
 	(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
 		ps->output_enabled, vcfg->system.verbose);

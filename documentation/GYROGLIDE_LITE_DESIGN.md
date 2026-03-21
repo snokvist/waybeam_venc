@@ -95,7 +95,8 @@ tilt correction). Not in the hot path.
  ────────────────────────      │
                                ▼
                     position += Δ × gain
-                    position -= position × recenter_rate × frame_dt
+                    if motion < threshold:
+                      position -= position × recenter_rate × frame_dt
                     position = slew_limit(position, prev, max_step)
                     position = clamp(position, -margin, +margin)
                                │
@@ -145,21 +146,30 @@ velocity state. Compare to current POC which tracks `raw_angle_x/y` and
 # 1. Convert angular displacement to pixel displacement
 Δpx_x = Δangle_x × pixels_per_radian × gain
 
-# 2. Update position (accumulate + exponential recenter)
+# 2. Update position
 pos_x = pos_x + Δpx_x
-pos_x = pos_x × (1.0 - recenter_rate × frame_dt)
 
-# 3. Edge-aware recenter (accelerate near margin limits)
+# 3. Motion-gated recenter (only when camera is still)
+motion_px = |Δangle_x + Δangle_y| × pixels_per_radian
+if motion_px < 0.5:
+    pos_x = pos_x × (1.0 - recenter_rate × frame_dt)
+
+# 4. Edge-aware recenter (always active — prevents margin saturation)
 if |pos_x| / margin_x > 0.8:
     extra_decay ∝ (edge_fraction - 0.8)
     pos_x *= (1 - extra_decay)
 
-# 4. Slew limit
+# 5. Slew limit
 pos_x = clamp(pos_x - prev_pos_x, -max_slew, +max_slew) + prev_pos_x
 
-# 5. Clamp to margin
+# 6. Clamp to margin
 pos_x = clamp(pos_x, -margin_x, +margin_x)
 ```
+
+**Important:** the recenter must NOT run during active motion — it would
+fight the correction and make stabilization feel sluggish. Recenter only
+activates when per-frame motion is below ~0.5px, allowing the crop to
+smoothly return to center during stationary periods.
 
 ### Why this over the existing POC's LPF approach
 
@@ -301,13 +311,37 @@ float predicted_x = pos_x + delta_x * px_per_rad * gain;
 
 | Parameter | Default | Range | Effect |
 |---|---|---|---|
-| `gain` | 0.8 | 0.0–1.0 | Fraction of detected motion to correct |
-| `deadband_rad` | 0.001 | 0.0–0.01 | Per-frame angle below which correction zeroed |
-| `recenter_rate` | 1.0 | 0.1–5.0 | Return-to-center speed (1/tau, per second) |
-| `margin_percent` | 10 | 5–20 | Overscan reserved for stabilization |
-| `max_slew_px` | 8.0 | 2.0–20.0 | Max crop change per frame (pixels) |
+| `gain` | 1.0 | 0.0–1.0 | Fraction of detected motion to correct |
+| `deadband_rad` | 0.0 | 0.0–0.01 | Per-frame angle below which correction zeroed |
+| `recenter_rate` | 0.5 | 0.1–5.0 | Return-to-center speed when idle (1/s) |
+| `margin_percent` | 25 | 5–30 | Overscan reserved for stabilization |
+| `max_slew_px` | 0 | 0–20.0 | Max crop change per frame (0 = disabled) |
 | `px_per_rad` | W/2 | auto | Lens FOV dependent (554 for 120° on 1920px) |
 | `bias_alpha` | 0.001 | 0.0001–0.01 | Runtime bias adaptation rate |
+
+### Hardware-validated recommendations
+
+**Target frame rate: 60fps or lower.** At 120fps with 200Hz IMU, each frame
+gets only ~1.6 gyro samples and an 8ms integration window — the per-frame
+correction is too small for visible stabilization. At 60fps, each frame gets
+~3.3 samples over 16.6ms, producing 2x larger corrections. The IMX335 sensor
+also selects a higher-resolution mode at 60fps (2560x1920 vs 1920x1080 at
+120fps), giving the VPE crop more input resolution to work with.
+
+**Margin: 25% recommended.** At 10% the correction range is only ±48px
+horizontal — too small for meaningful stabilization. 25% gives ±240px
+horizontal and ±135px vertical (at 1920x1080 capture), enough to absorb
+moderate hand shake. The VPE scaler handles the 1440x810→1920x1080 upscale
+without measurable fps cost at 60fps.
+
+**Deadband: 0.0 recommended.** The original default of 0.001 rad was too
+aggressive for short integration windows — it suppressed real motion. With
+motion-gated recentering, bias drift is handled by the recenter itself
+when the camera is still, making a separate deadband unnecessary.
+
+**Crop update placement:** The `imu_drain()` + `eis_update()` call should
+happen BEFORE `MI_VENC_GetStream()` so the crop is latched by VPE for the
+frame currently being captured, reducing latency by one frame.
 
 ### Tuning procedure
 
@@ -353,7 +387,7 @@ float predicted_x = pos_x + delta_x * px_per_rad * gain;
 |---|---|---|
 | Integration | Uniform `dt/n` per sample | Per-sample `ts[i]-ts[i-1]` |
 | Stabilization model | LPF smooth path, correction=smooth-raw | Direct position + spring recenter |
-| Recenter | Implicit via LPF tau | Explicit exponential decay + edge boost |
+| Recenter | Implicit via LPF tau | Motion-gated: only when idle + edge boost |
 | Bias tracking | Startup calibration only | Runtime slow-adapt in hot path |
 | Deadband | None | Per-frame delta gating |
 | Slew limit | None | Optional per-frame max step |

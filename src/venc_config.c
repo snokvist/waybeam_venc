@@ -135,17 +135,17 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* eis */
 	cfg->eis.enabled = false;
-	safe_strcpy(cfg->eis.mode, sizeof(cfg->eis.mode), "legacy");
-	cfg->eis.margin_percent = 10;
+	safe_strcpy(cfg->eis.mode, sizeof(cfg->eis.mode), "gyroglide");
+	cfg->eis.margin_percent = 25;
 	cfg->eis.filter_tau = 1.0f;
 	cfg->eis.test_mode = false;
 	cfg->eis.swap_xy = false;
 	cfg->eis.invert_x = false;
 	cfg->eis.invert_y = false;
-	cfg->eis.gain = 0.8f;
-	cfg->eis.deadband_rad = 0.001f;
-	cfg->eis.recenter_rate = 1.0f;
-	cfg->eis.max_slew_px = 8.0f;
+	cfg->eis.gain = 1.0f;
+	cfg->eis.deadband_rad = 0.0f;
+	cfg->eis.recenter_rate = 0.5f;
+	cfg->eis.max_slew_px = 0.0f;
 	cfg->eis.bias_alpha = 0.001f;
 
 	/* record */

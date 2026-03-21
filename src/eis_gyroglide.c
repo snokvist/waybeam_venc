@@ -237,13 +237,24 @@ static void gyroglide_compute(GyroglideState *st, struct timespec t_now,
 	st->pos_x += delta_x * st->pixels_per_radian * st->gain;
 	st->pos_y += delta_y * st->pixels_per_radian * st->gain;
 
-	/* Exponential recenter toward zero */
-	float decay = 1.0f - st->recenter_rate * frame_dt;
-	if (decay < 0.0f) decay = 0.0f;
-	st->pos_x *= decay;
-	st->pos_y *= decay;
+	/* Recenter only when there is no significant motion.
+	 * During active shake the crop should track fully;
+	 * recenter activates only when the camera is still,
+	 * preventing bias drift from pushing crop to the edge. */
+	float motion = fabsf_safe(delta_x) + fabsf_safe(delta_y);
+	float motion_px = motion * st->pixels_per_radian;
+	int is_idle = (motion_px < 0.5f);
+
+	if (is_idle) {
+		float decay = 1.0f - st->recenter_rate * frame_dt;
+		if (decay < 0.0f) decay = 0.0f;
+		st->pos_x *= decay;
+		st->pos_y *= decay;
+	}
 
 	/* ── Step 4: Edge-aware recentering ── */
+	/* Always active regardless of motion — prevents hard saturation
+	 * at margin limits during sustained rotation. */
 	if (st->margin_x > 0) {
 		float edge_x = fabsf_safe(st->pos_x) / (float)st->margin_x;
 		if (edge_x > GGL_EDGE_THRESH) {
