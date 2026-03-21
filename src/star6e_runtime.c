@@ -25,6 +25,17 @@
 
 static SdkQuietState g_sdk_quiet = SDK_QUIET_STATE_INIT;
 
+static MI_VENC_Pack_t *ensure_packs(MI_VENC_Pack_t **buf,
+	uint32_t *cap, uint32_t need)
+{
+	if (need <= *cap)
+		return *buf;
+	free(*buf);
+	*buf = malloc(need * sizeof(MI_VENC_Pack_t));
+	*cap = *buf ? need : 0;
+	return *buf;
+}
+
 /* Forward declaration — record status callback for HTTP API */
 static void record_status_callback(VencRecordStatus *out);
 
@@ -280,7 +291,8 @@ static void *dual_rec_thread_fn(void *arg)
 		}
 
 		stream.count = stat.curPacks;
-		stream.packet = calloc(stat.curPacks, sizeof(MI_VENC_Pack_t));
+		stream.packet = ensure_packs(&d->stream_packs,
+			&d->stream_packs_cap, stat.curPacks);
 		if (!stream.packet) {
 			usleep(1000);
 			continue;
@@ -289,7 +301,6 @@ static void *dual_rec_thread_fn(void *arg)
 		ret = MI_VENC_GetStream(d->channel, &stream,
 			g_running ? 40 : 0);
 		if (ret != 0) {
-			free(stream.packet);
 			if (ret == -EAGAIN || ret == EAGAIN)
 				usleep(1000);
 			continue;
@@ -308,7 +319,6 @@ static void *dual_rec_thread_fn(void *arg)
 		}
 
 		MI_VENC_ReleaseStream(d->channel, &stream);
-		free(stream.packet);
 		total_count++;
 
 		/* Peek: is another frame already waiting?  If so, we're
@@ -650,7 +660,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	*idle_counter = 0;
 
 	stream.count = stat.curPacks;
-	stream.packet = calloc(stat.curPacks, sizeof(MI_VENC_Pack_t));
+	stream.packet = ensure_packs(&ps->stream_packs,
+		&ps->stream_packs_cap, stat.curPacks);
 	if (!stream.packet) {
 		fprintf(stderr, "ERROR: Unable to allocate stream packets\n");
 		return -1;
@@ -658,8 +669,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 	ret = MI_VENC_GetStream(ps->venc_channel, &stream, 40);
 	if (ret != 0) {
-		free(stream.packet);
-		stream.packet = NULL;
 		if (ret == -EAGAIN || ret == EAGAIN) {
 			idle_wait(&ps->video.sidecar, 2);
 			return 0;
@@ -740,7 +749,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	}
 
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
-	free(stream.packet);
 
 	/* ch1 frames are now drained by the dedicated recording thread
 	 * (dual_rec_thread_fn) — no polling needed here. */
