@@ -105,7 +105,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->outgoing.server[0] = '\0';
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
-	cfg->outgoing.send_feedback = false;
+	cfg->outgoing.connected_udp = true;
 
 	/* fpv */
 	cfg->fpv.roi_enabled = true;
@@ -299,7 +299,8 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 		json_get_string(obj, "streamMode", s->stream_mode));
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
-	s->send_feedback = json_get_bool(obj, "sendFeedback", s->send_feedback);
+	s->connected_udp = json_get_bool(obj, "connectedUdp",
+		json_get_bool(obj, "sendFeedback", s->connected_udp));
 	s->audio_port = (uint16_t)json_get_int(obj, "audioPort",
 		(int)s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
@@ -554,7 +555,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(out, "server", cfg->outgoing.server);
 		cJSON_AddStringToObject(out, "streamMode", cfg->outgoing.stream_mode);
 		cJSON_AddNumberToObject(out, "maxPayloadSize", cfg->outgoing.max_payload_size);
-		cJSON_AddBoolToObject(out, "sendFeedback", cfg->outgoing.send_feedback);
+		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
 	}

@@ -153,7 +153,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
 	FIELD(outgoing, max_payload_size,  FT_UINT16, MUT_RESTART),
-	FIELD(outgoing, send_feedback,     FT_BOOL,   MUT_RESTART),
+	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 

@@ -16,7 +16,9 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
+#include <sys/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -478,7 +480,7 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			if (star6e_output_prepare(&ds_setup, ps->dual->server,
 			    vcfg->outgoing.stream_mode,
 			    vcfg->outgoing.max_payload_size,
-			    vcfg->outgoing.send_feedback) == 0) {
+			    vcfg->outgoing.connected_udp) == 0) {
 				star6e_output_init(&ps->dual->output, &ds_setup);
 				star6e_video_init(&ps->dual->video, vcfg,
 					ps->sensor.mode.maxFps,
@@ -806,6 +808,21 @@ static int star6e_runner_run(void *opaque)
 	int ret;
 
 	clock_gettime(CLOCK_MONOTONIC, &cus3a_ts_last);
+
+	/* Pin encoder to CPU 0 with minimum RT priority.  Reduces
+	 * scheduling jitter from ISP/audio/httpd threads.  Silent
+	 * fallback if unprivileged or single-core. */
+	{
+		unsigned long mask = 1UL;  /* CPU 0 */
+		syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask);
+
+		struct sched_param sp;
+		sp.sched_priority = 1;
+		if (pthread_setschedparam(pthread_self(), SCHED_FIFO,
+		    &sp) != 0)
+			printf("> note: RT priority not available"
+				" (run as root)\n");
+	}
 
 	while (g_running) {
 		ret = star6e_runtime_handle_reinit(ctx, &cus3a_ts_last,
