@@ -260,8 +260,9 @@ static void gyroglide_compute(GyroglideState *st, struct timespec t_now,
 		if (edge_x > GGL_EDGE_THRESH) {
 			float extra = (edge_x - GGL_EDGE_THRESH)
 				* GGL_EDGE_STRENGTH;
-			st->pos_x *= (1.0f - extra * frame_dt
-				* GGL_EDGE_RATE);
+			float mult = 1.0f - extra * frame_dt * GGL_EDGE_RATE;
+			if (mult < 0.0f) mult = 0.0f;
+			st->pos_x *= mult;
 		}
 	}
 	if (st->margin_y > 0) {
@@ -269,8 +270,9 @@ static void gyroglide_compute(GyroglideState *st, struct timespec t_now,
 		if (edge_y > GGL_EDGE_THRESH) {
 			float extra = (edge_y - GGL_EDGE_THRESH)
 				* GGL_EDGE_STRENGTH;
-			st->pos_y *= (1.0f - extra * frame_dt
-				* GGL_EDGE_RATE);
+			float mult = 1.0f - extra * frame_dt * GGL_EDGE_RATE;
+			if (mult < 0.0f) mult = 0.0f;
+			st->pos_y *= mult;
 		}
 	}
 
@@ -284,7 +286,9 @@ static void gyroglide_compute(GyroglideState *st, struct timespec t_now,
 		if (dy < -st->max_slew_px) st->pos_y = st->prev_out_y - st->max_slew_px;
 	}
 
-	/* ── Step 6: Clamp to margin ── */
+	/* ── Step 6: Clamp to margin (with NaN guard) ── */
+	if (st->pos_x != st->pos_x) st->pos_x = 0.0f;  /* NaN check */
+	if (st->pos_y != st->pos_y) st->pos_y = 0.0f;
 	st->pos_x = clampf(st->pos_x, -(float)st->margin_x,
 		(float)st->margin_x);
 	st->pos_y = clampf(st->pos_y, -(float)st->margin_y,
@@ -493,13 +497,13 @@ EisState *eis_gyroglide_create(const EisConfig *cfg)
 	st->vpe_port = cfg->vpe_port;
 	st->pixels_per_radian = cfg->pixels_per_radian > 0.0f
 		? cfg->pixels_per_radian : (float)cfg->capture_w / 2.0f;
-	st->gain = cfg->gain > 0.0f ? cfg->gain : 0.8f;
+	st->gain = cfg->gain > 0.0f ? cfg->gain : 1.0f;
 	st->deadband_rad = cfg->deadband_rad >= 0.0f
-		? cfg->deadband_rad : 0.001f;
+		? cfg->deadband_rad : 0.0f;
 	st->recenter_rate = cfg->recenter_rate > 0.0f
-		? cfg->recenter_rate : 1.0f;
+		? cfg->recenter_rate : 0.5f;
 	st->max_slew_px = cfg->max_slew_px >= 0.0f
-		? cfg->max_slew_px : 8.0f;
+		? cfg->max_slew_px : 0.0f;
 	st->bias_alpha = cfg->bias_alpha >= 0.0f
 		? cfg->bias_alpha : 0.001f;
 	st->test_mode = cfg->test_mode;

@@ -121,9 +121,12 @@ static inline void eis_get_status(EisState *st, EisStatus *out)
 
 static inline void eis_destroy(EisState *st)
 {
-	if (st && st->ops && st->ops->destroy)
+	if (!st)
+		return;
+	if (st->ops && st->ops->destroy)
 		st->ops->destroy(st->ctx);
-	/* The backend destroy frees ctx; we free the wrapper. */
+	else
+		free(st->ctx);  /* fallback: free ctx if no destroy op */
 	free(st);
 }
 

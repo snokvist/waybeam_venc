@@ -207,9 +207,9 @@ static int legacy_update(void *ctx)
 	}
 
 	/* Read samples from ring buffer for this frame interval */
-	EisMotionSample samples[256];
+	EisMotionSample samples[64];
 	uint32_t n = eis_ring_read_range(&st->ring, st->last_update_ts, now,
-		samples, 256);
+		samples, 64);
 	st->last_n_samples = n;
 
 	/* Integrate angular velocity */
