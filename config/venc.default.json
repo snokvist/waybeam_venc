@@ -54,12 +54,18 @@
   },
   "eis": {
     "enabled": false,
+    "mode": "legacy",
     "marginPercent": 10,
     "filterTau": 1.0,
     "testMode": false,
     "swapXY": false,
     "invertX": false,
-    "invertY": false
+    "invertY": false,
+    "gain": 0.8,
+    "deadbandRad": 0.001,
+    "recenterRate": 1.0,
+    "maxSlewPx": 8.0,
+    "biasAlpha": 0.001
   },
   "record": {
     "enabled": false,

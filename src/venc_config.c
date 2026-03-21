@@ -135,12 +135,18 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* eis */
 	cfg->eis.enabled = false;
+	safe_strcpy(cfg->eis.mode, sizeof(cfg->eis.mode), "legacy");
 	cfg->eis.margin_percent = 10;
 	cfg->eis.filter_tau = 1.0f;
 	cfg->eis.test_mode = false;
 	cfg->eis.swap_xy = false;
 	cfg->eis.invert_x = false;
 	cfg->eis.invert_y = false;
+	cfg->eis.gain = 0.8f;
+	cfg->eis.deadband_rad = 0.001f;
+	cfg->eis.recenter_rate = 1.0f;
+	cfg->eis.max_slew_px = 8.0f;
+	cfg->eis.bias_alpha = 0.001f;
 
 	/* record */
 	cfg->record.enabled = false;
@@ -353,6 +359,8 @@ static void load_eis(const cJSON *root, VencConfigEis *s)
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "eis");
 	if (!obj) return;
 	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	safe_strcpy(s->mode, sizeof(s->mode),
+		json_get_string(obj, "mode", s->mode));
 	s->margin_percent = json_get_int(obj, "marginPercent", s->margin_percent);
 	if (s->margin_percent < 1) s->margin_percent = 1;
 	if (s->margin_percent > 49) s->margin_percent = 49;
@@ -362,6 +370,21 @@ static void load_eis(const cJSON *root, VencConfigEis *s)
 	s->swap_xy = json_get_bool(obj, "swapXY", s->swap_xy);
 	s->invert_x = json_get_bool(obj, "invertX", s->invert_x);
 	s->invert_y = json_get_bool(obj, "invertY", s->invert_y);
+	s->gain = (float)json_get_double(obj, "gain", s->gain);
+	if (s->gain < 0.0f) s->gain = 0.0f;
+	if (s->gain > 1.0f) s->gain = 1.0f;
+	s->deadband_rad = (float)json_get_double(obj, "deadbandRad",
+		s->deadband_rad);
+	if (s->deadband_rad < 0.0f) s->deadband_rad = 0.0f;
+	s->recenter_rate = (float)json_get_double(obj, "recenterRate",
+		s->recenter_rate);
+	if (s->recenter_rate < 0.0f) s->recenter_rate = 0.0f;
+	s->max_slew_px = (float)json_get_double(obj, "maxSlewPx",
+		s->max_slew_px);
+	if (s->max_slew_px < 0.0f) s->max_slew_px = 0.0f;
+	s->bias_alpha = (float)json_get_double(obj, "biasAlpha",
+		s->bias_alpha);
+	if (s->bias_alpha < 0.0f) s->bias_alpha = 0.0f;
 }
 
 static void load_record(const cJSON *root, VencConfigRecord *s)
@@ -599,12 +622,18 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *eis = cJSON_AddObjectToObject(root, "eis");
 	if (eis) {
 		cJSON_AddBoolToObject(eis, "enabled", cfg->eis.enabled);
+		cJSON_AddStringToObject(eis, "mode", cfg->eis.mode);
 		cJSON_AddNumberToObject(eis, "marginPercent", cfg->eis.margin_percent);
 		cJSON_AddNumberToObject(eis, "filterTau", cfg->eis.filter_tau);
 		cJSON_AddBoolToObject(eis, "testMode", cfg->eis.test_mode);
 		cJSON_AddBoolToObject(eis, "swapXY", cfg->eis.swap_xy);
 		cJSON_AddBoolToObject(eis, "invertX", cfg->eis.invert_x);
 		cJSON_AddBoolToObject(eis, "invertY", cfg->eis.invert_y);
+		cJSON_AddNumberToObject(eis, "gain", cfg->eis.gain);
+		cJSON_AddNumberToObject(eis, "deadbandRad", cfg->eis.deadband_rad);
+		cJSON_AddNumberToObject(eis, "recenterRate", cfg->eis.recenter_rate);
+		cJSON_AddNumberToObject(eis, "maxSlewPx", cfg->eis.max_slew_px);
+		cJSON_AddNumberToObject(eis, "biasAlpha", cfg->eis.bias_alpha);
 	}
 
 	/* record */
