@@ -843,6 +843,11 @@ static void star6e_runner_teardown(void *opaque)
 	{
 		pid_t watchdog = fork();
 		if (watchdog == 0) {
+			/* Close inherited stdout — it may be a pipe from the
+			 * audio stdout filter.  Keeping it open prevents the
+			 * filter thread's read() from seeing EOF, which
+			 * deadlocks pthread_join in audio teardown. */
+			close(STDOUT_FILENO);
 			/* Child: poll parent liveness, escalate if stuck.
 			 * Check every second — exit early if parent dies
 			 * normally so we don't linger as an orphan. */
