@@ -134,6 +134,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
+	FIELD(isp, iq_api,             FT_BOOL,   MUT_RESTART),
 
 	FIELD(image, mirror,           FT_BOOL,   MUT_RESTART),
 	FIELD(image, flip,             FT_BOOL,   MUT_RESTART),
@@ -692,6 +693,47 @@ static int handle_awb(int fd, const HttpRequest *req, void *ctx)
 	return ret;
 }
 
+static int handle_iq(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->query_iq_info) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"IQ query not available");
+	}
+	char *json = g_cb->query_iq_info();
+	if (!json) {
+		return httpd_send_error(fd, 500, "internal_error",
+			"IQ query failed");
+	}
+	int ret = httpd_send_json(fd, 200, json);
+	free(json);
+	return ret;
+}
+
+static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)ctx;
+	if (!g_cb || !g_cb->apply_iq_param) {
+		return httpd_send_error(fd, 501, "not_implemented",
+			"IQ set not available");
+	}
+	char key[64], val[64];
+	if (parse_first_query_param(req->query, key, sizeof(key),
+			val, sizeof(val)) != 0 || !*key || !*val) {
+		return httpd_send_error(fd, 400, "invalid_request",
+			"usage: /api/v1/iq/set?param=value");
+	}
+	if (g_cb->apply_iq_param(key, val) != 0) {
+		return httpd_send_error(fd, 400, "apply_failed",
+			"IQ parameter set failed");
+	}
+	char buf[256];
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"param\":\"%s\",\"value\":%s}}",
+		key, val);
+	return httpd_send_json(fd, 200, buf);
+}
+
 static int handle_ae(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
@@ -1024,6 +1066,8 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/restart",      handle_restart, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/record/start",  handle_record_start, NULL);
