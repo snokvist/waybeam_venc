@@ -70,20 +70,32 @@ static IqParamDesc g_params[] = {
 	/* SHARPNESS_PARAM_t = 74B, auto=1184, manual@1192 (u8OverShootGain) */
 	{ "sharpness",    "MI_ISP_IQ_GetSharpness",   "MI_ISP_IQ_SetSharpness",
 	  NULL, NULL, VT_U8,  1192, 255 },
+	/* HSV_PARAM_t = 193B, auto=3088, manual@3096 (s16HueLut[0]) */
+	{ "hsv",          "MI_ISP_IQ_GetHSV",          "MI_ISP_IQ_SetHSV",
+	  NULL, NULL, VT_U8,  3096, 64 },
 
 	/* ── Noise reduction ───────────────────────────────────────── */
 	/* NR3D_PARAM_t = 80B, auto=1280, manual@1288 (u8MdThd) */
 	{ "nr3d",         "MI_ISP_IQ_GetNR3D",        "MI_ISP_IQ_SetNR3D",
 	  NULL, NULL, VT_U8,  1288, 255 },
+	/* NR3D_EX: manual-only@4, 24B (bAREn) */
+	{ "nr3d_ex",      "MI_ISP_IQ_GetNR3D_EX",     "MI_ISP_IQ_SetNR3D_EX",
+	  NULL, NULL, VT_U32, 4,    1 },
 	/* NRDESPIKE_PARAM_t = 39B, auto=624, manual@632 (u8BlendRatio) */
 	{ "nr_despike",   "MI_ISP_IQ_GetNRDeSpike",   "MI_ISP_IQ_SetNRDeSpike",
 	  NULL, NULL, VT_U8,  632,  15 },
 	/* NRLUMA_PARAM_t = 6B, auto=96, manual@104 (u8Strength) */
 	{ "nr_luma",      "MI_ISP_IQ_GetNRLuma",      "MI_ISP_IQ_SetNRLuma",
 	  NULL, NULL, VT_U8,  104,  255 },
+	/* NRLUMA_ADV_PARAM_t = 81B, auto=1296, manual@1304 (bDbgEn+u8Strength@+5) */
+	{ "nr_luma_adv",  "MI_ISP_IQ_GetNRLuma_Adv",  "MI_ISP_IQ_SetNRLuma_Adv",
+	  NULL, NULL, VT_U32, 1304, 1 },
 	/* NRCHROMA_PARAM_t = 13B, auto=208, manual@216 (u8MatchRatio) */
 	{ "nr_chroma",    "MI_ISP_IQ_GetNRChroma",    "MI_ISP_IQ_SetNRChroma",
 	  NULL, NULL, VT_U8,  216,  127 },
+	/* NRCHROMA_ADV_PARAM_t = 30B, auto=480, manual@488 (u8StrengthByY[0]) */
+	{ "nr_chroma_adv","MI_ISP_IQ_GetNRChroma_Adv","MI_ISP_IQ_SetNRChroma_Adv",
+	  NULL, NULL, VT_U8,  488,  255 },
 
 	/* ── Corrections ───────────────────────────────────────────── */
 	/* FALSECOLOR_PARAM_t = 7B, auto=112, manual@120 (u8FreqThrd) */
@@ -92,7 +104,7 @@ static IqParamDesc g_params[] = {
 	/* CROSSTALK_PARAM_t = 18B, auto=288, manual@296 (u8Strength) */
 	{ "crosstalk",    "MI_ISP_IQ_GetCrossTalk",   "MI_ISP_IQ_SetCrossTalk",
 	  NULL, NULL, VT_U8,  296,  31 },
-	/* DEMOSAIC: manual-only, bEnable(4) + stManual@4 (u8DirThrd) */
+	/* DEMOSAIC: manual-only@4 (u8DirThrd) */
 	{ "demosaic",     "MI_ISP_IQ_GetDEMOSAIC",    "MI_ISP_IQ_SetDEMOSAIC",
 	  NULL, NULL, VT_U8,  4,    63 },
 	/* OBC_PARAM_t = 8B, auto=128, manual@136 (u16ValR) */
@@ -101,25 +113,56 @@ static IqParamDesc g_params[] = {
 	/* DYNAMIC_DP_PARAM_t = 30B, auto=480, manual@488 (bHotPixEn) */
 	{ "dynamic_dp",   "MI_ISP_IQ_GetDynamicDP",   "MI_ISP_IQ_SetDynamicDP",
 	  NULL, NULL, VT_U8,  488,  1 },
+	/* DYNAMIC_DP_CLUSTER_PARAM_t = 67B, auto=1072, manual@1080 (bEdgeMode) */
+	{ "dp_cluster",   "MI_ISP_IQ_GetDynamicDP_CLUSTER", "MI_ISP_IQ_SetDynamicDP_CLUSTER",
+	  NULL, NULL, VT_U32, 1080, 1 },
+	/* R2Y: manual-only@4 (u16Matrix[0]) */
+	{ "r2y",          "MI_ISP_IQ_GetR2Y",          "MI_ISP_IQ_SetR2Y",
+	  NULL, NULL, VT_U16, 4,    1023 },
+	/* COLORTRANS: manual-only@4 (u16Y_OFST) */
+	{ "colortrans",   "MI_ISP_IQ_GetCOLORTRANS",  "MI_ISP_IQ_SetCOLORTRANS",
+	  NULL, NULL, VT_U16, 4,    2047 },
+	/* RGBMATRIX_PARAM_t: auto with bISOActEn, manual@CCM offset */
+	{ "rgb_matrix",   "MI_ISP_IQ_GetRGBMatrix",   "MI_ISP_IQ_SetRGBMatrix",
+	  NULL, NULL, VT_U16, 444,  8191 },
 
 	/* ── Dynamic range & special ───────────────────────────────── */
 	/* WDR_PARAM_t = 40B, auto=640, manual@648 (u8BoxNum) */
 	{ "wdr",          "MI_ISP_IQ_GetWDR",          "MI_ISP_IQ_SetWDR",
 	  NULL, NULL, VT_U8,  648,  4 },
+	/* WDRCurveAdv_PARAM_t = 6B, auto=96, manual@104 (u16Slope) */
+	{ "wdr_curve_adv","MI_ISP_IQ_GetWDRCurveAdv", "MI_ISP_IQ_SetWDRCurveAdv",
+	  NULL, NULL, VT_U16, 104,  16384 },
 	/* PFC_PARAM_t = 28B, auto=448, manual@456 (u8Strength) */
 	{ "pfc",          "MI_ISP_IQ_GetPFC",          "MI_ISP_IQ_SetPFC",
 	  NULL, NULL, VT_U8,  456,  255 },
+	/* PFC_EX: manual-only@4 (bDbgEn) */
+	{ "pfc_ex",       "MI_ISP_IQ_GetPFC_EX",      "MI_ISP_IQ_SetPFC_EX",
+	  NULL, NULL, VT_U32, 4,    1 },
 	/* HDR_PARAM_t = 68B, auto=1088, manual@1096 (bNrEn) */
 	{ "hdr",          "MI_ISP_IQ_GetHDR",          "MI_ISP_IQ_SetHDR",
 	  NULL, NULL, VT_U8,  1096, 1 },
+	/* HDR_EX: manual-only@4 (u16SensorExpRatio) */
+	{ "hdr_ex",       "MI_ISP_IQ_GetHDR_EX",      "MI_ISP_IQ_SetHDR_EX",
+	  NULL, NULL, VT_U16, 4,    65535 },
+	/* SHP_EX: manual-only@4 (bDbgEn) */
+	{ "shp_ex",       "MI_ISP_IQ_GetSHP_EX",      "MI_ISP_IQ_SetSHP_EX",
+	  NULL, NULL, VT_U32, 4,    1 },
 	/* RGBIR_PARAM_t = 37B, auto=592, manual@600 (u8IrPosType) */
 	{ "rgbir",        "MI_ISP_IQ_GetRGBIR",        "MI_ISP_IQ_SetRGBIR",
 	  NULL, NULL, VT_U8,  600,  7 },
+	/* IQMode: just an enum (0=day, 1=night) */
+	{ "iq_mode",      "MI_ISP_IQ_GetIQMode",       "MI_ISP_IQ_SetIQMode",
+	  NULL, NULL, VT_U32, 0,    1 },
 
 	/* ── Toggle controls ───────────────────────────────────────── */
 	{ "defog",        "MI_ISP_IQ_GetDefog",        "MI_ISP_IQ_SetDefog",
 	  NULL, NULL, VT_BOOL, 0,   1 },
 	{ "color_to_gray","MI_ISP_IQ_GetColorToGray",  "MI_ISP_IQ_SetColorToGray",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	{ "nr3d_p1",      "MI_ISP_IQ_GetNR3D_P1",      "MI_ISP_IQ_SetNR3D_P1",
+	  NULL, NULL, VT_BOOL, 0,   1 },
+	{ "fpn",          "MI_ISP_IQ_GetFPN",           "MI_ISP_IQ_SetFPN",
 	  NULL, NULL, VT_BOOL, 0,   1 },
 };
 #define NUM_PARAMS (sizeof(g_params) / sizeof(g_params[0]))
@@ -213,7 +256,7 @@ char *star6e_iq_query(void)
 	if (!g_isp_handle)
 		return NULL;
 
-	char buf[8192];
+	char buf[16384];
 	int pos = 0;
 
 	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
