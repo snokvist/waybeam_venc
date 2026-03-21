@@ -723,6 +723,15 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 400, "invalid_request",
 			"usage: /api/v1/iq/set?param=value");
 	}
+	/* Validate value is numeric to prevent JSON injection */
+	{
+		const char *p = val;
+		while (*p == '-' || (*p >= '0' && *p <= '9')) p++;
+		if (*p != '\0') {
+			return httpd_send_error(fd, 400, "invalid_request",
+				"value must be numeric");
+		}
+	}
 	if (g_cb->apply_iq_param(key, val) != 0) {
 		return httpd_send_error(fd, 400, "apply_failed",
 			"IQ parameter set failed");

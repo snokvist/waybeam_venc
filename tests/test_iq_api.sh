@@ -335,7 +335,6 @@ echo "  Failed:      $FAIL"
 echo "  Skipped:     $SKIP (symbol unavailable in firmware)"
 echo ""
 echo "  Known limitations:"
-echo "    nr_despike, pfc, hdr: struct padding differs from SDK header calc"
 echo "    nr3d_p1, fpn: ISP silently ignores enable on imx335 sensor"
 echo "    stitch_lpf: symbol not present in this firmware build"
 

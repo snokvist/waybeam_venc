@@ -472,8 +472,8 @@ int star6e_iq_set(const char *param, const char *value)
 		return -1;
 	}
 
-	uint8_t iq_buf[IQ_BUF_SIZE];
-	memset(iq_buf, 0, sizeof(iq_buf));
+	static uint8_t iq_buf[IQ_BUF_SIZE];
+	memset(iq_buf, 0, IQ_BUF_SIZE);
 
 	/* Get current state first to preserve unknown fields */
 	MI_S32 ret = target->fn_get(0, iq_buf);
