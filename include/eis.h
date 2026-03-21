@@ -8,10 +8,11 @@
  * eis_get_status() / eis_destroy() without knowing which backend is active.
  *
  * Backends register via EisOps vtable:
- *   - "legacy"    — original LPF-based crop EIS (eis_legacy.c)
  *   - "gyroglide" — GyroGlide-Lite: batched gyro integration + spring recenter
  *
  * Config "mode" field selects the backend at init time.
+ * New backends can be added by implementing EisOps and registering
+ * in eis.c's eis_create() factory.
  */
 
 #include <stdint.h>
@@ -54,7 +55,7 @@ typedef struct EisState {
 /* ── Config (flat struct, all backends) ─────────────────────────────── */
 
 typedef struct {
-	const char *mode;              /* "legacy" or "gyroglide" */
+	const char *mode;              /* "gyroglide" (default) */
 
 	/* Common */
 	int margin_percent;            /* overscan margin (default 10) */
@@ -68,10 +69,7 @@ typedef struct {
 	int invert_x;
 	int invert_y;
 
-	/* Legacy-specific */
-	float filter_tau;              /* LPF time constant (seconds) */
-
-	/* GyroGlide-specific */
+	/* GyroGlide parameters */
 	float gain;                    /* correction gain 0.0–1.0 */
 	float deadband_rad;            /* per-frame angle threshold */
 	float recenter_rate;           /* return-to-center speed (1/s) */

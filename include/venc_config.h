@@ -99,9 +99,8 @@ typedef struct {
 
 typedef struct {
 	bool enabled;
-	char mode[16];            /* "legacy" or "gyroglide" */
-	int margin_percent;       /* 10 */
-	float filter_tau;         /* 1.0 — legacy only */
+	char mode[16];            /* "gyroglide" (default) */
+	int margin_percent;       /* 30 */
 	bool test_mode;
 	bool swap_xy;
 	bool invert_x;

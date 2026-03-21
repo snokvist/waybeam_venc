@@ -114,7 +114,7 @@ template is provided at `config/venc.default.json`.
     "calFile": "/etc/imu.cal", "calSamples": 400
   },
   "eis": {
-    "enabled": false, "mode": "gyroglide", "marginPercent": 30,
+    "enabled": false, "marginPercent": 30,
     "gain": 1.0, "deadbandRad": 0.0, "recenterRate": 0.5,
     "testMode": false, "swapXY": false, "invertX": false, "invertY": false
   },
@@ -429,14 +429,13 @@ modes, the secondary channel parameters can be adjusted live via `/api/v1/dual/s
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `eis.enabled` | bool | restart | Enable gyro-based image stabilization |
-| `eis.mode` | string | restart | Backend: `"gyroglide"` (default) or `"legacy"` |
+| `eis.mode` | string | restart | EIS backend (default: `"gyroglide"`) |
 | `eis.margin_percent` | int | restart | Overscan margin 1-30% (default 30) |
 | `eis.gain` | float | restart | Correction gain 0.0-1.0 (default 1.0) |
 | `eis.deadband_rad` | float | restart | Per-frame angle threshold in rad (default 0.0) |
 | `eis.recenter_rate` | float | restart | Return-to-center speed when idle, 1/s (default 0.5) |
 | `eis.max_slew_px` | float | restart | Max crop change per frame in px (0 = off) |
 | `eis.bias_alpha` | float | restart | Runtime gyro bias adaptation rate (default 0.001) |
-| `eis.filter_tau` | float | restart | Legacy backend: LPF time constant (seconds) |
 | `eis.test_mode` | bool | restart | Inject sine wobble (no IMU needed) |
 | `eis.swap_xy` | bool | restart | Swap gyro X/Y axis mapping |
 | `eis.invert_x` | bool | restart | Invert gyro X correction |
@@ -763,13 +762,10 @@ camera sensor.
 
 ### Architecture
 
-The EIS system uses a modular dispatch framework with pluggable backends:
-
-- **gyroglide** (default) — timestamp-based integration, motion-gated
-  recenter, edge-aware recentering, optional slew limiting
-- **legacy** — original LPF-based approach for A/B comparison
-
-New backends can be added by implementing the `EisOps` vtable in `eis.h`.
+The EIS system uses a modular dispatch framework. The **gyroglide** backend
+provides timestamp-based integration, motion-gated recenter, edge-aware
+recentering, and optional slew limiting. New backends can be added by
+implementing the `EisOps` vtable in `eis.h`.
 
 ### Limitations
 

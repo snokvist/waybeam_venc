@@ -137,7 +137,6 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->eis.enabled = false;
 	safe_strcpy(cfg->eis.mode, sizeof(cfg->eis.mode), "gyroglide");
 	cfg->eis.margin_percent = 30;
-	cfg->eis.filter_tau = 1.0f;
 	cfg->eis.test_mode = false;
 	cfg->eis.swap_xy = false;
 	cfg->eis.invert_x = false;
@@ -364,8 +363,6 @@ static void load_eis(const cJSON *root, VencConfigEis *s)
 	s->margin_percent = json_get_int(obj, "marginPercent", s->margin_percent);
 	if (s->margin_percent < 1) s->margin_percent = 1;
 	if (s->margin_percent > 30) s->margin_percent = 30;
-	s->filter_tau = (float)json_get_double(obj, "filterTau", s->filter_tau);
-	if (s->filter_tau <= 0.0f) s->filter_tau = 1.0f;
 	s->test_mode = json_get_bool(obj, "testMode", s->test_mode);
 	s->swap_xy = json_get_bool(obj, "swapXY", s->swap_xy);
 	s->invert_x = json_get_bool(obj, "invertX", s->invert_x);
@@ -624,7 +621,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(eis, "enabled", cfg->eis.enabled);
 		cJSON_AddStringToObject(eis, "mode", cfg->eis.mode);
 		cJSON_AddNumberToObject(eis, "marginPercent", cfg->eis.margin_percent);
-		cJSON_AddNumberToObject(eis, "filterTau", cfg->eis.filter_tau);
 		cJSON_AddBoolToObject(eis, "testMode", cfg->eis.test_mode);
 		cJSON_AddBoolToObject(eis, "swapXY", cfg->eis.swap_xy);
 		cJSON_AddBoolToObject(eis, "invertX", cfg->eis.invert_x);

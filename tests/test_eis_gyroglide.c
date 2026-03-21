@@ -4,7 +4,7 @@
  *
  * Build: cc -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE -Iinclude \
  *        -DEIS_GYROGLIDE_TEST tests/test_eis_gyroglide.c \
- *        src/eis_gyroglide.c src/eis.c src/eis_legacy.c \
+ *        src/eis_gyroglide.c src/eis.c \
  *        -lpthread -lm -o tests/test_eis_gyroglide
  * Run:   ./tests/test_eis_gyroglide
  */
@@ -110,7 +110,6 @@ static EisConfig default_cfg(void)
 	cfg.swap_xy = 0;
 	cfg.invert_x = 0;
 	cfg.invert_y = 0;
-	cfg.filter_tau = 1.0f;
 	cfg.gain = 0.8f;
 	cfg.deadband_rad = 0.001f;
 	cfg.recenter_rate = 1.0f;

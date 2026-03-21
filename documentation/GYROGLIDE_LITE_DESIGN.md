@@ -109,17 +109,17 @@ tilt correction). Not in the hot path.
                     MI_VPE_SetPortCrop(ch, port, &rect)
 ```
 
-### Component mapping to existing code
+### Component mapping
 
-| Block | File | Status |
-|---|---|---|
-| IMU sampling | `imu_bmi270.c` | Exists — FIFO + polling, push callback |
-| Ring buffer | `eis_crop.c:MotionRing` | Exists — needs timestamp-based integration |
-| Batch extraction | `eis_crop.c:ring_read_range()` | Exists — correct |
-| Motion integration | `eis_crop.c:eis_crop_update()` L344-351 | **Rework** — currently uses uniform `dt/n` |
-| Crop decision | `eis_crop.c:eis_crop_update()` L353-367 | **Rework** — LPF→spring-damper + deadband + slew |
-| HW crop write | `eis_crop.c:clamp_and_apply_crop()` | Exists — correct |
-| Frame trigger | `star6e_runtime.c:683-685` | Exists — `imu_drain()` then `eis_crop_update()` |
+| Block | File |
+|---|---|
+| IMU sampling | `imu_bmi270.c` — FIFO + polling, push callback |
+| Ring buffer | `eis_ring.h` — shared header-only, mutex-protected |
+| Batch extraction | `eis_ring.h:eis_ring_read_range()` |
+| Motion integration | `eis_gyroglide.c:gyroglide_compute()` — timestamp-based |
+| Crop decision | `eis_gyroglide.c:gyroglide_compute()` — recenter + edge + slew |
+| HW crop write | `eis_gyroglide.c:apply_crop()` → `MI_VPE_SetPortCrop()` |
+| Frame trigger | `star6e_runtime.c` — `imu_drain()` then `eis_update()` before GetStream |
 
 ---
 
@@ -387,16 +387,15 @@ frame currently being captured, reducing latency by one frame.
 
 ---
 
-## 10. Changes from existing POC
+## 10. Implementation summary
 
-| Aspect | POC (`eis_crop.c`) | GyroGlide-Lite |
-|---|---|---|
-| Integration | Uniform `dt/n` per sample | Per-sample `ts[i]-ts[i-1]` |
-| Stabilization model | LPF smooth path, correction=smooth-raw | Direct position + spring recenter |
-| Recenter | Implicit via LPF tau | Motion-gated: only when idle + edge boost |
-| Bias tracking | Startup calibration only | Runtime slow-adapt in hot path |
-| Deadband | None | Per-frame delta gating |
-| Slew limit | None | Optional per-frame max step |
-| Edge behavior | Hard clamp only | Soft accelerated recenter before clamp |
-| Tail gap | Ignored | Extrapolated from last sample |
-| Modularity | Monolithic | EIS dispatch interface for multiple backends |
+| Feature | Implementation |
+|---|---|
+| Integration | Per-sample `ts[i]-ts[i-1]` with tail extrapolation |
+| Stabilization model | Direct position + motion-gated recenter |
+| Recenter | Exponential decay only when idle + edge-aware boost |
+| Bias tracking | Runtime slow-adapt in hot path |
+| Deadband | Optional per-frame delta gating |
+| Slew limit | Optional per-frame max step |
+| Edge behavior | Soft accelerated recenter before hard clamp |
+| Modularity | EisOps vtable dispatch for pluggable backends |
