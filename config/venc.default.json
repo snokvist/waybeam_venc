@@ -55,7 +55,7 @@
   "eis": {
     "enabled": false,
     "mode": "gyroglide",
-    "marginPercent": 25,
+    "marginPercent": 30,
     "filterTau": 1.0,
     "testMode": false,
     "swapXY": false,

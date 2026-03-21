@@ -314,7 +314,7 @@ float predicted_x = pos_x + delta_x * px_per_rad * gain;
 | `gain` | 1.0 | 0.0–1.0 | Fraction of detected motion to correct |
 | `deadband_rad` | 0.0 | 0.0–0.01 | Per-frame angle below which correction zeroed |
 | `recenter_rate` | 0.5 | 0.1–5.0 | Return-to-center speed when idle (1/s) |
-| `margin_percent` | 25 | 5–30 | Overscan reserved for stabilization |
+| `margin_percent` | 30 | 5–30 | Overscan reserved for stabilization |
 | `max_slew_px` | 0 | 0–20.0 | Max crop change per frame (0 = disabled) |
 | `px_per_rad` | W/2 | auto | Lens FOV dependent (554 for 120° on 1920px) |
 | `bias_alpha` | 0.001 | 0.0001–0.01 | Runtime bias adaptation rate |
@@ -328,11 +328,17 @@ correction is too small for visible stabilization. At 60fps, each frame gets
 also selects a higher-resolution mode at 60fps (2560x1920 vs 1920x1080 at
 120fps), giving the VPE crop more input resolution to work with.
 
-**Margin: 25% recommended.** At 10% the correction range is only ±48px
-horizontal — too small for meaningful stabilization. 25% gives ±240px
-horizontal and ±135px vertical (at 1920x1080 capture), enough to absorb
-moderate hand shake. The VPE scaler handles the 1440x810→1920x1080 upscale
-without measurable fps cost at 60fps.
+**Margin: 30% recommended (default, max safe).** At 10% the correction range
+is only ±48px horizontal — too small for meaningful stabilization. 30%
+produces a 1344x756 crop from 1920x1080 capture, giving ±288px horizontal
+and ±162px vertical — enough to absorb significant hand shake. The VPE
+scaler handles the upscale without measurable fps cost at 60fps.
+
+**VPE hard limit: 30% maximum.** On SSC30KQ, margins above 30% (crop below
+~70% of capture dimensions) cause VPE pipeline stalls when the VPE is also
+scaling the input (e.g., 2560x1440 sensor → 1920x1080 output at 60fps).
+Both backends clamp margin_percent to 30 and enforce a minimum crop of 70%
+of capture. The config parser also clamps to this range.
 
 **Deadband: 0.0 recommended.** The original default of 0.001 rad was too
 aggressive for short integration windows — it suppressed real motion. With

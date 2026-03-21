@@ -330,6 +330,12 @@ static const EisOps legacy_ops = {
 /* Factory                                                            */
 /* ------------------------------------------------------------------ */
 
+/* VPE SetPortCrop minimum: crop must be at least 70% of capture
+ * dimensions to avoid VPE pipeline stalls when scaling is active.
+ * Empirically validated on SSC30KQ: 30% margin works, 33% stalls. */
+#define LEGACY_MAX_MARGIN_PERCENT 30
+#define LEGACY_MIN_CROP_FRAC      70  /* percent of capture */
+
 EisState *eis_legacy_create(const EisConfig *cfg)
 {
 	if (!cfg || cfg->margin_percent <= 0 || cfg->margin_percent >= 50) {
@@ -342,11 +348,18 @@ EisState *eis_legacy_create(const EisConfig *cfg)
 		return NULL;
 	}
 
+	int margin_pct = cfg->margin_percent;
+	if (margin_pct > LEGACY_MAX_MARGIN_PERCENT) {
+		fprintf(stderr, "EIS: margin_percent %d exceeds VPE safe limit,"
+			" clamping to %d%%\n", margin_pct, LEGACY_MAX_MARGIN_PERCENT);
+		margin_pct = LEGACY_MAX_MARGIN_PERCENT;
+	}
+
 	LegacyState *st = calloc(1, sizeof(*st));
 	if (!st)
 		return NULL;
 
-	st->cfg.margin_percent = cfg->margin_percent;
+	st->cfg.margin_percent = margin_pct;
 	st->cfg.capture_w = cfg->capture_w;
 	st->cfg.capture_h = cfg->capture_h;
 	st->cfg.vpe_channel = cfg->vpe_channel;
@@ -360,14 +373,30 @@ EisState *eis_legacy_create(const EisConfig *cfg)
 	st->cfg.invert_y = cfg->invert_y;
 
 	uint16_t total_margin_x = align2(
-		(uint16_t)(cfg->capture_w * cfg->margin_percent / 100));
+		(uint16_t)(cfg->capture_w * margin_pct / 100));
 	uint16_t total_margin_y = align2(
-		(uint16_t)(cfg->capture_h * cfg->margin_percent / 100));
+		(uint16_t)(cfg->capture_h * margin_pct / 100));
 
 	st->margin_x = total_margin_x / 2;
 	st->margin_y = total_margin_y / 2;
 	st->crop_w = align2(cfg->capture_w - total_margin_x);
 	st->crop_h = align2(cfg->capture_h - total_margin_y);
+
+	/* Enforce minimum crop size (VPE stalls below ~70% of capture) */
+	uint16_t min_w = align2((uint16_t)(cfg->capture_w * LEGACY_MIN_CROP_FRAC / 100));
+	uint16_t min_h = align2((uint16_t)(cfg->capture_h * LEGACY_MIN_CROP_FRAC / 100));
+	if (min_w < 64) min_w = 64;
+	if (min_h < 64) min_h = 64;
+
+	if (st->crop_w < min_w || st->crop_h < min_h) {
+		st->crop_w = min_w > st->crop_w ? min_w : st->crop_w;
+		st->crop_h = min_h > st->crop_h ? min_h : st->crop_h;
+		st->margin_x = (cfg->capture_w - st->crop_w) / 2;
+		st->margin_y = (cfg->capture_h - st->crop_h) / 2;
+		fprintf(stderr, "EIS: crop clamped to %ux%u (margin ±%u,±%u)"
+			" to stay within VPE safe range\n",
+			st->crop_w, st->crop_h, st->margin_x, st->margin_y);
+	}
 
 	if (st->crop_w < 64 || st->crop_h < 64) {
 		fprintf(stderr, "EIS: margin too large, crop window %ux%u\n",

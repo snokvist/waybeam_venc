@@ -136,7 +136,7 @@ void venc_config_defaults(VencConfig *cfg)
 	/* eis */
 	cfg->eis.enabled = false;
 	safe_strcpy(cfg->eis.mode, sizeof(cfg->eis.mode), "gyroglide");
-	cfg->eis.margin_percent = 25;
+	cfg->eis.margin_percent = 30;
 	cfg->eis.filter_tau = 1.0f;
 	cfg->eis.test_mode = false;
 	cfg->eis.swap_xy = false;
@@ -363,7 +363,7 @@ static void load_eis(const cJSON *root, VencConfigEis *s)
 		json_get_string(obj, "mode", s->mode));
 	s->margin_percent = json_get_int(obj, "marginPercent", s->margin_percent);
 	if (s->margin_percent < 1) s->margin_percent = 1;
-	if (s->margin_percent > 49) s->margin_percent = 49;
+	if (s->margin_percent > 30) s->margin_percent = 30;
 	s->filter_tau = (float)json_get_double(obj, "filterTau", s->filter_tau);
 	if (s->filter_tau <= 0.0f) s->filter_tau = 1.0f;
 	s->test_mode = json_get_bool(obj, "testMode", s->test_mode);
