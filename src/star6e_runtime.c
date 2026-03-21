@@ -390,8 +390,7 @@ static void star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 
 	g_runner_ctx = ctx;
 	star6e_controls_bind(ps, vcfg);
-	if (vcfg->isp.iq_api)
-		star6e_iq_init();
+	star6e_iq_init();
 	venc_api_register(vcfg, "star6e", star6e_controls_callbacks());
 	venc_api_set_record_status_fn(record_status_callback);
 

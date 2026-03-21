@@ -134,7 +134,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
-	FIELD(isp, iq_api,             FT_BOOL,   MUT_RESTART),
 
 	FIELD(image, mirror,           FT_BOOL,   MUT_RESTART),
 	FIELD(image, flip,             FT_BOOL,   MUT_RESTART),

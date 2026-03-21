@@ -446,7 +446,7 @@ Error `501`:
 
 ### `GET /api/v1/iq`
 
-Query all ISP IQ parameter values. Requires `isp.iq_api: true` in config.
+Query all ISP IQ parameter values. Always available on Star6E backend.
 
 ```bash
 curl http://192.168.2.10/api/v1/iq
@@ -472,7 +472,7 @@ Each parameter reports:
 - `value`: current primary value (manual level for auto/manual params, enable for bools)
 - `available`: `false` if the dlsym symbol was not found
 
-Error `501` if `isp.iq_api` is disabled or backend doesn't support IQ:
+Error `501` if backend doesn't support IQ (Maruko):
 ```json
 {"ok":false,"error":{"code":"not_implemented","message":"IQ query not available"}}
 ```
@@ -759,7 +759,7 @@ Behavior:
 - `0.5.0`:
   - Added `GET /api/v1/iq` — query all ISP IQ parameter values (46 params).
   - Added `GET /api/v1/iq/set?param=value` — set individual IQ parameters live.
-  - New config field `isp.iq_api` (bool, default false) gates the IQ API.
+  - Always enabled on Star6E (no config toggle needed — zero runtime overhead).
   - Params cover image quality, noise reduction, corrections, dynamic range,
     lens calibration, LUT enables, and ISP mode controls.
   - Star6E: 45/46 symbols resolved, Maruko returns 501.
