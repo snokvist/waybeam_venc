@@ -8,6 +8,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Round a float to 6 significant digits before cJSON serialization.
+ * Prevents artifacts like 0.001f -> 0.0010000000474974513 in JSON. */
+static double float_clean(float v)
+{
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%.6g", (double)v);
+	return strtod(buf, NULL);
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
@@ -154,6 +163,10 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->record.mode, sizeof(cfg->record.mode), "mirror");
 	cfg->record.max_seconds = 300;
 	cfg->record.max_mb = 500;
+	cfg->record.bitrate = 0;
+	cfg->record.fps = 0;
+	cfg->record.gop_size = 0;
+	cfg->record.server[0] = '\0';
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -398,6 +411,11 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 	s->max_seconds = (uint32_t)json_get_int(obj, "maxSeconds",
 		(int)s->max_seconds);
 	s->max_mb = (uint32_t)json_get_int(obj, "maxMB", (int)s->max_mb);
+	s->bitrate = (uint32_t)json_get_int(obj, "bitrate", (int)s->bitrate);
+	s->fps = (uint32_t)json_get_int(obj, "fps", (int)s->fps);
+	s->gop_size = json_get_double(obj, "gopSize", s->gop_size);
+	safe_strcpy(s->server, sizeof(s->server),
+		json_get_string(obj, "server", s->server));
 }
 
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
@@ -625,11 +643,11 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(eis, "swapXY", cfg->eis.swap_xy);
 		cJSON_AddBoolToObject(eis, "invertX", cfg->eis.invert_x);
 		cJSON_AddBoolToObject(eis, "invertY", cfg->eis.invert_y);
-		cJSON_AddNumberToObject(eis, "gain", cfg->eis.gain);
-		cJSON_AddNumberToObject(eis, "deadbandRad", cfg->eis.deadband_rad);
-		cJSON_AddNumberToObject(eis, "recenterRate", cfg->eis.recenter_rate);
-		cJSON_AddNumberToObject(eis, "maxSlewPx", cfg->eis.max_slew_px);
-		cJSON_AddNumberToObject(eis, "biasAlpha", cfg->eis.bias_alpha);
+		cJSON_AddNumberToObject(eis, "gain", float_clean(cfg->eis.gain));
+		cJSON_AddNumberToObject(eis, "deadbandRad", float_clean(cfg->eis.deadband_rad));
+		cJSON_AddNumberToObject(eis, "recenterRate", float_clean(cfg->eis.recenter_rate));
+		cJSON_AddNumberToObject(eis, "maxSlewPx", float_clean(cfg->eis.max_slew_px));
+		cJSON_AddNumberToObject(eis, "biasAlpha", float_clean(cfg->eis.bias_alpha));
 	}
 
 	/* record */
@@ -641,6 +659,10 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(rec, "mode", cfg->record.mode);
 		cJSON_AddNumberToObject(rec, "maxSeconds", cfg->record.max_seconds);
 		cJSON_AddNumberToObject(rec, "maxMB", cfg->record.max_mb);
+		cJSON_AddNumberToObject(rec, "bitrate", cfg->record.bitrate);
+		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
+		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
+		cJSON_AddStringToObject(rec, "server", cfg->record.server);
 	}
 
 	return root;

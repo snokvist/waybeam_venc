@@ -11,8 +11,8 @@ extern "C" {
 #define HTTPD_MAX_METHOD    8
 #define HTTPD_MAX_PATH      256
 #define HTTPD_MAX_QUERY     512
-#define HTTPD_MAX_BODY      4096
-#define HTTPD_MAX_ROUTES    48
+#define HTTPD_MAX_BODY      8192
+#define HTTPD_MAX_ROUTES    64
 
 /* Parsed HTTP request passed to route handlers */
 typedef struct {
@@ -47,6 +47,9 @@ int httpd_send_json(int client_fd, int status_code, const char *json_str);
 
 /* Send a plain-text response body. */
 int httpd_send_text(int client_fd, int status_code, const char *text_str);
+
+/* Send an HTML response body. */
+int httpd_send_html(int client_fd, int status_code, const char *html_str);
 
 /* Send a JSON success envelope: {"ok":true,"data":{...}} */
 int httpd_send_ok(int client_fd, const char *data_json);

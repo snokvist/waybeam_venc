@@ -122,6 +122,12 @@ int httpd_send_text(int client_fd, int status_code, const char *text_str)
 		"text/plain; charset=utf-8", text_str, (int)strlen(text_str));
 }
 
+int httpd_send_html(int client_fd, int status_code, const char *html_str)
+{
+	return send_response(client_fd, status_code, status_text(status_code),
+		"text/html; charset=utf-8", html_str, (int)strlen(html_str));
+}
+
 int httpd_send_ok(int client_fd, const char *data_json)
 {
 	char buf[2048];
@@ -159,6 +165,7 @@ static int parse_request(int fd, HttpRequest *req)
 	int total = 0;
 	while (total < (int)sizeof(raw) - 1) {
 		int n = (int)read(fd, raw + total, (size_t)(sizeof(raw) - 1 - (size_t)total));
+		if (n < 0 && errno == EINTR) continue;
 		if (n <= 0) break;
 		total += n;
 		/* Check for end of headers (body handled via Content-Length) */
@@ -219,6 +226,7 @@ static int parse_request(int fd, HttpRequest *req)
 		while (already < content_len) {
 			int n = (int)read(fd, req->body + already,
 				(size_t)(content_len - already));
+			if (n < 0 && errno == EINTR) continue;
 			if (n <= 0) break;
 			already += n;
 		}

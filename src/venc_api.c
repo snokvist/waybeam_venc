@@ -2,6 +2,7 @@
 #include "pipeline_common.h"
 #include "star6e_recorder.h"
 #include "venc_httpd.h"
+#include "venc_webui.h"
 #include "cJSON.h"
 
 #include <pthread.h>
@@ -101,7 +102,7 @@ void venc_api_set_record_status_fn(VencRecordStatusFn fn)
 /* ── Field descriptor table ──────────────────────────────────────────── */
 
 typedef enum { MUT_LIVE, MUT_RESTART } Mutability;
-typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT16, FT_DOUBLE, FT_STRING, FT_SIZE } FieldType;
+typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT8, FT_UINT16, FT_DOUBLE, FT_FLOAT, FT_STRING, FT_SIZE } FieldType;
 
 typedef struct {
 	const char *key;          /* dot-separated JSON path, e.g. "video0.bitrate" */
@@ -157,6 +158,14 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, audio_port,        FT_UINT16, MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 
+	FIELD(isp, legacy_ae,      FT_BOOL,   MUT_RESTART),
+	FIELD(isp, ae_fps,         FT_UINT,   MUT_RESTART),
+
+	FIELD(audio, enabled,      FT_BOOL,   MUT_RESTART),
+	FIELD(audio, sample_rate,  FT_UINT,   MUT_RESTART),
+	FIELD(audio, channels,     FT_UINT,   MUT_RESTART),
+	FIELD(audio, codec,        FT_STRING, MUT_RESTART),
+	FIELD(audio, volume,       FT_INT,    MUT_RESTART),
 	FIELD(audio, mute,         FT_BOOL,   MUT_LIVE),
 
 	FIELD(fpv, roi_enabled,  FT_BOOL,   MUT_LIVE),
@@ -164,6 +173,38 @@ static const FieldDesc g_fields[] = {
 	FIELD(fpv, roi_steps,    FT_UINT16, MUT_LIVE),
 	FIELD(fpv, roi_center,   FT_DOUBLE, MUT_LIVE),
 	FIELD(fpv, noise_level,  FT_INT,    MUT_RESTART),
+
+	FIELD(imu, enabled,        FT_BOOL,   MUT_RESTART),
+	FIELD(imu, i2c_device,     FT_STRING, MUT_RESTART),
+	FIELD(imu, i2c_addr,       FT_UINT8,  MUT_RESTART),
+	FIELD(imu, sample_rate_hz, FT_INT,    MUT_RESTART),
+	FIELD(imu, gyro_range_dps, FT_INT,    MUT_RESTART),
+	FIELD(imu, cal_file,       FT_STRING, MUT_RESTART),
+	FIELD(imu, cal_samples,    FT_INT,    MUT_RESTART),
+
+	FIELD(eis, enabled,        FT_BOOL,   MUT_RESTART),
+	FIELD(eis, mode,           FT_STRING, MUT_RESTART),
+	FIELD(eis, margin_percent, FT_INT,    MUT_RESTART),
+	FIELD(eis, test_mode,      FT_BOOL,   MUT_RESTART),
+	FIELD(eis, swap_xy,        FT_BOOL,   MUT_RESTART),
+	FIELD(eis, invert_x,       FT_BOOL,   MUT_RESTART),
+	FIELD(eis, invert_y,       FT_BOOL,   MUT_RESTART),
+	FIELD(eis, gain,           FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, deadband_rad,   FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, recenter_rate,  FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, max_slew_px,    FT_FLOAT,  MUT_RESTART),
+	FIELD(eis, bias_alpha,     FT_FLOAT,  MUT_RESTART),
+
+	FIELD(record, enabled,     FT_BOOL,   MUT_RESTART),
+	FIELD(record, dir,         FT_STRING, MUT_RESTART),
+	FIELD(record, format,      FT_STRING, MUT_RESTART),
+	FIELD(record, mode,        FT_STRING, MUT_RESTART),
+	FIELD(record, max_seconds, FT_UINT,   MUT_RESTART),
+	FIELD(record, max_mb,      FT_UINT,   MUT_RESTART),
+	FIELD(record, bitrate,     FT_UINT,   MUT_RESTART),
+	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
+	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
+	FIELD(record, server,      FT_STRING, MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -185,6 +226,11 @@ typedef struct {
 static const FieldAlias g_field_aliases[] = {
 	{ "system.webPort", "system.web_port" },
 	{ "system.overclockLevel", "system.overclock_level" },
+	{ "sensor.unlockEnabled", "sensor.unlock_enabled" },
+	{ "sensor.unlockCmd", "sensor.unlock_cmd" },
+	{ "sensor.unlockReg", "sensor.unlock_reg" },
+	{ "sensor.unlockValue", "sensor.unlock_value" },
+	{ "sensor.unlockDir", "sensor.unlock_dir" },
 	{ "isp.sensorBin", "isp.sensor_bin" },
 	{ "isp.gainMax", "isp.gain_max" },
 	{ "isp.awbMode", "isp.awb_mode" },
@@ -200,6 +246,30 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.roiSteps", "fpv.roi_steps" },
 	{ "fpv.roiCenter", "fpv.roi_center" },
 	{ "fpv.noiseLevel", "fpv.noise_level" },
+	{ "isp.legacyAe", "isp.legacy_ae" },
+	{ "isp.aeFps", "isp.ae_fps" },
+	{ "audio.sampleRate", "audio.sample_rate" },
+	{ "imu.i2cDevice", "imu.i2c_device" },
+	{ "imu.i2cAddr", "imu.i2c_addr" },
+	{ "imu.sampleRateHz", "imu.sample_rate_hz" },
+	{ "imu.gyroRangeDps", "imu.gyro_range_dps" },
+	{ "imu.calFile", "imu.cal_file" },
+	{ "imu.calSamples", "imu.cal_samples" },
+	{ "eis.marginPercent", "eis.margin_percent" },
+	{ "eis.testMode", "eis.test_mode" },
+	{ "eis.swapXY", "eis.swap_xy" },
+	{ "eis.invertX", "eis.invert_x" },
+	{ "eis.invertY", "eis.invert_y" },
+	{ "eis.deadbandRad", "eis.deadband_rad" },
+	{ "eis.recenterRate", "eis.recenter_rate" },
+	{ "eis.maxSlewPx", "eis.max_slew_px" },
+	{ "eis.biasAlpha", "eis.bias_alpha" },
+	{ "record.maxSeconds", "record.max_seconds" },
+	{ "record.maxMB", "record.max_mb" },
+	{ "record.gopSize", "record.gop_size" },
+	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
+	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
+	{ "outgoing.streamMode", "outgoing.stream_mode" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -233,11 +303,17 @@ static char *field_to_json_value(const FieldDesc *f)
 	case FT_UINT:
 		snprintf(buf, sizeof(buf), "%u", *(const uint32_t *)ptr);
 		return strdup(buf);
+	case FT_UINT8:
+		snprintf(buf, sizeof(buf), "%u", (unsigned)*(const uint8_t *)ptr);
+		return strdup(buf);
 	case FT_UINT16:
 		snprintf(buf, sizeof(buf), "%u", (unsigned)*(const uint16_t *)ptr);
 		return strdup(buf);
 	case FT_DOUBLE:
 		snprintf(buf, sizeof(buf), "%g", *(const double *)ptr);
+		return strdup(buf);
+	case FT_FLOAT:
+		snprintf(buf, sizeof(buf), "%.6g", (double)*(const float *)ptr);
 		return strdup(buf);
 	case FT_STRING: {
 		cJSON *s = cJSON_CreateString((const char *)ptr);
@@ -283,6 +359,13 @@ static int field_from_string(const FieldDesc *f, const char *val)
 		*(uint32_t *)ptr = (uint32_t)v;
 		break;
 	}
+	case FT_UINT8: {
+		char *end;
+		unsigned long v = strtoul(val, &end, 0);  /* base 0: accepts 0x hex */
+		if (end == val || *end != '\0' || v > 255) return -1;
+		*(uint8_t *)ptr = (uint8_t)v;
+		break;
+	}
 	case FT_UINT16: {
 		char *end;
 		unsigned long v = strtoul(val, &end, 10);
@@ -295,6 +378,13 @@ static int field_from_string(const FieldDesc *f, const char *val)
 		double v = strtod(val, &end);
 		if (end == val || *end != '\0') return -1;
 		*(double *)ptr = v;
+		break;
+	}
+	case FT_FLOAT: {
+		char *end;
+		float v = (float)strtod(val, &end);
+		if (end == val || *end != '\0') return -1;
+		*(float *)ptr = v;
 		break;
 	}
 	case FT_STRING:
@@ -720,30 +810,59 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"IQ set not available");
 	}
-	char key[64], val[64];
+	char key[64], val[256];
 	if (parse_first_query_param(req->query, key, sizeof(key),
 			val, sizeof(val)) != 0 || !*key || !*val) {
 		return httpd_send_error(fd, 400, "invalid_request",
 			"usage: /api/v1/iq/set?param=value");
 	}
-	/* Validate value is numeric to prevent JSON injection */
+	/* Validate value is numeric (with commas for arrays) */
 	{
 		const char *p = val;
-		while (*p == '-' || (*p >= '0' && *p <= '9')) p++;
+		while (*p == '-' || *p == ',' || (*p >= '0' && *p <= '9')) p++;
 		if (*p != '\0') {
 			return httpd_send_error(fd, 400, "invalid_request",
-				"value must be numeric");
+				"value must be numeric (comma-separated for arrays)");
 		}
 	}
 	if (g_cb->apply_iq_param(key, val) != 0) {
 		return httpd_send_error(fd, 400, "apply_failed",
 			"IQ parameter set failed");
 	}
-	char buf[256];
-	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"param\":\"%s\",\"value\":%s}}",
-		key, val);
+	char buf[512];
+	if (strchr(val, ','))
+		snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{\"param\":\"%s\",\"value\":[%s]}}",
+			key, val);
+	else
+		snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{\"param\":\"%s\",\"value\":%s}}",
+			key, val);
 	return httpd_send_json(fd, 200, buf);
+}
+
+#if HAVE_BACKEND_STAR6E
+extern int star6e_iq_import(const char *json_str);
+#endif
+
+static int handle_iq_import(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)ctx;
+#if HAVE_BACKEND_STAR6E
+	if (req->body_len <= 0 || !req->body[0]) {
+		return httpd_send_error(fd, 400, "invalid_request",
+			"POST JSON body required (output of /api/v1/iq)");
+	}
+	int ret = star6e_iq_import(req->body);
+	if (ret != 0)
+		return httpd_send_error(fd, 500, "import_partial",
+			"some parameters failed to apply");
+	return httpd_send_ok(fd, "{\"imported\":true}");
+#else
+	(void)req;
+	return httpd_send_error(fd, 501, "not_implemented",
+		"IQ import not available on this backend");
+#endif
 }
 
 static int handle_ae(int fd, const HttpRequest *req, void *ctx)
@@ -984,7 +1103,7 @@ static int dual_apply_bitrate(uint32_t kbps)
 
 	if (MI_VENC_SetChnAttr(g_dual.channel, &attr) != 0)
 		return -1;
-#ifdef HAVE_BACKEND_STAR6E
+#if HAVE_BACKEND_STAR6E
 	if (star6e_controls_apply_frame_lost_threshold(g_dual.channel,
 	    g_dual.frame_lost, kbps) != 0)
 		return -1;
@@ -1139,6 +1258,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq/set",       handle_iq_set, NULL);
+	r |= venc_httpd_route("POST", "/api/v1/iq/import",  handle_iq_import, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/iq",           handle_iq, NULL);
 	r |= venc_httpd_route("GET", "/metrics/isp",         handle_isp_metrics, NULL);
 	r |= venc_httpd_route("GET", "/request/idr",         handle_idr, NULL);
@@ -1148,6 +1268,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/status", handle_dual_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
+	r |= venc_webui_register();
 	if (r != 0) {
 		fprintf(stderr, "[api] ERROR: failed to register one or more routes\n");
 		return -1;
