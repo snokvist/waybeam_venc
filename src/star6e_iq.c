@@ -39,6 +39,14 @@ typedef enum {
 } IqValueType;
 
 typedef struct {
+	const char *name;       /* "y_ofst", "matrix" */
+	IqValueType vtype;      /* VT_U8, VT_U16, VT_U32 */
+	uint16_t rel_offset;    /* bytes from manual struct start */
+	uint16_t count;         /* 1=scalar, N=array */
+	uint32_t max_val;       /* per-element max */
+} IqFieldDesc;
+
+typedef struct {
 	const char *name;
 	const char *get_sym;
 	const char *set_sym;
@@ -47,7 +55,70 @@ typedef struct {
 	IqValueType vtype;
 	uint32_t    manual_offset;  /* 0=bool-only, 4=manual-only, >4=auto/manual */
 	uint32_t    max_val;
+	const IqFieldDesc *fields;  /* NULL = legacy single-value */
+	uint16_t    field_count;    /* 0 when fields==NULL */
 } IqParamDesc;
+
+/* ── Multi-field descriptors (from SDK mi_isp_iq_datatype.h) ────────── */
+
+/* COLORTRANS: manual-only@4 */
+static const IqFieldDesc colortrans_fields[] = {
+	{ "y_ofst",  VT_U16, 0,  1, 2047 },
+	{ "u_ofst",  VT_U16, 2,  1, 2047 },
+	{ "v_ofst",  VT_U16, 4,  1, 2047 },
+	{ "matrix",  VT_U16, 6,  9, 65535 },
+};
+
+/* R2Y: manual-only@4 */
+static const IqFieldDesc r2y_fields[] = {
+	{ "matrix",  VT_U16, 0,  9, 1023 },
+	{ "add_y16", VT_U8,  18, 1, 1 },
+};
+
+/* OBC: auto/manual, manual@136 */
+static const IqFieldDesc obc_fields[] = {
+	{ "val_r",  VT_U16, 0, 1, 255 },
+	{ "val_gr", VT_U16, 2, 1, 255 },
+	{ "val_gb", VT_U16, 4, 1, 255 },
+	{ "val_b",  VT_U16, 6, 1, 255 },
+};
+
+/* DEMOSAIC: manual-only@4 */
+static const IqFieldDesc demosaic_fields[] = {
+	{ "dir_thrd",      VT_U8, 0, 1, 63 },
+	{ "edge_smooth_y", VT_U8, 1, 1, 255 },
+	{ "edge_smooth_c", VT_U8, 2, 1, 127 },
+};
+
+/* FALSECOLOR: auto/manual, manual@120 */
+static const IqFieldDesc false_color_fields[] = {
+	{ "freq_thrd",       VT_U8, 0, 1, 255 },
+	{ "edge_score_thrd", VT_U8, 1, 1, 255 },
+	{ "chroma_thrd_max", VT_U8, 2, 1, 127 },
+	{ "chroma_thrd_mid", VT_U8, 3, 1, 127 },
+	{ "chroma_thrd_min", VT_U8, 4, 1, 127 },
+	{ "strength_mid",    VT_U8, 5, 1, 7 },
+	{ "strength_min",    VT_U8, 6, 1, 7 },
+};
+
+/* CROSSTALK: auto/manual, manual@296 */
+static const IqFieldDesc crosstalk_fields[] = {
+	{ "strength",      VT_U8,  0,  1,  31 },
+	{ "strength_by_y", VT_U8,  1,  15, 127 },
+	{ "threshold",     VT_U8,  16, 1,  255 },
+	{ "offset",        VT_U16, 18, 1,  4095 },
+};
+
+/* WDR_CURVE_ADV: auto/manual, manual@104 */
+static const IqFieldDesc wdr_curve_adv_fields[] = {
+	{ "slope",           VT_U16, 0, 1, 16384 },
+	{ "trans_point_0",   VT_U8,  2, 1, 255 },
+	{ "trans_point_1",   VT_U8,  3, 1, 255 },
+	{ "saturated_point", VT_U8,  4, 1, 255 },
+	{ "curve_mode_sel",  VT_U8,  5, 1, 1 },
+};
+
+#define FIELDS(a) a, (sizeof(a) / sizeof(a[0]))
 
 /*
  * Parameter table — offsets computed from SDK structs:
@@ -59,200 +130,150 @@ static IqParamDesc g_params[] = {
 	/* ── Image quality ─────────────────────────────────────────── */
 	/* LEVEL_BASE_PARAM_t = 4B, auto=64, manual@72 */
 	{ "lightness",    "MI_ISP_IQ_GetLightness",   "MI_ISP_IQ_SetLightness",
-	  NULL, NULL, VT_U32, 72,   100 },
+	  NULL, NULL, VT_U32, 72,   100, NULL, 0 },
 	{ "contrast",     "MI_ISP_IQ_GetContrast",    "MI_ISP_IQ_SetContrast",
-	  NULL, NULL, VT_U32, 72,   100 },
+	  NULL, NULL, VT_U32, 72,   100, NULL, 0 },
 	{ "brightness",   "MI_ISP_IQ_GetBrightness",  "MI_ISP_IQ_SetBrightness",
-	  NULL, NULL, VT_U32, 72,   100 },
+	  NULL, NULL, VT_U32, 72,   100, NULL, 0 },
 	/* SATURATION_PARAM_t = 24B, auto=384, manual@392 (u8SatAllStr 0-127, 32=1X) */
 	{ "saturation",   "MI_ISP_IQ_GetSaturation",  "MI_ISP_IQ_SetSaturation",
-	  NULL, NULL, VT_U8,  392,  127 },
+	  NULL, NULL, VT_U8,  392,  127, NULL, 0 },
 	/* SHARPNESS_PARAM_t = 74B, auto=1184, manual@1192 (u8OverShootGain) */
 	{ "sharpness",    "MI_ISP_IQ_GetSharpness",   "MI_ISP_IQ_SetSharpness",
-	  NULL, NULL, VT_U8,  1192, 255 },
+	  NULL, NULL, VT_U8,  1192, 255, NULL, 0 },
 	/* HSV_PARAM_t = 193B, auto=3088, manual@3096 (s16HueLut[0]) */
 	{ "hsv",          "MI_ISP_IQ_GetHSV",          "MI_ISP_IQ_SetHSV",
-	  NULL, NULL, VT_U8,  3096, 64 },
+	  NULL, NULL, VT_U8,  3096, 64,  NULL, 0 },
 
 	/* ── Noise reduction ───────────────────────────────────────── */
-	/* NR3D_PARAM_t = 80B, auto=1280, manual@1288 (u8MdThd) */
 	{ "nr3d",         "MI_ISP_IQ_GetNR3D",        "MI_ISP_IQ_SetNR3D",
-	  NULL, NULL, VT_U8,  1288, 255 },
-	/* NR3D_EX: manual-only@4, 24B (bAREn) */
+	  NULL, NULL, VT_U8,  1288, 255, NULL, 0 },
 	{ "nr3d_ex",      "MI_ISP_IQ_GetNR3D_EX",     "MI_ISP_IQ_SetNR3D_EX",
-	  NULL, NULL, VT_U32, 4,    1 },
-	/* NRDESPIKE_PARAM_t = 34B, auto=544, manual@552 (u8BlendRatio) */
+	  NULL, NULL, VT_U32, 4,    1,   NULL, 0 },
 	{ "nr_despike",   "MI_ISP_IQ_GetNRDeSpike",   "MI_ISP_IQ_SetNRDeSpike",
-	  NULL, NULL, VT_U8,  552,  15 },
-	/* NRLUMA_PARAM_t = 6B, auto=96, manual@104 (u8Strength) */
+	  NULL, NULL, VT_U8,  552,  15,  NULL, 0 },
 	{ "nr_luma",      "MI_ISP_IQ_GetNRLuma",      "MI_ISP_IQ_SetNRLuma",
-	  NULL, NULL, VT_U8,  104,  255 },
-	/* NRLUMA_ADV_PARAM_t = 81B, auto=1296, manual@1304 (bDbgEn+u8Strength@+5) */
+	  NULL, NULL, VT_U8,  104,  255, NULL, 0 },
 	{ "nr_luma_adv",  "MI_ISP_IQ_GetNRLuma_Adv",  "MI_ISP_IQ_SetNRLuma_Adv",
-	  NULL, NULL, VT_U32, 1304, 1 },
-	/* NRCHROMA_PARAM_t = 13B, auto=208, manual@216 (u8MatchRatio) */
+	  NULL, NULL, VT_U32, 1304, 1,   NULL, 0 },
 	{ "nr_chroma",    "MI_ISP_IQ_GetNRChroma",    "MI_ISP_IQ_SetNRChroma",
-	  NULL, NULL, VT_U8,  216,  127 },
-	/* NRCHROMA_ADV_PARAM_t = 30B, auto=480, manual@488 (u8StrengthByY[0]) */
+	  NULL, NULL, VT_U8,  216,  127, NULL, 0 },
 	{ "nr_chroma_adv","MI_ISP_IQ_GetNRChroma_Adv","MI_ISP_IQ_SetNRChroma_Adv",
-	  NULL, NULL, VT_U8,  488,  255 },
+	  NULL, NULL, VT_U8,  488,  255, NULL, 0 },
 
 	/* ── Corrections ───────────────────────────────────────────── */
-	/* FALSECOLOR_PARAM_t = 7B, auto=112, manual@120 (u8FreqThrd) */
 	{ "false_color",  "MI_ISP_IQ_GetFalseColor",  "MI_ISP_IQ_SetFalseColor",
-	  NULL, NULL, VT_U8,  120,  255 },
-	/* CROSSTALK_PARAM_t = 18B, auto=288, manual@296 (u8Strength) */
+	  NULL, NULL, VT_U8,  120,  255, FIELDS(false_color_fields) },
 	{ "crosstalk",    "MI_ISP_IQ_GetCrossTalk",   "MI_ISP_IQ_SetCrossTalk",
-	  NULL, NULL, VT_U8,  296,  31 },
-	/* DEMOSAIC: manual-only@4 (u8DirThrd) */
+	  NULL, NULL, VT_U8,  296,  31,  FIELDS(crosstalk_fields) },
 	{ "demosaic",     "MI_ISP_IQ_GetDEMOSAIC",    "MI_ISP_IQ_SetDEMOSAIC",
-	  NULL, NULL, VT_U8,  4,    63 },
-	/* OBC_PARAM_t = 8B, auto=128, manual@136 (u16ValR) */
+	  NULL, NULL, VT_U8,  4,    63,  FIELDS(demosaic_fields) },
 	{ "obc",          "MI_ISP_IQ_GetOBC",          "MI_ISP_IQ_SetOBC",
-	  NULL, NULL, VT_U16, 136,  255 },
-	/* DYNAMIC_DP_PARAM_t = 30B, auto=480, manual@488 (bHotPixEn) */
+	  NULL, NULL, VT_U16, 136,  255, FIELDS(obc_fields) },
 	{ "dynamic_dp",   "MI_ISP_IQ_GetDynamicDP",   "MI_ISP_IQ_SetDynamicDP",
-	  NULL, NULL, VT_U8,  488,  1 },
-	/* DYNAMIC_DP_CLUSTER_PARAM_t = 67B, auto=1072, manual@1080 (bEdgeMode) */
+	  NULL, NULL, VT_U8,  488,  1,   NULL, 0 },
 	{ "dp_cluster",   "MI_ISP_IQ_GetDynamicDP_CLUSTER", "MI_ISP_IQ_SetDynamicDP_CLUSTER",
-	  NULL, NULL, VT_U32, 1080, 1 },
-	/* R2Y: manual-only@4 (u16Matrix[0]) */
+	  NULL, NULL, VT_U32, 1080, 1,   NULL, 0 },
 	{ "r2y",          "MI_ISP_IQ_GetR2Y",          "MI_ISP_IQ_SetR2Y",
-	  NULL, NULL, VT_U16, 4,    1023 },
-	/* COLORTRANS: manual-only@4 (u16Y_OFST) */
+	  NULL, NULL, VT_U16, 4,    1023, FIELDS(r2y_fields) },
 	{ "colortrans",   "MI_ISP_IQ_GetCOLORTRANS",  "MI_ISP_IQ_SetCOLORTRANS",
-	  NULL, NULL, VT_U16, 4,    2047 },
-	/* RGBMATRIX_PARAM_t: auto with bISOActEn, manual@CCM offset */
+	  NULL, NULL, VT_U16, 4,    2047, FIELDS(colortrans_fields) },
 	{ "rgb_matrix",   "MI_ISP_IQ_GetRGBMatrix",   "MI_ISP_IQ_SetRGBMatrix",
-	  NULL, NULL, VT_U16, 444,  8191 },
+	  NULL, NULL, VT_U16, 444,  8191, NULL, 0 },
 
 	/* ── Dynamic range & special ───────────────────────────────── */
-	/* WDR_PARAM_t = 40B, auto=640, manual@648 (u8BoxNum) */
 	{ "wdr",          "MI_ISP_IQ_GetWDR",          "MI_ISP_IQ_SetWDR",
-	  NULL, NULL, VT_U8,  648,  4 },
-	/* WDRCurveAdv_PARAM_t = 6B, auto=96, manual@104 (u16Slope) */
+	  NULL, NULL, VT_U8,  648,  4,    NULL, 0 },
 	{ "wdr_curve_adv","MI_ISP_IQ_GetWDRCurveAdv", "MI_ISP_IQ_SetWDRCurveAdv",
-	  NULL, NULL, VT_U16, 104,  16384 },
-	/* PFC_PARAM_t = 23B, auto=368, manual@376 (u8Strength) */
+	  NULL, NULL, VT_U16, 104,  16384, FIELDS(wdr_curve_adv_fields) },
 	{ "pfc",          "MI_ISP_IQ_GetPFC",          "MI_ISP_IQ_SetPFC",
-	  NULL, NULL, VT_U8,  376,  255 },
-	/* PFC_EX: manual-only@4 (bDbgEn) */
+	  NULL, NULL, VT_U8,  376,  255, NULL, 0 },
 	{ "pfc_ex",       "MI_ISP_IQ_GetPFC_EX",      "MI_ISP_IQ_SetPFC_EX",
-	  NULL, NULL, VT_U32, 4,    1 },
-	/* HDR_PARAM_t = 56B, auto=896, manual@904 (bNrEn as MI_ISP_BOOL_e) */
+	  NULL, NULL, VT_U32, 4,    1,   NULL, 0 },
 	{ "hdr",          "MI_ISP_IQ_GetHDR",          "MI_ISP_IQ_SetHDR",
-	  NULL, NULL, VT_U32, 904,  1 },
-	/* HDR_EX: manual-only@4 (u16SensorExpRatio) */
+	  NULL, NULL, VT_U32, 904,  1,   NULL, 0 },
 	{ "hdr_ex",       "MI_ISP_IQ_GetHDR_EX",      "MI_ISP_IQ_SetHDR_EX",
-	  NULL, NULL, VT_U16, 4,    65535 },
-	/* SHP_EX: manual-only@4 (bDbgEn) */
+	  NULL, NULL, VT_U16, 4,    65535, NULL, 0 },
 	{ "shp_ex",       "MI_ISP_IQ_GetSHP_EX",      "MI_ISP_IQ_SetSHP_EX",
-	  NULL, NULL, VT_U32, 4,    1 },
-	/* RGBIR_PARAM_t = 37B, auto=592, manual@600 (u8IrPosType) */
+	  NULL, NULL, VT_U32, 4,    1,   NULL, 0 },
 	{ "rgbir",        "MI_ISP_IQ_GetRGBIR",        "MI_ISP_IQ_SetRGBIR",
-	  NULL, NULL, VT_U8,  600,  7 },
-	/* IQMode: just an enum (0=day, 1=night) */
+	  NULL, NULL, VT_U8,  600,  7,   NULL, 0 },
 	{ "iq_mode",      "MI_ISP_IQ_GetIQMode",       "MI_ISP_IQ_SetIQMode",
-	  NULL, NULL, VT_U32, 0,    1 },
+	  NULL, NULL, VT_U32, 0,    1,   NULL, 0 },
 
 	/* ── Lens & sensor calibration (flat structs) ─────────────── */
-	/* LSC: flat, bEnable(4) + u16CenterX@4 */
 	{ "lsc",          "MI_ISP_IQ_GetLSC",          "MI_ISP_IQ_SetLSC",
-	  NULL, NULL, VT_U16, 4,    65535 },
-	/* LSC_CTRL: flat, bEnable(4) + u8RRatioByCct[0]@4 */
+	  NULL, NULL, VT_U16, 4,    65535, NULL, 0 },
 	{ "lsc_ctrl",     "MI_ISP_IQ_GetLSC_CTRL",    "MI_ISP_IQ_SetLSC_CTRL",
-	  NULL, NULL, VT_U8,  4,    255 },
-	/* ALSC: flat, bEnable(4) + u8GridX@4 */
+	  NULL, NULL, VT_U8,  4,    255, NULL, 0 },
 	{ "alsc",         "MI_ISP_IQ_GetALSC",         "MI_ISP_IQ_SetALSC",
-	  NULL, NULL, VT_U8,  4,    255 },
-	/* ALSC_CTRL: flat, bEnable(4) + u8RRatioByCct[0]@4 */
+	  NULL, NULL, VT_U8,  4,    255, NULL, 0 },
 	{ "alsc_ctrl",    "MI_ISP_IQ_GetALSC_CTRL",   "MI_ISP_IQ_SetALSC_CTRL",
-	  NULL, NULL, VT_U8,  4,    255 },
-	/* OBC_P1: same struct as OBC, separate API ID */
+	  NULL, NULL, VT_U8,  4,    255, NULL, 0 },
 	{ "obc_p1",       "MI_ISP_IQ_GetOBC_P1",       "MI_ISP_IQ_SetOBC_P1",
-	  NULL, NULL, VT_U16, 136,  255 },
-	/* STITCH_LPF: flat, bEnable(4) + u16Coeff[0]@4 */
+	  NULL, NULL, VT_U16, 136,  255, FIELDS(obc_fields) },
 	{ "stitch_lpf",   "MI_ISP_IQ_GetSTITCH_LPF",  "MI_ISP_IQ_SetSTITCH_LPF",
-	  NULL, NULL, VT_U16, 4,    256 },
+	  NULL, NULL, VT_U16, 4,    256, NULL, 0 },
 
-	/* ── LUT-based (enable/mode control, value = first LUT entry) ─ */
-	/* RGBGAMMA: auto/manual, huge LUT struct */
+	/* ── LUT-based (enable/mode control only) ─────────────────── */
 	{ "rgb_gamma",    "MI_ISP_IQ_GetRGBGamma",    "MI_ISP_IQ_SetRGBGamma",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* YUVGAMMA: auto/manual, huge LUT struct */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "yuv_gamma",    "MI_ISP_IQ_GetYUVGamma",    "MI_ISP_IQ_SetYUVGamma",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* WDRCurveFull: auto/manual, 256-entry curve */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "wdr_curve_full","MI_ISP_IQ_GetWDRCurveFull","MI_ISP_IQ_SetWDRCurveFull",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 
 	/* ── Debug/test ────────────────────────────────────────────── */
 	{ "dummy",        "MI_ISP_IQ_GetDUMMY",        "MI_ISP_IQ_SetDUMMY",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "dummy_ex",     "MI_ISP_IQ_GetDUMMY_EX",    "MI_ISP_IQ_SetDUMMY_EX",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 
 	/* ── Toggle controls ───────────────────────────────────────── */
 	{ "defog",        "MI_ISP_IQ_GetDefog",        "MI_ISP_IQ_SetDefog",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "color_to_gray","MI_ISP_IQ_GetColorToGray",  "MI_ISP_IQ_SetColorToGray",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "nr3d_p1",      "MI_ISP_IQ_GetNR3D_P1",      "MI_ISP_IQ_SetNR3D_P1",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "fpn",          "MI_ISP_IQ_GetFPN",           "MI_ISP_IQ_SetFPN",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 
 	/* ── AE (auto-exposure) ────────────────────────────────────── */
-	/* EV_COMP: {s32EV(4), u32Grad(4)} = 8B, primary s32EV@0 */
 	{ "ae_ev_comp",   "MI_ISP_AE_GetEVComp",      "MI_ISP_AE_SetEVComp",
-	  NULL, NULL, VT_U32, 0,    200 },
-	/* AE mode enum: 0=A, 1=AV, 2=SV, 3=TV, 4=M */
+	  NULL, NULL, VT_U32, 0,    200, NULL, 0 },
 	{ "ae_mode",      "MI_ISP_AE_GetExpoMode",    "MI_ISP_AE_SetExpoMode",
-	  NULL, NULL, VT_U32, 0,    4 },
-	/* AE state enum: 0=normal, 1=pause */
+	  NULL, NULL, VT_U32, 0,    4,   NULL, 0 },
 	{ "ae_state",     "MI_ISP_AE_GetState",        "MI_ISP_AE_SetState",
-	  NULL, NULL, VT_U32, 0,    1 },
-	/* Flicker enum: 0=disable, 1=60Hz, 2=50Hz, 3=auto */
+	  NULL, NULL, VT_U32, 0,    1,   NULL, 0 },
 	{ "ae_flicker",   "MI_ISP_AE_GetFlicker",      "MI_ISP_AE_SetFlicker",
-	  NULL, NULL, VT_U32, 0,    3 },
-	/* FlickerEX: bEnable(4)+enOpType(4)+u8Sensitivity@8 */
+	  NULL, NULL, VT_U32, 0,    3,   NULL, 0 },
 	{ "ae_flicker_ex","MI_ISP_AE_GetFlickerEX",   "MI_ISP_AE_SetFlickerEX",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* Metering mode enum: 0=average, 1=center, 2=spot */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "ae_win_wgt_type","MI_ISP_AE_GetWinWgtType", "MI_ISP_AE_SetWinWgtType",
-	  NULL, NULL, VT_U32, 0,    2 },
-	/* Manual exposure: {u32FNx10(4), u32SensorGain(4), u32ISPGain(4), u32ShutterUS(4)} = 16B */
+	  NULL, NULL, VT_U32, 0,    2,   NULL, 0 },
 	{ "ae_manual_expo","MI_ISP_AE_GetManualExpo",  "MI_ISP_AE_SetManualExpo",
-	  NULL, NULL, VT_U32, 0,    65535 },
-	/* Exposure limit: {u32MinShutterUS,...} = 32B, 8 x u32 */
+	  NULL, NULL, VT_U32, 0,    65535, NULL, 0 },
 	{ "ae_expo_limit", "MI_ISP_AE_GetExposureLimit","MI_ISP_AE_SetExposureLimit",
-	  NULL, NULL, VT_U32, 0,    65535 },
-	/* AE stabilizer: bEnable(4)+u16DiffThd(2)+u16Percent(2) = 8B */
+	  NULL, NULL, VT_U32, 0,    65535, NULL, 0 },
 	{ "ae_stabilizer","MI_ISP_AE_GetStabilizer",   "MI_ISP_AE_SetStabilizer",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* AE RGBIR: bEnable(4)+u16MaxYWithIR(2)+u16MinISPGainCompRatio(2) = 8B */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "ae_rgbir",     "MI_ISP_AE_GetRGBIRAE",      "MI_ISP_AE_SetRGBIRAE",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* AE HDR: complex LUT struct = 140B */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "ae_hdr",       "MI_ISP_AE_GetHDR",          "MI_ISP_AE_SetHDR",
-	  NULL, NULL, VT_BOOL, 0,   1 },
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 
 	/* ── AWB (auto white balance) ──────────────────────────────── */
-	/* AWB AttrEx: bExtraLightEn(4)+stLightInfo[4] = 20B */
 	{ "awb_attr_ex",  "MI_ISP_AWB_GetAttrEx",      "MI_ISP_AWB_SetAttrEx",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* AWB MultiLS: bEnable(4)+u8Sensitive(1)+u8CaliStrength(1)+CCMs = 44B */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "awb_multi_ls", "MI_ISP_AWB_GetMultiLSAttr", "MI_ISP_AWB_SetMultiLSAttr",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* AWB stabilizer: bEnable(4)+thresholds = 12B */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "awb_stabilizer","MI_ISP_AWB_GetStabilizer",  "MI_ISP_AWB_SetStabilizer",
-	  NULL, NULL, VT_BOOL, 0,   1 },
-	/* AWB CT calibration: u16StartIdx(2)+... = 84B */
+	  NULL, NULL, VT_BOOL, 0,   1,   NULL, 0 },
 	{ "awb_ct_cali",  "MI_ISP_AWB_GetCTCaliAttr",  "MI_ISP_AWB_SetCTCaliAttr",
-	  NULL, NULL, VT_U16, 0,    65535 },
-	/* AWB CT weight: u16LvIndex(2)+stParaAPI = 22B */
+	  NULL, NULL, VT_U16, 0,    65535, NULL, 0 },
 	{ "awb_ct_weight","MI_ISP_AWB_GetCTWeight",    "MI_ISP_AWB_SetCTWeight",
-	  NULL, NULL, VT_U16, 0,    65535 },
+	  NULL, NULL, VT_U16, 0,    65535, NULL, 0 },
 };
 #define NUM_PARAMS (sizeof(g_params) / sizeof(g_params[0]))
 
@@ -340,6 +361,43 @@ static void write_value(uint8_t *buf, uint32_t offset, IqValueType vt,
 	}
 }
 
+static int emit_fields_json(char *buf, size_t buf_size,
+	const IqParamDesc *p, const uint8_t *iq_buf)
+{
+	int pos = 0;
+	uint32_t elem_size;
+
+	pos += snprintf(buf + pos, buf_size - (size_t)pos, "\"fields\":{");
+	for (uint16_t f = 0; f < p->field_count; f++) {
+		const IqFieldDesc *fd = &p->fields[f];
+		uint32_t abs = p->manual_offset + fd->rel_offset;
+
+		if (f > 0)
+			buf[pos++] = ',';
+		if (fd->count == 1) {
+			uint32_t val = read_value(iq_buf, abs, fd->vtype);
+			pos += snprintf(buf + pos, buf_size - (size_t)pos,
+				"\"%s\":%u", fd->name, val);
+		} else {
+			pos += snprintf(buf + pos, buf_size - (size_t)pos,
+				"\"%s\":[", fd->name);
+			elem_size = (fd->vtype == VT_U8) ? 1 :
+				(fd->vtype == VT_U16) ? 2 : 4;
+			for (uint16_t e = 0; e < fd->count; e++) {
+				uint32_t val = read_value(iq_buf,
+					abs + e * elem_size, fd->vtype);
+				if (e > 0) buf[pos++] = ',';
+				pos += snprintf(buf + pos,
+					buf_size - (size_t)pos, "%u", val);
+			}
+			buf[pos++] = ']';
+		}
+	}
+	buf[pos++] = '}';
+	buf[pos] = '\0';
+	return pos;
+}
+
 char *star6e_iq_query(void)
 {
 	if (!g_isp_handle)
@@ -368,21 +426,24 @@ char *star6e_iq_query(void)
 
 		if (p->vtype == VT_BOOL) {
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
-				"\"%s\":{\"ret\":%d,\"value\":%s}%s",
+				"\"%s\":{\"ret\":%d,\"value\":%s}",
 				p->name, ret,
-				enable ? "true" : "false",
-				(i + 1 < NUM_PARAMS) ? "," : "");
+				enable ? "true" : "false");
 		} else if (p->manual_offset == 4) {
 			/* Manual-only struct: no enOpType */
 			uint32_t val = read_value(iq_buf, p->manual_offset,
 				p->vtype);
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 				"\"%s\":{\"ret\":%d,\"enabled\":%s,"
-				"\"value\":%u}%s",
+				"\"value\":%u",
 				p->name, ret,
-				enable ? "true" : "false",
-				val,
-				(i + 1 < NUM_PARAMS) ? "," : "");
+				enable ? "true" : "false", val);
+			if (p->fields) {
+				buf[pos++] = ',';
+				pos += emit_fields_json(buf + pos,
+					sizeof(buf) - (size_t)pos, p, iq_buf);
+			}
+			buf[pos++] = '}';
 		} else {
 			/* Standard auto/manual struct */
 			uint32_t optype = read_value(iq_buf,
@@ -391,13 +452,19 @@ char *star6e_iq_query(void)
 				p->vtype);
 			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
 				"\"%s\":{\"ret\":%d,\"enabled\":%s,"
-				"\"op_type\":\"%s\",\"value\":%u}%s",
+				"\"op_type\":\"%s\",\"value\":%u",
 				p->name, ret,
 				enable ? "true" : "false",
-				optype == 1 ? "manual" : "auto",
-				val,
-				(i + 1 < NUM_PARAMS) ? "," : "");
+				optype == 1 ? "manual" : "auto", val);
+			if (p->fields) {
+				buf[pos++] = ',';
+				pos += emit_fields_json(buf + pos,
+					sizeof(buf) - (size_t)pos, p, iq_buf);
+			}
+			buf[pos++] = '}';
 		}
+		if (i + 1 < NUM_PARAMS)
+			buf[pos++] = ',';
 	}
 
 	/* ── Read-only ISP diagnostics ─────────────────────────────── */
@@ -454,21 +521,36 @@ int star6e_iq_set(const char *param, const char *value)
 	if (!g_isp_handle || !param || !value)
 		return -1;
 
+	/* Check for dot-notation: "colortrans.y_ofst" */
+	const char *dot = strchr(param, '.');
+	char param_name[64];
+	const char *field_name = NULL;
+
+	if (dot) {
+		size_t plen = (size_t)(dot - param);
+		if (plen >= sizeof(param_name)) plen = sizeof(param_name) - 1;
+		memcpy(param_name, param, plen);
+		param_name[plen] = '\0';
+		field_name = dot + 1;
+	} else {
+		snprintf(param_name, sizeof(param_name), "%s", param);
+	}
+
 	IqParamDesc *target = NULL;
 	for (size_t i = 0; i < NUM_PARAMS; i++) {
-		if (strcmp(g_params[i].name, param) == 0) {
+		if (strcmp(g_params[i].name, param_name) == 0) {
 			target = &g_params[i];
 			break;
 		}
 	}
 
 	if (!target) {
-		fprintf(stderr, "[iq] unknown parameter: %s\n", param);
+		fprintf(stderr, "[iq] unknown parameter: %s\n", param_name);
 		return -1;
 	}
 
 	if (!target->fn_get || !target->fn_set) {
-		fprintf(stderr, "[iq] %s: symbols not resolved\n", param);
+		fprintf(stderr, "[iq] %s: symbols not resolved\n", param_name);
 		return -1;
 	}
 
@@ -479,30 +561,69 @@ int star6e_iq_set(const char *param, const char *value)
 	MI_S32 ret = target->fn_get(0, iq_buf);
 	if (ret != 0) {
 		fprintf(stderr, "[iq] %s: Get failed: 0x%08x\n",
-			param, (unsigned)ret);
+			param_name, (unsigned)ret);
 		return -1;
 	}
 
-	uint32_t level = (uint32_t)atoi(value);
-	if (level > target->max_val)
-		level = target->max_val;
+	/* Field-level set via dot-notation */
+	if (field_name && target->fields) {
+		const IqFieldDesc *fd = NULL;
+		for (uint16_t f = 0; f < target->field_count; f++) {
+			if (strcmp(target->fields[f].name, field_name) == 0) {
+				fd = &target->fields[f];
+				break;
+			}
+		}
+		if (!fd) {
+			fprintf(stderr, "[iq] %s: unknown field: %s\n",
+				param_name, field_name);
+			return -1;
+		}
 
-	if (target->vtype == VT_BOOL) {
-		/* Bool-only: just set bEnable */
-		write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32,
-			level ? 1 : 0);
-	} else if (target->manual_offset == 4) {
-		/* Manual-only: set bEnable=1, write value (no enOpType) */
+		uint32_t abs_offset = target->manual_offset + fd->rel_offset;
+
+		/* Enable + set manual mode */
 		write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32, 1);
-		write_value(iq_buf, target->manual_offset, target->vtype,
-			level);
+		if (target->manual_offset > 4)
+			write_value(iq_buf, IQ_OFFSET_OPTYPE, VT_U32, 1);
+
+		if (fd->count == 1) {
+			uint32_t level = (uint32_t)atoi(value);
+			if (level > fd->max_val) level = fd->max_val;
+			write_value(iq_buf, abs_offset, fd->vtype, level);
+		} else {
+			/* Comma-separated array */
+			uint32_t elem_size = (fd->vtype == VT_U8) ? 1 :
+				(fd->vtype == VT_U16) ? 2 : 4;
+			const char *p = value;
+			for (uint16_t e = 0; e < fd->count && *p; e++) {
+				uint32_t v = (uint32_t)atoi(p);
+				if (v > fd->max_val) v = fd->max_val;
+				write_value(iq_buf, abs_offset + e * elem_size,
+					fd->vtype, v);
+				while (*p && *p != ',') p++;
+				if (*p == ',') p++;
+			}
+		}
 	} else {
-		/* Standard auto/manual: set bEnable=1, enOpType=1 (manual),
-		 * write value at the SDK-defined manual offset */
-		write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32, 1);
-		write_value(iq_buf, IQ_OFFSET_OPTYPE, VT_U32, 1);
-		write_value(iq_buf, target->manual_offset, target->vtype,
-			level);
+		/* Legacy single-value set */
+		uint32_t level = (uint32_t)atoi(value);
+		if (level > target->max_val)
+			level = target->max_val;
+
+		if (target->vtype == VT_BOOL) {
+			write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32,
+				level ? 1 : 0);
+		} else if (target->manual_offset == 4) {
+			write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32, 1);
+			write_value(iq_buf, target->manual_offset,
+				target->vtype, level);
+		} else {
+			write_value(iq_buf, IQ_OFFSET_ENABLE, VT_U32, 1);
+			write_value(iq_buf, IQ_OFFSET_OPTYPE, VT_U32, 1);
+			write_value(iq_buf, target->manual_offset,
+				target->vtype, level);
+		}
 	}
 
 	ret = target->fn_set(0, iq_buf);

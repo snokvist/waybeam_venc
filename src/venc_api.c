@@ -721,29 +721,34 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"IQ set not available");
 	}
-	char key[64], val[64];
+	char key[64], val[256];
 	if (parse_first_query_param(req->query, key, sizeof(key),
 			val, sizeof(val)) != 0 || !*key || !*val) {
 		return httpd_send_error(fd, 400, "invalid_request",
 			"usage: /api/v1/iq/set?param=value");
 	}
-	/* Validate value is numeric to prevent JSON injection */
+	/* Validate value is numeric (with commas for arrays) */
 	{
 		const char *p = val;
-		while (*p == '-' || (*p >= '0' && *p <= '9')) p++;
+		while (*p == '-' || *p == ',' || (*p >= '0' && *p <= '9')) p++;
 		if (*p != '\0') {
 			return httpd_send_error(fd, 400, "invalid_request",
-				"value must be numeric");
+				"value must be numeric (comma-separated for arrays)");
 		}
 	}
 	if (g_cb->apply_iq_param(key, val) != 0) {
 		return httpd_send_error(fd, 400, "apply_failed",
 			"IQ parameter set failed");
 	}
-	char buf[256];
-	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"param\":\"%s\",\"value\":%s}}",
-		key, val);
+	char buf[512];
+	if (strchr(val, ','))
+		snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{\"param\":\"%s\",\"value\":[%s]}}",
+			key, val);
+	else
+		snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{\"param\":\"%s\",\"value\":%s}}",
+			key, val);
 	return httpd_send_json(fd, 200, buf);
 }
 
