@@ -12,7 +12,9 @@ via HTTP API.
 - H.265 (HEVC) and H.264 encoding with CBR/VBR/AVBR/FIXQP rate control
 - RTP packetization with adaptive payload sizing
 - Compact UDP streaming mode (raw NAL units)
+- Built-in web dashboard at `/` for configuration, API docs, and IQ tuning
 - HTTP API for live parameter tuning without pipeline restart
+- ISP IQ parameter system: 62 params with multi-field structs, export/import
 - Custom 3A: built-in AE and AWB with configurable gain limits and convergence
 - ISP control: exposure, AWB mode, color temperature
 - ROI-based QP gradient for FPV center-priority encoding
@@ -682,6 +684,85 @@ Run the API test suite against a live device:
 ```sh
 ./scripts/api_test_suite.sh 192.168.2.13 8888
 ```
+
+## Web Dashboard
+
+venc includes a built-in web dashboard served at the root URL (`/`). Open
+`http://<device-ip>/` in any browser to access it.
+
+### Settings Tab
+
+All 75 configuration fields across 11 sections (System, Sensor, ISP, Image,
+Video, Outgoing, Audio, FPV, IMU, EIS, Recording) with:
+
+- **Collapsible sections** — start collapsed for a clean overview
+- **Live/Restart badges** — green for immediate changes, orange for restart-required
+- **Tooltips** — hover any field label for a description
+- **Change tracking** — modified fields highlighted; Apply only sends changes
+- **Apply Changes** — applies all modified fields via the API
+- **Save & Restart** — applies changes then triggers pipeline reinit
+- **Restore Defaults** — reloads on-disk config and resets the form
+
+### API Reference Tab
+
+Documentation for all HTTP endpoints with descriptions and example responses,
+grouped by category: Configuration, Encoder Control, ISP & Image Quality,
+Recording, and Dual-Stream.
+
+### Image Quality Tab
+
+Direct access to 62 SigmaStar ISP parameters organized by category.
+
+**Parameter Categories** — expandable sections with clickable parameter chips.
+Multi-field parameters (colortrans, obc, demosaic, false_color, crosstalk,
+r2y, wdr_curve_adv) show sub-field chips for individual field access.
+
+**Expanded Editor** — click a multi-field parameter to open an inline form
+with all sub-fields pre-filled from live ISP values. Array fields (e.g.,
+colortrans 3x3 matrix) render as editable grids. Changed fields highlight
+and Apply All writes only the modified fields.
+
+**Export / Import** — save all IQ parameters as a timestamped JSON file,
+or import a previously saved file to restore tuning. Partial imports are
+supported — only the parameters present in the JSON are applied, leaving
+others untouched.
+
+```sh
+# Export current IQ state
+curl http://<device>/api/v1/iq > my_tuning.json
+
+# Import (full or partial)
+curl -X POST -H "Content-Type: application/json" \
+  -d @my_tuning.json http://<device>/api/v1/iq/import
+
+# Partial import example — only set specific params
+echo '{"lightness":{"value":75},"demosaic":{"fields":{"dir_thrd":30}}}' | \
+  curl -X POST -H "Content-Type: application/json" -d @- http://<device>/api/v1/iq/import
+```
+
+### IQ Dot-Notation API
+
+Multi-field parameters support dot-notation for individual field access:
+
+```sh
+# Set a single field
+curl "http://<device>/api/v1/iq/set?colortrans.y_ofst=200"
+
+# Set an array field (comma-separated)
+curl "http://<device>/api/v1/iq/set?colortrans.matrix=23,45,9,1005,987,56,56,977,1015"
+
+# Query shows all fields
+curl http://<device>/api/v1/iq
+# Returns: "colortrans":{"enabled":true,"value":200,"fields":{"y_ofst":200,"u_ofst":0,"v_ofst":0,"matrix":[23,45,...]}}
+```
+
+Legacy single-value set (`?colortrans=200`) still works for backward compatibility.
+
+### Status Bar
+
+The top telemetry bar shows version, backend type, live FPS (auto-refreshes
+every 2s), recording status indicator, and an Export Config button to
+download the full configuration as JSON.
 
 ## GyroGlide-Lite: Gyro-Based Image Stabilization
 

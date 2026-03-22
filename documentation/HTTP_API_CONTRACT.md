@@ -15,7 +15,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.5.0`
+- `contract_version`: `0.6.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -469,8 +469,20 @@ Each parameter reports:
 - `ret`: MI_ISP return code (0 = success)
 - `enabled`: bEnable flag
 - `op_type`: `"auto"` or `"manual"` (omitted for bool-only and manual-only params)
-- `value`: current primary value (manual level for auto/manual params, enable for bools)
+- `value`: current primary value (backward-compat scalar)
+- `fields`: (multi-field params only) object with all named sub-fields and arrays
 - `available`: `false` if the dlsym symbol was not found
+
+Multi-field example (colortrans):
+```json
+"colortrans": {
+  "ret": 0, "enabled": true, "value": 200,
+  "fields": {
+    "y_ofst": 200, "u_ofst": 0, "v_ofst": 0,
+    "matrix": [23, 45, 9, 1005, 987, 56, 56, 977, 1015]
+  }
+}
+```
 
 Error `501` if backend doesn't support IQ (Maruko):
 ```json
@@ -482,18 +494,55 @@ Error `501` if backend doesn't support IQ (Maruko):
 Set a single IQ parameter. The parameter is switched to manual mode (for
 auto/manual params) and the value is written to the primary manual field.
 
+Supports dot-notation for multi-field params and comma-separated arrays:
+
 ```bash
+# Simple scalar
 curl "http://192.168.2.10/api/v1/iq/set?contrast=70"
-curl "http://192.168.2.10/api/v1/iq/set?saturation=80"
+
+# Dot-notation for sub-field
+curl "http://192.168.2.10/api/v1/iq/set?colortrans.y_ofst=200"
+
+# Array value (comma-separated)
+curl "http://192.168.2.10/api/v1/iq/set?colortrans.matrix=23,45,9,1005,987,56,56,977,1015"
+
+# Bool toggle
 curl "http://192.168.2.10/api/v1/iq/set?color_to_gray=1"
 ```
 
 Response `200`:
 ```json
-{"ok":true,"data":{"param":"contrast","value":70}}
+{"ok":true,"data":{"param":"colortrans.y_ofst","value":200}}
+{"ok":true,"data":{"param":"colortrans.matrix","value":[23,45,9,1005,987,56,56,977,1015]}}
 ```
 
-**Available parameters (46 total, Star6E):**
+### `POST /api/v1/iq/import`
+
+Import IQ parameters from a JSON body (output of `GET /api/v1/iq`).
+Partial imports are supported — only parameters present in the JSON are applied.
+
+```bash
+# Full import from exported file
+curl -X POST -H "Content-Type: application/json" \
+  -d @my_tuning.json http://192.168.2.10/api/v1/iq/import
+
+# Partial import — only specific params
+echo '{"lightness":{"value":75},"demosaic":{"fields":{"dir_thrd":30}}}' | \
+  curl -X POST -H "Content-Type: application/json" -d @- http://192.168.2.10/api/v1/iq/import
+```
+
+Response `200`:
+```json
+{"ok":true,"data":{"imported":true}}
+```
+
+### `GET /` (Web Dashboard)
+
+Serves a self-contained HTML dashboard (gzip-compressed, ~14KB). The dashboard
+provides Settings, API Reference, and Image Quality tabs. All modern browsers
+decompress the gzip response automatically.
+
+**Available parameters (62 total, Star6E):**
 
 | Parameter | Type | Range | Description |
 |-----------|------|-------|-------------|

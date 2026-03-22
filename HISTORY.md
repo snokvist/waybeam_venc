@@ -1,5 +1,35 @@
 # History
 
+## [0.4.0] - 2026-03-22
+
+- Add built-in web dashboard at `/` with Settings, API Reference, and
+  Image Quality tabs. Served as pre-compressed gzip (14KB on the wire).
+- Add multi-field IQ parameter descriptors: colortrans (3 offsets + 3x3
+  matrix), r2y, obc, demosaic, false_color, crosstalk, wdr_curve_adv now
+  expose all sub-fields via dot-notation set API and `"fields"` JSON object.
+- Add IQ export/import: `GET /api/v1/iq` exports all 62 ISP params as JSON,
+  `POST /api/v1/iq/import` restores them. Partial imports supported.
+- Add all missing config sections to the API: record (including dual channel
+  bitrate/fps/gopSize/server), EIS (12 params), IMU (7 params), full audio
+  (6 params), and ISP extras (legacyAe, aeFps). Total: 75 controllable fields.
+- Add FT_FLOAT field type for EIS float params with `%.6g` precision to
+  prevent artifacts like `0.001` displaying as `0.0010000000474974513`.
+- Add FT_UINT8 field type for `imu.i2c_addr` — fixes memory corruption where
+  `FT_UINT` wrote 4 bytes to a 1-byte field.
+- Consolidate frame-loss threshold into shared function with minimum 512 kbit/s
+  absolute margin for low-bitrate streams and 200 Mbps overflow clamp.
+- Add `g_iq_mutex` for thread-safe IQ query/set operations.
+- Add `g_dual_mutex` for thread-safe dual channel HTTP handlers.
+- Fix `#ifdef` to `#if HAVE_BACKEND_STAR6E` in dual_apply_bitrate (Maruko
+  link error from upstream PR #18).
+- Fix stream_packs memory leak in SIGHUP reinit path.
+- Fix diagnostic JSON trailing comma when dlsym lookups partially resolve.
+- Add snprintf overflow protection (`JSON_CLAMP` macro) in IQ query output.
+- Add EINTR handling in httpd read loops.
+- Move dual channel settings from raw JSON file parsing to VencConfigRecord
+  struct fields, simplifying star6e_runtime.c.
+- Increase HTTPD_MAX_ROUTES to 64, HTTPD_MAX_BODY to 8192.
+
 ## [0.3.4] - 2026-03-22
 
 - Refresh the Star6E frame-loss threshold on live bitrate changes so
