@@ -226,6 +226,11 @@ typedef struct {
 static const FieldAlias g_field_aliases[] = {
 	{ "system.webPort", "system.web_port" },
 	{ "system.overclockLevel", "system.overclock_level" },
+	{ "sensor.unlockEnabled", "sensor.unlock_enabled" },
+	{ "sensor.unlockCmd", "sensor.unlock_cmd" },
+	{ "sensor.unlockReg", "sensor.unlock_reg" },
+	{ "sensor.unlockValue", "sensor.unlock_value" },
+	{ "sensor.unlockDir", "sensor.unlock_dir" },
 	{ "isp.sensorBin", "isp.sensor_bin" },
 	{ "isp.gainMax", "isp.gain_max" },
 	{ "isp.awbMode", "isp.awb_mode" },

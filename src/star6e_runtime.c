@@ -1,6 +1,5 @@
 #include "star6e_runtime.h"
 
-#include "cJSON.h"
 #include "eis.h"
 #include "imu_bmi270.h"
 #include "sdk_quiet.h"
