@@ -1,5 +1,14 @@
 # History
 
+## [0.3.4] - 2026-03-22
+
+- Refresh the Star6E frame-loss threshold on live bitrate changes so
+  `/api/v1/set?video0.bitrate=...` keeps frame dropping aligned with the
+  updated main-channel bitrate.
+- Refresh the Star6E dual-channel frame-loss threshold on
+  `/api/v1/dual/set?bitrate=...` so ch1 live bitrate changes keep the same
+  overflow protection policy as channel creation.
+
 ## [0.3.3] - 2026-03-18
 
 - Add Opus audio codec via `libopus.so` (loaded at runtime; graceful fallback
