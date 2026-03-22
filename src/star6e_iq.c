@@ -19,6 +19,7 @@
 #include "star6e_iq.h"
 
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,9 @@ typedef MI_S32 (*iq_fn_t)(uint32_t channel, void *param);
 #define IQ_OFFSET_ENABLE   0
 #define IQ_OFFSET_OPTYPE   4
 #define IQ_BUF_SIZE        32768  /* must fit largest struct: DUMMY ~26KB */
+
+/* Serializes query and set operations — the static iq_buf is shared. */
+static pthread_mutex_t g_iq_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef enum {
 	VT_BOOL,    /* just bEnable (color_to_gray, defog) */
@@ -77,10 +81,10 @@ static const IqFieldDesc r2y_fields[] = {
 
 /* OBC: auto/manual, manual@136 */
 static const IqFieldDesc obc_fields[] = {
-	{ "val_r",  VT_U16, 0, 1, 255 },
-	{ "val_gr", VT_U16, 2, 1, 255 },
-	{ "val_gb", VT_U16, 4, 1, 255 },
-	{ "val_b",  VT_U16, 6, 1, 255 },
+	{ "val_r",  VT_U16, 0, 1, 65535 },
+	{ "val_gr", VT_U16, 2, 1, 65535 },
+	{ "val_gb", VT_U16, 4, 1, 65535 },
+	{ "val_b",  VT_U16, 6, 1, 65535 },
 };
 
 /* DEMOSAIC: manual-only@4 */
@@ -361,6 +365,10 @@ static void write_value(uint8_t *buf, uint32_t offset, IqValueType vt,
 	}
 }
 
+/* Bounds-checked single-char append for JSON building. */
+#define JSON_CHR(b, p, sz, c) do { \
+	if ((size_t)(p) < (sz) - 1) (b)[(p)++] = (c); } while (0)
+
 static int emit_fields_json(char *buf, size_t buf_size,
 	const IqParamDesc *p, const uint8_t *iq_buf)
 {
@@ -373,7 +381,7 @@ static int emit_fields_json(char *buf, size_t buf_size,
 		uint32_t abs = p->manual_offset + fd->rel_offset;
 
 		if (f > 0)
-			buf[pos++] = ',';
+			JSON_CHR(buf, pos, buf_size, ',');
 		if (fd->count == 1) {
 			uint32_t val = read_value(iq_buf, abs, fd->vtype);
 			pos += snprintf(buf + pos, buf_size - (size_t)pos,
@@ -386,22 +394,26 @@ static int emit_fields_json(char *buf, size_t buf_size,
 			for (uint16_t e = 0; e < fd->count; e++) {
 				uint32_t val = read_value(iq_buf,
 					abs + e * elem_size, fd->vtype);
-				if (e > 0) buf[pos++] = ',';
+				if (e > 0) JSON_CHR(buf, pos, buf_size, ',');
 				pos += snprintf(buf + pos,
 					buf_size - (size_t)pos, "%u", val);
 			}
-			buf[pos++] = ']';
+			JSON_CHR(buf, pos, buf_size, ']');
 		}
 	}
-	buf[pos++] = '}';
-	buf[pos] = '\0';
+	JSON_CHR(buf, pos, buf_size, '}');
+	buf[pos < (int)buf_size ? pos : (int)buf_size - 1] = '\0';
 	return pos;
 }
 
 char *star6e_iq_query(void)
 {
+	char *result;
+
 	if (!g_isp_handle)
 		return NULL;
+
+	pthread_mutex_lock(&g_iq_mutex);
 
 	char buf[16384];
 	int pos = 0;
@@ -439,11 +451,11 @@ char *star6e_iq_query(void)
 				p->name, ret,
 				enable ? "true" : "false", val);
 			if (p->fields) {
-				buf[pos++] = ',';
+				JSON_CHR(buf, pos, sizeof(buf), ',');
 				pos += emit_fields_json(buf + pos,
 					sizeof(buf) - (size_t)pos, p, iq_buf);
 			}
-			buf[pos++] = '}';
+			JSON_CHR(buf, pos, sizeof(buf), '}');
 		} else {
 			/* Standard auto/manual struct */
 			uint32_t optype = read_value(iq_buf,
@@ -457,14 +469,14 @@ char *star6e_iq_query(void)
 				enable ? "true" : "false",
 				optype == 1 ? "manual" : "auto", val);
 			if (p->fields) {
-				buf[pos++] = ',';
+				JSON_CHR(buf, pos, sizeof(buf), ',');
 				pos += emit_fields_json(buf + pos,
 					sizeof(buf) - (size_t)pos, p, iq_buf);
 			}
-			buf[pos++] = '}';
+			JSON_CHR(buf, pos, sizeof(buf), '}');
 		}
 		if (i + 1 < NUM_PARAMS)
-			buf[pos++] = ',';
+			JSON_CHR(buf, pos, sizeof(buf), ',');
 	}
 
 	/* ── Read-only ISP diagnostics ─────────────────────────────── */
@@ -513,13 +525,19 @@ char *star6e_iq_query(void)
 		}
 	}
 	pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "}}}");
-	return strdup(buf);
+	result = strdup(buf);
+	pthread_mutex_unlock(&g_iq_mutex);
+	return result;
 }
 
 int star6e_iq_set(const char *param, const char *value)
 {
+	int rc;
+
 	if (!g_isp_handle || !param || !value)
 		return -1;
+
+	pthread_mutex_lock(&g_iq_mutex);
 
 	/* Check for dot-notation: "colortrans.y_ofst" */
 	const char *dot = strchr(param, '.');
@@ -546,12 +564,14 @@ int star6e_iq_set(const char *param, const char *value)
 
 	if (!target) {
 		fprintf(stderr, "[iq] unknown parameter: %s\n", param_name);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 
 	if (!target->fn_get || !target->fn_set) {
 		fprintf(stderr, "[iq] %s: symbols not resolved\n", param_name);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 
 	static uint8_t iq_buf[IQ_BUF_SIZE];
@@ -562,7 +582,8 @@ int star6e_iq_set(const char *param, const char *value)
 	if (ret != 0) {
 		fprintf(stderr, "[iq] %s: Get failed: 0x%08x\n",
 			param_name, (unsigned)ret);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 
 	/* Field-level set via dot-notation */
@@ -577,7 +598,8 @@ int star6e_iq_set(const char *param, const char *value)
 		if (!fd) {
 			fprintf(stderr, "[iq] %s: unknown field: %s\n",
 				param_name, field_name);
-			return -1;
+			rc = -1;
+			goto out;
 		}
 
 		uint32_t abs_offset = target->manual_offset + fd->rel_offset;
@@ -630,9 +652,14 @@ int star6e_iq_set(const char *param, const char *value)
 	if (ret != 0) {
 		fprintf(stderr, "[iq] %s: Set failed: 0x%08x\n",
 			param, (unsigned)ret);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 
 	printf("[iq] %s = %s (set OK)\n", param, value);
-	return 0;
+	rc = 0;
+
+out:
+	pthread_mutex_unlock(&g_iq_mutex);
+	return rc;
 }
