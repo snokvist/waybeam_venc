@@ -300,7 +300,7 @@ static char *field_to_json_value(const FieldDesc *f)
 		snprintf(buf, sizeof(buf), "%g", *(const double *)ptr);
 		return strdup(buf);
 	case FT_FLOAT:
-		snprintf(buf, sizeof(buf), "%g", (double)*(const float *)ptr);
+		snprintf(buf, sizeof(buf), "%.6g", (double)*(const float *)ptr);
 		return strdup(buf);
 	case FT_STRING: {
 		cJSON *s = cJSON_CreateString((const char *)ptr);

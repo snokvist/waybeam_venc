@@ -8,6 +8,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Round a float to 6 significant digits before cJSON serialization.
+ * Prevents artifacts like 0.001f -> 0.0010000000474974513 in JSON. */
+static double float_clean(float v)
+{
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%.6g", (double)v);
+	return strtod(buf, NULL);
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 static void safe_strcpy(char *dst, size_t dst_size, const char *src)
@@ -625,11 +634,11 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(eis, "swapXY", cfg->eis.swap_xy);
 		cJSON_AddBoolToObject(eis, "invertX", cfg->eis.invert_x);
 		cJSON_AddBoolToObject(eis, "invertY", cfg->eis.invert_y);
-		cJSON_AddNumberToObject(eis, "gain", cfg->eis.gain);
-		cJSON_AddNumberToObject(eis, "deadbandRad", cfg->eis.deadband_rad);
-		cJSON_AddNumberToObject(eis, "recenterRate", cfg->eis.recenter_rate);
-		cJSON_AddNumberToObject(eis, "maxSlewPx", cfg->eis.max_slew_px);
-		cJSON_AddNumberToObject(eis, "biasAlpha", cfg->eis.bias_alpha);
+		cJSON_AddNumberToObject(eis, "gain", float_clean(cfg->eis.gain));
+		cJSON_AddNumberToObject(eis, "deadbandRad", float_clean(cfg->eis.deadband_rad));
+		cJSON_AddNumberToObject(eis, "recenterRate", float_clean(cfg->eis.recenter_rate));
+		cJSON_AddNumberToObject(eis, "maxSlewPx", float_clean(cfg->eis.max_slew_px));
+		cJSON_AddNumberToObject(eis, "biasAlpha", float_clean(cfg->eis.bias_alpha));
 	}
 
 	/* record */
