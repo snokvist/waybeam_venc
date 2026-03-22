@@ -952,7 +952,18 @@ static int dual_apply_bitrate(uint32_t kbps)
 
 	if (MI_VENC_SetChnAttr(g_dual.channel, &attr) != 0)
 		return -1;
-	MI_VENC_RequestIdr(g_dual.channel, 1);
+#ifdef HAVE_BACKEND_STAR6E
+	{
+		MI_VENC_ParamFrameLost_t lost = {0};
+
+		lost.bFrmLostOpen = 1;
+		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
+		lost.u32FrmLostBpsThr = bits + bits / 5;
+		lost.u32EncFrmGaps = 0;
+		if (MI_VENC_SetFrameLostStrategy(g_dual.channel, &lost) != 0)
+			return -1;
+	}
+#endif
 	g_dual.bitrate = kbps;
 	return 0;
 }
