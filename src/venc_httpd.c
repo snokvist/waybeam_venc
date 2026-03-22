@@ -122,6 +122,12 @@ int httpd_send_text(int client_fd, int status_code, const char *text_str)
 		"text/plain; charset=utf-8", text_str, (int)strlen(text_str));
 }
 
+int httpd_send_html(int client_fd, int status_code, const char *html_str)
+{
+	return send_response(client_fd, status_code, status_text(status_code),
+		"text/html; charset=utf-8", html_str, (int)strlen(html_str));
+}
+
 int httpd_send_ok(int client_fd, const char *data_json)
 {
 	char buf[2048];
