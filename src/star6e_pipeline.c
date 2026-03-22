@@ -1225,6 +1225,7 @@ static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
 	if (state->dual) {
 		venc_api_dual_unregister();
 		MI_VENC_DestroyChn(state->dual->channel);
+		free(state->dual->stream_packs);
 		free(state->dual);
 		state->dual = NULL;
 	}

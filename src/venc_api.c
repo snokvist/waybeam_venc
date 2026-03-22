@@ -2,6 +2,7 @@
 #include "pipeline_common.h"
 #include "star6e_recorder.h"
 #include "venc_httpd.h"
+#include "venc_webui.h"
 #include "cJSON.h"
 
 #include <pthread.h>
@@ -984,7 +985,7 @@ static int dual_apply_bitrate(uint32_t kbps)
 
 	if (MI_VENC_SetChnAttr(g_dual.channel, &attr) != 0)
 		return -1;
-#ifdef HAVE_BACKEND_STAR6E
+#if HAVE_BACKEND_STAR6E
 	if (star6e_controls_apply_frame_lost_threshold(g_dual.channel,
 	    g_dual.frame_lost, kbps) != 0)
 		return -1;
@@ -1148,6 +1149,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/status", handle_dual_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
+	r |= venc_webui_register();
 	if (r != 0) {
 		fprintf(stderr, "[api] ERROR: failed to register one or more routes\n");
 		return -1;
