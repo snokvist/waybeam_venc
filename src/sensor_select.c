@@ -2,6 +2,7 @@
 #include "sdk_quiet.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static SdkQuietState g_sensor_sdk_quiet = SDK_QUIET_STATE_INIT;
@@ -206,6 +207,57 @@ void sensor_list_modes(int forced_pad, int selected_pad, int selected_mode)
 			printf("\n");
 		}
 	}
+}
+
+char *sensor_modes_json(int forced_pad, int selected_pad, int selected_mode)
+{
+	size_t cap = 4096;
+	char *buf = malloc(cap);
+	if (!buf) return NULL;
+	int off = 0;
+
+	off += snprintf(buf + off, cap - off,
+		"{\"ok\":true,\"data\":{\"selected_pad\":%d,\"selected_mode\":%d,\"pads\":[",
+		selected_pad, selected_mode);
+
+	int pad_start = 0, pad_end = 3;
+	if (forced_pad >= 0 && forced_pad <= 3) { pad_start = forced_pad; pad_end = forced_pad; }
+
+	int first_pad = 1;
+	for (int p = pad_start; p <= pad_end; ++p) {
+		MI_U32 count = 0;
+		MI_S32 ret = MI_SNR_QueryResCount((MI_SNR_PAD_ID_e)p, &count);
+		if (ret != 0) continue;
+
+		if (!first_pad) off += snprintf(buf + off, cap - off, ",");
+		first_pad = 0;
+		off += snprintf(buf + off, cap - off, "{\"pad\":%d,\"modes\":[", p);
+
+		for (MI_U32 idx = 0; idx < count; ++idx) {
+			MI_SNR_Res_t res = {0};
+			ret = MI_SNR_GetRes((MI_SNR_PAD_ID_e)p, idx, &res);
+			if (ret != 0) continue;
+			if (idx > 0) off += snprintf(buf + off, cap - off, ",");
+			int selected = (p == selected_pad && (int)idx == selected_mode);
+			off += snprintf(buf + off, cap - off,
+				"{\"index\":%u,\"width\":%u,\"height\":%u,"
+				"\"min_fps\":%u,\"max_fps\":%u,"
+				"\"desc\":\"%s\",\"selected\":%s}",
+				idx, res.crop.width, res.crop.height,
+				res.minFps, res.maxFps,
+				res.desc, selected ? "true" : "false");
+			if ((size_t)off >= cap - 256) {
+				cap *= 2;
+				char *nb = realloc(buf, cap);
+				if (!nb) { free(buf); return NULL; }
+				buf = nb;
+			}
+		}
+		off += snprintf(buf + off, cap - off, "]}");
+	}
+
+	off += snprintf(buf + off, cap - off, "]}}");
+	return buf;
 }
 
 /* ── Core selection ──────────────────────────────────────────────────── */
