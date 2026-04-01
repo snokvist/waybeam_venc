@@ -164,7 +164,7 @@ static int rgn_load(DebugOsdState *ctx)
 }
 
 /* ── 8x8 bitmap font (CP437 printable ASCII, public domain) ────────
- * Each glyph: 8 rows, LSB-first (bit 0 = leftmost pixel). */
+ * Each glyph: 8 rows, 5px wide, bit 4 = leftmost pixel. */
 static const uint8_t g_font8x8[128][8] = {
 	[0x20] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* space */
 	[0x21] = {0x04,0x04,0x04,0x04,0x04,0x00,0x04,0x00}, /* ! */
@@ -267,6 +267,12 @@ static const uint8_t g_font8x8[128][8] = {
 
 static inline void dirty_expand(DebugOsdState *osd, int x, int y)
 {
+	/* Clamp to canvas bounds before storing — negative values would
+	 * wrap to huge uint16_t and corrupt the dirty rect. */
+	if (x < 0) x = 0;
+	if (y < 0) y = 0;
+	if (x >= (int)osd->width) x = (int)osd->width - 1;
+	if (y >= (int)osd->height) y = (int)osd->height - 1;
 	if ((uint16_t)x < osd->dirty.x0) osd->dirty.x0 = (uint16_t)x;
 	if ((uint16_t)y < osd->dirty.y0) osd->dirty.y0 = (uint16_t)y;
 	if ((uint16_t)x > osd->dirty.x1) osd->dirty.x1 = (uint16_t)x;
@@ -280,7 +286,8 @@ static inline void put_pixel(DebugOsdState *osd, int x, int y, uint16_t color)
 	uint16_t *pixels = (uint16_t *)(uintptr_t)osd->canvas.virtAddr;
 	uint32_t stride_px = osd->canvas.u32Stride / 2;
 	pixels[y * stride_px + x] = color;
-	dirty_expand(osd, x, y);
+	/* dirty_expand not needed here — callers that use put_pixel in bulk
+	 * (draw_char, point, line) expand dirty at a higher level. */
 }
 
 static void draw_char(DebugOsdState *osd, int px, int py,
@@ -289,15 +296,30 @@ static void draw_char(DebugOsdState *osd, int px, int py,
 	if (ch < 0x20 || ch > 0x7e) ch = '?';
 	const uint8_t *glyph = g_font8x8[(unsigned char)ch];
 	int s = osd->font_scale;
+	uint16_t *pixels = (uint16_t *)(uintptr_t)osd->canvas.virtAddr;
+	uint32_t stride_px = osd->canvas.u32Stride / 2;
+
+	/* Expand dirty rect once for the whole character */
+	dirty_expand(osd, px, py);
+	dirty_expand(osd, px + 5 * s - 1, py + 8 * s - 1);
 
 	for (int gy = 0; gy < 8; gy++) {
 		uint8_t bits = glyph[gy];
-		for (int gx = 0; gx < 8; gx++) {
-			if (bits & (0x10 >> gx)) {
-				for (int sy = 0; sy < s; sy++)
+		for (int gx = 0; gx < 5; gx++) {
+			if (!(bits & (0x10 >> gx)))
+				continue;
+			int cx = px + gx * s;
+			int cy = py + gy * s;
+			/* Write scaled block — use fill_row for each row of the block */
+			for (int sy = 0; sy < s; sy++) {
+				int row_y = cy + sy;
+				if (row_y < 0 || row_y >= (int)osd->height)
+					continue;
+				if (cx >= 0 && cx + s <= (int)osd->width)
+					fill_row(pixels + row_y * stride_px + cx, s, color);
+				else
 					for (int sx = 0; sx < s; sx++)
-						put_pixel(osd, px + gx * s + sx,
-						          py + gy * s + sy, color);
+						put_pixel(osd, cx + sx, row_y, color);
 			}
 		}
 	}
@@ -466,9 +488,11 @@ void debug_osd_begin_frame(DebugOsdState *osd)
 {
 	if (!osd) return;
 
-	/* Re-acquire canvas info (may change after UpdateCanvas) */
-	if (osd->fnGetCanvasInfo(RGN_HANDLE, &osd->canvas) != 0)
-		return;
+	/* Canvas info is cached from create; re-acquire only if virtAddr lost */
+	if (!osd->canvas.virtAddr) {
+		if (osd->fnGetCanvasInfo(RGN_HANDLE, &osd->canvas) != 0)
+			return;
+	}
 
 	/* Clear only the previous frame's dirty region */
 	if (osd->dirty.x1 >= osd->dirty.x0 && osd->dirty.y1 >= osd->dirty.y0) {
@@ -517,10 +541,15 @@ void debug_osd_text(DebugOsdState *osd, int row, const char *label,
 	char line[LINE_MAX];
 	int len = snprintf(line, sizeof(line), "%s: %s", label, value);
 	if (len < 0) return;
+	if (len >= (int)sizeof(line)) len = (int)sizeof(line) - 1;
 
 	/* Semi-transparent background behind text */
 	uint16_t bg_w = (uint16_t)(len * char_w + 4 * s);
-	debug_osd_rect(osd, PANEL_X - 2, y - s, bg_w,
+	int bg_x = PANEL_X - 2;
+	int bg_y = (int)y - s;
+	if (bg_x < 0) bg_x = 0;
+	if (bg_y < 0) bg_y = 0;
+	debug_osd_rect(osd, (uint16_t)bg_x, (uint16_t)bg_y, bg_w,
 		(uint16_t)(char_h + 2 * s), DEBUG_OSD_SEMITRANS_BLACK, 1);
 
 	draw_string(osd, PANEL_X, y, line, DEBUG_OSD_WHITE);
@@ -537,29 +566,42 @@ int debug_osd_get_cpu(DebugOsdState *osd)
 	return osd ? osd->cpu_pct : 0;
 }
 
-/* ── NEON row fill (8 pixels / 128 bits per store) ─────────────────── */
+/* ── Row fill ──────────────────────────────────────────────────────── */
 
 static void fill_row(uint16_t *row, int count, uint16_t color)
 {
+#ifdef __ARM_NEON
+	/* NEON: 8 pixels (128 bits) per store */
 	uint16x8_t v = vdupq_n_u16(color);
 	int i = 0;
 
-	/* Align to 16-byte boundary */
 	while (i < count && ((uintptr_t)(row + i) & 15)) {
 		row[i] = color;
 		i++;
 	}
-	/* Bulk NEON stores */
 	int chunks = (count - i) / 8;
 	uint16_t *p = row + i;
 	for (int j = 0; j < chunks; j++)
 		vst1q_u16(p + j * 8, v);
 	i += chunks * 8;
-	/* Tail */
 	while (i < count) {
 		row[i] = color;
 		i++;
 	}
+#else
+	/* Fallback: 32-bit word fill (2 pixels per store) */
+	uint32_t pair = ((uint32_t)color << 16) | color;
+	int i = 0;
+	if (((uintptr_t)row & 2) && count > 0)
+		row[i++] = color;
+	uint32_t *p32 = (uint32_t *)(row + i);
+	int pairs = (count - i) / 2;
+	for (int j = 0; j < pairs; j++)
+		p32[j] = pair;
+	i += pairs * 2;
+	if (i < count)
+		row[i] = color;
+#endif
 }
 
 /* ── Rectangles ────────────────────────────────────────────────────── */
@@ -603,6 +645,8 @@ void debug_osd_point(DebugOsdState *osd, uint16_t x, uint16_t y,
                      uint16_t color, int size)
 {
 	if (!osd) return;
+	dirty_expand(osd, (int)x - size, (int)y - size);
+	dirty_expand(osd, (int)x + size, (int)y + size);
 	for (int d = -size; d <= size; d++) {
 		put_pixel(osd, (int)x + d, (int)y, color);
 		put_pixel(osd, (int)x, (int)y + d, color);
@@ -613,6 +657,8 @@ void debug_osd_line(DebugOsdState *osd, uint16_t x0, uint16_t y0,
                     uint16_t x1, uint16_t y1, uint16_t color)
 {
 	if (!osd) return;
+	dirty_expand(osd, x0, y0);
+	dirty_expand(osd, x1, y1);
 
 	int dx = abs((int)x1 - (int)x0);
 	int dy = -abs((int)y1 - (int)y0);
