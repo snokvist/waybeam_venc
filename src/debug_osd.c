@@ -488,11 +488,10 @@ void debug_osd_begin_frame(DebugOsdState *osd)
 {
 	if (!osd) return;
 
-	/* Canvas info is cached from create; re-acquire only if virtAddr lost */
-	if (!osd->canvas.virtAddr) {
-		if (osd->fnGetCanvasInfo(RGN_HANDLE, &osd->canvas) != 0)
-			return;
-	}
+	/* Re-acquire canvas info every frame — SDK double-buffers the canvas,
+	 * so virtAddr can change after UpdateCanvas. */
+	if (osd->fnGetCanvasInfo(RGN_HANDLE, &osd->canvas) != 0)
+		return;
 
 	/* Clear only the previous frame's dirty region */
 	if (osd->dirty.x1 >= osd->dirty.x0 && osd->dirty.y1 >= osd->dirty.y0) {
