@@ -741,21 +741,28 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			EisStatus est;
 			eis_get_status(ps->eis, &est);
 
+			/* 1/3 scale miniature in bottom-right corner */
+			uint16_t iw = (uint16_t)(ps->image_width / 3);
+			uint16_t ih = (uint16_t)(ps->image_height / 3);
+			uint16_t ox = (uint16_t)(ps->image_width - iw - 8);
+			uint16_t oy = (uint16_t)(ps->image_height - ih - 8);
+
 			/* Outer: full sensor area */
-			debug_osd_rect(ps->debug_osd, 0, 0,
-				(uint16_t)ps->image_width,
-				(uint16_t)ps->image_height,
+			debug_osd_rect(ps->debug_osd, ox, oy, iw, ih,
 				DEBUG_OSD_WHITE, 0);
 			/* Middle: margin boundary */
 			debug_osd_rect(ps->debug_osd,
-				est.margin_x, est.margin_y,
-				(uint16_t)(ps->image_width - 2 * est.margin_x),
-				(uint16_t)(ps->image_height - 2 * est.margin_y),
+				(uint16_t)(ox + est.margin_x / 3),
+				(uint16_t)(oy + est.margin_y / 3),
+				(uint16_t)(iw - 2 * est.margin_x / 3),
+				(uint16_t)(ih - 2 * est.margin_y / 3),
 				DEBUG_OSD_YELLOW, 0);
 			/* Inner: current crop window */
 			debug_osd_rect(ps->debug_osd,
-				est.crop_x, est.crop_y,
-				est.crop_w, est.crop_h,
+				(uint16_t)(ox + est.crop_x / 3),
+				(uint16_t)(oy + est.crop_y / 3),
+				(uint16_t)(est.crop_w / 3),
+				(uint16_t)(est.crop_h / 3),
 				DEBUG_OSD_SEMITRANS_GREEN, 1);
 
 			debug_osd_text(ps->debug_osd, 3, "crop", "%u,%u",

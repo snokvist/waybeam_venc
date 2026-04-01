@@ -12,6 +12,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
+
 /* ── MI_RGN types ──────────────────────────────────────────────────────
  * Defined locally because the SDK headers (sdk/ssc338q/include/i6_rgn.h)
  * are not on the include path.  Layouts match the SigmaStar vendor SDK. */
@@ -108,6 +112,8 @@ struct DebugOsdState {
 	DirtyRect dirty;           /* previous frame's drawn area */
 	int font_scale;            /* pixel scaling factor for text */
 
+	int benchmarked;           /* fill benchmark done */
+
 	/* CPU usage sampler (from /proc/stat) */
 	unsigned long long cpu_prev_total, cpu_prev_idle;
 	int cpu_pct;               /* last sampled CPU% */
@@ -122,6 +128,13 @@ struct DebugOsdState {
 	int (*fnGetCanvasInfo)(unsigned int, DebugOsdCanvasInfo *);
 	int (*fnUpdateCanvas)(unsigned int);
 };
+
+/* Forward declarations for fill strategies */
+typedef void (*fill_row_fn)(uint16_t *row, int count, uint16_t color);
+static void fill_row_word(uint16_t *row, int count, uint16_t color);
+static fill_row_fn g_fill_row = fill_row_word;
+static void benchmark_fill(uint16_t *buf, int width, int height,
+                           uint32_t stride_px);
 
 /* ── dlopen ────────────────────────────────────────────────────────── */
 
@@ -464,13 +477,21 @@ void debug_osd_begin_frame(DebugOsdState *osd)
 	if (osd->fnGetCanvasInfo(RGN_HANDLE, &osd->canvas) != 0)
 		return;
 
+	/* One-shot fill benchmark on first frame */
+	if (!osd->benchmarked) {
+		osd->benchmarked = 1;
+		uint16_t *pixels = (uint16_t *)(uintptr_t)osd->canvas.virtAddr;
+		uint32_t stride_px = osd->canvas.u32Stride / 2;
+		benchmark_fill(pixels, osd->width, osd->height, stride_px);
+	}
+
 	/* Clear only the previous frame's dirty region */
 	if (osd->dirty.x1 >= osd->dirty.x0 && osd->dirty.y1 >= osd->dirty.y0) {
 		uint16_t *pixels = (uint16_t *)(uintptr_t)osd->canvas.virtAddr;
 		uint32_t stride_px = osd->canvas.u32Stride / 2;
-		uint32_t clear_w = (osd->dirty.x1 - osd->dirty.x0 + 1) * 2;
+		int clear_w = osd->dirty.x1 - osd->dirty.x0 + 1;
 		for (uint32_t y = osd->dirty.y0; y <= osd->dirty.y1 && y < osd->height; y++)
-			memset(&pixels[y * stride_px + osd->dirty.x0], 0, clear_w);
+			g_fill_row(pixels + y * stride_px + osd->dirty.x0, clear_w, 0);
 	}
 
 	/* Reset dirty rect to empty (max/min sentinel) */
@@ -531,6 +552,143 @@ int debug_osd_get_cpu(DebugOsdState *osd)
 	return osd ? osd->cpu_pct : 0;
 }
 
+/* ── Row fill strategies ───────────────────────────────────────────── */
+
+/* Naive: one pixel at a time */
+static void fill_row_naive(uint16_t *row, int count, uint16_t color)
+{
+	for (int i = 0; i < count; i++)
+		row[i] = color;
+}
+
+/* Word fill: write 2 pixels (32 bits) at a time, handle edges */
+static void fill_row_word(uint16_t *row, int count, uint16_t color)
+{
+	uint32_t pair = ((uint32_t)color << 16) | color;
+	int i = 0;
+
+	/* Align to 4-byte boundary */
+	if (((uintptr_t)row & 2) && count > 0) {
+		row[0] = color;
+		i = 1;
+	}
+	/* Bulk 32-bit writes */
+	uint32_t *p32 = (uint32_t *)(row + i);
+	int pairs = (count - i) / 2;
+	for (int j = 0; j < pairs; j++)
+		p32[j] = pair;
+	i += pairs * 2;
+	/* Tail */
+	if (i < count)
+		row[i] = color;
+}
+
+#ifdef __ARM_NEON
+/* NEON fill: write 8 pixels (128 bits) at a time */
+static void fill_row_neon(uint16_t *row, int count, uint16_t color)
+{
+	uint16x8_t v = vdupq_n_u16(color);
+	int i = 0;
+
+	/* Align to 16-byte boundary */
+	while (i < count && ((uintptr_t)(row + i) & 15)) {
+		row[i] = color;
+		i++;
+	}
+	/* Bulk NEON stores */
+	int chunks = (count - i) / 8;
+	uint16_t *p = row + i;
+	for (int j = 0; j < chunks; j++)
+		vst1q_u16(p + j * 8, v);
+	i += chunks * 8;
+	/* Tail */
+	while (i < count) {
+		row[i] = color;
+		i++;
+	}
+}
+#endif
+
+/* ── Benchmark ─────────────────────────────────────────────────────── */
+
+static long long ts_us(const struct timespec *t)
+{
+	return (long long)t->tv_sec * 1000000LL + t->tv_nsec / 1000;
+}
+
+static void benchmark_fill(uint16_t *buf, int width, int height,
+                           uint32_t stride_px)
+{
+	/* Benchmark on a 256×64 region — quick, representative */
+	const int ITERS = 50;
+	const int bw = width < 256 ? width : 256;
+	const int bh = height < 64 ? height : 64;
+	struct timespec t0, t1;
+	long long us_naive, us_word;
+#ifdef __ARM_NEON
+	long long us_neon;
+#endif
+
+	/* Warm cache */
+	for (int y = 0; y < bh; y++)
+		fill_row_naive(buf + y * stride_px, bw, 0x1234);
+
+	/* Benchmark naive */
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int iter = 0; iter < ITERS; iter++)
+		for (int y = 0; y < bh; y++)
+			fill_row_naive(buf + y * stride_px, bw, 0x1234);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	us_naive = ts_us(&t1) - ts_us(&t0);
+
+	/* Benchmark word fill */
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int iter = 0; iter < ITERS; iter++)
+		for (int y = 0; y < bh; y++)
+			fill_row_word(buf + y * stride_px, bw, 0x1234);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	us_word = ts_us(&t1) - ts_us(&t0);
+
+#ifdef __ARM_NEON
+	/* Benchmark NEON fill */
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int iter = 0; iter < ITERS; iter++)
+		for (int y = 0; y < bh; y++)
+			fill_row_neon(buf + y * stride_px, bw, 0x1234);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	us_neon = ts_us(&t1) - ts_us(&t0);
+
+	fprintf(stderr, "[debug_osd] fill bench %dx%d x%d: naive=%lldus word=%lldus neon=%lldus\n",
+		bw, bh, ITERS, us_naive, us_word, us_neon);
+
+	/* Select fastest */
+	if (us_neon <= us_word && us_neon <= us_naive) {
+		g_fill_row = fill_row_neon;
+		fprintf(stderr, "[debug_osd] selected: NEON (%.1fx vs naive)\n",
+			(double)us_naive / us_neon);
+	} else
+#else
+	fprintf(stderr, "[debug_osd] fill bench %dx%d x%d: naive=%lldus word=%lldus\n",
+		bw, bh, ITERS, us_naive, us_word);
+#endif
+	if (us_word <= us_naive) {
+		g_fill_row = fill_row_word;
+		fprintf(stderr, "[debug_osd] selected: word (%.1fx vs naive)\n",
+			(double)us_naive / us_word);
+	} else {
+		g_fill_row = fill_row_naive;
+		fprintf(stderr, "[debug_osd] selected: naive\n");
+	}
+
+	/* Clear benchmark residue */
+	for (int y = 0; y < bh; y++)
+		memset(buf + y * stride_px, 0, bw * 2);
+
+	(void)width; (void)height;
+}
+
+/* ── Rectangles ────────────────────────────────────────────────────── */
+
 void debug_osd_rect(DebugOsdState *osd, uint16_t x, uint16_t y,
                     uint16_t w, uint16_t h, uint16_t color, int filled)
 {
@@ -551,16 +709,14 @@ void debug_osd_rect(DebugOsdState *osd, uint16_t x, uint16_t y,
 
 	uint16_t *pixels = (uint16_t *)(uintptr_t)osd->canvas.virtAddr;
 	uint32_t stride_px = osd->canvas.u32Stride / 2;
+	int span = x1 - x0 + 1;
 
 	if (filled) {
 		for (int row = y0; row <= y1; row++)
-			for (int col = x0; col <= x1; col++)
-				pixels[row * stride_px + col] = color;
+			g_fill_row(pixels + row * stride_px + x0, span, color);
 	} else {
-		for (int col = x0; col <= x1; col++) {
-			pixels[y0 * stride_px + col] = color;
-			pixels[y1 * stride_px + col] = color;
-		}
+		g_fill_row(pixels + y0 * stride_px + x0, span, color);
+		g_fill_row(pixels + y1 * stride_px + x0, span, color);
 		for (int row = y0; row <= y1; row++) {
 			pixels[row * stride_px + x0] = color;
 			pixels[row * stride_px + x1] = color;
