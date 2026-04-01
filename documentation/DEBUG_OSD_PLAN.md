@@ -63,7 +63,7 @@ Text elements carry:
 - `row` — vertical position (0 = top, increments downward)
 - `label` — short string key (e.g., "tx", "fps", "crop_x")
 - `value` — formatted string (caller formats via snprintf before submission)
-- `color` — palette index
+- `color` — ARGB4444 color value
 
 This supports both current needs (optical flow tx/ty/tz) and future needs
 (any module can push key=value pairs without OSD changes).
@@ -114,24 +114,65 @@ void eis_update_osd(DebugOsdState *osd, const EisStatus *s)
 
 ### RGN Backend Strategy (Star6E)
 
-**Key insight:** The SigmaStar MI_RGN API supports multiple independent
-overlay regions per VPE channel. Each region has its own handle, position,
-size, and type. This is far more efficient than a single full-screen I4
-bitmap that must be re-uploaded every frame.
+**Key insight from waybeam-hub's `mod_osd_render.c`:** The SigmaStar MI_RGN
+API provides `MI_RGN_GetCanvasInfo()` for direct memory-mapped canvas access.
+Instead of building bitmaps in CPU memory and uploading via `MI_RGN_SetBitMap`
+per frame, the backend maps the canvas once, writes pixels directly into the
+mapped buffer, and commits with `MI_RGN_UpdateCanvas()`. This is the proven
+pattern used in the production OSD.
 
-**Region allocation strategy:**
+**Rendering approach — single canvas region with direct writes:**
 
-| Element type | RGN strategy | Cost |
-|-------------|-------------|------|
-| Marker | Small OSD region (e.g. 8x8 I4 bitmap). Move via `SetDisplayAttr` point change — no pixel re-upload when only position changes. | Tiny bitmap upload only on color change |
-| Rect | Cover region (`I6_RGN_TYPE_COVER`). Hardware-rendered solid rectangle. Position and size set via channel config. | Zero CPU — pure hardware overlay |
-| Text | OSD region sized to text length (8×height per char). Bitmap rendered from font table on content change only. | Small bitmap upload only on text change |
-| Vector | OSD region sized to bounding box. Line rasterized into I4 bitmap. | Small bitmap upload per change |
+1. Create one OSD region sized to the video frame (or a smaller debug area)
+2. `MI_RGN_GetCanvasInfo()` → get `virtAddr`, `u32Stride`, `stSize`
+3. Each frame: clear only dirty areas, draw elements directly into mapped memory
+4. `MI_RGN_UpdateCanvas()` to commit — no per-frame copy or upload
 
-**Region handle budget:** Star6E supports up to ~16 simultaneous RGN handles
-(hardware limit varies by SoC). The backend tracks a pool of handles and
-reuses them across frames. If the pool is exhausted, lowest-priority elements
-are silently dropped.
+This replaces the earlier multi-region strategy. A single canvas with direct
+writes is simpler (one RGN handle, no pool management) and proven in production.
+
+**Per-element rendering into canvas:**
+
+| Element type | Canvas strategy | Cost |
+|-------------|----------------|------|
+| Marker | Write a small glyph (e.g. 8×8 crosshair) at (x,y) into canvas | 128 bytes written |
+| Rect | Rasterize outline or fill directly into canvas pixels | Stride × height bytes |
+| Text | Render 8×8 font glyphs into canvas at row offset | ~width × 16 bytes per char |
+| Vector | Bresenham line rasterized into canvas pixels | Proportional to length |
+
+**Dirty-rect optimization:** Track a bounding box of changed regions per frame.
+On `begin_frame`, clear only the previous frame's dirty rect (not the entire
+canvas). This minimizes memset cost — typical debug overlays touch < 5% of
+the canvas area.
+
+**Pixel format — ARGB4444:**
+
+16-bit per pixel with 4-bit alpha. This is the format used by waybeam-hub's
+`mod_osd_render.c` (`E_MI_RGN_PIXEL_FORMAT_ARGB4444`) and provides:
+
+- Full RGB color (4096 colors) — no palette limitations
+- Per-pixel alpha transparency — clean overlay compositing
+- 2 bytes/pixel — a 1920×1080 canvas = ~4 MB, but a reduced debug area
+  (e.g. 480×270 quarter-screen) = ~256 KB
+
+Color constants as ARGB4444 uint16:
+
+| Color | Value | Use |
+|-------|-------|-----|
+| Transparent | `0x0000` | Background / clear |
+| Red | `0xF00F` | Primary marker, errors |
+| Green | `0x0F0F` | Tracked points, success |
+| Blue | `0x00FF` | Secondary data |
+| Yellow | `0xFF0F` | Warnings, highlight |
+| Cyan | `0x0FFF` | Tertiary data |
+| White | `0xFFFF` | Text, outlines |
+| Semi-transparent black | `0x0008` | Text background shadow |
+
+**Canvas region sizing:** The debug OSD does not need a full-screen canvas.
+A quarter-resolution region (e.g. 480×270 at a corner) is sufficient for
+debug text and markers, using ~256 KB. Full-screen is available if vector/rect
+elements span the frame, at ~4 MB — still acceptable since it's memory-mapped
+(no upload bandwidth), and only drawn when debug OSD is enabled.
 
 **`dlopen` for graceful degradation:**
 
@@ -141,7 +182,8 @@ static int rgn_load_api(RgnBackend *ctx)
     ctx->lib = dlopen("libmi_rgn.so", RTLD_LAZY | RTLD_GLOBAL);
     if (!ctx->lib) return -1;
     /* resolve: MI_RGN_Init, MI_RGN_Create, MI_RGN_AttachToChn,
-       MI_RGN_SetDisplayAttr, MI_RGN_SetBitMap, MI_RGN_Destroy,
+       MI_RGN_GetCanvasInfo, MI_RGN_UpdateCanvas,
+       MI_RGN_SetDisplayAttr, MI_RGN_Destroy,
        MI_RGN_DetachFromChn, MI_RGN_DeInit */
     return 0;
 }
@@ -151,39 +193,26 @@ If `libmi_rgn.so` is not present on the target, `debug_osd_create()` returns
 NULL and every consumer's `if (!osd) return;` guard makes the entire OSD
 path a no-op. No linker hacks needed.
 
-**I4 pixel format & palette:**
+### Why Canvas API, Not SetBitMap or Multi-Region
 
-4-bit indexed color (16 entries). Sufficient for debug overlay:
+**vs. `MI_RGN_SetBitMap` (per-frame upload):**
+The bitmap approach requires allocating a CPU-side buffer, rendering into it,
+then copying the entire bitmap to the RGN subsystem every frame. The canvas
+API provides a memory-mapped pointer — writes go directly to the backing
+store with zero copy overhead. `MI_RGN_UpdateCanvas()` just commits (flips),
+no data transfer.
 
-| Index | Color | Use |
-|-------|-------|-----|
-| 0 | Transparent | Background |
-| 1 | Red (255,0,0) | Primary marker, errors |
-| 2 | Green (0,255,0) | Tracked points, success |
-| 3 | Blue (0,0,255) | Secondary data |
-| 4 | Yellow (255,255,0) | Warnings, highlight |
-| 5 | Cyan (0,255,255) | Tertiary data |
-| 6 | Magenta (255,0,255) | Reserved |
-| 7 | White (255,255,255) | Text, outlines |
-| 8-14 | Reserved | Future use |
-| 15 | Transparent alt | Alias for clear |
+**vs. multi-region (one RGN handle per element):**
+The multi-region approach avoids full-screen uploads but introduces complexity:
+handle pooling, per-element create/destroy lifecycle, hardware handle limits
+(~16 on Star6E). A single canvas region with direct pixel writes is simpler,
+uses one handle, and scales to any number of drawn elements without hardware
+limits.
 
-### Why NOT a Full-Screen CPU Buffer
-
-A full-screen I4 bitmap for 1920x1080 = ~1 MB. Uploading this via
-`MI_RGN_SetBitMap` every frame at 30+ fps = 30+ MB/s of memory bandwidth
-on an embedded ARM core, plus the CPU cost of clearing and redrawing.
-
-The multi-region approach:
-- Markers: 8x8 = 32 bytes each
-- Text line: 8×(8×20 chars) = 1280 bytes
-- Total per frame: typically < 4 KB vs ~1 MB
-- Position changes (marker moves): zero bitmap upload
-
-The CPU-side buffer approach would be justified only for a backend that
-lacks hardware region support (e.g., a raw framebuffer or a software
-compositor). In that case, a future `debug_osd_fb.c` backend could use
-the buffer strategy while the RGN backend stays efficient.
+**Proven in production:** waybeam-hub's `mod_osd_render.c` uses exactly this
+pattern — `GetCanvasInfo` → direct memory writes via LVGL → `UpdateCanvas`.
+The debug OSD replaces LVGL with a lightweight 8×8 bitmap font and primitive
+rasterizers, but the RGN interaction is identical.
 
 ## Config Integration (4-Layer Sync)
 
@@ -227,7 +256,7 @@ WebUI: Add to SECTIONS with camelCase key `showOsd`.
 |------|---------|-------------|
 | `include/debug_osd.h` | Public interface, element types, vtable, colors, inline dispatch wrappers | ~120 |
 | `src/debug_osd.c` | Factory (`debug_osd_create`), 8x8 font table | ~100 |
-| `src/debug_osd_rgn.c` | Star6E RGN backend: dlopen, region pool, draw primitives | ~350 |
+| `src/debug_osd_rgn.c` | Star6E RGN backend: dlopen, canvas API, font/primitive rasterizers | ~400 |
 | Config updates | `venc_config.{h,c}`, `venc_api.c`, `venc_webui.c`, `venc.default.json` | ~30 total |
 | Makefile | Add sources to `STAR6E_ONLY_SRC`, add `include/debug_osd.h` to deps | ~5 |
 
@@ -295,8 +324,9 @@ text elements.
 |----------|-----------|
 | Vtable dispatch (not #ifdef) | Matches EIS pattern; runtime backend selection; testable on host |
 | `dlopen` for MI_RGN (not static link) | Library not vendored; graceful degradation; no linker hacks |
-| Multi-region RGN (not full-screen bitmap) | 100-1000x less bandwidth; hardware Cover for rectangles |
-| I4 pixel format | Minimal memory (4-bit); sufficient colors for debug; matches SigmaStar examples |
+| Canvas API (not SetBitMap or multi-region) | Proven in waybeam-hub; zero-copy direct writes; one handle; no pool management |
+| ARGB4444 pixel format (not I4) | Full RGB color + alpha; no palette setup; matches mod_osd_render production format |
+| Single canvas region (not per-element regions) | Simpler lifecycle; no hardware handle limits; dirty-rect approach minimizes writes |
 | 8x8 bitmap font (not freetype/cairo) | Zero dependencies; ~2 KB table; adequate for debug text |
 | Flat element array (not retained scene graph) | Simple; no lifetime management; consumers rebuild each frame |
 | `debug.showOsd` config (not per-module flags) | Single kill switch; consumers already have their own enable flags |
@@ -307,6 +337,8 @@ text elements.
 - Do NOT add `--unresolved-symbols=ignore-in-shared-libs` to linker flags
 - Do NOT statically link `-lmi_rgn` — use `dlopen`
 - Do NOT embed optical-flow-specific logic in the OSD module
-- Do NOT use a full-screen I4 bitmap when individual regions suffice
+- Do NOT use `MI_RGN_SetBitMap` — use `GetCanvasInfo` + direct writes + `UpdateCanvas`
+- Do NOT allocate one RGN handle per element — use a single canvas region
+- Do NOT use I4 indexed pixel format — use ARGB4444 for full color and alpha
 - Do NOT add SDK type redefinitions — use existing headers or dlopen
 - Do NOT add global mutable state beyond what's in the pipeline state struct
