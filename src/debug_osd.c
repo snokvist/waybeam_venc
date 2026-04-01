@@ -12,9 +12,7 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef __ARM_NEON
 #include <arm_neon.h>
-#endif
 
 /* ── MI_RGN types ──────────────────────────────────────────────────────
  * Defined locally because the SDK headers (sdk/ssc338q/include/i6_rgn.h)
@@ -569,8 +567,6 @@ int debug_osd_get_cpu(DebugOsdState *osd)
 
 static void fill_row(uint16_t *row, int count, uint16_t color)
 {
-#ifdef __ARM_NEON
-	/* NEON: 8 pixels (128 bits) per store */
 	uint16x8_t v = vdupq_n_u16(color);
 	int i = 0;
 
@@ -587,20 +583,6 @@ static void fill_row(uint16_t *row, int count, uint16_t color)
 		row[i] = color;
 		i++;
 	}
-#else
-	/* Fallback: 32-bit word fill (2 pixels per store) */
-	uint32_t pair = ((uint32_t)color << 16) | color;
-	int i = 0;
-	if (((uintptr_t)row & 2) && count > 0)
-		row[i++] = color;
-	uint32_t *p32 = (uint32_t *)(row + i);
-	int pairs = (count - i) / 2;
-	for (int j = 0; j < pairs; j++)
-		p32[j] = pair;
-	i += pairs * 2;
-	if (i < count)
-		row[i] = color;
-#endif
 }
 
 /* ── Rectangles ────────────────────────────────────────────────────── */
