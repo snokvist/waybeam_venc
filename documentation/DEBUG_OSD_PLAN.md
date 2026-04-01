@@ -49,7 +49,12 @@ union:
 | `DEBUG_OSD_ELEM_TEXT` | Key=value text line at a row position | Frame metrics, motion estimates, EIS status, IMU data, bitrate, fps |
 | `DEBUG_OSD_ELEM_MARKER` | Small dot/crosshair at (x,y) | Feature points, motion centroid, ROI center |
 | `DEBUG_OSD_ELEM_VECTOR` | Line/arrow from (x0,y0) to (x1,y1) | Motion vectors, flow direction, gyro displacement |
-| `DEBUG_OSD_ELEM_RECT` | Axis-aligned rectangle outline or fill | ROI bounds, SAD blocks, detection regions, crop window |
+| `DEBUG_OSD_ELEM_RECT` | Axis-aligned rectangle, outline or filled | ROI bounds, SAD blocks, detection regions, crop window |
+
+Rect elements carry a `filled` flag. Filled rects are rendered as hardware
+Cover regions (semi-transparent area highlights, visually distinct from canvas
+content). Outline rects are drawn as 4 lines on the canvas. If Cover handles
+are exhausted, filled rects silently fall back to canvas rasterization.
 
 Future element types (histogram, grid, heatmap) are added by extending the
 enum and adding a draw case in each backend — no interface changes needed.
@@ -112,48 +117,61 @@ void eis_update_osd(DebugOsdState *osd, const EisStatus *s)
 }
 ```
 
-### RGN Backend Strategy (Star6E)
+### RGN Backend Strategy (Star6E) — Hybrid Canvas + Cover
 
-**Key insight from waybeam-hub's `mod_osd_render.c`:** The SigmaStar MI_RGN
-API provides `MI_RGN_GetCanvasInfo()` for direct memory-mapped canvas access.
-Instead of building bitmaps in CPU memory and uploading via `MI_RGN_SetBitMap`
-per frame, the backend maps the canvas once, writes pixels directly into the
-mapped buffer, and commits with `MI_RGN_UpdateCanvas()`. This is the proven
-pattern used in the production OSD.
+The design principle is **debug-rich first, efficient second**. This is a
+debug overlay — visual clarity and information density matter more than
+minimizing CPU cycles. The backend uses two complementary RGN mechanisms,
+each for what it does best:
 
-**Rendering approach — single canvas region with direct writes:**
+**1. Canvas region — text, markers, vectors, outlines**
 
-1. Create one OSD region sized to the video frame (or a smaller debug area)
+Based on the proven pattern from waybeam-hub's `mod_osd_render.c`:
+
+1. Create one full-frame OSD region (`E_MI_RGN_PIXEL_FORMAT_ARGB4444`)
 2. `MI_RGN_GetCanvasInfo()` → get `virtAddr`, `u32Stride`, `stSize`
-3. Each frame: clear only dirty areas, draw elements directly into mapped memory
-4. `MI_RGN_UpdateCanvas()` to commit — no per-frame copy or upload
+3. Each frame: clear canvas, draw all pixel-based elements directly
+4. `MI_RGN_UpdateCanvas()` to commit — zero-copy, just a flip
 
-This replaces the earlier multi-region strategy. A single canvas with direct
-writes is simpler (one RGN handle, no pool management) and proven in production.
+Full-frame canvas (1920×1080 ARGB4444 = ~4 MB) is acceptable for a debug
+tool — it's memory-mapped (no upload bandwidth), only active when debug
+OSD is enabled, and gives unrestricted drawing anywhere on screen.
 
-**Per-element rendering into canvas:**
+**2. Cover regions — filled rectangles for area highlighting**
 
-| Element type | Canvas strategy | Cost |
-|-------------|----------------|------|
-| Marker | Write a small glyph (e.g. 8×8 crosshair) at (x,y) into canvas | 128 bytes written |
-| Rect | Rasterize outline or fill directly into canvas pixels | Stride × height bytes |
-| Text | Render 8×8 font glyphs into canvas at row offset | ~width × 16 bytes per char |
-| Vector | Bresenham line rasterized into canvas pixels | Proportional to length |
+Cover regions (`E_MI_RGN_TYPE_COVER`) are hardware-rendered solid-color
+rectangles. They're the natural tool for marking debug areas:
 
-**Dirty-rect optimization:** Track a bounding box of changed regions per frame.
-On `begin_frame`, clear only the previous frame's dirty rect (not the entire
-canvas). This minimizes memset cost — typical debug overlays touch < 5% of
-the canvas area.
+- ROI bounds, crop windows, detection regions, SAD blocks
+- Semi-transparent colored overlays that visually stand out from canvas content
+- Zero CPU cost — position, size, and color set via `MI_RGN_SetDisplayAttr`
+- Visually distinct from canvas-drawn content (hardware composited at a
+  different layer)
 
-**Pixel format — ARGB4444:**
+The ~16 handle limit is not a concern for debug rectangles — you rarely
+need more than 4-5 area indicators simultaneously.
 
-16-bit per pixel with 4-bit alpha. This is the format used by waybeam-hub's
-`mod_osd_render.c` (`E_MI_RGN_PIXEL_FORMAT_ARGB4444`) and provides:
+**Per-element rendering dispatch:**
+
+| Element type | Mechanism | Rationale |
+|-------------|-----------|-----------|
+| Text | Canvas | Arbitrary position, font rasterization, any string content |
+| Marker | Canvas | Small glyphs at pixel-precise locations, unlimited count |
+| Vector | Canvas | Bresenham lines, arrows — arbitrary angle and length |
+| Rect (outline) | Canvas | Thin outlines drawn as 4 lines into canvas pixels |
+| Rect (filled) | Cover region | Hardware-rendered area highlight, visually distinct layer |
+
+Consumers specify filled vs outline via a flag in the rect element. The
+backend dispatches to Cover or canvas accordingly. If Cover handles are
+exhausted, filled rects fall back to canvas rasterization silently.
+
+**Pixel format — ARGB4444 (canvas):**
+
+16-bit per pixel with 4-bit alpha, matching waybeam-hub's production OSD:
 
 - Full RGB color (4096 colors) — no palette limitations
 - Per-pixel alpha transparency — clean overlay compositing
-- 2 bytes/pixel — a 1920×1080 canvas = ~4 MB, but a reduced debug area
-  (e.g. 480×270 quarter-screen) = ~256 KB
+- Full-frame 1920×1080 = ~4 MB — acceptable for debug-only use
 
 Color constants as ARGB4444 uint16:
 
@@ -168,11 +186,10 @@ Color constants as ARGB4444 uint16:
 | White | `0xFFFF` | Text, outlines |
 | Semi-transparent black | `0x0008` | Text background shadow |
 
-**Canvas region sizing:** The debug OSD does not need a full-screen canvas.
-A quarter-resolution region (e.g. 480×270 at a corner) is sufficient for
-debug text and markers, using ~256 KB. Full-screen is available if vector/rect
-elements span the frame, at ~4 MB — still acceptable since it's memory-mapped
-(no upload bandwidth), and only drawn when debug OSD is enabled.
+**Cover region colors:** Cover regions use a separate color format (typically
+ARGB8888 via `MI_RGN_ChnPortParam_t`). Semi-transparent fills (e.g. 50% alpha
+red for an ROI box) make covered video content still visible beneath the
+debug overlay.
 
 **`dlopen` for graceful degradation:**
 
@@ -181,10 +198,10 @@ static int rgn_load_api(RgnBackend *ctx)
 {
     ctx->lib = dlopen("libmi_rgn.so", RTLD_LAZY | RTLD_GLOBAL);
     if (!ctx->lib) return -1;
-    /* resolve: MI_RGN_Init, MI_RGN_Create, MI_RGN_AttachToChn,
-       MI_RGN_GetCanvasInfo, MI_RGN_UpdateCanvas,
-       MI_RGN_SetDisplayAttr, MI_RGN_Destroy,
-       MI_RGN_DetachFromChn, MI_RGN_DeInit */
+    /* Canvas API: MI_RGN_GetCanvasInfo, MI_RGN_UpdateCanvas
+       Cover API:  MI_RGN_Create (COVER type), MI_RGN_SetDisplayAttr
+       Lifecycle:  MI_RGN_Init, MI_RGN_AttachToChn, MI_RGN_Destroy,
+                   MI_RGN_DetachFromChn, MI_RGN_DeInit */
     return 0;
 }
 ```
@@ -193,26 +210,22 @@ If `libmi_rgn.so` is not present on the target, `debug_osd_create()` returns
 NULL and every consumer's `if (!osd) return;` guard makes the entire OSD
 path a no-op. No linker hacks needed.
 
-### Why Canvas API, Not SetBitMap or Multi-Region
+### Why Hybrid, Not Canvas-Only or Multi-Region-Only
 
-**vs. `MI_RGN_SetBitMap` (per-frame upload):**
-The bitmap approach requires allocating a CPU-side buffer, rendering into it,
-then copying the entire bitmap to the RGN subsystem every frame. The canvas
-API provides a memory-mapped pointer — writes go directly to the backing
-store with zero copy overhead. `MI_RGN_UpdateCanvas()` just commits (flips),
-no data transfer.
+**Canvas alone** can draw everything, but filled rectangles on the canvas
+are just colored pixels — they don't visually stand out from other canvas
+content and can't be semi-transparent over the video independently. Cover
+regions are composited by the hardware at a different layer, giving debug
+area highlights a distinct visual quality.
 
-**vs. multi-region (one RGN handle per element):**
-The multi-region approach avoids full-screen uploads but introduces complexity:
-handle pooling, per-element create/destroy lifecycle, hardware handle limits
-(~16 on Star6E). A single canvas region with direct pixel writes is simpler,
-uses one handle, and scales to any number of drawn elements without hardware
-limits.
+**Multi-region alone** (one OSD handle per text/marker) introduces handle
+pooling complexity and hits hardware limits with many markers. The canvas
+handles unlimited pixel-based elements with one handle.
 
-**Proven in production:** waybeam-hub's `mod_osd_render.c` uses exactly this
-pattern — `GetCanvasInfo` → direct memory writes via LVGL → `UpdateCanvas`.
-The debug OSD replaces LVGL with a lightweight 8×8 bitmap font and primitive
-rasterizers, but the RGN interaction is identical.
+**The hybrid** uses each mechanism for what it's best at: canvas for
+arbitrary pixel drawing (text, lines, dots), Cover for area highlighting
+(filled rects). This matches the debug-first priority — maximum visual
+information with minimal implementation complexity.
 
 ## Config Integration (4-Layer Sync)
 
@@ -324,9 +337,10 @@ text elements.
 |----------|-----------|
 | Vtable dispatch (not #ifdef) | Matches EIS pattern; runtime backend selection; testable on host |
 | `dlopen` for MI_RGN (not static link) | Library not vendored; graceful degradation; no linker hacks |
-| Canvas API (not SetBitMap or multi-region) | Proven in waybeam-hub; zero-copy direct writes; one handle; no pool management |
-| ARGB4444 pixel format (not I4) | Full RGB color + alpha; no palette setup; matches mod_osd_render production format |
-| Single canvas region (not per-element regions) | Simpler lifecycle; no hardware handle limits; dirty-rect approach minimizes writes |
+| Hybrid canvas + Cover (not single mechanism) | Canvas for pixels (text, markers, vectors); Cover for area highlights (filled rects). Debug-rich first, efficient second |
+| ARGB4444 canvas (not I4) | Full RGB color + alpha; no palette setup; matches mod_osd_render production format |
+| Full-frame canvas (not quarter-screen) | Debug tool — unrestricted drawing anywhere; ~4 MB acceptable when enabled |
+| Cover regions for filled rects (not canvas fill) | Hardware-composited, visually distinct layer; semi-transparent over video; zero CPU |
 | 8x8 bitmap font (not freetype/cairo) | Zero dependencies; ~2 KB table; adequate for debug text |
 | Flat element array (not retained scene graph) | Simple; no lifetime management; consumers rebuild each frame |
 | `debug.showOsd` config (not per-module flags) | Single kill switch; consumers already have their own enable flags |
@@ -338,7 +352,8 @@ text elements.
 - Do NOT statically link `-lmi_rgn` — use `dlopen`
 - Do NOT embed optical-flow-specific logic in the OSD module
 - Do NOT use `MI_RGN_SetBitMap` — use `GetCanvasInfo` + direct writes + `UpdateCanvas`
-- Do NOT allocate one RGN handle per element — use a single canvas region
+- Do NOT allocate one RGN handle per text/marker/vector — use the canvas for pixel elements
 - Do NOT use I4 indexed pixel format — use ARGB4444 for full color and alpha
+- Do NOT draw filled rects on canvas when Cover regions give better visual separation
 - Do NOT add SDK type redefinitions — use existing headers or dlopen
 - Do NOT add global mutable state beyond what's in the pipeline state struct
