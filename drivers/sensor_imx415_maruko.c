@@ -32,7 +32,6 @@ SENSOR_DRV_ENTRY_IMPL_BEGIN_EX(IMX415_HDR);
 
 //#define SENSOR_PAD_GROUP_SET CUS_SENSOR_PAD_GROUP_A
 //#define SENSOR_CHANNEL_NUM (0)
-#define SENSOR_CHANNEL_MODE CUS_SENSOR_CHANNEL_MODE_REALTIME_NORMAL
 
 //============================================
 #define ENABLE 1
@@ -103,9 +102,6 @@ SENSOR_DRV_ENTRY_IMPL_BEGIN_EX(IMX415_HDR);
 #define SENSOR_RST_POL CUS_CLK_POL_NEG // if RESET pin High can makes sensor in reset state, set CUS_CLK_POL_NEG
                                        // VSYNC/HSYNC POL can be found in data sheet timing diagram,
                                        // Notice: the initial setting may contain VSYNC/HSYNC POL inverse settings so that condition is different.
-#define SENSOR_VSYNC_POL CUS_CLK_POL_NEG // if VSYNC pin High and data bus have data, set CUS_CLK_POL_POS
-#define SENSOR_HSYNC_POL CUS_CLK_POL_NEG // if HSYNC pin High and data bus have data, set CUS_CLK_POL_POS
-#define SENSOR_PCLK_POL CUS_CLK_POL_NEG // depend on sensor setting, sometimes need to try CUS_CLK_POL_POS or CUS_CLK_POL_NEG
 
 ////////////////////////////////////
 // Sensor ID                      //
@@ -115,8 +111,6 @@ SENSOR_DRV_ENTRY_IMPL_BEGIN_EX(IMX415_HDR);
 #undef SENSOR_NAME
 #define SENSOR_NAME IMX415
 
-#define CHIP_ID_r3F12 0x3F12
-#define CHIP_ID_r3F13 0x3F13
 #define CHIP_ID 0x0415
 
 ////////////////////////////////////
@@ -251,234 +245,8 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us);
 ///////////////////////////////////////////////////////////////
 
 // 3840x2160@30fps
-const static I2C_ARRAY Sensor_8m_30fps_init_table_4lane_linear[] = {
-    { 0x3000, 0x01 }, // Standby
-    { 0x3002, 0x01 }, // Master mode stop
-    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
-    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
-    { 0x3024, 0xCA }, // VMAX
-    { 0x3025, 0x08 }, //
-    { 0x3028, 0xFE }, // HMAX
-    { 0x3029, 0x03 }, //
-    { 0x3031, 0x00 }, // ADBIT (10bit)
-    { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
-    { 0x3050, 0x08 }, // SHR0[19:0]
-    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
-    { 0x3116, 0x23 }, // INCKSEL2
-    { 0x3118, 0xC6 }, // INCKSEL3
-    { 0x311A, 0xE7 }, // INCKSEL4
-    { 0x311E, 0x23 }, // INCKSEL5
-    { 0x32D4, 0x21 }, // -
-    { 0x32EC, 0xA1 }, // -
-    { 0x3452, 0x7F }, // -
-    { 0x3453, 0x03 }, // -
-    { 0x358A, 0x04 }, // -
-    { 0x35A1, 0x02 }, // -
-    { 0x36BC, 0x0C }, // -
-    { 0x36CC, 0x53 }, // -
-    { 0x36CD, 0x00 }, // -
-    { 0x36CE, 0x3C }, // -
-    { 0x36D0, 0x8C }, // -
-    { 0x36D1, 0x00 }, // -
-    { 0x36D2, 0x71 }, // -
-    { 0x36D4, 0x3C }, // -
-    { 0x36D6, 0x53 }, // -
-    { 0x36D7, 0x00 }, // -
-    { 0x36D8, 0x71 }, // -
-    { 0x36DA, 0x8C }, // -
-    { 0x36DB, 0x00 }, // -
-    { 0x3701, 0x00 }, // ADBIT1[7:0]
-    { 0x3724, 0x02 }, // -
-    { 0x3726, 0x02 }, // -
-    { 0x3732, 0x02 }, // -
-    { 0x3734, 0x03 }, // -
-    { 0x3736, 0x03 }, // -
-    { 0x3742, 0x03 }, // -
-    { 0x3862, 0xE0 }, // -
-    { 0x38CC, 0x30 }, // -
-    { 0x38CD, 0x2F }, // -
-    { 0x395C, 0x0C }, // -
-    { 0x3A42, 0xD1 }, // -
-    { 0x3A4C, 0x77 }, // -
-    { 0x3AE0, 0x02 }, // -
-    { 0x3AEC, 0x0C }, // -
-    { 0x3B00, 0x2E }, // -
-    { 0x3B06, 0x29 }, // -
-    { 0x3B98, 0x25 }, // -
-    { 0x3B99, 0x21 }, // -
-    { 0x3B9B, 0x13 }, // -
-    { 0x3B9C, 0x13 }, // -
-    { 0x3B9D, 0x13 }, // -
-    { 0x3B9E, 0x13 }, // -
-    { 0x3BA1, 0x00 }, // -
-    { 0x3BA2, 0x06 }, // -
-    { 0x3BA3, 0x0B }, // -
-    { 0x3BA4, 0x10 }, // -
-    { 0x3BA5, 0x14 }, // -
-    { 0x3BA6, 0x18 }, // -
-    { 0x3BA7, 0x1A }, // -
-    { 0x3BA8, 0x1A }, // -
-    { 0x3BA9, 0x1A }, // -
-    { 0x3BAC, 0xED }, // -
-    { 0x3BAD, 0x01 }, // -
-    { 0x3BAE, 0xF6 }, // -
-    { 0x3BAF, 0x02 }, // -
-    { 0x3BB0, 0xA2 }, // -
-    { 0x3BB1, 0x03 }, // -
-    { 0x3BB2, 0xE0 }, // -
-    { 0x3BB3, 0x03 }, // -
-    { 0x3BB4, 0xE0 }, // -
-    { 0x3BB5, 0x03 }, // -
-    { 0x3BB6, 0xE0 }, // -
-    { 0x3BB7, 0x03 }, // -
-    { 0x3BB8, 0xE0 }, // -
-    { 0x3BBA, 0xE0 }, // -
-    { 0x3BBC, 0xDA }, // -
-    { 0x3BBE, 0x88 }, // -
-    { 0x3BC0, 0x44 }, // -
-    { 0x3BC2, 0x7B }, // -
-    { 0x3BC4, 0xA2 }, // -
-    { 0x3BC8, 0xBD }, // -
-    { 0x3BCA, 0xBD }, // -
-    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
-    { 0x4005, 0x06 }, //
-    { 0x400C, 0x00 }, // INCKSEL6
-    { 0x4018, 0x7F }, // TCLKPOST
-    { 0x401A, 0x37 }, // TCLKPREPARE
-    { 0x401C, 0x37 }, // TCLKTRAIL
-    { 0x401E, 0xF7 }, // TCLKZERO
-    { 0x401F, 0x00 }, //
-    { 0x4020, 0x3F }, // THSPREPARE
-    { 0x4022, 0x6F }, // THSZERO
-    { 0x4024, 0x3F }, // THSTRAIL
-    { 0x4026, 0x5F }, // THSEXIT
-    { 0x4028, 0x2F }, // TLPX
-    { 0x4074, 0x01 }, // INCKSEL7
-    { 0xFFFF, 0x24 },
-    { 0x3002, 0x00 }, // Master mode start
-    { 0xFFFF, 0x10 },
-    { 0x3000, 0x00 }, // Operating
-};
 
 // 2952x1656@60fps
-const static I2C_ARRAY Sensor_5m_60fps_init_table_4lane_linear[] = {
-    { 0x3000, 0x01 }, // Standby
-    { 0x3002, 0x01 }, // Master mode stop
-    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
-    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
-    { 0x301C, 0x04 }, // WINMODE (cropping mode)
-    { 0x3024, 0xB8 }, // VMAX
-    { 0x3025, 0x06 }, //
-    { 0x3028, 0x8C }, // HMAX
-    { 0x3029, 0x02 }, //
-    { 0x3031, 0x00 }, // ADBIT (10bit)
-    { 0x3032, 0x00 }, //
-    { 0x3033, 0x08 }, // SYS_MODE
-    { 0x3040, 0xBC }, // PIX_HST
-    { 0x3041, 0x01 }, //
-    { 0x3042, 0x88 }, // PIX_HWIDTH
-    { 0x3043, 0x0B }, //
-    { 0x3044, 0xF8 }, // PIX_VST
-    { 0x3045, 0x01 }, //
-    { 0x3046, 0xF0 }, // PIX_VWIDTH
-    { 0x3047, 0x0C }, //
-    { 0x3050, 0x08 }, // SHR0[19:0]
-    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
-    { 0x3116, 0x23 }, // INCKSEL2
-    { 0x3118, 0xA5 }, // INCKSEL3
-    { 0x311A, 0xE7 }, // INCKSEL4
-    { 0x311E, 0x23 }, // INCKSEL5
-    { 0x32D4, 0x21 }, // -
-    { 0x32EC, 0xA1 }, // -
-    { 0x3452, 0x7F }, // -
-    { 0x3453, 0x03 }, // -
-    { 0x358A, 0x04 }, // -
-    { 0x35A1, 0x02 }, // -
-    { 0x36BC, 0x0C }, // -
-    { 0x36CC, 0x53 }, // -
-    { 0x36CD, 0x00 }, // -
-    { 0x36CE, 0x3C }, // -
-    { 0x36D0, 0x8C }, // -
-    { 0x36D1, 0x00 }, // -
-    { 0x36D2, 0x71 }, // -
-    { 0x36D4, 0x3C }, // -
-    { 0x36D6, 0x53 }, // -
-    { 0x36D7, 0x00 }, // -
-    { 0x36D8, 0x71 }, // -
-    { 0x36DA, 0x8C }, // -
-    { 0x36DB, 0x00 }, // -
-    { 0x3701, 0x00 }, // ADBIT1[7:0]
-    { 0x3724, 0x02 }, // -
-    { 0x3726, 0x02 }, // -
-    { 0x3732, 0x02 }, // -
-    { 0x3734, 0x03 }, // -
-    { 0x3736, 0x03 }, // -
-    { 0x3742, 0x03 }, // -
-    { 0x3862, 0xE0 }, // -
-    { 0x38CC, 0x30 }, // -
-    { 0x38CD, 0x2F }, // -
-    { 0x395C, 0x0C }, // -
-    { 0x3A42, 0xD1 }, // -
-    { 0x3A4C, 0x77 }, // -
-    { 0x3AE0, 0x02 }, // -
-    { 0x3AEC, 0x0C }, // -
-    { 0x3B00, 0x2E }, // -
-    { 0x3B06, 0x29 }, // -
-    { 0x3B98, 0x25 }, // -
-    { 0x3B99, 0x21 }, // -
-    { 0x3B9B, 0x13 }, // -
-    { 0x3B9C, 0x13 }, // -
-    { 0x3B9D, 0x13 }, // -
-    { 0x3B9E, 0x13 }, // -
-    { 0x3BA1, 0x00 }, // -
-    { 0x3BA2, 0x06 }, // -
-    { 0x3BA3, 0x0B }, // -
-    { 0x3BA4, 0x10 }, // -
-    { 0x3BA5, 0x14 }, // -
-    { 0x3BA6, 0x18 }, // -
-    { 0x3BA7, 0x1A }, // -
-    { 0x3BA8, 0x1A }, // -
-    { 0x3BA9, 0x1A }, // -
-    { 0x3BAC, 0xED }, // -
-    { 0x3BAD, 0x01 }, // -
-    { 0x3BAE, 0xF6 }, // -
-    { 0x3BAF, 0x02 }, // -
-    { 0x3BB0, 0xA2 }, // -
-    { 0x3BB1, 0x03 }, // -
-    { 0x3BB2, 0xE0 }, // -
-    { 0x3BB3, 0x03 }, // -
-    { 0x3BB4, 0xE0 }, // -
-    { 0x3BB5, 0x03 }, // -
-    { 0x3BB6, 0xE0 }, // -
-    { 0x3BB7, 0x03 }, // -
-    { 0x3BB8, 0xE0 }, // -
-    { 0x3BBA, 0xE0 }, // -
-    { 0x3BBC, 0xDA }, // -
-    { 0x3BBE, 0x88 }, // -
-    { 0x3BC0, 0x44 }, // -
-    { 0x3BC2, 0x7B }, // -
-    { 0x3BC4, 0xA2 }, // -
-    { 0x3BC8, 0xBD }, // -
-    { 0x3BCA, 0xBD }, // -
-    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
-    { 0x4005, 0x06 }, //
-    { 0x400C, 0x01 }, // INCKSEL6
-    { 0x4018, 0xA7 }, // TCLKPOST
-    { 0x401A, 0x57 }, // TCLKPREPARE
-    { 0x401C, 0x5F }, // TCLKTRAIL
-    { 0x401E, 0x97 }, // TCLKZERO
-    { 0x401F, 0x01 }, //
-    { 0x4020, 0x5F }, // THSPREPARE
-    { 0x4022, 0xAF }, // THSZERO
-    { 0x4024, 0x5F }, // THSTRAIL
-    { 0x4026, 0x9F }, // THSEXIT
-    { 0x4028, 0x4F }, // TLPX
-    { 0x4074, 0x00 }, // INCKSEL7
-    { 0xFFFF, 0x24 },
-    { 0x3002, 0x00 }, // Master mode start
-    { 0xFFFF, 0x10 },
-    { 0x3000, 0x00 }, // Operating
-};
 
 // 1920x1080@90fps
 const static I2C_ARRAY Sensor_2m_90fps_init_table_4lane_linear[] = {
@@ -942,64 +710,6 @@ static int imx415_SetPatternMode(ms_cus_sensor* handle, u32 mode)
     return SUCCESS;
 }
 
-static int pCus_init_8m_30fps_mipi4lane_linear(ms_cus_sensor* handle)
-{
-    // imx415_params *params = (imx415_params *)handle->private_data;
-    int i, cnt = 0;
-    // s16 sen_data;
-
-    if (pCus_CheckSensorProductID(handle) == FAIL) {
-        return FAIL;
-    }
-
-    for (i = 0; i < ARRAY_SIZE(Sensor_8m_30fps_init_table_4lane_linear); i++) {
-        if (Sensor_8m_30fps_init_table_4lane_linear[i].reg == 0xffff) {
-            SENSOR_MSLEEP(Sensor_8m_30fps_init_table_4lane_linear[i].data);
-        } else {
-            cnt = 0;
-            while (SensorReg_Write(Sensor_8m_30fps_init_table_4lane_linear[i].reg, Sensor_8m_30fps_init_table_4lane_linear[i].data) != SUCCESS) {
-                cnt++;
-                if (cnt >= 10) {
-                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
-                    return FAIL;
-                }
-                // SENSOR_UDELAY(1);
-            }
-        }
-    }
-
-    return SUCCESS;
-}
-
-static int pCus_init_5m_60fps_mipi4lane_linear(ms_cus_sensor* handle)
-{
-    // imx415_params *params = (imx415_params *)handle->private_data;
-    int i, cnt = 0;
-    // s16 sen_data;
-
-    if (pCus_CheckSensorProductID(handle) == FAIL) {
-        return FAIL;
-    }
-
-    for (i = 0; i < ARRAY_SIZE(Sensor_5m_60fps_init_table_4lane_linear); i++) {
-        if (Sensor_5m_60fps_init_table_4lane_linear[i].reg == 0xffff) {
-            SENSOR_MSLEEP(Sensor_5m_60fps_init_table_4lane_linear[i].data);
-        } else {
-            cnt = 0;
-            while (SensorReg_Write(Sensor_5m_60fps_init_table_4lane_linear[i].reg, Sensor_5m_60fps_init_table_4lane_linear[i].data) != SUCCESS) {
-                cnt++;
-                if (cnt >= 10) {
-                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
-                    return FAIL;
-                }
-                // SENSOR_UDELAY(1);
-            }
-        }
-    }
-
-    return SUCCESS;
-}
-
 static int pCus_init_2m_90fps_mipi4lane_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
@@ -1251,68 +961,6 @@ static int pCus_init_1080p_binned_mipi4lane_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
-/* Maruko 1080p@60fps binning — tipoman9 I6C init table.
- * Uses I6C-tuned INCKSEL3=0xC6, HMAX=0x1B, VTS=2296. */
-const static I2C_ARRAY Sensor_2m_60fps_init_table_4lane_linear[] = {
-    {0x3000, 0x01}, {0x3002, 0x01}, {0x3008, 0x5D}, {0x300A, 0x42},
-    {0x3020, 0x01}, {0x3021, 0x01}, {0x3022, 0x01},
-    {0x3024, 0xF8}, {0x3028, 0x1B},
-    {0x3031, 0x00}, {0x3033, 0x05}, {0x3050, 0x08},
-    {0x30C1, 0x00}, {0x30D9, 0x02}, {0x30DA, 0x01},
-    {0x3116, 0x23}, {0x3118, 0xC6}, {0x311A, 0xE7}, {0x311E, 0x23},
-    {0x32D4, 0x21}, {0x32EC, 0xA1}, {0x3452, 0x7F}, {0x3453, 0x03},
-    {0x358A, 0x04}, {0x35A1, 0x02}, {0x36BC, 0x0C},
-    {0x36CC, 0x53}, {0x36CD, 0x00}, {0x36CE, 0x3C},
-    {0x36D0, 0x8C}, {0x36D1, 0x00}, {0x36D2, 0x71},
-    {0x36D4, 0x3C}, {0x36D6, 0x53}, {0x36D7, 0x00},
-    {0x36D8, 0x71}, {0x36DA, 0x8C}, {0x36DB, 0x00},
-    {0x3701, 0x00}, {0x3724, 0x02}, {0x3726, 0x02},
-    {0x3732, 0x02}, {0x3734, 0x03}, {0x3736, 0x03}, {0x3742, 0x03},
-    {0x3862, 0xE0}, {0x38CC, 0x30}, {0x38CD, 0x2F}, {0x395C, 0x0C},
-    {0x3A42, 0xD1}, {0x3A4C, 0x77}, {0x3AE0, 0x02}, {0x3AEC, 0x0C},
-    {0x3B00, 0x2E}, {0x3B06, 0x29},
-    {0x3B98, 0x25}, {0x3B99, 0x21},
-    {0x3B9B, 0x13}, {0x3B9C, 0x13}, {0x3B9D, 0x13}, {0x3B9E, 0x13},
-    {0x3BA1, 0x00}, {0x3BA2, 0x06}, {0x3BA3, 0x0B}, {0x3BA4, 0x10},
-    {0x3BA5, 0x14}, {0x3BA6, 0x18}, {0x3BA7, 0x1A}, {0x3BA8, 0x1A},
-    {0x3BA9, 0x1A},
-    {0x3BAC, 0xED}, {0x3BAD, 0x01}, {0x3BAE, 0xF6}, {0x3BAF, 0x02},
-    {0x3BB0, 0xA2}, {0x3BB1, 0x03}, {0x3BB2, 0xE0}, {0x3BB3, 0x03},
-    {0x3BB4, 0xE0}, {0x3BB5, 0x03}, {0x3BB6, 0xE0}, {0x3BB7, 0x03},
-    {0x3BB8, 0xE0}, {0x3BBA, 0xE0}, {0x3BBC, 0xDA}, {0x3BBE, 0x88},
-    {0x3BC0, 0x44}, {0x3BC2, 0x7B}, {0x3BC4, 0xA2},
-    {0x3BC8, 0xBD}, {0x3BCA, 0xBD},
-    {0x4004, 0xC0}, {0x4005, 0x06}, {0x400C, 0x00},
-    {0x4018, 0x7F}, {0x401A, 0x37}, {0x401C, 0x37},
-    {0x401E, 0xF7}, {0x401F, 0x00}, {0x4020, 0x3F},
-    {0x4022, 0x6F}, {0x4024, 0x3F}, {0x4026, 0x5F},
-    {0x4028, 0x2F}, {0x4074, 0x01},
-    {0xffff, 0x24}, {0x3002, 0x00}, {0xffff, 0x10}, {0x3000, 0x00},
-};
-
-static int pCus_init_2m_60fps_mipi4lane_linear(ms_cus_sensor* handle)
-{
-    int i, cnt = 0;
-    if (pCus_CheckSensorProductID(handle) == FAIL)
-        return FAIL;
-    for (i = 0; i < ARRAY_SIZE(Sensor_2m_60fps_init_table_4lane_linear); i++) {
-        if (Sensor_2m_60fps_init_table_4lane_linear[i].reg == 0xffff) {
-            SENSOR_MSLEEP(Sensor_2m_60fps_init_table_4lane_linear[i].data);
-        } else {
-            cnt = 0;
-            while (SensorReg_Write(Sensor_2m_60fps_init_table_4lane_linear[i].reg,
-                    Sensor_2m_60fps_init_table_4lane_linear[i].data) != SUCCESS) {
-                cnt++;
-                if (cnt >= 10) {
-                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
-                    return FAIL;
-                }
-            }
-        }
-    }
-    return SUCCESS;
-}
-
 static int pCus_GetVideoResNum(ms_cus_sensor* handle, u32* ulres_num)
 {
     *ulres_num = handle->video_res_supported.num_res;
@@ -1492,9 +1140,9 @@ static int pCus_GetFPS(ms_cus_sensor* handle)
     u32 tVts = (params->tVts_reg[0].data << 16) | (params->tVts_reg[1].data << 8) | (params->tVts_reg[2].data << 0);
 
     if (params->expo.fps >= 1000)
-        params->expo.preview_fps = (vts_30fps * max_fps * 1000) / tVts;
+        params->expo.preview_fps = (u32)(((u64)vts_30fps * max_fps * 1000) / tVts);
     else
-        params->expo.preview_fps = (vts_30fps * max_fps) / tVts;
+        params->expo.preview_fps = (u32)(((u64)vts_30fps * max_fps) / tVts);
 
     return params->expo.preview_fps;
 }
@@ -1511,15 +1159,15 @@ static int pCus_SetFPS(ms_cus_sensor* handle, u32 fps)
     if (fps >= min_fps && fps <= max_fps) {
         if (CUS_CMU_CLK_36MHZ == handle->mclk) {
             fps = fps > 29 ? 29 : fps; // limit fps at 29 fps due to MCLK=36MHz
-            params->expo.vts = (vts_30fps * 29091 + fps * 500) / (fps * 1000);
+            params->expo.vts = (u32)(((u64)vts_30fps * 29091 + fps * 500) / (fps * 1000));
         } else
-            params->expo.vts = (vts_30fps * (max_fps * 1000) + fps * 500) / (fps * 1000);
+            params->expo.vts = (u32)(((u64)vts_30fps * max_fps * 1000 + fps * 500) / (fps * 1000));
     } else if (fps >= (min_fps * 1000) && fps <= (max_fps * 1000)) {
         if (CUS_CMU_CLK_36MHZ == handle->mclk) {
             fps = fps > 29091 ? 29091 : fps; // limit fps at 29.091 fps due to MCLK=36MHz
-            params->expo.vts = (vts_30fps * 29091 + (fps >> 1)) / fps;
+            params->expo.vts = (u32)(((u64)vts_30fps * 29091 + (fps >> 1)) / fps);
         } else
-            params->expo.vts = (vts_30fps * (max_fps * 1000) + (fps >> 1)) / fps;
+            params->expo.vts = (u32)(((u64)vts_30fps * max_fps * 1000 + (fps >> 1)) / fps);
     } else {
         SENSOR_DMSG("[%s] FPS %d out of range.\n", __FUNCTION__, fps);
         return FAIL;
@@ -1679,7 +1327,7 @@ static int pCus_SetAEGain(ms_cus_sensor* handle, u32 gain)
         }
     }
     gain_double = 20 * (intlog10(gain) - intlog10(1024));
-    gain_double = (u16)((gain_double * 10) >> 24) / 3;
+    gain_double = ((gain_double * 10) >> 24) / 3;
 
     params->tGain_reg[0].data = gain_double & 0xff;
     params->tGain_reg[1].data = (gain_double >> 8) & 0xff;
@@ -1810,7 +1458,7 @@ int cus_camsensor_init_handle_linear(ms_cus_sensor* drv_handle)
     // Sensor Status Control and Get Info //
     ////////////////////////////////////////
     handle->pCus_sensor_release = cus_camsensor_release_handle;
-    handle->pCus_sensor_init = pCus_init_8m_30fps_mipi4lane_linear;
+    handle->pCus_sensor_init = pCus_init_nobinned_dynamic;
     // handle->pCus_sensor_powerupseq     = pCus_powerupseq;
     handle->pCus_sensor_poweron = pCus_poweron;
     handle->pCus_sensor_poweroff = pCus_poweroff;
