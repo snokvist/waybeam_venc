@@ -4,9 +4,11 @@
 #include "venc_config.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define STAR6E_RTP_HEADER_SIZE 12
@@ -255,6 +257,117 @@ uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
 	return n;
 }
 
+/* Flush the accumulated batch via one sendmmsg() syscall.
+ * Returns number of messages successfully sent. Accounts unsent messages
+ * against output->send_errors. Always resets batch->count to 0. */
+static int star6e_batch_flush(Star6eOutput *output)
+{
+	Star6eOutputBatch *b = &output->batch;
+	int sent;
+
+	if (b->count == 0)
+		return 0;
+	if (output->socket_handle < 0) {
+		output->send_errors += (uint32_t)b->count;
+		b->count = 0;
+		return 0;
+	}
+
+	sent = sendmmsg(output->socket_handle, b->msgs,
+		(unsigned int)b->count, 0);
+	if (sent < 0) {
+		if (errno != EINTR)
+			output->send_errors += (uint32_t)b->count;
+		b->count = 0;
+		return 0;
+	}
+	if ((size_t)sent < b->count)
+		output->send_errors += (uint32_t)(b->count - (size_t)sent);
+	b->count = 0;
+	return sent;
+}
+
+void star6e_output_begin_frame(Star6eOutput *output)
+{
+	if (!output)
+		return;
+	output->batch.count = 0;
+	/* Batch is meaningful only for UDP/UNIX datagram transport, not SHM */
+	output->batch.active = (output->ring == NULL &&
+		output->socket_handle >= 0) ? 1 : 0;
+}
+
+int star6e_output_end_frame(Star6eOutput *output)
+{
+	int sent;
+
+	if (!output || !output->batch.active)
+		return 0;
+	sent = star6e_batch_flush(output);
+	output->batch.active = 0;
+	return sent;
+}
+
+/* Queue one RTP packet into the active batch. Returns 0 on success,
+ * -1 if the packet cannot fit the scratch slot (caller falls back to
+ * immediate send).
+ *
+ * Both the header and payload1 are copied into scratch because both live
+ * on the caller's stack and are reused between packets (rtp header is
+ * built in rtp_packetizer_send_packet; payload1 is either a 3-byte FU-A
+ * header or the HevcApBuilder's payload buffer, reset after each AP
+ * packet). payload2, when present, is a slice of the VENC stream buffer
+ * which remains valid until MI_VENC_ReleaseStream is called in the
+ * pipeline after end_frame(), so we keep it as a zero-copy iovec. */
+static int star6e_batch_enqueue(Star6eOutput *output,
+	const uint8_t *header, size_t header_len,
+	const uint8_t *payload1, size_t payload1_len,
+	const uint8_t *payload2, size_t payload2_len)
+{
+	Star6eOutputBatch *b = &output->batch;
+	size_t slot;
+	size_t scratch_len = header_len + payload1_len;
+	struct iovec *iov;
+	struct msghdr *hdr;
+
+	if (scratch_len > STAR6E_OUTPUT_BATCH_SLOT_SCRATCH)
+		return -1;
+
+	if (b->count >= STAR6E_OUTPUT_BATCH_MAX)
+		star6e_batch_flush(output);
+
+	slot = b->count;
+	iov = &b->iov[slot * 2];
+	hdr = &b->msgs[slot].msg_hdr;
+
+	/* Copy header + payload1 into owned scratch so the caller can reuse
+	 * both stack buffers for the next packet before we flush. */
+	memcpy(b->scratch[slot], header, header_len);
+	memcpy(b->scratch[slot] + header_len, payload1, payload1_len);
+	iov[0].iov_base = b->scratch[slot];
+	iov[0].iov_len = scratch_len;
+
+	if (payload2 && payload2_len > 0) {
+		iov[1].iov_base = (void *)payload2;
+		iov[1].iov_len = payload2_len;
+	}
+
+	memset(hdr, 0, sizeof(*hdr));
+	if (output->connected_udp) {
+		hdr->msg_name = NULL;
+		hdr->msg_namelen = 0;
+	} else {
+		hdr->msg_name = (void *)&output->dst;
+		hdr->msg_namelen = output->dst_len;
+	}
+	hdr->msg_iov = iov;
+	hdr->msg_iovlen = (payload2 && payload2_len > 0) ? 2 : 1;
+	b->msgs[slot].msg_len = 0;
+
+	b->count++;
+	return 0;
+}
+
 int star6e_output_send_rtp_parts(Star6eOutput *output,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
@@ -281,6 +394,18 @@ int star6e_output_send_rtp_parts(Star6eOutput *output,
 			payload1, (uint16_t)payload1_len);
 	}
 
+	if (output->batch.active) {
+		if (star6e_batch_enqueue(output, header, header_len,
+		    payload1, payload1_len, payload2, payload2_len) == 0)
+			return 0;
+		/* Scratch slot too small for this packet — flush anything
+		 * we already have (to preserve ordering), then fall through
+		 * to immediate send for this one packet. */
+		star6e_batch_flush(output);
+	}
+
+	/* Fallback: either batching inactive (probe/audio/compact paths) or
+	 * a packet too big for scratch — send immediately. */
 	if (output_socket_send_parts(output->socket_handle, &output->dst,
 	    output->dst_len, output->connected_udp,
 	    header, header_len, payload1, payload1_len,
@@ -424,13 +549,18 @@ size_t star6e_output_send_frame(Star6eOutput *output,
 	const MI_VENC_Stream_t *stream, uint32_t max_size,
 	Star6eOutputRtpSendFn rtp_send, void *opaque)
 {
+	size_t total;
+
 	if (!output || !stream)
 		return 0;
 
 	if (star6e_output_is_rtp(output)) {
 		if (!rtp_send)
 			return 0;
-		return rtp_send(output, stream, opaque);
+		star6e_output_begin_frame(output);
+		total = rtp_send(output, stream, opaque);
+		star6e_output_end_frame(output);
+		return total;
 	}
 
 	return star6e_output_send_compact_frame(output, stream, max_size);

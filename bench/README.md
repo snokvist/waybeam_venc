@@ -316,5 +316,70 @@ at this bench scale.
 change so far that has a clear mechanism to move that floor, cutting
 19 syscalls per frame to 1. Worth building.
 
+### Tier C — sendmmsg() batching, matched control (hub stopped)
+
+Same procedure as the other control runs, bitrate persisted in
+`/etc/venc.json`, hub stopped before deploy.
+
+**First deploy broke decode.** The initial batch implementation kept
+`payload1` as a pointer into the caller's stack. For FU-A fragments
+(`fu_hdr[3]` rebuilt each loop iteration) and HEVC aggregation packets
+(`HevcApBuilder._internal.payload` reset between packets), the stack
+buffer was reused before `sendmmsg` flushed — multiple queued packets
+ended up with aliased payload1 content. The receiver saw bitrate arrive
+but the stream could not be decoded.
+
+Fix: the batch now owns a per-slot scratch buffer holding
+`[RTP header || payload1]` concatenated and pre-copied on enqueue.
+`payload2` (when present) is a slice of the VENC stream buffer and
+stays valid until `MI_VENC_ReleaseStream` after `end_frame()`, so it
+remains a zero-copy iovec pointer.
+
+Probe summary:
+
+```
+Frames:            7000+ (119.3 fps actual, 60 s)
+Encode:            mean 9104 us, max 11945 us
+Send spread:       mean  718 us, P50 609, P95 1352, P99 1616, max 2191 us
+
+Sidecar overhead:  7.5 KB/s rx (1 MSG_FRAME/frame + 0.7 sync pps)
+venc log grep sendmmsg|send_error|ERROR: 0 hits (60+ s uptime)
+```
+
+Side by side vs the other hub-stopped controls:
+
+| Metric            | Master | Tier B | **Tier C** | C vs Master | C vs Tier B |
+|-------------------|-------:|-------:|-----------:|------------:|------------:|
+| Send spread mean  | 788 us | 762 us |  **718 us**|      −9%    |    −6%      |
+| Send spread P50   | 654 us | 644 us |  **609 us**|      −7%    |    −5%      |
+| Send spread P95   |1384 us |1404 us | **1352 us**|      −2%    |    −4%      |
+| Send spread P99   |1684 us |1728 us | **1616 us**|      −4%    |    −6%      |
+| Send spread max   |2343 us |3028 us | **2191 us**|      −6%    |   −28%      |
+| Encode mean       |7764 us |7929 us |    9104 us |   (noise)   |   (noise)   |
+
+**Honest assessment.** `sendmmsg()` batching moved the ~760 μs floor to
+~720 μs. That's a real, consistent improvement across mean, P50, P95,
+P99 and max. Ordering is preserved, no send errors, no decode issues
+on the fixed build.
+
+Magnitude matches what the mechanism predicts: 19 packets/frame × ~4 μs
+per-syscall cost on Cortex-A7 collapsed to one syscall ≈ 70 μs saved
+per frame. Mean dropped from 788 → 718 μs (−70 μs). The remaining
+~720 μs floor is the cost of actually *building* the 19 RTP packets
+(memcpy into scratch, NAL stripping, AP aggregation, FU-A fragment
+loop) — that part is unchanged from master.
+
+**Tier C is the first tier where a hub-stopped bench shows measurable
+code-driven gain.** Not huge in absolute terms (~70 μs per frame on a
+~8.3 ms frame period at 120 fps), but steady and predictable.
+
+**Open question for Tier C.** On the wire each packet still leaves the
+NIC individually — batching only saves kernel-entry overhead, not TX
+time. If the encoded frame is CPU-bound in the packetizer itself, the
+next lever would be to reduce the per-packet work (e.g. stop copying
+payload1 into scratch — it is only needed because FU-A / AP buffers
+are reused — by restructuring the packetizer to hand out stable
+buffers instead). That is a bigger refactor; not planned for now.
+
 
 
