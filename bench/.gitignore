@@ -1,3 +1,4 @@
 *.tsv
 !baseline-master-*.tsv
 !tier-*.tsv
+!control-*.tsv

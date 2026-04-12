@@ -9,6 +9,7 @@ the Codex review (April 2026).
 - Sensor bin: `/etc/sensors/imx335_greg_fpvVII-gpt200.bin`
 - ISP profile: legacy AE, `overclockLevel=1`, `verbose=true`
 - Codec: H.265, CBR, GOP 10, `qpDelta=-4`, `frameLost=true`
+- Bitrate: 25 Mbps (persisted in `/etc/venc.json`; see procedure below)
 
 ## Method
 
@@ -19,6 +20,86 @@ the Codex review (April 2026).
   - `frame_ready_us → last_pkt_send_us`  = **send spread** (packetize + all
     per-packet sendmsg() syscalls + anything else holding the stream)
 - `--stats` prints percentile summary on exit.
+
+## Execution procedure (run this exact sequence every time)
+
+Lessons learned the hard way across the Tier A / Tier B / control runs:
+
+- Just setting the bitrate via the HTTP API does **not** persist across a
+  venc restart — re-deploy will snap back to whatever `/etc/venc.json`
+  has. Persist the bitrate in the config file instead.
+- Stopping `waybeam_hub` makes numbers *look* great but confounds results:
+  hub-stop removes scheduler jitter from HTTP polls, mDNS, metrics
+  scraping and aalink, so encode and send durations appear to shrink even
+  without any code change. **Always note the hub state in the bench
+  filename**.
+- `SIGHUP` to `waybeam_hub` does **not** reload `venc.bitrate_enabled`;
+  the flag is read once at hub startup. Until that is fixed in the hub,
+  the only way to stop the hub's bitrate override is to stop
+  `waybeam_hub` entirely.
+
+### 1. Persist the target bitrate in /etc/venc.json (once per vehicle)
+
+```bash
+ssh root@192.168.1.13 'json_cli -s .video0.bitrate 25000 -i /etc/venc.json'
+```
+
+This survives venc restarts, so step 4 below becomes a sanity check
+rather than a re-apply.
+
+### 2. Pick the hub state you want to measure
+
+- **Hub running** — production-realistic; matches how the vehicle is
+  deployed. Use this for A-vs-B code comparisons that include the real
+  scheduling environment.
+- **Hub stopped** — cleanest per-frame numbers; removes system noise but
+  also removes the contention Tier A was designed to mitigate. Useful as
+  a "best case" floor but not representative of deployment.
+
+Record the hub state in the filename: `...hubstopped...` vs
+`...hubrunning...`.
+
+### 3. (Re)deploy the binary being measured
+
+```bash
+make build SOC_BUILD=star6e        # on host
+ssh root@192.168.1.13 'killall venc; sleep 2; rm -f /tmp/venc.log'
+scp -O out/star6e/venc root@192.168.1.13:/usr/bin/venc
+ssh root@192.168.1.13 'nohup venc > /tmp/venc.log 2>&1 &'
+# Pipeline init takes ~10 s on cold start — wait before the probe
+```
+
+### 4. Verify 25 Mbps sticky before the probe
+
+```bash
+for i in 1 2 3; do
+  ssh root@192.168.1.13 'wget -q -O- http://127.0.0.1/api/v1/config | grep -oE "\"bitrate\":[0-9]+" | head -1'
+  sleep 2
+done
+```
+
+All three reads must show `"bitrate":25000`. If the hub is running and
+it drops to 8 Mbps, aalink is clamping — either stop the hub or skip the
+run. Never bench a mixed-bitrate window.
+
+### 5. Run the 60 s probe
+
+```bash
+timeout 62 ./tools/rtp_timing_probe --venc-ip 192.168.1.13 --stats \
+  > bench/<label>.tsv 2> bench/<label>.summary
+```
+
+Label format: `<tier-or-baseline>-<hubstate>-120fps-25mbps`, e.g.
+`control-tier-b-hubstopped-120fps-25mbps`.
+
+### 6. Restore vehicle state
+
+```bash
+# If the hub was stopped for the run:
+ssh root@192.168.1.13 'waybeam_hub -c /etc/waybeam_vehicle.conf > /tmp/hub.log 2>&1 &'
+# If you set bitrate_enabled=false for a separate reason:
+ssh root@192.168.1.13 'json_cli -s .venc.bitrate_enabled true -i /etc/waybeam_vehicle.conf'
+```
 
 ## Baseline results
 
@@ -177,5 +258,63 @@ both runs is still pending. To be run before Tier C.
 Open: a hub reload-path fix so `venc.bitrate_enabled` changes take effect
 on SIGHUP without a full restart — unblocks future benches without
 stopping the hub.
+
+### Clean control — Tier A+B code contribution with hub stopped in both runs
+
+Both runs use the bench procedure above with the hub fully stopped and
+`/etc/venc.json` persisted at 25 Mbps. The **only** difference between
+these two runs is the binary — the master binary vs the Tier A+B binary.
+
+```
+control-master-hubstopped:
+  Encode:            mean 7764 us, max  9941 us
+  Send spread:       mean  788 us, P50 654, P95 1384, P99 1684, max 2343 us
+
+control-tier-b-hubstopped:
+  Encode:            mean 7929 us, max 13526 us
+  Send spread:       mean  762 us, P50 644, P95 1404, P99 1728, max 3028 us
+```
+
+Side by side:
+
+| Metric            | Master | Tier A+B | Δ      |
+|-------------------|-------:|---------:|-------:|
+| Encode mean       | 7764 us| 7929 us  | +2%    |
+| Encode max        | 9941 us|13526 us  | +36%\* |
+| Send spread mean  |  788 us|  762 us  | −3%    |
+| Send spread P50   |  654 us|  644 us  | −2%    |
+| Send spread P95   | 1384 us| 1404 us  | +1%    |
+| Send spread P99   | 1684 us| 1728 us  | +3%    |
+| Send spread max   | 2343 us| 3028 us  | +29%\* |
+
+\* The encode-max / send-spread-max deltas are single-frame tail outliers
+and flip sign across 60 s runs — treat as noise, not signal.
+
+**Honest finding.** At the 25 Mbps / 120 fps working point on this
+hardware, Tier A+B's code changes contribute ~0% to the hot-path
+measurements when system noise is controlled. The big numbers from the
+earlier hub-running benches (P99 −38%, max −73%) were the hub-stop
+confound showing up, not the code.
+
+**Why Tier A still might help in production.** Tier A's early
+`MI_VENC_ReleaseStream` is only useful when there is CPU contention
+after the release — verbose prints, HTTP polls, OSD draws that *would*
+have stalled the next encoder cycle. With the hub stopped there is no
+such contention, so there is nothing to win. A hub-running A-vs-master
+bench is the right test for Tier A; that run was never done cleanly
+(the earlier hub-running Tier A bench had the `bitrate_enabled` SIGHUP
+issue and may not have locked 25 Mbps end-to-end).
+
+**Tier B is sub-noise** in both configurations so far. `connected_udp`
+saves a per-packet route lookup, and the sidecar `now_us()` consolidation
+saves ~1 clock_gettime per frame — both real, both too small to measure
+at this bench scale.
+
+**Implication for Tier C.** Send-spread mean sits at ~760 μs floor with
+19 packets/frame. That is dominated by 19 × per-syscall cost of
+`sendmsg()` on Cortex-A7. `sendmmsg()` batching (Tier C) is the only
+change so far that has a clear mechanism to move that floor, cutting
+19 syscalls per frame to 1. Worth building.
+
 
 
