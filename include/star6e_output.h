@@ -46,13 +46,24 @@ typedef struct {
  *
  * iovec layout: 2 iovs per slot. iov[2*slot] -> scratch[slot], length =
  * header_len+payload1_len. iov[2*slot+1] -> external payload2 pointer
- * (msg_iovlen becomes 1 if payload2 is absent). */
+ * (msg_iovlen becomes 1 if payload2 is absent).
+ *
+ * Transport snapshot (socket_handle/dst/dst_len/connected_udp) is
+ * captured at begin_frame() under the transport_gen seqlock so that a
+ * concurrent apply_server() on the HTTP thread cannot retarget queued
+ * packets mid-frame. Enqueue and flush dereference only batch fields,
+ * never the live Star6eOutput transport state. */
 typedef struct {
 	uint8_t scratch[STAR6E_OUTPUT_BATCH_MAX][STAR6E_OUTPUT_BATCH_SLOT_SCRATCH];
 	struct iovec iov[STAR6E_OUTPUT_BATCH_MAX * 2];
 	struct mmsghdr msgs[STAR6E_OUTPUT_BATCH_MAX];
 	size_t count;
 	int active;
+	/* Transport snapshot taken at begin_frame() under transport_gen */
+	int socket_handle;
+	struct sockaddr_storage dst;
+	socklen_t dst_len;
+	int connected_udp;
 } Star6eOutputBatch;
 
 typedef struct {

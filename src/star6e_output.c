@@ -257,44 +257,97 @@ uint32_t star6e_output_drain_send_errors(Star6eOutput *output)
 	return n;
 }
 
-/* Flush the accumulated batch via one sendmmsg() syscall.
- * Returns number of messages successfully sent. Accounts unsent messages
- * against output->send_errors. Always resets batch->count to 0. */
+/* Flush the accumulated batch via sendmmsg().
+ *
+ * On partial success (sendmmsg returns 0 < n < count) or EINTR, retry
+ * from the first unsent message. Only a persistent error (non-EINTR
+ * failure on the next unsent message) ends the loop; the remaining
+ * unsent packets are counted into output->send_errors so the caller can
+ * observe silent drops via star6e_output_drain_send_errors().
+ *
+ * Returns number of messages successfully sent. Always resets
+ * batch->count to 0. */
 static int star6e_batch_flush(Star6eOutput *output)
 {
 	Star6eOutputBatch *b = &output->batch;
-	int sent;
+	size_t sent_total = 0;
+	int fd;
 
 	if (b->count == 0)
 		return 0;
-	if (output->socket_handle < 0) {
+
+	/* Use the batch-snapshotted socket — output->socket_handle can be
+	 * mutated by a concurrent apply_server() on the HTTP thread between
+	 * begin_frame and here. */
+	fd = b->socket_handle;
+	if (fd < 0) {
 		output->send_errors += (uint32_t)b->count;
 		b->count = 0;
 		return 0;
 	}
 
-	sent = sendmmsg(output->socket_handle, b->msgs,
-		(unsigned int)b->count, 0);
-	if (sent < 0) {
-		if (errno != EINTR)
-			output->send_errors += (uint32_t)b->count;
-		b->count = 0;
-		return 0;
+	while (sent_total < b->count) {
+		int n = sendmmsg(fd, b->msgs + sent_total,
+			(unsigned int)(b->count - sent_total), 0);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			/* Permanent error on the next unsent message:
+			 * account remaining as drops and bail. */
+			output->send_errors +=
+				(uint32_t)(b->count - sent_total);
+			break;
+		}
+		if (n == 0) {
+			/* Defensive: sendmmsg returning 0 should not happen,
+			 * but treat as permanent to avoid a spin. */
+			output->send_errors +=
+				(uint32_t)(b->count - sent_total);
+			break;
+		}
+		sent_total += (size_t)n;
 	}
-	if ((size_t)sent < b->count)
-		output->send_errors += (uint32_t)(b->count - (size_t)sent);
+
 	b->count = 0;
-	return sent;
+	return (int)sent_total;
 }
 
 void star6e_output_begin_frame(Star6eOutput *output)
 {
+	Star6eOutputBatch *b;
+	uint32_t gen_before, gen_after;
+
 	if (!output)
 		return;
-	output->batch.count = 0;
-	/* Batch is meaningful only for UDP/UNIX datagram transport, not SHM */
-	output->batch.active = (output->ring == NULL &&
-		output->socket_handle >= 0) ? 1 : 0;
+	b = &output->batch;
+	b->count = 0;
+	b->active = 0;
+
+	/* SHM output is not batched — skip the snapshot entirely. */
+	if (output->ring)
+		return;
+
+	/* Seqlock read of transport state: retry while apply_server() holds
+	 * an odd generation. Matches the writer pattern in
+	 * star6e_output_apply_server. */
+	for (;;) {
+		gen_before = __atomic_load_n(&output->transport_gen,
+			__ATOMIC_ACQUIRE);
+		if (gen_before & 1u) {
+			/* Writer in progress — spin briefly. */
+			continue;
+		}
+		b->socket_handle = output->socket_handle;
+		b->dst = output->dst;
+		b->dst_len = output->dst_len;
+		b->connected_udp = output->connected_udp;
+		gen_after = __atomic_load_n(&output->transport_gen,
+			__ATOMIC_ACQUIRE);
+		if (gen_before == gen_after)
+			break;
+	}
+
+	b->active = (b->socket_handle >= 0) ? 1 : 0;
 }
 
 int star6e_output_end_frame(Star6eOutput *output)
@@ -353,12 +406,15 @@ static int star6e_batch_enqueue(Star6eOutput *output,
 	}
 
 	memset(hdr, 0, sizeof(*hdr));
-	if (output->connected_udp) {
+	/* Use the transport snapshot taken at begin_frame(), not the live
+	 * output fields — those may be mutated by apply_server() on the
+	 * HTTP thread. */
+	if (b->connected_udp) {
 		hdr->msg_name = NULL;
 		hdr->msg_namelen = 0;
 	} else {
-		hdr->msg_name = (void *)&output->dst;
-		hdr->msg_namelen = output->dst_len;
+		hdr->msg_name = (void *)&b->dst;
+		hdr->msg_namelen = b->dst_len;
 	}
 	hdr->msg_iov = iov;
 	hdr->msg_iovlen = (payload2 && payload2_len > 0) ? 2 : 1;
