@@ -1395,6 +1395,15 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 				PKTZR_VERBOSE_ACTIVE() ? &frame_pktzr : NULL);
 		}
 
+		/* Release the encoder stream immediately after the last
+		 * consumer of stream payload (maruko_video_send_frame) so
+		 * the sidecar emit and verbose printf below don't hold the
+		 * VENC output slot. stream.count is captured locally for
+		 * the verbose line; sidecar uses rtp_state only. */
+		unsigned int pack_count = stream.count;
+		(void)maruko_mi_venc_release_stream(ctx->venc_device,
+			ctx->venc_channel, &stream);
+
 		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
 			seq_before,
 			(uint16_t)(rtp_state.seq - seq_before),
@@ -1422,7 +1431,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 					" | %u packs\n",
 					sample.uptime_s, sample.fps,
 					sample.kbps, frame_counter,
-					sample.avg_bytes, stream.count);
+					sample.avg_bytes, pack_count);
 				if (PKTZR_VERBOSE_ACTIVE()) {
 					unsigned int avg_rtp_payload =
 						pktzr_interval.rtp_packets > 0
@@ -1442,9 +1451,6 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 				fflush(stdout);
 			}
 		}
-
-		(void)maruko_mi_venc_release_stream(ctx->venc_device,
-			ctx->venc_channel, &stream);
 	}
 	result = 0;
 

@@ -31,9 +31,16 @@ static int fill_unix_destination(const char *name,
 	return 0;
 }
 
+/* Size the kernel send buffer for one IDR burst at stress-level bitrates
+ * (25+ Mbps at 120 fps). Embedded defaults can be well under 64 KiB and
+ * would cause head-of-line blocking on IDR frames. Raising here is
+ * advisory — setsockopt failure is non-fatal. */
+#define OUTPUT_SOCKET_SNDBUF_BYTES (512 * 1024)
+
 static int open_socket(int *socket_handle, VencOutputUriType type)
 {
 	int domain;
+	int sndbuf;
 
 	if (!socket_handle)
 		return -1;
@@ -55,6 +62,13 @@ static int open_socket(int *socket_handle, VencOutputUriType type)
 		fprintf(stderr, "[output_socket] socket() failed: %s\n",
 			strerror(errno));
 		return -1;
+	}
+
+	sndbuf = OUTPUT_SOCKET_SNDBUF_BYTES;
+	if (setsockopt(*socket_handle, SOL_SOCKET, SO_SNDBUF,
+		&sndbuf, sizeof(sndbuf)) != 0) {
+		fprintf(stderr, "[output_socket] SO_SNDBUF(%d) failed: %s "
+			"(keeping kernel default)\n", sndbuf, strerror(errno));
 	}
 
 	return 0;
