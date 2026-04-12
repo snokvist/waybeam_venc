@@ -473,6 +473,70 @@ the send path ignored it; Maruko was never plumbed at all), combined
 with the measured user-CPU reduction and tail latency gains, is what
 makes the PR worth shipping independent of the mean-latency wash.
 
+## Post-review-fix final validation
+
+After Codex adversarial review (session
+`019d82d8-0ba8-7a72-a80e-f9f6a55f152d`, verdict needs-attention) we
+landed three correctness fixes on the batch path:
+
+1. Retry unsent batch tail on partial `sendmmsg` / `EINTR`, charge
+   permanent drops to `send_errors`.
+2. Snapshot transport state (`socket_handle`, `dst`, `dst_len`,
+   `connected_udp`) into the batch at `begin_frame` under the
+   existing `transport_gen` seqlock, so live `apply_server` on the
+   HTTP thread cannot retarget in-flight queued packets.
+3. Maruko compact mode honors `connected_udp` by switching to
+   `send()` with no destination when set.
+
+Re-ran the same matched protocol (hub stopped, 25 Mbps persisted,
+same 60 s probe + 30 s /proc KPIs). The review fixes exercise error
+paths and cross-thread races that don't fire under a healthy bench,
+so the expectation is parity with Tier A+B+C, not improvement.
+
+### Send-spread (60 s probe)
+
+| Metric            | Master | Tier A+B+C | Review-fix | Notes |
+|-------------------|-------:|-----------:|-----------:|-------|
+| Encode mean       | 7886 us|   8014 us  |   7929 us  | noise |
+| Encode max        |10183 us|  10901 us  |  19577 us  | single-frame outlier on review-fix run |
+| Send spread mean  |  791 us|    807 us  |    792 us  | wash — review-fix between master and tier-abc |
+| Send spread P50   |  683 us|    778 us  |    723 us  | noise |
+| Send spread P95   | 1419 us|   1307 us  |   1379 us  | noise |
+| Send spread P99   | 1730 us|   1663 us  |   1744 us  | noise |
+| Send spread max   | 2277 us|   2069 us  |   2159 us  | noise |
+
+### CPU, context switches, memory (30 s sampling)
+
+| KPI                         | Master | Tier A+B+C | Review-fix |
+|-----------------------------|-------:|-----------:|-----------:|
+| CPU %                       | 26.20 %|  24.87 %   |  **25.33 %** |
+| User jiffies (30 s)         |     79 |       65   |      73    |
+| Sys jiffies (30 s)          |    707 |      681   |     687    |
+| Voluntary ctxt-sw / s       |    825 |      830   |     831    |
+| Non-voluntary ctxt-sw / s   |    214 |      210   |     199    |
+| VmRSS (kB)                  |   2652 |     2756   |    2756    |
+| Threads                     |      5 |        5   |       5    |
+
+### Interpretation
+
+**No regression from the review fixes.** Every KPI lands between
+master and Tier A+B+C or within run-to-run noise of one of them. The
+added code paths — retry loop (dead code in the healthy case), the
+one-atomic-load seqlock read at `begin_frame`, the extra branch in
+`maruko_send_udp_chunks` — have no measurable hot-path cost.
+
+The `19577 us` encode max is a single-frame outlier unrelated to
+these changes (encode path is untouched); the Tier A+B+C run showed
+`10901 us` for the same metric — both are tail samples and not part
+of the signal.
+
+**Ship verdict**: correctness fixes preserve the Tier A+B+C
+performance profile while closing the three issues Codex flagged.
+No send errors, no decode issues, venc stable through the full run,
+`VmRSS` unchanged from Tier A+B+C (the snapshot fields are a few
+dozen bytes added to the existing batch struct).
+
+
 
 
 
