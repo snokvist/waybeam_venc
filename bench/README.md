@@ -124,3 +124,58 @@ SO_SNDBUF raise to 512 KiB had no visible steady-state effect at 25 Mbps;
 the IDR-burst failure mode it targets is a rare event that does not appear
 in a 60 s bench.
 
+### Tier B — connected-UDP fast path + sidecar now_us consolidation
+
+Same 25 Mbps / 120 fps working point.
+
+**Environment caveat:** `SIGHUP` to waybeam_hub does not reload
+`venc.bitrate_enabled` — the flag is read once at hub startup. To keep
+the bench locked at 25 Mbps I had to fully **stop** the hub for the
+run, not just disable aalink rate-control via config. This also removes
+hub-generated scheduler jitter (periodic HTTP polls, mDNS beacons,
+metrics scraping), which confounds the tail numbers.
+
+Probe summary:
+
+```
+Frames:            7398 (119.3 fps actual, 62 s)
+RTP packets:       145157 (19.6 pkts/frame avg)
+RTP gaps:          0
+
+Encode:            mean 8553 us, max 11827 us
+Send spread:       mean  769 us, P50 656, P95 1449, P99 1954, max 2367 us
+
+Sidecar overhead:  7.5 KB/s rx (1 MSG_FRAME/frame + 0.7 sync pps)
+Clock sync RTT:    best 1230 us
+```
+
+Delta vs Tier A (hub-running) and baseline (hub-running):
+
+| Metric            | Baseline | Tier A | Tier B | Δ vs baseline |
+|-------------------|---------:|-------:|-------:|--------------:|
+| Encode mean       |  8931 us | 9653 us| 8553 us|        −4%    |
+| Encode max        | 15660 us |16380 us|11827 us|       −24%    |
+| Send spread mean  |  1123 us |  952 us|  769 us|       −32%    |
+| Send spread P50   |   996 us |  717 us|  656 us|       −34%    |
+| Send spread P95   |  2108 us | 1912 us| 1449 us|       −31%    |
+| Send spread P99   |  4829 us | 3017 us| 1954 us|     **−60%**  |
+| Send spread max   |  8775 us | 8581 us| 2367 us|     **−73%**  |
+
+**Disentangling the numbers.** Encode duration dropped by 24% at max
+even though nothing in Tier B touches the encoder. That 24% is purely
+the hub-stop confound — hub background work was perturbing the encoder
+thread's scheduling. The same confound lifts some portion of the P99/max
+send-spread improvement; Tier B's code changes are responsible for the
+rest.
+
+Code-driven gains (from Tier A, hub running, identical setup) still stand:
+mean −15%, P50 −28%, P99 −38% of Tier A code's own improvement over
+baseline. Tier B's additional connected-UDP and sidecar consolidation
+compound on top, but a clean A-vs-B comparison with the hub stopped in
+both runs is still pending. To be run before Tier C.
+
+Open: a hub reload-path fix so `venc.bitrate_enabled` changes take effect
+on SIGHUP without a full restart — unblocks future benches without
+stopping the hub.
+
+

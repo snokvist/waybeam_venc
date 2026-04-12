@@ -129,8 +129,8 @@ static int send_audio_rtp(const uint8_t *header,
 		return -1;
 
 	return output_socket_send_parts(target->socket_handle, &target->dst,
-		target->dst_len, header,
-		header_len, payload1, payload1_len, payload2, payload2_len);
+		target->dst_len, 0 /* audio socket never connect()ed */,
+		header, header_len, payload1, payload1_len, payload2, payload2_len);
 }
 
 static void star6e_output_setup_reset(Star6eOutputSetup *setup)
@@ -282,7 +282,8 @@ int star6e_output_send_rtp_parts(Star6eOutput *output,
 	}
 
 	if (output_socket_send_parts(output->socket_handle, &output->dst,
-	    output->dst_len, header, header_len, payload1, payload1_len,
+	    output->dst_len, output->connected_udp,
+	    header, header_len, payload1, payload1_len,
 	    payload2, payload2_len) != 0) {
 		output->send_errors++;
 		return -1;

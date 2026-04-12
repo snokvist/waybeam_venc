@@ -182,6 +182,7 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 
 int output_socket_send_parts(int socket_handle,
 	const struct sockaddr_storage *dst, socklen_t dst_len,
+	int connected_udp,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len)
@@ -191,10 +192,12 @@ int output_socket_send_parts(int socket_handle,
 	int iovcnt;
 	ssize_t sent;
 
-	if (socket_handle < 0 || !dst || dst_len == 0 || !header || !payload1 ||
+	if (socket_handle < 0 || !header || !payload1 ||
 	    header_len == 0 || payload1_len == 0) {
 		return -1;
 	}
+	if (!connected_udp && (!dst || dst_len == 0))
+		return -1;
 
 	vec[0].iov_base = (void *)header;
 	vec[0].iov_len = header_len;
@@ -208,8 +211,13 @@ int output_socket_send_parts(int socket_handle,
 	}
 
 	memset(&msg, 0, sizeof(msg));
-	msg.msg_name = (void *)dst;
-	msg.msg_namelen = dst_len;
+	if (connected_udp) {
+		msg.msg_name = NULL;
+		msg.msg_namelen = 0;
+	} else {
+		msg.msg_name = (void *)dst;
+		msg.msg_namelen = dst_len;
+	}
 	msg.msg_iov = vec;
 	msg.msg_iovlen = iovcnt;
 	sent = sendmsg(socket_handle, &msg, 0);

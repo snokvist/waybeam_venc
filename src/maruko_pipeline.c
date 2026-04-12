@@ -1158,7 +1158,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		    ctx->cfg.rtp_payload_size) != 0)
 			return -1;
 	} else {
-		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri) != 0)
+		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,
+		    ctx->cfg.connected_udp) != 0)
 			return -1;
 	}
 
