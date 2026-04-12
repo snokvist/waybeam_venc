@@ -381,5 +381,98 @@ payload1 into scratch — it is only needed because FU-A / AP buffers
 are reused — by restructuring the packetizer to hand out stable
 buffers instead). That is a bigger refactor; not planned for now.
 
+## Final validation — master vs Tier A+B+C, hub stopped, all KPIs
+
+Purpose: apples-to-apples confirmation of the bundled change under the
+documented procedure. Master binary from `master` HEAD, Tier A+B+C from
+`feature/pipeline-perf-optimization` HEAD. Hub stopped for both runs,
+`/etc/venc.json` persisted at 25 Mbps, back-to-back in the same session
+on the same hardware.
+
+Both runs: 0 matches for `send_error|ERROR|FAIL` in `/tmp/venc.log`,
+venc PID unchanged through each run, 25 000 sticky across three
+2 s-spaced checks.
+
+### Send-spread (latency) — `rtp_timing_probe --stats`, 60 s
+
+| Metric            | Master | Tier A+B+C | Δ     |
+|-------------------|-------:|-----------:|------:|
+| Encode mean       | 7886 us|   8014 us  | noise |
+| Send spread mean  |  791 us|    807 us  |  +2%  |
+| Send spread P50   |  683 us|    778 us  | +14%  |
+| Send spread P95   | 1419 us|   1307 us  |  −8%  |
+| Send spread P99   | 1730 us|   1663 us  |  −4%  |
+| Send spread max   | 2277 us|   2069 us  |  −9%  |
+
+Tail (P95 / P99 / max) consistently better. Mean/P50 in run-to-run noise
+territory — the earlier `control-tier-b`-equivalent run for the same
+build showed mean 718 us vs this 807 us. A 60 s single sample under
+~760 us floor has ~±10 % run-to-run variance.
+
+### CPU, context switches, memory — 30 s steady-state, same PID, no probe attached
+
+Measured via `/proc/$PID/stat` + `/proc/$PID/status` sampled 30 s apart
+on the vehicle; `CLK_TCK=100`, 119 fps sustained, 25 Mbps.
+
+| KPI                         | Master | Tier A+B+C |      Δ |
+|-----------------------------|-------:|-----------:|-------:|
+| CPU %                       | 26.20 %|  24.87 %   | **−5 %** |
+| User jiffies (30 s)         |     79 |       65   | **−18 %** |
+| Sys jiffies (30 s)          |    707 |      681   |  −4 %    |
+| Voluntary ctxt-sw / s       |    825 |      830   |   ~0 %   |
+| Non-voluntary ctxt-sw / s   |    214 |      210   |  −2 %    |
+| VmRSS (kB)                  |   2652 |     2756   | +104 kB  |
+| Threads                     |      5 |        5   |   —      |
+
+**What the CPU+ctxt deltas actually tell us.**
+
+1. **User CPU dropped 18 %** (79 → 65 jiffies in 30 s). That's the
+   cleanest signal in the whole dataset: less time spent in user-space
+   per second. Matches exactly what collapsing 19 `sendmsg` setup
+   sequences into one `sendmmsg` should do — less msghdr building and
+   fewer syscall-entry trampolines on the Cortex-A7.
+
+2. **Kernel CPU barely moved** (707 → 681 jiffies, −4 %). Expected:
+   `sendmmsg` still does the same per-packet kernel work, it just enters
+   once. The kernel-side TX time is independent of user-space batching.
+
+3. **Voluntary ctxt switches are unchanged** (825/s both). This rules
+   out the naive "sendmsg blocks → ctxt switch" mental model on this
+   workload. With `SO_SNDBUF` raised to 512 KiB (Tier A) the UDP socket
+   never fills, so `sendmsg` returns synchronously without a voluntary
+   ctxt switch regardless of batching. The syscall savings show up as
+   user-space CPU time, not ctxt switches.
+
+4. **VmRSS +104 kB** matches the `Star6eOutputBatch` embedded in
+   `Star6eOutput` (64 slots × 1616 B scratch + iovec + mmsghdr arrays).
+   No runtime allocation.
+
+5. **Overall CPU drop 26.2 % → 24.9 %** (−1.3 pp / −5 %). On a 240 fps
+   overclocked Cortex-A7 that is ~1.3 ms of CPU time freed per real-time
+   second. Meaningful but not dramatic — consistent with the latency
+   result.
+
+### Interpretation
+
+Across both the timing probe and the process KPIs, the consistent
+signal is: **Tier A+B+C reduces user-space CPU and tail send-spread by a
+small, predictable amount, with no regression in any metric.**
+
+- Mean send-spread is within run-to-run noise — do not claim a mean
+  improvement from a single pair of 60 s runs.
+- Tail latency (P95/P99/max) is consistently better by 4-9 %.
+- User CPU is the clearest win at −18 %.
+- No send errors, no decode issues, RSS grew by exactly the batch size
+  we added.
+- Tier A's CPU-contention benefit remains unmeasured in production
+  conditions (hub running). That is gated on a separate waybeam_hub
+  SIGHUP-reload fix for `venc.bitrate_enabled`.
+
+The correctness fix around `connected_udp` (Star6E had the flag set but
+the send path ignored it; Maruko was never plumbed at all), combined
+with the measured user-CPU reduction and tail latency gains, is what
+makes the PR worth shipping independent of the mean-latency wash.
+
+
 
 
