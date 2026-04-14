@@ -1,5 +1,32 @@
 # History
 
+## [0.7.2] - 2026-04-14
+
+- **Maruko CPU reduction — phase 1 (source-only):** Three safe hot-path
+  and init-path trims ahead of the riskier Userspace3A work tracked in
+  `documentation/MARUKO_CPU_REDUCTION_PLAN.md`.
+- **Dead IQ bin reload removed (`maruko_pipeline.c`):** The disabled
+  `MI_ISP_IQ_ApiCmdLoadBinFile` block in `maruko_load_isp_bin` still did
+  `fopen` + `malloc` + `fread` + `free` on every ISP bin load / SIGHUP
+  reinit even though the actual SDK call had been commented out. Removed
+  the entire block (~30 lines of dead code).
+- **AWB mode-change coalescing (`maruko_controls.c`):** `maruko_apply_awb_mode`
+  now caches the last-applied mode + color temperature and short-circuits
+  when the incoming values are unchanged. Avoids the
+  `CUS3A_Enable(1,0,1)` → `AWB_SetAttr` → `CUS3A_Enable(1,1,1)` thrash
+  when WebUI/HTTP clients re-post the same AWB settings.
+- **Per-frame bookkeeping trim (`maruko_pipeline.c`):** Cold-boot FPS kick
+  is now latched with a `fps_kick_done` flag (was a `frame_counter == fps`
+  compare every frame forever). Per-frame sidecar work — `rtp_sidecar_poll`,
+  `monotonic_us()`, `scene_fill_sidecar`, and `rtp_sidecar_send_frame`
+  argument setup — is gated on `sidecar.fd >= 0` so non-RTP stream modes
+  skip it entirely instead of relying on each callee's early-return.
+- **New HW verification plan:** `documentation/MARUKO_CPU_REDUCTION_PLAN.md`
+  captures the remaining two items — conditional `MI_ISP_EnableUserspace3A`
+  (phase 2) and a Maruko supervisory AE thread ported from
+  `star6e_cus3a.c` (phase 3) — with explicit test matrices for the
+  ssc378qe + imx415 bench at 30/60/90/120 fps.
+
 ## [0.7.1] - 2026-04-12
 
 - **Phase 5 — Maruko HEVC RTP parity (PR #32):** Extracted the HEVC RTP

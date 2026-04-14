@@ -657,6 +657,18 @@ static void cus3a_awb_set(void *handle, int enable)
 
 static int maruko_apply_awb_mode(int mode, uint32_t ct)
 {
+	/* Cache last-applied state so repeated calls with the same
+	 * values skip the CUS3A-AWB disable/enable thrash.  Majestic
+	 * WebUI and HTTP clients can hammer this endpoint; each call
+	 * otherwise re-enters CUS3A_Enable twice. */
+	static int cached_mode = -1;
+	static uint32_t cached_ct = 0;
+	static int cached_valid = 0;
+
+	if (cached_valid && mode == cached_mode &&
+	    (mode == 0 || ct == cached_ct))
+		return 0;
+
 	/* i6c ISP functions take (dev, channel, data*) */
 	typedef MI_S32 (*fn_get_t)(uint32_t, uint32_t, MarukoAwbAttr *);
 	typedef MI_S32 (*fn_set_t)(uint32_t, uint32_t, MarukoAwbAttr *);
@@ -737,6 +749,12 @@ static int maruko_apply_awb_mode(int mode, uint32_t ct)
 
 	/* Re-enable CUS3A AWB */
 	cus3a_awb_set(handle, 1);
+
+	if (ret == 0) {
+		cached_mode = mode;
+		cached_ct = ct;
+		cached_valid = 1;
+	}
 
 	dlclose(handle);
 	return ret;

@@ -186,45 +186,7 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 	hooks.disable_userspace3a = maruko_disable_userspace3a;
 	hooks.load_bin = maruko_call_load_bin;
 	hooks.post_load = maruko_post_load_cus3a;
-	int ret = isp_runtime_load_bin_file(isp_bin_path, &hooks);
-
-	/* Also load via MI_ISP_IQ_ApiCmdLoadBinFile to initialize the
-	 * IQ parameter subsystem. Without this, MI_ISP_IQ_Set* calls
-	 * are accepted but have no effect on the image. The IQ variant
-	 * takes raw bin data (not a file path).
-	 * NOTE: this second load may reset AE parameters from the API
-	 * bin — testing if skipping it fixes dark image issue. */
-	if (ret == 0) {
-		FILE *f = fopen(isp_bin_path, "rb");
-		if (f) {
-			fseek(f, 0, SEEK_END);
-			long sz = ftell(f);
-			fseek(f, 0, SEEK_SET);
-			uint8_t *buf = malloc((size_t)sz);
-			if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz) {
-				typedef int (*iq_load_fn_t)(uint32_t, uint32_t,
-					uint8_t *, uint32_t);
-				iq_load_fn_t fn = (iq_load_fn_t)dlsym(
-					RTLD_DEFAULT,
-					"MI_ISP_IQ_ApiCmdLoadBinFile");
-				if (fn) {
-					/* DISABLED: IQ bin reload may reset
-					 * AE params from API bin load above.
-					 * Testing if this fixes dark image. */
-					printf("> [maruko] IQ bin load: "
-						"SKIPPED (testing AE fix)\n");
-					(void)fn;
-				} else {
-					printf("> [maruko] IQ bin load: "
-						"symbol not found (skipped)\n");
-				}
-			}
-			free(buf);
-			fclose(f);
-		}
-	}
-
-	return ret;
+	return isp_runtime_load_bin_file(isp_bin_path, &hooks);
 }
 
 /* maruko_load_symbol, i6c_isp_load/unload, i6c_scl_load/unload moved to
@@ -1275,6 +1237,7 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 
 	unsigned int frame_counter = 0;
 	unsigned int idle_counter = 0;
+	int fps_kick_done = 0;
 	/* Cached packet buffer — avoids malloc/free per frame at 90fps. */
 	i6c_venc_pack *cached_packs = NULL;
 	uint32_t cached_packs_cap = 0;
@@ -1362,30 +1325,48 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		 * timing on first init, locking FPS below target (e.g.
 		 * 74fps instead of 89fps).  Re-kick MI_SNR_SetFps after
 		 * ~1 second of frames to force correct sensor timing.
-		 * Same fix as Star6E CUS3A cold-boot FPS lock. */
-		if (frame_counter == (unsigned int)ctx->sensor.fps) {
+		 * Same fix as Star6E CUS3A cold-boot FPS lock.
+		 * Latched so the per-frame check becomes a single load
+		 * once the kick has fired. */
+		if (!fps_kick_done &&
+		    frame_counter >= (unsigned int)ctx->sensor.fps) {
 			MI_SNR_SetFps(ctx->sensor.pad_id, ctx->sensor.fps);
 			printf("> [maruko] delayed FPS kick: pad %d fps %u "
 				"(cold-boot fix at frame %u)\n",
 				ctx->sensor.pad_id, ctx->sensor.fps,
 				frame_counter);
+			fps_kick_done = 1;
 		}
 
-		rtp_sidecar_poll(&sidecar);
+		/* Sidecar work — poll, timestamp, scene metadata, send —
+		 * is only meaningful when the sidecar socket is live.
+		 * Skipping it when disabled avoids one recvfrom syscall,
+		 * one monotonic_us() read, a scene_fill_sidecar copy, and
+		 * the sidecar send argument setup per frame. */
+		int sidecar_active = (sidecar.fd >= 0);
+		if (sidecar_active)
+			rtp_sidecar_poll(&sidecar);
 
-		uint32_t frame_rtp_ts = rtp_state.timestamp;
-		uint16_t seq_before = rtp_state.seq;
-		uint64_t ready_us = monotonic_us();
-		uint64_t capture_us = (stream.count > 0 && stream.packet)
-			? stream.packet[0].timestamp : 0;
+		uint32_t frame_rtp_ts = 0;
+		uint16_t seq_before = 0;
+		uint64_t ready_us = 0;
+		uint64_t capture_us = 0;
+		RtpSidecarEncInfo enc_info = {0};
 
 		int codec = (ctx->cfg.rc_codec == PT_H265) ? 1 : 0;
 		uint32_t frame_size = maruko_scene_frame_size(&stream);
 		uint8_t is_idr = maruko_scene_is_idr(&stream, codec);
 		scene_update(&ctx->scene, frame_size, is_idr,
 			maruko_scene_request_idr, ctx);
-		RtpSidecarEncInfo enc_info = {0};
-		scene_fill_sidecar(&ctx->scene, &enc_info);
+
+		if (sidecar_active) {
+			frame_rtp_ts = rtp_state.timestamp;
+			seq_before = rtp_state.seq;
+			ready_us = monotonic_us();
+			capture_us = (stream.count > 0 && stream.packet)
+				? stream.packet[0].timestamp : 0;
+			scene_fill_sidecar(&ctx->scene, &enc_info);
+		}
 
 		size_t total_bytes = 0;
 		HevcRtpStats frame_pktzr = {0};
@@ -1405,10 +1386,12 @@ int maruko_pipeline_run(MarukoBackendContext *ctx)
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			ctx->venc_channel, &stream);
 
-		rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc, frame_rtp_ts,
-			seq_before,
-			(uint16_t)(rtp_state.seq - seq_before),
-			capture_us, ready_us, &enc_info);
+		if (sidecar_active) {
+			rtp_sidecar_send_frame(&sidecar, rtp_state.ssrc,
+				frame_rtp_ts, seq_before,
+				(uint16_t)(rtp_state.seq - seq_before),
+				capture_us, ready_us, &enc_info);
+		}
 
 		if (ctx->cfg.verbose) {
 			StreamMetricsSample sample;
