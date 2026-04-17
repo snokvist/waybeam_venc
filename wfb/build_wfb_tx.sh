@@ -12,14 +12,18 @@
 #   ./build_wfb_tx.sh --deploy   # build + scp to device
 #
 # Output (all in build/):
-#   wfb_tx             - patched wfb_tx with -H flag (static, 540 KB)
-#   wfb_keygen         - key generator (static, 430 KB)
-#   shm_ring_stats     - ring status checker (dynamic, 10 KB)
-#   shm_consumer_test  - ring throughput tester (dynamic, 10 KB)
+#   wfb_tx             - patched wfb_tx with -H (SHM), -b, -r, -x flags (cross, static)
+#   wfb_tx_cmd         - runtime control client (set_fec, set_radio, set_mbit, get_*) (cross, static)
+#   wfb_keygen         - key generator (cross, static)
+#   shm_ring_stats     - ring status checker (cross, dynamic)
+#   shm_consumer_test  - ring throughput tester (cross, dynamic)
+#   wfb_rx_native      - x86_64 native build for the ground-station laptop;
+#                        the cross pcap stub only covers wfb_tx's inject path
 #
 # Requirements:
 #   - star6e toolchain at ../toolchain/toolchain.sigmastar-infinity6e/
-#   - git, curl, autotools (first run only)
+#   - Host x86_64: g++, gcc, libsodium-dev, libpcap-dev (for wfb_rx_native)
+#   - git, curl, autotools (first run only, for libsodium cross-build)
 
 set -euo pipefail
 
@@ -265,6 +269,9 @@ else
     echo "To deploy:  ./build_wfb_tx.sh --deploy"
     echo "  or:       DEPLOY_HOST=192.168.1.10 ./build_wfb_tx.sh --deploy"
     echo ""
-    echo "Manual deploy:"
-    echo "  scp -O $BUILD_DIR/{wfb_tx,wfb_keygen,shm_ring_stats,shm_consumer_test} root@$DEPLOY_HOST:$DEPLOY_DIR/"
+    echo "Manual deploy (vehicle):"
+    echo "  scp -O $BUILD_DIR/{wfb_tx,wfb_tx_cmd,wfb_keygen,shm_ring_stats,shm_consumer_test} root@$DEPLOY_HOST:$DEPLOY_DIR/"
+    echo ""
+    echo "Manual deploy (ground-station x86_64 native wfb_rx):"
+    echo "  cp $BUILD_DIR/wfb_rx_native /wherever/you/run/wfb_rx"
 fi
