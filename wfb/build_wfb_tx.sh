@@ -182,6 +182,30 @@ $CROSS_CC -o wfb_tx_cmd src/tx_cmd.o $WFB_LDFLAGS
 $CROSS_STRIP wfb_tx_cmd
 cp wfb_tx_cmd "$BUILD_DIR/wfb_tx_cmd"
 
+# ── Native wfb_rx (x86_64) for the ground station laptop ────────────
+# wfb_rx needs real libpcap (not the stub used by the cross build of
+# wfb_tx) so we compile it natively with the host toolchain and system
+# libpcap/libsodium.  Drop it onto the ground-station laptop via:
+#   cp build/wfb_rx_native /home/snokvist/dev/wfb-ng/wfb_rx
+# (or wherever you run wfb_rx from).
+echo "  Building wfb_rx (native x86_64)..."
+NATIVE_BUILD="$BUILD_DIR/native"
+mkdir -p "$NATIVE_BUILD"
+NATIVE_CFLAGS="-Wall -O2 -fno-strict-aliasing -I$VENC_ROOT/include"
+NATIVE_CFLAGS="$NATIVE_CFLAGS -DZFEX_UNROLL_ADDMUL_SIMD=8 -DZFEX_INLINE_ADDMUL -DZFEX_INLINE_ADDMUL_SIMD"
+NATIVE_CFLAGS="$NATIVE_CFLAGS -DWFB_VERSION='\"shm-patched-native\"'"
+g++ $NATIVE_CFLAGS -std=gnu++11 -c -o "$NATIVE_BUILD/rx_native.o" src/rx.cpp
+gcc $NATIVE_CFLAGS -std=gnu99 -c -o "$NATIVE_BUILD/zfex_native.o" src/zfex.c
+g++ $NATIVE_CFLAGS -std=gnu++11 -c -o "$NATIVE_BUILD/wfb_native.o" src/wifibroadcast.cpp
+gcc $NATIVE_CFLAGS -std=gnu99 -c -o "$NATIVE_BUILD/radiotap_native.o" src/radiotap.c
+g++ -o "$BUILD_DIR/wfb_rx_native" \
+    "$NATIVE_BUILD/rx_native.o" \
+    "$NATIVE_BUILD/zfex_native.o" \
+    "$NATIVE_BUILD/wfb_native.o" \
+    "$NATIVE_BUILD/radiotap_native.o" \
+    -lrt -lsodium -lpcap
+strip "$BUILD_DIR/wfb_rx_native"
+
 # ── Step 6: Build SHM diagnostic tools ───────────────────────────────
 
 echo "=== Building SHM tools ==="
@@ -209,6 +233,7 @@ echo ""
 echo "=== Build complete ==="
 echo ""
 ls -lh "$BUILD_DIR/wfb_tx" "$BUILD_DIR/wfb_keygen" "$BUILD_DIR/wfb_tx_cmd" \
+       "$BUILD_DIR/wfb_rx_native" \
        "$BUILD_DIR/shm_ring_stats" "$BUILD_DIR/shm_consumer_test"
 echo ""
 

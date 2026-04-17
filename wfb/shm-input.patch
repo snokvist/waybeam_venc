@@ -1,5 +1,175 @@
+diff --git a/src/rx.cpp b/src/rx.cpp
+index 1603b6e..d6fc33c 100644
+--- a/src/rx.cpp
++++ b/src/rx.cpp
+@@ -592,6 +592,8 @@ void Aggregator::process_packet(const uint8_t *buf, size_t size, uint8_t wlan_id
+     switch(buf[0])
+     {
+     case WFB_PACKET_DATA:
++        // Mode mismatch: TX is encrypted but we're plaintext.  Silent drop.
++        if (!encrypt_data) return;
+         if(size < sizeof(wblock_hdr_t) + crypto_aead_chacha20poly1305_ABYTES + sizeof(wpacket_hdr_t))
+         {
+             WFB_ERR("Short packet (fec header)\n");
+@@ -600,6 +602,18 @@ void Aggregator::process_packet(const uint8_t *buf, size_t size, uint8_t wlan_id
+         }
+         break;
+ 
++    case WFB_PACKET_DATA_PLAIN:
++        // Mode mismatch: TX is plaintext but we require AEAD.  Silent drop.
++        if (encrypt_data) return;
++        // Plaintext minimum: wblock_hdr_t + wpacket_hdr_t (no AEAD tag).
++        if(size < sizeof(wblock_hdr_t) + sizeof(wpacket_hdr_t))
++        {
++            WFB_ERR("Short packet (fec header, plain)\n");
++            count_p_bad += 1;
++            return;
++        }
++        break;
++
+     case WFB_PACKET_SESSION:
+         new_session_data = (wsession_data_t*)session_tmp;
+ 
+@@ -714,16 +728,31 @@ void Aggregator::process_packet(const uint8_t *buf, size_t size, uint8_t wlan_id
+     unsigned long long decrypted_len;
+     wblock_hdr_t *block_hdr = (wblock_hdr_t*)buf;
+ 
+-    if (crypto_aead_chacha20poly1305_decrypt(decrypted, &decrypted_len,
+-                                             NULL,
+-                                             buf + sizeof(wblock_hdr_t), size - sizeof(wblock_hdr_t),
+-                                             buf,
+-                                             sizeof(wblock_hdr_t),
+-                                             (uint8_t*)(&(block_hdr->data_nonce)), session_key) != 0)
++    if (encrypt_data)
+     {
+-        WFB_ERR("Unable to decrypt packet #0x%" PRIx64 "\n", be64toh(block_hdr->data_nonce));
+-        count_p_dec_err += 1;
+-        return;
++        if (crypto_aead_chacha20poly1305_decrypt(decrypted, &decrypted_len,
++                                                 NULL,
++                                                 buf + sizeof(wblock_hdr_t), size - sizeof(wblock_hdr_t),
++                                                 buf,
++                                                 sizeof(wblock_hdr_t),
++                                                 (uint8_t*)(&(block_hdr->data_nonce)), session_key) != 0)
++        {
++            WFB_ERR("Unable to decrypt packet #0x%" PRIx64 "\n", be64toh(block_hdr->data_nonce));
++            count_p_dec_err += 1;
++            return;
++        }
++    }
++    else
++    {
++        // Plaintext: payload follows wblock_hdr_t directly.  No tag to verify.
++        decrypted_len = size - sizeof(wblock_hdr_t);
++        if (decrypted_len > MAX_FEC_PAYLOAD)
++        {
++            WFB_ERR("Oversized plaintext fragment #0x%" PRIx64 "\n", be64toh(block_hdr->data_nonce));
++            count_p_bad += 1;
++            return;
++        }
++        memcpy(decrypted, buf + sizeof(wblock_hdr_t), decrypted_len);
+     }
+ 
+     count_p_data += 1;
+@@ -745,6 +774,18 @@ void Aggregator::process_packet(const uint8_t *buf, size_t size, uint8_t wlan_id
+         return;
+     }
+ 
++    // Data arriving before the first session packet: fec_n is still 0 and
++    // we have no FEC params to dispatch against.  Silent drop (not a real
++    // protocol error, just startup race).  In encrypt mode the decrypt
++    // above already rejected these; in plaintext mode we need this guard
++    // explicitly or every pre-session fragment hits the fragment_idx
++    // >= fec_n check below with a misleading error.
++    if (fec_n == 0)
++    {
++        count_p_bad += 1;
++        return;
++    }
++
+     if (fragment_idx >= fec_n)
+     {
+         WFB_ERR("Invalid fragment_idx: %d\n", fragment_idx);
+@@ -1147,8 +1188,9 @@ int main(int argc, char* const *argv)
+ 
+     string keypair = "rx.key";
+     string unix_socket = "";
++    int encrypt_data = 1;  // -x disables AEAD (must match TX's -x setting)
+ 
+-    while ((opt = getopt(argc, argv, "K:fa:c:u:U:p:l:i:e:R:s:")) != -1) {
++    while ((opt = getopt(argc, argv, "K:fa:c:u:U:p:l:i:e:R:s:x")) != -1) {
+         switch (opt) {
+         case 'K':
+             keypair = optarg;
+@@ -1187,6 +1229,12 @@ int main(int argc, char* const *argv)
+         case 'e':
+             epoch = atoll(optarg);
+             break;
++        case 'x':
++            /* Disable per-fragment AEAD. Must match TX's -x setting; if
++             * mismatched, the RX silently drops mode-incompatible packets
++             * (DATA in plaintext mode, or DATA_PLAIN in AEAD mode). */
++            encrypt_data = 0;
++            break;
+         default: /* '?' */
+         show_usage:
+             WFB_INFO("Local RX: %s [-K rx_key] { [-c client_addr] [-u client_port] | [-U unix_socket] } [-p radio_port]\n"
+@@ -1245,15 +1293,22 @@ int main(int argc, char* const *argv)
+         case AGGREGATOR:
+             if(unix_socket.length() > 0)
+             {
+-                agg = unique_ptr<AggregatorUNIX>(new AggregatorUNIX(unix_socket, keypair, epoch, channel_id, snd_buf));
++                auto a = new AggregatorUNIX(unix_socket, keypair, epoch, channel_id, snd_buf);
++                a->set_encrypt_data(encrypt_data != 0);
++                agg = unique_ptr<AggregatorUNIX>(a);
+             }
+             else
+             {
+-                agg = unique_ptr<AggregatorUDPv4>(new AggregatorUDPv4(client_addr, client_port, keypair, epoch, channel_id, snd_buf));
++                auto a = new AggregatorUDPv4(client_addr, client_port, keypair, epoch, channel_id, snd_buf);
++                a->set_encrypt_data(encrypt_data != 0);
++                agg = unique_ptr<AggregatorUDPv4>(a);
+             }
+             break;
+ 
+         case FORWARDER:
++            // Forwarder is a dumb pass-through; it doesn't decrypt so the
++            // -x flag is a no-op at this layer.  Downstream aggregator
++            // needs -x to match.
+             agg = unique_ptr<Forwarder>(new Forwarder(client_addr, client_port, snd_buf));
+             break;
+ 
+diff --git a/src/rx.hpp b/src/rx.hpp
+index 856248e..09fd61c 100644
+--- a/src/rx.hpp
++++ b/src/rx.hpp
+@@ -179,6 +179,14 @@ public:
+     // Packet loss listener for immediate notifications
+     void set_packet_loss_listener(PacketLossListener* listener) { packet_loss_listener_ = listener; }
+ 
++    // Cleartext mode: RX silently drops WFB_PACKET_DATA (AEAD) packets when
++    // enabled and drops WFB_PACKET_DATA_PLAIN packets when disabled.  Set
++    // from -c on the CLI at startup; no runtime toggle for session-state
++    // reasons (we'd have to re-handshake).  Session packets are always
++    // authenticated regardless.
++    void set_encrypt_data(bool e) { encrypt_data = e; }
++    bool is_encrypt_data(void) const { return encrypt_data; }
++
+     // Make stats public for android userspace receiver
+     void clear_stats(void)
+     {
+@@ -247,6 +255,9 @@ private:
+     uint8_t tx_publickey[crypto_box_PUBLICKEYBYTES];
+     uint8_t session_key[crypto_aead_chacha20poly1305_KEYBYTES];
+ 
++    // Cleartext-mode flag (see set_encrypt_data).
++    bool encrypt_data = true;
++
+     // Packet loss listener for immediate notifications
+     PacketLossListener* packet_loss_listener_ = nullptr;
+ };
 diff --git a/src/tx.cpp b/src/tx.cpp
-index 0dec131..edbcb77 100644
+index 0dec131..1b3cf04 100644
 --- a/src/tx.cpp
 +++ b/src/tx.cpp
 @@ -42,6 +42,12 @@
@@ -15,16 +185,54 @@ index 0dec131..edbcb77 100644
  
  using namespace std;
  
-@@ -52,6 +58,8 @@ Transmitter::Transmitter(int k, int n, const string &keypair, uint64_t epoch, ui
+@@ -52,6 +58,9 @@ Transmitter::Transmitter(int k, int n, const string &keypair, uint64_t epoch, ui
      fec_p(NULL), fec_k(-1), fec_n(-1),
      block_idx(0), fragment_idx(0),
      max_packet_size(0),
 +    parity_ratio_q8(512),   /* Q8.8: 512 = 2.0, matches 12:6 full-block ratio */
 +    mbit_close_enabled(true),
++    encrypt_data(true),     /* AEAD on by default; -N disables */
      epoch(epoch),
      channel_id(channel_id),
      fec_delay(fec_delay),
-@@ -724,6 +732,120 @@ bool Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
+@@ -627,16 +636,29 @@ void Transmitter::send_block_fragment(size_t packet_size)
+ 
+     assert(packet_size <= MAX_FEC_PAYLOAD);
+ 
+-    block_hdr->packet_type = WFB_PACKET_DATA;
++    // packet_type depends on AEAD mode; data_nonce is unchanged so RX can
++    // still dedupe by (block_idx, fragment_idx) and FEC decoding keeps
++    // working identically.
++    block_hdr->packet_type = encrypt_data ? WFB_PACKET_DATA : WFB_PACKET_DATA_PLAIN;
+     block_hdr->data_nonce = htobe64(((block_idx & BLOCK_IDX_MASK) << 8) + fragment_idx);
+ 
+-    // encrypted payload
+-    if (crypto_aead_chacha20poly1305_encrypt(ciphertext + sizeof(wblock_hdr_t), &ciphertext_len,
+-                                             block[fragment_idx], packet_size,
+-                                             (uint8_t*)block_hdr, sizeof(wblock_hdr_t),
+-                                             NULL, (uint8_t*)(&(block_hdr->data_nonce)), session_key) < 0)
++    if (encrypt_data)
+     {
+-        throw runtime_error("Unable to encrypt packet!");
++        // AEAD: ChaCha20-Poly1305 encrypts plaintext + appends 16 B tag.
++        if (crypto_aead_chacha20poly1305_encrypt(ciphertext + sizeof(wblock_hdr_t), &ciphertext_len,
++                                                 block[fragment_idx], packet_size,
++                                                 (uint8_t*)block_hdr, sizeof(wblock_hdr_t),
++                                                 NULL, (uint8_t*)(&(block_hdr->data_nonce)), session_key) < 0)
++        {
++            throw runtime_error("Unable to encrypt packet!");
++        }
++    }
++    else
++    {
++        // Plaintext: copy the block slot directly.  No tag, no MAC.  RX
++        // reads it as-is.  Saves ABYTES (16) on wire + ChaCha20 CPU.
++        memcpy(ciphertext + sizeof(wblock_hdr_t), block[fragment_idx], packet_size);
++        ciphertext_len = packet_size;
+     }
+ 
+     inject_packet(ciphertext, sizeof(wblock_hdr_t) + ciphertext_len);
+@@ -724,6 +746,120 @@ bool Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
      return true;
  }
  
@@ -145,7 +353,7 @@ index 0dec131..edbcb77 100644
  // Extract SO_RXQ_OVFL counter
  uint32_t extract_rxq_overflow(struct msghdr *msg)
  {
-@@ -739,10 +861,19 @@ uint32_t extract_rxq_overflow(struct msghdr *msg)
+@@ -739,10 +875,21 @@ uint32_t extract_rxq_overflow(struct msghdr *msg)
      return 0;
  }
  
@@ -153,21 +361,23 @@ index 0dec131..edbcb77 100644
 +void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
 +                 int fec_timeout, bool mirror, int log_interval,
 +                 const char *shm_name = NULL,
-+                 int mbit_close_enable = 1, int parity_ratio_q8 = 512)
++                 int mbit_close_enable = 1, int parity_ratio_q8 = 512,
++                 int encrypt_data = 1)
  {
 +    bool use_shm = (shm_name && shm_name[0]);
      int nfds = rx_fd.size();
 -    assert(nfds > 0);
 +    assert(use_shm || nfds > 0);
 +
-+    // Apply CLI-configured frame-alignment knobs (runtime-tunable via wfb_cmd set_mbit).
-+    // parity_ratio_q8 is Q8.8 fixed-point (512 = 2.0 default).
++    // Apply CLI-configured knobs.  parity_ratio_q8 is Q8.8 (512 = 2.0 default).
++    // encrypt_data is the -c startup toggle (1 = AEAD, 0 = plaintext).
 +    t->set_mbit_close_enabled(mbit_close_enable != 0);
 +    t->set_parity_ratio_q8((uint16_t)parity_ratio_q8);
++    t->set_encrypt_data(encrypt_data != 0);
  
      struct pollfd fds[nfds + 1];
      memset(fds, '\0', sizeof(fds));
-@@ -769,6 +900,43 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -769,6 +916,43 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
      uint32_t count_p_truncated = 0; // injected large packets that were truncated
      int start_fd_idx = 0;
  
@@ -211,7 +421,7 @@ index 0dec131..edbcb77 100644
      for(;;)
      {
          uint64_t cur_ts = get_time_ms();
-@@ -779,7 +947,55 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -779,7 +963,55 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              poll_timeout = std::min(poll_timeout, (int)(fec_close_ts > cur_ts ? fec_close_ts - cur_ts : 0));
          }
  
@@ -268,7 +478,7 @@ index 0dec131..edbcb77 100644
  
          if (rc < 0)
          {
-@@ -969,6 +1185,53 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -969,6 +1201,53 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
                  }
                  break;
  
@@ -322,7 +532,7 @@ index 0dec131..edbcb77 100644
                  default:
                  {
                      resp.rc = htonl(ENOTSUP);
-@@ -980,7 +1243,7 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -980,7 +1259,7 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              }
          }
  
@@ -331,7 +541,7 @@ index 0dec131..edbcb77 100644
          {
              // close fec only if no data packets and fec timeout expired
              if (fec_timeout > 0 && cur_ts >= fec_close_ts)
-@@ -994,6 +1257,158 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -994,6 +1273,158 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              continue;
          }
  
@@ -490,7 +700,7 @@ index 0dec131..edbcb77 100644
          // rc > 0: events detected
          // start from last fd index and reset it to zero
          int _tmp = start_fd_idx;
-@@ -1071,6 +1486,15 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -1071,6 +1502,15 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
  
                      t->send_packet(buf, rsize, 0);
  
@@ -506,22 +716,22 @@ index 0dec131..edbcb77 100644
                      if (cur_ts >= log_send_ts)  // log timeout expired
                      {
                          // Save current index and go to outer loop
-@@ -1428,7 +1852,8 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
+@@ -1428,7 +1868,8 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
                      int udp_port, int debug_port, int k, int n, const string &keypair, int fec_timeout,
                      uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
                      radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                    int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay)
 +                    int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay,
-+                    int mbit_close_enable, int parity_ratio_q8)
++                    int mbit_close_enable, int parity_ratio_q8, int encrypt_data)
  {
      vector<int> rx_fd;
      vector<string> wlans;
-@@ -1478,14 +1903,15 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
+@@ -1478,14 +1919,15 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
      }
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8, encrypt_data);
  }
  
  void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int log_interval,
@@ -530,16 +740,16 @@ index 0dec131..edbcb77 100644
                       radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                     int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay)
 +                     int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay,
-+                     int mbit_close_enable, int parity_ratio_q8)
++                     int mbit_close_enable, int parity_ratio_q8, int encrypt_data)
  {
      vector<int> rx_fd;
      vector<string> wlans;
-@@ -1522,15 +1948,61 @@ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int l
+@@ -1522,15 +1964,61 @@ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int l
      }
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8, encrypt_data);
 +}
 +
 +
@@ -550,7 +760,7 @@ index 0dec131..edbcb77 100644
 +                    bool use_qdisc, uint32_t fwmark,
 +                    radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port,
 +                    bool mirror, int snd_buf_size, uint32_t inject_retries,
-+                    uint32_t inject_retry_delay, int mbit_close_enable, int parity_ratio_q8)
++                    uint32_t inject_retry_delay, int mbit_close_enable, int parity_ratio_q8, int encrypt_data)
 +{
 +    vector<int> rx_fd;
 +    vector<string> wlans;
@@ -577,7 +787,7 @@ index 0dec131..edbcb77 100644
 +
 +    int control_fd = open_control_fd(control_port);
 +    WFB_INFO("SHM input mode: reading from ring '%s'\n", shm_name);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, shm_name, mbit_close_enable, parity_ratio_q8);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, shm_name, mbit_close_enable, parity_ratio_q8, encrypt_data);
 +
 +    // Cleanup
 +    if (g_shm_ring)
@@ -594,38 +804,38 @@ index 0dec131..edbcb77 100644
                        uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
                        radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                      int snd_buf_size)
-+                      int snd_buf_size, int mbit_close_enable, int parity_ratio_q8)
++                      int snd_buf_size, int mbit_close_enable, int parity_ratio_q8, int encrypt_data)
  {
      vector<int> rx_fd;
      vector<pair<string, vector<uint16_t>>> remote_hosts;
-@@ -1598,7 +2070,7 @@ void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int
+@@ -1598,7 +2086,7 @@ void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int
                                                                                      fwmark, snd_buf_size));
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8, encrypt_data);
  }
  
  
-@@ -1606,7 +2078,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
+@@ -1606,7 +2094,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
                             const char* unix_socket, int k, int n, const string &keypair, int fec_timeout,
                             uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
                             radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                           int snd_buf_size)
-+                           int snd_buf_size, int mbit_close_enable, int parity_ratio_q8)
++                           int snd_buf_size, int mbit_close_enable, int parity_ratio_q8, int encrypt_data)
  {
      vector<int> rx_fd;
      vector<pair<string, vector<uint16_t>>> remote_hosts;
-@@ -1660,7 +2132,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
+@@ -1660,7 +2148,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
                                                                                      fwmark, snd_buf_size));
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8, encrypt_data);
  }
  
  
-@@ -1669,6 +2141,7 @@ int main(int argc, char * const *argv)
+@@ -1669,6 +2157,7 @@ int main(int argc, char * const *argv)
      int opt;
      uint8_t k=8, n=12, radio_port=0;
      uint32_t fec_delay = 0;
@@ -633,20 +843,21 @@ index 0dec131..edbcb77 100644
      uint32_t link_id = 0x0;
      uint64_t epoch = 0;
      int srv_port = 10000;
-@@ -1696,8 +2169,11 @@ int main(int argc, char * const *argv)
+@@ -1696,8 +2185,12 @@ int main(int argc, char * const *argv)
      char *unix_socket = NULL;
      uint32_t inject_retries = 0;
      uint32_t inject_retry_delay = 5000; // 5ms
 +    int mbit_close_enable = 1;      // -b 0|1, default on
 +    int parity_ratio_q8 = 512;      // -r (float), default 2.0 (Q8.8 = 512)
 +                                    // matches 12:6 full-block ratio of -k 6 -n 18
++    int encrypt_data = 1;           // -x (no-AEAD flag) flips to 0
  
 -    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:")) != -1) {
-+    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:H:b:r:")) != -1) {
++    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:H:b:r:x")) != -1) {
          switch (opt) {
          case 'I':
              tx_mode = INJECTOR;
-@@ -1814,9 +2290,39 @@ int main(int argc, char * const *argv)
+@@ -1814,9 +2307,47 @@ int main(int argc, char * const *argv)
              inject_retry_delay = atoi(optarg);
              break;
  
@@ -680,6 +891,14 @@ index 0dec131..edbcb77 100644
 +            break;
 +        }
 +
++        case 'x':
++            /* Disable per-fragment AEAD (plaintext video mode).
++             * Session packets remain authenticated so fec_k/fec_n/epoch
++             * can't be spoofed.  RX must also run with -x or it will
++             * silently drop our DATA_PLAIN packets. */
++            encrypt_data = 0;
++            break;
++
          default: /* '?' */
          show_usage:
 -            WFB_INFO("Local TX: %s [-K tx_key] [-k RS_K] [-n RS_N] { [-u udp_port] | [-U unix_socket] } [-R rcv_buf] [-p radio_port]\n"
@@ -687,13 +906,13 @@ index 0dec131..edbcb77 100644
                       "             [-F fec_delay] [-B bandwidth] [-G guard_interval] [-S stbc] [-L ldpc] [-M mcs_index] [-N VHT_NSS]\n"
                       "             [-T fec_timeout] [-l log_interval] [-e epoch] [-i link_id] [-f { data | rts }] [-m] [-V] [-Q]\n"
                       "             [-P fwmark] [-J inject_retries] [-E inject_retry_delay] [-C control_port] interface1 [interface2] ...\n",
-@@ -1880,7 +2386,17 @@ int main(int argc, char * const *argv)
+@@ -1880,7 +2411,17 @@ int main(int argc, char * const *argv)
                                  unix_socket, debug_port, k, n, keypair, fec_timeout,
                                  epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                  radiotap_header, frame_type, control_port, mirror,
 -                                snd_buf, inject_retries, inject_retry_delay);
 +                                snd_buf, inject_retries, inject_retry_delay,
-+                                mbit_close_enable, parity_ratio_q8);
++                                mbit_close_enable, parity_ratio_q8, encrypt_data);
 +            }
 +            else if (shm_name != NULL)
 +            {
@@ -702,43 +921,43 @@ index 0dec131..edbcb77 100644
 +                               epoch, channel_id, fec_delay, use_qdisc, fwmark,
 +                               radiotap_header, frame_type, control_port, mirror,
 +                               snd_buf, inject_retries, inject_retry_delay,
-+                               mbit_close_enable, parity_ratio_q8);
++                               mbit_close_enable, parity_ratio_q8, encrypt_data);
              }
              else
              {
-@@ -1888,7 +2404,8 @@ int main(int argc, char * const *argv)
+@@ -1888,7 +2429,8 @@ int main(int argc, char * const *argv)
                                 udp_port, debug_port, k, n, keypair, fec_timeout,
                                 epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                 radiotap_header, frame_type, control_port, mirror,
 -                               snd_buf, inject_retries, inject_retry_delay);
 +                               snd_buf, inject_retries, inject_retry_delay,
-+                               mbit_close_enable, parity_ratio_q8);
++                               mbit_close_enable, parity_ratio_q8, encrypt_data);
              }
              break;
  
-@@ -1899,7 +2416,7 @@ int main(int argc, char * const *argv)
+@@ -1899,7 +2441,7 @@ int main(int argc, char * const *argv)
                                        unix_socket, k, n, keypair, fec_timeout,
                                        epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                        radiotap_header, frame_type, control_port, mirror,
 -                                      snd_buf);
-+                                      snd_buf, mbit_close_enable, parity_ratio_q8);
++                                      snd_buf, mbit_close_enable, parity_ratio_q8, encrypt_data);
              }
              else
              {
-@@ -1907,7 +2424,7 @@ int main(int argc, char * const *argv)
+@@ -1907,7 +2449,7 @@ int main(int argc, char * const *argv)
                                   udp_port, k, n, keypair, fec_timeout,
                                   epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                   radiotap_header, frame_type, control_port, mirror,
 -                                 snd_buf);
-+                                 snd_buf, mbit_close_enable, parity_ratio_q8);
++                                 snd_buf, mbit_close_enable, parity_ratio_q8, encrypt_data);
              }
              break;
  
 diff --git a/src/tx.hpp b/src/tx.hpp
-index 39506e6..2c7df1b 100644
+index 39506e6..8f4f590 100644
 --- a/src/tx.hpp
 +++ b/src/tx.hpp
-@@ -75,8 +75,23 @@ public:
+@@ -75,8 +75,30 @@ public:
      Transmitter(int k, int n, const std::string &keypair, uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, std::vector<tags_item_t> &tags);
      virtual ~Transmitter();
      bool send_packet(const uint8_t *buf, size_t size, uint8_t flags);
@@ -759,10 +978,17 @@ index 39506e6..2c7df1b 100644
 +    uint16_t get_parity_ratio_q8(void) const { return parity_ratio_q8; }
 +    void set_mbit_close_enabled(bool e) { mbit_close_enabled = e; }
 +    bool is_mbit_close_enabled(void) const { return mbit_close_enabled; }
++    // Per-fragment AEAD is toggled via the -N CLI flag at startup (there is
++    // no wfb_cmd for this — switching mid-session would invalidate the RX's
++    // current session state and require a re-handshake the protocol doesn't
++    // support).  Session packets are always encrypted regardless of this flag
++    // so RX can validate fec_k/fec_n/epoch.
++    void set_encrypt_data(bool e) { encrypt_data = e; }
++    bool is_encrypt_data(void) const { return encrypt_data; }
      void get_fec(int &k, int &n) { k = fec_k; n = fec_n; }
      virtual void select_output(int idx) = 0;
      virtual void dump_stats(uint64_t ts, uint32_t &injected_packets, uint32_t &dropped_packets, uint32_t &injected_bytes) = 0;
-@@ -99,6 +114,10 @@ private:
+@@ -99,6 +121,14 @@ private:
      uint8_t fragment_idx;
      uint8_t** block;
      size_t max_packet_size;
@@ -770,6 +996,10 @@ index 39506e6..2c7df1b 100644
 +    // parity_ratio_q8 is Q8.8 fixed-point: 256 = 1.0, 128 = 0.5, 512 = 2.0, etc.
 +    uint16_t parity_ratio_q8;
 +    bool     mbit_close_enabled;
++    // Per-fragment AEAD (startup-only, no runtime command).  True = ChaCha20-
++    // Poly1305 on each data fragment; false = plaintext with a
++    // WFB_PACKET_DATA_PLAIN header (skips encrypt + 16 B tag on wire).
++    bool     encrypt_data;
      const uint64_t epoch; // Packets from old epoch will be discarded
      const uint32_t channel_id; // (link_id << 8) + port_number
      const uint32_t fec_delay; // fec packet delay [us]
@@ -939,3 +1169,24 @@ index 5e30e52..313e15c 100644
 +        } __attribute__ ((packed)) cmd_get_mbit;
      } __attribute__ ((packed)) u;
  } __attribute__ ((packed)) cmd_resp_t;
+diff --git a/src/wifibroadcast.hpp b/src/wifibroadcast.hpp
+index 7e9e001..16fe6a5 100644
+--- a/src/wifibroadcast.hpp
++++ b/src/wifibroadcast.hpp
+@@ -186,8 +186,14 @@ static const uint8_t ieee80211_header[] __attribute__((unused)) = {
+ #define MAX_BLOCK_IDX ((1LLU << 55) - 1)
+ 
+ // packet types
+-#define WFB_PACKET_DATA    0x1
+-#define WFB_PACKET_SESSION 0x2
++#define WFB_PACKET_DATA          0x1
++#define WFB_PACKET_SESSION       0x2
++#define WFB_PACKET_DATA_PLAIN    0x3  /* data fragment, no AEAD tag; wpacket_hdr
++                                       * and payload follow wblock_hdr directly.
++                                       * RX silently drops DATA when running in
++                                       * plain-mode and drops DATA_PLAIN when
++                                       * running in encrypt-mode (mode must match
++                                       * on both sides). */
+ 
+ // FEC types
+ #define WFB_FEC_VDM_RS  0x1  //Reed-Solomon on Vandermonde matrix
