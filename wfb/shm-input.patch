@@ -1,5 +1,5 @@
 diff --git a/src/tx.cpp b/src/tx.cpp
-index 0dec131..850b982 100644
+index 0dec131..edbcb77 100644
 --- a/src/tx.cpp
 +++ b/src/tx.cpp
 @@ -42,6 +42,12 @@
@@ -19,12 +19,12 @@ index 0dec131..850b982 100644
      fec_p(NULL), fec_k(-1), fec_n(-1),
      block_idx(0), fragment_idx(0),
      max_packet_size(0),
-+    parity_ratio(2),
++    parity_ratio_q8(512),   /* Q8.8: 512 = 2.0, matches 12:6 full-block ratio */
 +    mbit_close_enabled(true),
      epoch(epoch),
      channel_id(channel_id),
      fec_delay(fec_delay),
-@@ -724,6 +732,99 @@ bool Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
+@@ -724,6 +732,120 @@ bool Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
      return true;
  }
  
@@ -55,18 +55,34 @@ index 0dec131..850b982 100644
 +
 +    uint8_t actual_k = fragment_idx;
 +
-+    // parity_count: at least (fec_k - actual_k) to let RX reach its
-+    // has_fragments == fec_k trigger; at most (fec_n - fec_k) so we
-+    // never exceed the session's configured parity budget; scaled by
-+    // actual_k * parity_ratio between those bounds.
-+    int parity_min = fec_k - (int)actual_k;
-+    int parity_max = fec_n - fec_k;
-+    int parity_target = (int)actual_k * (int)parity_ratio;
-+    int parity_count = std::max(parity_min, std::min(parity_max, parity_target));
++    // Plan the emission.  Two quantities matter:
++    //
++    //   parity_count     : how many parity packets we send on the wire.
++    //                      Hard-capped at (fec_n - fec_k); target is
++    //                      round(actual_k * parity_ratio_q8 / 256); the
++    //                      Q8.8 shift matches set_mbit's fixed-point.
++    //   padding_on_wire  : how many zero-padded data slots we additionally
++    //                      emit on the wire when (actual_k + parity_count)
++    //                      would fall short of fec_k.  Without this, RX
++    //                      never reaches has_fragments == fec_k and the
++    //                      block expires without decode.
++    //
++    // When (fec_k - actual_k) > (fec_n - fec_k) — i.e. the full-block
++    // parity budget is smaller than the shortfall to fec_k — we fall
++    // back to wire padding for the difference.  This keeps C3 correct
++    // for "light FEC" configs like -k 8 -n 12 where fec_k > 2*(fec_n-fec_k)
++    // and tiny partials can't reach the RX trigger on parity alone.
++    int parity_max     = fec_n - fec_k;
++    int parity_target  = (int)(((uint32_t)actual_k * (uint32_t)parity_ratio_q8 + 128u) >> 8);
++    int parity_count   = std::min(parity_max, std::max(0, parity_target));
++    int padding_on_wire = std::max(0, fec_k - (int)actual_k - parity_count);
 +
 +    // Fill the remaining data slots with FEC_ONLY markers (flags + zero
-+    // payload) so the FEC encoder sees a full k-input matrix. These slots
-+    // are NOT transmitted on the wire; RX reconstructs them from parity.
++    // payload) so the FEC encoder sees a full k-input matrix.  Emit the
++    // first `padding_on_wire` of them on the wire; the rest stay in
++    // memory only (RX reconstructs them from parity as FEC_ONLY zeros
++    // and suppresses them at send_to_socket).
++    int padding_emitted = 0;
 +    while (fragment_idx < fec_k)
 +    {
 +        wpacket_hdr_t *packet_hdr = (wpacket_hdr_t*)block[fragment_idx];
@@ -74,6 +90,11 @@ index 0dec131..850b982 100644
 +        packet_hdr->packet_size = 0;
 +        memset(block[fragment_idx] + sizeof(wpacket_hdr_t), '\0',
 +               MAX_FEC_PAYLOAD - sizeof(wpacket_hdr_t));
++        if (padding_emitted < padding_on_wire)
++        {
++            send_block_fragment(sizeof(wpacket_hdr_t));
++            padding_emitted += 1;
++        }
 +        fragment_idx += 1;
 +    }
 +
@@ -124,7 +145,7 @@ index 0dec131..850b982 100644
  // Extract SO_RXQ_OVFL counter
  uint32_t extract_rxq_overflow(struct msghdr *msg)
  {
-@@ -739,10 +840,18 @@ uint32_t extract_rxq_overflow(struct msghdr *msg)
+@@ -739,10 +861,19 @@ uint32_t extract_rxq_overflow(struct msghdr *msg)
      return 0;
  }
  
@@ -132,20 +153,21 @@ index 0dec131..850b982 100644
 +void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
 +                 int fec_timeout, bool mirror, int log_interval,
 +                 const char *shm_name = NULL,
-+                 int mbit_close_enable = 1, int parity_ratio = 2)
++                 int mbit_close_enable = 1, int parity_ratio_q8 = 512)
  {
 +    bool use_shm = (shm_name && shm_name[0]);
      int nfds = rx_fd.size();
 -    assert(nfds > 0);
 +    assert(use_shm || nfds > 0);
 +
-+    // Apply CLI-configured frame-alignment knobs (runtime-tunable via wfb_cmd set_mbit)
++    // Apply CLI-configured frame-alignment knobs (runtime-tunable via wfb_cmd set_mbit).
++    // parity_ratio_q8 is Q8.8 fixed-point (512 = 2.0 default).
 +    t->set_mbit_close_enabled(mbit_close_enable != 0);
-+    t->set_parity_ratio((uint8_t)parity_ratio);
++    t->set_parity_ratio_q8((uint16_t)parity_ratio_q8);
  
      struct pollfd fds[nfds + 1];
      memset(fds, '\0', sizeof(fds));
-@@ -769,6 +878,43 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -769,6 +900,43 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
      uint32_t count_p_truncated = 0; // injected large packets that were truncated
      int start_fd_idx = 0;
  
@@ -189,7 +211,7 @@ index 0dec131..850b982 100644
      for(;;)
      {
          uint64_t cur_ts = get_time_ms();
-@@ -779,7 +925,55 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -779,7 +947,55 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              poll_timeout = std::min(poll_timeout, (int)(fec_close_ts > cur_ts ? fec_close_ts - cur_ts : 0));
          }
  
@@ -246,7 +268,7 @@ index 0dec131..850b982 100644
  
          if (rc < 0)
          {
-@@ -969,6 +1163,53 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -969,6 +1185,53 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
                  }
                  break;
  
@@ -259,8 +281,8 @@ index 0dec131..850b982 100644
 +                        continue;
 +                    }
 +
-+                    uint8_t enable = req.u.cmd_set_mbit.enable;
-+                    uint8_t ratio  = req.u.cmd_set_mbit.parity_ratio;
++                    uint8_t  enable   = req.u.cmd_set_mbit.enable;
++                    uint16_t ratio_q8 = ntohs(req.u.cmd_set_mbit.parity_ratio_q8);
 +
 +                    // Enable is boolean: 0 or 1. Reject other values so a
 +                    // future bit-field expansion in the protocol isn't
@@ -274,10 +296,10 @@ index 0dec131..850b982 100644
 +                    }
 +
 +                    t->set_mbit_close_enabled(enable != 0);
-+                    t->set_parity_ratio(ratio);
++                    t->set_parity_ratio_q8(ratio_q8);
 +
 +                    sendto(fd, &resp, offsetof(cmd_resp_t, u), MSG_DONTWAIT, (sockaddr*)&from_addr, addr_size);
-+                    WFB_INFO("M-bit close: enable=%u, parity_ratio=%u\n", enable, ratio);
++                    WFB_INFO("M-bit close: enable=%u, parity_ratio=%.4f\n", enable, ratio_q8 / 256.0);
 +                }
 +                break;
 +
@@ -291,7 +313,7 @@ index 0dec131..850b982 100644
 +                    }
 +
 +                    resp.u.cmd_get_mbit.enable = t->is_mbit_close_enabled() ? 1 : 0;
-+                    resp.u.cmd_get_mbit.parity_ratio = t->get_parity_ratio();
++                    resp.u.cmd_get_mbit.parity_ratio_q8 = htons(t->get_parity_ratio_q8());
 +
 +                    sendto(fd, &resp, offsetof(cmd_resp_t, u) + sizeof(resp.u.cmd_get_mbit), MSG_DONTWAIT, (sockaddr*)&from_addr, addr_size);
 +                }
@@ -300,7 +322,7 @@ index 0dec131..850b982 100644
                  default:
                  {
                      resp.rc = htonl(ENOTSUP);
-@@ -980,7 +1221,7 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -980,7 +1243,7 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              }
          }
  
@@ -309,7 +331,7 @@ index 0dec131..850b982 100644
          {
              // close fec only if no data packets and fec timeout expired
              if (fec_timeout > 0 && cur_ts >= fec_close_ts)
-@@ -994,6 +1235,158 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -994,6 +1257,158 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              continue;
          }
  
@@ -468,7 +490,7 @@ index 0dec131..850b982 100644
          // rc > 0: events detected
          // start from last fd index and reset it to zero
          int _tmp = start_fd_idx;
-@@ -1071,6 +1464,15 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -1071,6 +1486,15 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
  
                      t->send_packet(buf, rsize, 0);
  
@@ -484,22 +506,22 @@ index 0dec131..850b982 100644
                      if (cur_ts >= log_send_ts)  // log timeout expired
                      {
                          // Save current index and go to outer loop
-@@ -1428,7 +1830,8 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
+@@ -1428,7 +1852,8 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
                      int udp_port, int debug_port, int k, int n, const string &keypair, int fec_timeout,
                      uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
                      radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                    int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay)
 +                    int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay,
-+                    int mbit_close_enable, int parity_ratio)
++                    int mbit_close_enable, int parity_ratio_q8)
  {
      vector<int> rx_fd;
      vector<string> wlans;
-@@ -1478,14 +1881,15 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
+@@ -1478,14 +1903,15 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
      }
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
  }
  
  void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int log_interval,
@@ -508,19 +530,19 @@ index 0dec131..850b982 100644
                       radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                     int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay)
 +                     int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay,
-+                     int mbit_close_enable, int parity_ratio)
++                     int mbit_close_enable, int parity_ratio_q8)
  {
      vector<int> rx_fd;
      vector<string> wlans;
-@@ -1522,15 +1926,61 @@ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int l
+@@ -1522,15 +1948,61 @@ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int l
      }
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
- }
- 
- 
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
++}
++
++
 +// --- SHM ring input mode ---
 +void local_loop_shm(int argc, char* const* argv, int optind, int log_interval,
 +                    const char *shm_name, int debug_port, int k, int n, const string &keypair,
@@ -528,7 +550,7 @@ index 0dec131..850b982 100644
 +                    bool use_qdisc, uint32_t fwmark,
 +                    radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port,
 +                    bool mirror, int snd_buf_size, uint32_t inject_retries,
-+                    uint32_t inject_retry_delay, int mbit_close_enable, int parity_ratio)
++                    uint32_t inject_retry_delay, int mbit_close_enable, int parity_ratio_q8)
 +{
 +    vector<int> rx_fd;
 +    vector<string> wlans;
@@ -555,7 +577,7 @@ index 0dec131..850b982 100644
 +
 +    int control_fd = open_control_fd(control_port);
 +    WFB_INFO("SHM input mode: reading from ring '%s'\n", shm_name);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, shm_name, mbit_close_enable, parity_ratio);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, shm_name, mbit_close_enable, parity_ratio_q8);
 +
 +    // Cleanup
 +    if (g_shm_ring)
@@ -563,47 +585,47 @@ index 0dec131..850b982 100644
 +        venc_ring_destroy(g_shm_ring);
 +        g_shm_ring = NULL;
 +    }
-+}
+ }
 +// --- end SHM ring input mode ---
-+
-+
+ 
+ 
  void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int log_interval,
                        int udp_port, int k, int n, const string &keypair, int fec_timeout,
                        uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
                        radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                      int snd_buf_size)
-+                      int snd_buf_size, int mbit_close_enable, int parity_ratio)
++                      int snd_buf_size, int mbit_close_enable, int parity_ratio_q8)
  {
      vector<int> rx_fd;
      vector<pair<string, vector<uint16_t>>> remote_hosts;
-@@ -1598,7 +2048,7 @@ void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int
+@@ -1598,7 +2070,7 @@ void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int
                                                                                      fwmark, snd_buf_size));
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
  }
  
  
-@@ -1606,7 +2056,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
+@@ -1606,7 +2078,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
                             const char* unix_socket, int k, int n, const string &keypair, int fec_timeout,
                             uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
                             radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
 -                           int snd_buf_size)
-+                           int snd_buf_size, int mbit_close_enable, int parity_ratio)
++                           int snd_buf_size, int mbit_close_enable, int parity_ratio_q8)
  {
      vector<int> rx_fd;
      vector<pair<string, vector<uint16_t>>> remote_hosts;
-@@ -1660,7 +2110,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
+@@ -1660,7 +2132,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
                                                                                      fwmark, snd_buf_size));
  
      int control_fd = open_control_fd(control_port);
 -    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio_q8);
  }
  
  
-@@ -1669,6 +2119,7 @@ int main(int argc, char * const *argv)
+@@ -1669,6 +2141,7 @@ int main(int argc, char * const *argv)
      int opt;
      uint8_t k=8, n=12, radio_port=0;
      uint32_t fec_delay = 0;
@@ -611,19 +633,20 @@ index 0dec131..850b982 100644
      uint32_t link_id = 0x0;
      uint64_t epoch = 0;
      int srv_port = 10000;
-@@ -1696,8 +2147,10 @@ int main(int argc, char * const *argv)
+@@ -1696,8 +2169,11 @@ int main(int argc, char * const *argv)
      char *unix_socket = NULL;
      uint32_t inject_retries = 0;
      uint32_t inject_retry_delay = 5000; // 5ms
-+    int mbit_close_enable = 1;  // -b 0|1, default on
-+    int parity_ratio = 2;       // -r, default 2 (matches 12:6 full-block ratio)
++    int mbit_close_enable = 1;      // -b 0|1, default on
++    int parity_ratio_q8 = 512;      // -r (float), default 2.0 (Q8.8 = 512)
++                                    // matches 12:6 full-block ratio of -k 6 -n 18
  
 -    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:")) != -1) {
 +    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:H:b:r:")) != -1) {
          switch (opt) {
          case 'I':
              tx_mode = INJECTOR;
-@@ -1814,9 +2267,31 @@ int main(int argc, char * const *argv)
+@@ -1814,9 +2290,39 @@ int main(int argc, char * const *argv)
              inject_retry_delay = atoi(optarg);
              break;
  
@@ -641,13 +664,21 @@ index 0dec131..850b982 100644
 +            break;
 +
 +        case 'r':
-+            parity_ratio = atoi(optarg);
-+            if (parity_ratio < 0 || parity_ratio > 255)
++        {
++            /* -r accepts a float ratio; internally stored as Q8.8.
++             * Examples:  -r 0.5  ->  128
++             *            -r 1    ->  256
++             *            -r 2    ->  512 (default)
++             * Range [0.0, 256.0); resolution 1/256 ≈ 0.004. */
++            double ratio_f = atof(optarg);
++            if (!(ratio_f >= 0.0 && ratio_f < 256.0))
 +            {
-+                WFB_ERR("-r must be 0..255\n");
++                WFB_ERR("-r must be in [0.0, 256.0)\n");
 +                exit(1);
 +            }
++            parity_ratio_q8 = (int)(ratio_f * 256.0 + 0.5);
 +            break;
++        }
 +
          default: /* '?' */
          show_usage:
@@ -656,13 +687,13 @@ index 0dec131..850b982 100644
                       "             [-F fec_delay] [-B bandwidth] [-G guard_interval] [-S stbc] [-L ldpc] [-M mcs_index] [-N VHT_NSS]\n"
                       "             [-T fec_timeout] [-l log_interval] [-e epoch] [-i link_id] [-f { data | rts }] [-m] [-V] [-Q]\n"
                       "             [-P fwmark] [-J inject_retries] [-E inject_retry_delay] [-C control_port] interface1 [interface2] ...\n",
-@@ -1880,7 +2355,17 @@ int main(int argc, char * const *argv)
+@@ -1880,7 +2386,17 @@ int main(int argc, char * const *argv)
                                  unix_socket, debug_port, k, n, keypair, fec_timeout,
                                  epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                  radiotap_header, frame_type, control_port, mirror,
 -                                snd_buf, inject_retries, inject_retry_delay);
 +                                snd_buf, inject_retries, inject_retry_delay,
-+                                mbit_close_enable, parity_ratio);
++                                mbit_close_enable, parity_ratio_q8);
 +            }
 +            else if (shm_name != NULL)
 +            {
@@ -671,43 +702,43 @@ index 0dec131..850b982 100644
 +                               epoch, channel_id, fec_delay, use_qdisc, fwmark,
 +                               radiotap_header, frame_type, control_port, mirror,
 +                               snd_buf, inject_retries, inject_retry_delay,
-+                               mbit_close_enable, parity_ratio);
++                               mbit_close_enable, parity_ratio_q8);
              }
              else
              {
-@@ -1888,7 +2373,8 @@ int main(int argc, char * const *argv)
+@@ -1888,7 +2404,8 @@ int main(int argc, char * const *argv)
                                 udp_port, debug_port, k, n, keypair, fec_timeout,
                                 epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                 radiotap_header, frame_type, control_port, mirror,
 -                               snd_buf, inject_retries, inject_retry_delay);
 +                               snd_buf, inject_retries, inject_retry_delay,
-+                               mbit_close_enable, parity_ratio);
++                               mbit_close_enable, parity_ratio_q8);
              }
              break;
  
-@@ -1899,7 +2385,7 @@ int main(int argc, char * const *argv)
+@@ -1899,7 +2416,7 @@ int main(int argc, char * const *argv)
                                        unix_socket, k, n, keypair, fec_timeout,
                                        epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                        radiotap_header, frame_type, control_port, mirror,
 -                                      snd_buf);
-+                                      snd_buf, mbit_close_enable, parity_ratio);
++                                      snd_buf, mbit_close_enable, parity_ratio_q8);
              }
              else
              {
-@@ -1907,7 +2393,7 @@ int main(int argc, char * const *argv)
+@@ -1907,7 +2424,7 @@ int main(int argc, char * const *argv)
                                   udp_port, k, n, keypair, fec_timeout,
                                   epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                   radiotap_header, frame_type, control_port, mirror,
 -                                 snd_buf);
-+                                 snd_buf, mbit_close_enable, parity_ratio);
++                                 snd_buf, mbit_close_enable, parity_ratio_q8);
              }
              break;
  
 diff --git a/src/tx.hpp b/src/tx.hpp
-index 39506e6..689164a 100644
+index 39506e6..2c7df1b 100644
 --- a/src/tx.hpp
 +++ b/src/tx.hpp
-@@ -75,8 +75,20 @@ public:
+@@ -75,8 +75,23 @@ public:
      Transmitter(int k, int n, const std::string &keypair, uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, std::vector<tags_item_t> &tags);
      virtual ~Transmitter();
      bool send_packet(const uint8_t *buf, size_t size, uint8_t flags);
@@ -720,26 +751,30 @@ index 39506e6..689164a 100644
 +    bool close_block_early(void);
      void send_session_key(void);
      void init_session(int k, int n);
-+    // Runtime-tunable frame-alignment knobs.
-+    void set_parity_ratio(uint8_t r) { parity_ratio = r; }
-+    uint8_t get_parity_ratio(void) const { return parity_ratio; }
++    // Runtime-tunable frame-alignment knobs.  parity_ratio is stored
++    // as Q8.8 fixed-point (256 = 1.0) so fractional values like 0.5
++    // are representable (useful for configs where (n-k)/k is fractional,
++    // e.g. -k 8 -n 12 wants 0.5).
++    void set_parity_ratio_q8(uint16_t r) { parity_ratio_q8 = r; }
++    uint16_t get_parity_ratio_q8(void) const { return parity_ratio_q8; }
 +    void set_mbit_close_enabled(bool e) { mbit_close_enabled = e; }
 +    bool is_mbit_close_enabled(void) const { return mbit_close_enabled; }
      void get_fec(int &k, int &n) { k = fec_k; n = fec_n; }
      virtual void select_output(int idx) = 0;
      virtual void dump_stats(uint64_t ts, uint32_t &injected_packets, uint32_t &dropped_packets, uint32_t &injected_bytes) = 0;
-@@ -99,6 +111,9 @@ private:
+@@ -99,6 +114,10 @@ private:
      uint8_t fragment_idx;
      uint8_t** block;
      size_t max_packet_size;
 +    // Frame-alignment state (runtime-tunable via CMD_SET_MBIT).
-+    uint8_t parity_ratio;
-+    bool    mbit_close_enabled;
++    // parity_ratio_q8 is Q8.8 fixed-point: 256 = 1.0, 128 = 0.5, 512 = 2.0, etc.
++    uint16_t parity_ratio_q8;
++    bool     mbit_close_enabled;
      const uint64_t epoch; // Packets from old epoch will be discarded
      const uint32_t channel_id; // (link_id << 8) + port_number
      const uint32_t fec_delay; // fec packet delay [us]
 diff --git a/src/tx_cmd.c b/src/tx_cmd.c
-index 7549e44..b446142 100644
+index 7549e44..c335360 100644
 --- a/src/tx_cmd.c
 +++ b/src/tx_cmd.c
 @@ -79,6 +79,7 @@ int send_command(int port, cmd_req_t req, size_t req_size, cmd_resp_t *resp)
@@ -761,7 +796,7 @@ index 7549e44..b446142 100644
      default:
          assert(0);
      }
-@@ -268,6 +273,71 @@ int get_radio(char *progname, int port, int argc, char **argv)
+@@ -268,6 +273,79 @@ int get_radio(char *progname, int port, int argc, char **argv)
      return rc;
  }
  
@@ -769,7 +804,7 @@ index 7549e44..b446142 100644
 +{
 +    int opt;
 +    int enable = 1;
-+    int ratio = 2;
++    double ratio = 2.0;
 +    cmd_req_t req = { .req_id = htonl(rand()), .cmd_id = CMD_SET_MBIT };
 +    cmd_resp_t resp;
 +
@@ -782,23 +817,27 @@ index 7549e44..b446142 100644
 +            break;
 +
 +        case 'r':
-+            ratio = atoi(optarg);
++            ratio = atof(optarg);
 +            break;
 +
 +        default: /* '?' */
-+            fprintf(stderr, "Usage: %s <port> %s [-e ENABLE(0|1)] [-r RATIO(0..255)]\n", progname, argv[0]);
-+            fprintf(stderr, "Default: enable=%d, ratio=%d\n", enable, ratio);
++            fprintf(stderr, "Usage: %s <port> %s [-e ENABLE(0|1)] [-r RATIO(float, 0..255.996)]\n", progname, argv[0]);
++            fprintf(stderr, "Default: enable=%d, ratio=%.2f\n", enable, ratio);
 +            fprintf(stderr, "  enable=1 closes FEC block on RTP M-bit (frame boundary)\n");
-+            fprintf(stderr, "  ratio scales parity for partial blocks; 2 matches typical full-block ratio\n");
++            fprintf(stderr, "  ratio scales parity:data for partial blocks; set to (n-k)/k of your\n");
++            fprintf(stderr, "  -k/-n config for proportional protection. Examples:\n");
++            fprintf(stderr, "    -k 6  -n 18 : ratio 2.0 (default)\n");
++            fprintf(stderr, "    -k 8  -n 12 : ratio 0.5\n");
++            fprintf(stderr, "    -k 10 -n 30 : ratio 2.0\n");
 +            fprintf(stderr, "WFB-ng version %s\n", WFB_VERSION);
 +            fprintf(stderr, "WFB-ng home page: <http://wfb-ng.org>\n");
 +            return 1;
 +        }
 +    }
 +
-+    if (ratio < 0 || ratio > 255)
++    if (ratio < 0.0 || ratio >= 256.0)
 +    {
-+        fprintf(stderr, "ratio must be 0..255\n");
++        fprintf(stderr, "ratio must be in [0.0, 256.0)\n");
 +        return 1;
 +    }
 +    if (enable != 0 && enable != 1)
@@ -807,8 +846,11 @@ index 7549e44..b446142 100644
 +        return 1;
 +    }
 +
++    /* Convert to Q8.8 with rounding, then big-endian for the wire. */
++    uint16_t ratio_q8 = (uint16_t)(ratio * 256.0 + 0.5);
++
 +    req.u.cmd_set_mbit.enable = (uint8_t)enable;
-+    req.u.cmd_set_mbit.parity_ratio = (uint8_t)ratio;
++    req.u.cmd_set_mbit.parity_ratio_q8 = htons(ratio_q8);
 +
 +    return send_command(port, req, offsetof(cmd_req_t, u) + sizeof(req.u.cmd_set_mbit), &resp);
 +}
@@ -822,10 +864,11 @@ index 7549e44..b446142 100644
 +
 +    if (rc == 0)
 +    {
++        double ratio = ntohs(resp.u.cmd_get_mbit.parity_ratio_q8) / 256.0;
 +        printf("enable=%d\n"
-+               "parity_ratio=%d\n",
++               "parity_ratio=%.4f\n",
 +               resp.u.cmd_get_mbit.enable,
-+               resp.u.cmd_get_mbit.parity_ratio);
++               ratio);
 +    }
 +    return rc;
 +}
@@ -833,7 +876,7 @@ index 7549e44..b446142 100644
  
  int main(int argc, char **argv)
  {
-@@ -285,7 +355,7 @@ int main(int argc, char **argv)
+@@ -285,7 +363,7 @@ int main(int argc, char **argv)
  
      if (argc < 3)
      {
@@ -842,7 +885,7 @@ index 7549e44..b446142 100644
          fprintf(stderr, "WFB-ng version %s\n", WFB_VERSION);
          fprintf(stderr, "WFB-ng home page: <http://wfb-ng.org>\n");
          return 1;
-@@ -311,6 +381,14 @@ int main(int argc, char **argv)
+@@ -311,6 +389,14 @@ int main(int argc, char **argv)
      {
          return get_radio(argv[0], port, argc - 2, argv + 2);
      }
@@ -858,7 +901,7 @@ index 7549e44..b446142 100644
      {
          fprintf(stderr, "Unknown command: %s\n", command);
 diff --git a/src/tx_cmd.h b/src/tx_cmd.h
-index 5e30e52..f533e6e 100644
+index 5e30e52..313e15c 100644
 --- a/src/tx_cmd.h
 +++ b/src/tx_cmd.h
 @@ -5,6 +5,8 @@
@@ -870,28 +913,29 @@ index 5e30e52..f533e6e 100644
  
  typedef struct {
      uint32_t req_id;
-@@ -26,6 +28,12 @@ typedef struct {
+@@ -26,6 +28,13 @@ typedef struct {
              bool vht_mode;
              uint8_t vht_nss;
          } __attribute__ ((packed)) cmd_set_radio;
 +
 +        struct
 +        {
-+            uint8_t enable;        /* 0 = off, nonzero = on */
-+            uint8_t parity_ratio;  /* partial-block parity:data scaling; 0..255 */
++            uint8_t  enable;            /* 0 = off, 1 = on; other values rejected */
++            uint16_t parity_ratio_q8;   /* partial-block parity:data scaling,
++                                         * Q8.8 fixed-point, big-endian; 256 = 1.0 */
 +        } __attribute__ ((packed)) cmd_set_mbit;
      } __attribute__ ((packed)) u;
  } __attribute__ ((packed)) cmd_req_t;
  
-@@ -50,5 +58,11 @@ typedef struct {
+@@ -50,5 +59,11 @@ typedef struct {
              bool vht_mode;
              uint8_t vht_nss;
          } __attribute__ ((packed)) cmd_get_radio;
 +
 +        struct
 +        {
-+            uint8_t enable;
-+            uint8_t parity_ratio;
++            uint8_t  enable;
++            uint16_t parity_ratio_q8;   /* Q8.8 fixed-point, big-endian */
 +        } __attribute__ ((packed)) cmd_get_mbit;
      } __attribute__ ((packed)) u;
  } __attribute__ ((packed)) cmd_resp_t;
