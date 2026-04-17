@@ -176,6 +176,12 @@ $CROSS_CC -o wfb_keygen src/keygen.o $WFB_LDFLAGS
 $CROSS_STRIP wfb_keygen
 cp wfb_keygen "$BUILD_DIR/wfb_keygen"
 
+echo "  Building wfb_tx_cmd..."
+$CROSS_CC $WFB_CFLAGS -std=gnu99 -c -o src/tx_cmd.o src/tx_cmd.c
+$CROSS_CC -o wfb_tx_cmd src/tx_cmd.o $WFB_LDFLAGS
+$CROSS_STRIP wfb_tx_cmd
+cp wfb_tx_cmd "$BUILD_DIR/wfb_tx_cmd"
+
 # ── Step 6: Build SHM diagnostic tools ───────────────────────────────
 
 echo "=== Building SHM tools ==="
@@ -202,7 +208,7 @@ $CROSS_STRIP "$BUILD_DIR/shm_consumer_test"
 echo ""
 echo "=== Build complete ==="
 echo ""
-ls -lh "$BUILD_DIR/wfb_tx" "$BUILD_DIR/wfb_keygen" \
+ls -lh "$BUILD_DIR/wfb_tx" "$BUILD_DIR/wfb_keygen" "$BUILD_DIR/wfb_tx_cmd" \
        "$BUILD_DIR/shm_ring_stats" "$BUILD_DIR/shm_consumer_test"
 echo ""
 
@@ -213,6 +219,7 @@ if [ "$DO_DEPLOY" = "1" ]; then
     scp -O \
         "$BUILD_DIR/wfb_tx" \
         "$BUILD_DIR/wfb_keygen" \
+        "$BUILD_DIR/wfb_tx_cmd" \
         "$BUILD_DIR/shm_ring_stats" \
         "$BUILD_DIR/shm_consumer_test" \
         "root@${DEPLOY_HOST}:${DEPLOY_DIR}/"

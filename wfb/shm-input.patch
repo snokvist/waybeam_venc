@@ -1,5 +1,5 @@
 diff --git a/src/tx.cpp b/src/tx.cpp
-index 0dec131..99b98e4 100644
+index 0dec131..850b982 100644
 --- a/src/tx.cpp
 +++ b/src/tx.cpp
 @@ -42,6 +42,12 @@
@@ -15,23 +15,137 @@ index 0dec131..99b98e4 100644
  
  using namespace std;
  
-@@ -739,10 +745,13 @@ uint32_t extract_rxq_overflow(struct msghdr *msg)
+@@ -52,6 +58,8 @@ Transmitter::Transmitter(int k, int n, const string &keypair, uint64_t epoch, ui
+     fec_p(NULL), fec_k(-1), fec_n(-1),
+     block_idx(0), fragment_idx(0),
+     max_packet_size(0),
++    parity_ratio(2),
++    mbit_close_enabled(true),
+     epoch(epoch),
+     channel_id(channel_id),
+     fec_delay(fec_delay),
+@@ -724,6 +732,99 @@ bool Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
+     return true;
+ }
+ 
++// C3 variable-k close: emit the currently-open FEC block with only the
++// fragments actually written, trimmed parity count, and no zero-padded
++// data packets on the wire.
++//
++// Semantics: the block is still FEC-encoded with the session's fec_k so
++// the existing RX (which waits for fec_k fragments) decodes normally via
++// parity substitution; we simply skip the wire-inject of the padding
++// slots. Parity count is capped at (fec_n - fec_k) and floored at
++// (fec_k - actual_k) so the receiver always collects enough fragments
++// to trigger its FEC path.
++//
++// Savings vs. the padding-based close path:
++//   - no wire inject of (fec_k - actual_k) zero-padded data packets
++//   - no wire inject of (fec_n - fec_k - parity_count) skipped parity
++//   - RX behaviour unchanged: same session keys, same block_idx sequence,
++//     same apply_fec logic (reconstructs FEC_ONLY slots as zeros)
++//
++// Returns false if no block is open (fragment_idx == 0).
++bool Transmitter::close_block_early(void)
++{
++    if (fragment_idx == 0)
++    {
++        return false;  // nothing open to close
++    }
++
++    uint8_t actual_k = fragment_idx;
++
++    // parity_count: at least (fec_k - actual_k) to let RX reach its
++    // has_fragments == fec_k trigger; at most (fec_n - fec_k) so we
++    // never exceed the session's configured parity budget; scaled by
++    // actual_k * parity_ratio between those bounds.
++    int parity_min = fec_k - (int)actual_k;
++    int parity_max = fec_n - fec_k;
++    int parity_target = (int)actual_k * (int)parity_ratio;
++    int parity_count = std::max(parity_min, std::min(parity_max, parity_target));
++
++    // Fill the remaining data slots with FEC_ONLY markers (flags + zero
++    // payload) so the FEC encoder sees a full k-input matrix. These slots
++    // are NOT transmitted on the wire; RX reconstructs them from parity.
++    while (fragment_idx < fec_k)
++    {
++        wpacket_hdr_t *packet_hdr = (wpacket_hdr_t*)block[fragment_idx];
++        packet_hdr->flags = WFB_PACKET_FEC_ONLY;
++        packet_hdr->packet_size = 0;
++        memset(block[fragment_idx] + sizeof(wpacket_hdr_t), '\0',
++               MAX_FEC_PAYLOAD - sizeof(wpacket_hdr_t));
++        fragment_idx += 1;
++    }
++
++    // FEC encode with the session's fec_k / fec_n (no change to the math)
++    zfex_status_code_t _rc = fec_encode_simd(fec_p, (const uint8_t**)block,
++                                             block + fec_k,
++                                             ZFEX_ROUND_UP_SIMD(max_packet_size));
++    assert(_rc == ZFEX_SC_OK);
++
++    set_mark(1);
++
++    // Emit only parity_count parity packets (fragment_idx fec_k .. fec_k+parity_count-1)
++    int emit_stop = fec_k + parity_count;
++    while (fragment_idx < emit_stop)
++    {
++        if (fec_delay > 0)
++        {
++            struct timespec t = { .tv_sec = (time_t)(fec_delay / 1000000),
++                                  .tv_nsec = (suseconds_t)(fec_delay % 1000000) * 1000 };
++            int rc = clock_nanosleep(CLOCK_MONOTONIC, 0, &t, NULL);
++            if(rc != 0 && rc != EINTR)
++            {
++                throw runtime_error(string_format("clock_nanosleep: %s", strerror(rc)));
++            }
++        }
++        send_block_fragment(max_packet_size);
++        fragment_idx += 1;
++    }
++
++    // Block emitted — reset counters for next block
++    block_idx += 1;
++    fragment_idx = 0;
++    max_packet_size = 0;
++
++    // Rotate session key periodically (same as send_packet's full-block close)
++    if (block_idx > MAX_BLOCK_IDX)
++    {
++        init_session(fec_k, fec_n);
++        for(int i = 0; i < fec_n - fec_k + 1; i++)
++        {
++            send_session_key();
++        }
++    }
++
++    return true;
++}
++
+ // Extract SO_RXQ_OVFL counter
+ uint32_t extract_rxq_overflow(struct msghdr *msg)
+ {
+@@ -739,10 +840,18 @@ uint32_t extract_rxq_overflow(struct msghdr *msg)
      return 0;
  }
  
 -void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd, int fec_timeout, bool mirror, int log_interval)
 +void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
 +                 int fec_timeout, bool mirror, int log_interval,
-+                 const char *shm_name = NULL)
++                 const char *shm_name = NULL,
++                 int mbit_close_enable = 1, int parity_ratio = 2)
  {
 +    bool use_shm = (shm_name && shm_name[0]);
      int nfds = rx_fd.size();
 -    assert(nfds > 0);
 +    assert(use_shm || nfds > 0);
++
++    // Apply CLI-configured frame-alignment knobs (runtime-tunable via wfb_cmd set_mbit)
++    t->set_mbit_close_enabled(mbit_close_enable != 0);
++    t->set_parity_ratio((uint8_t)parity_ratio);
  
      struct pollfd fds[nfds + 1];
      memset(fds, '\0', sizeof(fds));
-@@ -769,6 +778,43 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -769,6 +878,43 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
      uint32_t count_p_truncated = 0; // injected large packets that were truncated
      int start_fd_idx = 0;
  
@@ -43,7 +157,7 @@ index 0dec131..99b98e4 100644
 +    uint64_t shm_watchdog_ts = 0;      // when write_idx last advanced
 +    const uint64_t SHM_STALL_MS = 3000; // detach if write_idx stuck this long
 +    const int SHM_DRAIN_MAX = 128;     // cap packets drained per outer iter
-+    const int SHM_FUTEX_MS = 2;        // futex wait when ring empty
++    const int SHM_FUTEX_MS = 10;       // idle-wait timeout only; producer wakes within us
 +    if (use_shm)
 +    {
 +        g_shm_ring = venc_ring_attach(shm_name);
@@ -75,7 +189,7 @@ index 0dec131..99b98e4 100644
      for(;;)
      {
          uint64_t cur_ts = get_time_ms();
-@@ -779,7 +825,55 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -779,7 +925,55 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              poll_timeout = std::min(poll_timeout, (int)(fec_close_ts > cur_ts ? fec_close_ts - cur_ts : 0));
          }
  
@@ -132,7 +246,61 @@ index 0dec131..99b98e4 100644
  
          if (rc < 0)
          {
-@@ -980,7 +1074,7 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -969,6 +1163,53 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+                 }
+                 break;
+ 
++                case CMD_SET_MBIT:
++                {
++                    if (rsize != offsetof(cmd_req_t, u) + sizeof(req.u.cmd_set_mbit))
++                    {
++                        resp.rc = htonl(EINVAL);
++                        sendto(fd, &resp, offsetof(cmd_resp_t, u), MSG_DONTWAIT, (sockaddr*)&from_addr, addr_size);
++                        continue;
++                    }
++
++                    uint8_t enable = req.u.cmd_set_mbit.enable;
++                    uint8_t ratio  = req.u.cmd_set_mbit.parity_ratio;
++
++                    // Enable is boolean: 0 or 1. Reject other values so a
++                    // future bit-field expansion in the protocol isn't
++                    // silently misinterpreted as "enabled".
++                    if (enable > 1)
++                    {
++                        resp.rc = htonl(EINVAL);
++                        sendto(fd, &resp, offsetof(cmd_resp_t, u), MSG_DONTWAIT, (sockaddr*)&from_addr, addr_size);
++                        WFB_ERR("Rejecting set_mbit: enable must be 0 or 1\n");
++                        continue;
++                    }
++
++                    t->set_mbit_close_enabled(enable != 0);
++                    t->set_parity_ratio(ratio);
++
++                    sendto(fd, &resp, offsetof(cmd_resp_t, u), MSG_DONTWAIT, (sockaddr*)&from_addr, addr_size);
++                    WFB_INFO("M-bit close: enable=%u, parity_ratio=%u\n", enable, ratio);
++                }
++                break;
++
++                case CMD_GET_MBIT:
++                {
++                    if (rsize != offsetof(cmd_req_t, u))
++                    {
++                        resp.rc = htonl(EINVAL);
++                        sendto(fd, &resp, offsetof(cmd_resp_t, u), MSG_DONTWAIT, (sockaddr*)&from_addr, addr_size);
++                        continue;
++                    }
++
++                    resp.u.cmd_get_mbit.enable = t->is_mbit_close_enabled() ? 1 : 0;
++                    resp.u.cmd_get_mbit.parity_ratio = t->get_parity_ratio();
++
++                    sendto(fd, &resp, offsetof(cmd_resp_t, u) + sizeof(resp.u.cmd_get_mbit), MSG_DONTWAIT, (sockaddr*)&from_addr, addr_size);
++                }
++                break;
++
+                 default:
+                 {
+                     resp.rc = htonl(ENOTSUP);
+@@ -980,7 +1221,7 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              }
          }
  
@@ -141,7 +309,7 @@ index 0dec131..99b98e4 100644
          {
              // close fec only if no data packets and fec timeout expired
              if (fec_timeout > 0 && cur_ts >= fec_close_ts)
-@@ -994,6 +1088,156 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+@@ -994,6 +1235,158 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
              continue;
          }
  
@@ -224,16 +392,18 @@ index 0dec131..99b98e4 100644
 +                // (H.264/H.265 RTP payload format, RFC 3550 byte 1 bit 7).
 +                // Close the FEC block at the frame boundary so one frame
 +                // fits in one block, eliminating cross-frame contamination
-+                // on block loss.  If fec_k exceeds the frame's packet
-+                // count, the block is padded with zero-length FEC_ONLY
-+                // fragments -- real airtime cost, so fec_controller should
-+                // size k near typical frame packet count.  send_packet
-+                // returns false once the block auto-emits and fragment_idx
-+                // wraps to 0, terminating the loop.  fec_timeout remains a
-+                // safety-net fallback for streams without M-bit markers.
-+                if (rsize >= 2 && (buf[1] & 0x80))
++                // on block loss.
++                //
++                // close_block_early skips wire injection of padding data
++                // slots and trims parity to scale with actual_k; parity
++                // ratio is runtime-tunable via wfb_cmd set_mbit.  The
++                // whole feature can be disabled (reverts to k-sized
++                // blocks spanning frame boundaries) via set_mbit -e 0.
++                // fec_timeout remains a safety-net fallback for streams
++                // without M-bit markers.
++                if (rsize >= 2 && (buf[1] & 0x80) && t->is_mbit_close_enabled())
 +                {
-+                    while(t->send_packet(NULL, 0, WFB_PACKET_FEC_ONLY));
++                    t->close_block_early();
 +                }
 +
 +                if (cur_ts >= log_send_ts)
@@ -298,7 +468,56 @@ index 0dec131..99b98e4 100644
          // rc > 0: events detected
          // start from last fd index and reset it to zero
          int _tmp = start_fd_idx;
-@@ -1526,6 +1770,52 @@ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int l
+@@ -1071,6 +1464,15 @@ void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
+ 
+                     t->send_packet(buf, rsize, 0);
+ 
++                    // Honor RTP M-bit on the UDP input path too, matching
++                    // the SHM branch. When enabled, closes the current FEC
++                    // block at the frame boundary via close_block_early so
++                    // a frame never spans across two blocks.
++                    if (rsize >= 2 && (buf[1] & 0x80) && t->is_mbit_close_enabled())
++                    {
++                        t->close_block_early();
++                    }
++
+                     if (cur_ts >= log_send_ts)  // log timeout expired
+                     {
+                         // Save current index and go to outer loop
+@@ -1428,7 +1830,8 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
+                     int udp_port, int debug_port, int k, int n, const string &keypair, int fec_timeout,
+                     uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
+                     radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
+-                    int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay)
++                    int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay,
++                    int mbit_close_enable, int parity_ratio)
+ {
+     vector<int> rx_fd;
+     vector<string> wlans;
+@@ -1478,14 +1881,15 @@ void local_loop_udp(int argc, char* const* argv, int optind, int rcv_buf, int lo
+     }
+ 
+     int control_fd = open_control_fd(control_port);
+-    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
+ }
+ 
+ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int log_interval,
+                      const char *unix_socket, int debug_port, int k, int n, const string &keypair, int fec_timeout,
+                      uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
+                      radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
+-                     int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay)
++                     int snd_buf_size, uint32_t inject_retries, uint32_t inject_retry_delay,
++                     int mbit_close_enable, int parity_ratio)
+ {
+     vector<int> rx_fd;
+     vector<string> wlans;
+@@ -1522,15 +1926,61 @@ void local_loop_unix(int argc, char* const* argv, int optind, int rcv_buf, int l
+     }
+ 
+     int control_fd = open_control_fd(control_port);
+-    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
  }
  
  
@@ -309,7 +528,7 @@ index 0dec131..99b98e4 100644
 +                    bool use_qdisc, uint32_t fwmark,
 +                    radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port,
 +                    bool mirror, int snd_buf_size, uint32_t inject_retries,
-+                    uint32_t inject_retry_delay)
++                    uint32_t inject_retry_delay, int mbit_close_enable, int parity_ratio)
 +{
 +    vector<int> rx_fd;
 +    vector<string> wlans;
@@ -336,7 +555,7 @@ index 0dec131..99b98e4 100644
 +
 +    int control_fd = open_control_fd(control_port);
 +    WFB_INFO("SHM input mode: reading from ring '%s'\n", shm_name);
-+    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, shm_name);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, shm_name, mbit_close_enable, parity_ratio);
 +
 +    // Cleanup
 +    if (g_shm_ring)
@@ -351,7 +570,40 @@ index 0dec131..99b98e4 100644
  void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int log_interval,
                        int udp_port, int k, int n, const string &keypair, int fec_timeout,
                        uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
-@@ -1669,6 +1959,7 @@ int main(int argc, char * const *argv)
+                       radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
+-                      int snd_buf_size)
++                      int snd_buf_size, int mbit_close_enable, int parity_ratio)
+ {
+     vector<int> rx_fd;
+     vector<pair<string, vector<uint16_t>>> remote_hosts;
+@@ -1598,7 +2048,7 @@ void distributor_loop(int argc, char* const* argv, int optind, int rcv_buf, int
+                                                                                     fwmark, snd_buf_size));
+ 
+     int control_fd = open_control_fd(control_port);
+-    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
+ }
+ 
+ 
+@@ -1606,7 +2056,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
+                            const char* unix_socket, int k, int n, const string &keypair, int fec_timeout,
+                            uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, bool use_qdisc, uint32_t fwmark,
+                            radiotap_header_t &radiotap_header, uint8_t frame_type, int control_port, bool mirror,
+-                           int snd_buf_size)
++                           int snd_buf_size, int mbit_close_enable, int parity_ratio)
+ {
+     vector<int> rx_fd;
+     vector<pair<string, vector<uint16_t>>> remote_hosts;
+@@ -1660,7 +2110,7 @@ void distributor_loop_unix(int argc, char* const* argv, int optind, int rcv_buf,
+                                                                                     fwmark, snd_buf_size));
+ 
+     int control_fd = open_control_fd(control_port);
+-    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval);
++    data_source(t, rx_fd, control_fd, fec_timeout, mirror, log_interval, NULL, mbit_close_enable, parity_ratio);
+ }
+ 
+ 
+@@ -1669,6 +2119,7 @@ int main(int argc, char * const *argv)
      int opt;
      uint8_t k=8, n=12, radio_port=0;
      uint32_t fec_delay = 0;
@@ -359,21 +611,42 @@ index 0dec131..99b98e4 100644
      uint32_t link_id = 0x0;
      uint64_t epoch = 0;
      int srv_port = 10000;
-@@ -1697,7 +1988,7 @@ int main(int argc, char * const *argv)
+@@ -1696,8 +2147,10 @@ int main(int argc, char * const *argv)
+     char *unix_socket = NULL;
      uint32_t inject_retries = 0;
      uint32_t inject_retry_delay = 5000; // 5ms
++    int mbit_close_enable = 1;  // -b 0|1, default on
++    int parity_ratio = 2;       // -r, default 2 (matches 12:6 full-block ratio)
  
 -    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:")) != -1) {
-+    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:H:")) != -1) {
++    while ((opt = getopt(argc, argv, "dI:K:k:n:u:U:p:F:l:B:G:S:L:M:N:D:T:i:e:R:s:f:mVQP:C:J:E:H:b:r:")) != -1) {
          switch (opt) {
          case 'I':
              tx_mode = INJECTOR;
-@@ -1814,9 +2105,13 @@ int main(int argc, char * const *argv)
+@@ -1814,9 +2267,31 @@ int main(int argc, char * const *argv)
              inject_retry_delay = atoi(optarg);
              break;
  
 +        case 'H':
 +            shm_name = optarg;
++            break;
++
++        case 'b':
++            mbit_close_enable = atoi(optarg);
++            if (mbit_close_enable != 0 && mbit_close_enable != 1)
++            {
++                WFB_ERR("-b must be 0 or 1\n");
++                exit(1);
++            }
++            break;
++
++        case 'r':
++            parity_ratio = atoi(optarg);
++            if (parity_ratio < 0 || parity_ratio > 255)
++            {
++                WFB_ERR("-r must be 0..255\n");
++                exit(1);
++            }
 +            break;
 +
          default: /* '?' */
@@ -383,18 +656,242 @@ index 0dec131..99b98e4 100644
                       "             [-F fec_delay] [-B bandwidth] [-G guard_interval] [-S stbc] [-L ldpc] [-M mcs_index] [-N VHT_NSS]\n"
                       "             [-T fec_timeout] [-l log_interval] [-e epoch] [-i link_id] [-f { data | rts }] [-m] [-V] [-Q]\n"
                       "             [-P fwmark] [-J inject_retries] [-E inject_retry_delay] [-C control_port] interface1 [interface2] ...\n",
-@@ -1882,6 +2177,14 @@ int main(int argc, char * const *argv)
+@@ -1880,7 +2355,17 @@ int main(int argc, char * const *argv)
+                                 unix_socket, debug_port, k, n, keypair, fec_timeout,
+                                 epoch, channel_id, fec_delay, use_qdisc, fwmark,
                                  radiotap_header, frame_type, control_port, mirror,
-                                 snd_buf, inject_retries, inject_retry_delay);
-             }
+-                                snd_buf, inject_retries, inject_retry_delay);
++                                snd_buf, inject_retries, inject_retry_delay,
++                                mbit_close_enable, parity_ratio);
++            }
 +            else if (shm_name != NULL)
 +            {
 +                local_loop_shm(argc, argv, optind, log_interval,
 +                               shm_name, debug_port, k, n, keypair, fec_timeout,
 +                               epoch, channel_id, fec_delay, use_qdisc, fwmark,
 +                               radiotap_header, frame_type, control_port, mirror,
-+                               snd_buf, inject_retries, inject_retry_delay);
-+            }
++                               snd_buf, inject_retries, inject_retry_delay,
++                               mbit_close_enable, parity_ratio);
+             }
              else
              {
-                 local_loop_udp(argc, argv, optind, rcv_buf, log_interval,
+@@ -1888,7 +2373,8 @@ int main(int argc, char * const *argv)
+                                udp_port, debug_port, k, n, keypair, fec_timeout,
+                                epoch, channel_id, fec_delay, use_qdisc, fwmark,
+                                radiotap_header, frame_type, control_port, mirror,
+-                               snd_buf, inject_retries, inject_retry_delay);
++                               snd_buf, inject_retries, inject_retry_delay,
++                               mbit_close_enable, parity_ratio);
+             }
+             break;
+ 
+@@ -1899,7 +2385,7 @@ int main(int argc, char * const *argv)
+                                       unix_socket, k, n, keypair, fec_timeout,
+                                       epoch, channel_id, fec_delay, use_qdisc, fwmark,
+                                       radiotap_header, frame_type, control_port, mirror,
+-                                      snd_buf);
++                                      snd_buf, mbit_close_enable, parity_ratio);
+             }
+             else
+             {
+@@ -1907,7 +2393,7 @@ int main(int argc, char * const *argv)
+                                  udp_port, k, n, keypair, fec_timeout,
+                                  epoch, channel_id, fec_delay, use_qdisc, fwmark,
+                                  radiotap_header, frame_type, control_port, mirror,
+-                                 snd_buf);
++                                 snd_buf, mbit_close_enable, parity_ratio);
+             }
+             break;
+ 
+diff --git a/src/tx.hpp b/src/tx.hpp
+index 39506e6..689164a 100644
+--- a/src/tx.hpp
++++ b/src/tx.hpp
+@@ -75,8 +75,20 @@ public:
+     Transmitter(int k, int n, const std::string &keypair, uint64_t epoch, uint32_t channel_id, uint32_t fec_delay, std::vector<tags_item_t> &tags);
+     virtual ~Transmitter();
+     bool send_packet(const uint8_t *buf, size_t size, uint8_t flags);
++    // Close current FEC block early with variable actual_k < fec_k.
++    // Emits only fragment_idx data packets (no zero padding on wire) plus
++    // parity_count parity packets, where parity_count scales with actual_k
++    // but always provides at least (fec_k - actual_k) to let the receiver
++    // reach its fec_k threshold. Returns false if no open block.
++    // Uses the Transmitter's current parity_ratio.
++    bool close_block_early(void);
+     void send_session_key(void);
+     void init_session(int k, int n);
++    // Runtime-tunable frame-alignment knobs.
++    void set_parity_ratio(uint8_t r) { parity_ratio = r; }
++    uint8_t get_parity_ratio(void) const { return parity_ratio; }
++    void set_mbit_close_enabled(bool e) { mbit_close_enabled = e; }
++    bool is_mbit_close_enabled(void) const { return mbit_close_enabled; }
+     void get_fec(int &k, int &n) { k = fec_k; n = fec_n; }
+     virtual void select_output(int idx) = 0;
+     virtual void dump_stats(uint64_t ts, uint32_t &injected_packets, uint32_t &dropped_packets, uint32_t &injected_bytes) = 0;
+@@ -99,6 +111,9 @@ private:
+     uint8_t fragment_idx;
+     uint8_t** block;
+     size_t max_packet_size;
++    // Frame-alignment state (runtime-tunable via CMD_SET_MBIT).
++    uint8_t parity_ratio;
++    bool    mbit_close_enabled;
+     const uint64_t epoch; // Packets from old epoch will be discarded
+     const uint32_t channel_id; // (link_id << 8) + port_number
+     const uint32_t fec_delay; // fec packet delay [us]
+diff --git a/src/tx_cmd.c b/src/tx_cmd.c
+index 7549e44..b446142 100644
+--- a/src/tx_cmd.c
++++ b/src/tx_cmd.c
+@@ -79,6 +79,7 @@ int send_command(int port, cmd_req_t req, size_t req_size, cmd_resp_t *resp)
+     {
+     case CMD_SET_FEC:
+     case CMD_SET_RADIO:
++    case CMD_SET_MBIT:
+         resp_payload_size = 0;
+         break;
+ 
+@@ -90,6 +91,10 @@ int send_command(int port, cmd_req_t req, size_t req_size, cmd_resp_t *resp)
+         resp_payload_size = sizeof(resp->u.cmd_get_radio);
+         break;
+ 
++    case CMD_GET_MBIT:
++        resp_payload_size = sizeof(resp->u.cmd_get_mbit);
++        break;
++
+     default:
+         assert(0);
+     }
+@@ -268,6 +273,71 @@ int get_radio(char *progname, int port, int argc, char **argv)
+     return rc;
+ }
+ 
++int set_mbit(char *progname, int port, int argc, char **argv)
++{
++    int opt;
++    int enable = 1;
++    int ratio = 2;
++    cmd_req_t req = { .req_id = htonl(rand()), .cmd_id = CMD_SET_MBIT };
++    cmd_resp_t resp;
++
++    while ((opt = getopt(argc, argv, "e:r:h")) != -1)
++    {
++        switch (opt)
++        {
++        case 'e':
++            enable = atoi(optarg);
++            break;
++
++        case 'r':
++            ratio = atoi(optarg);
++            break;
++
++        default: /* '?' */
++            fprintf(stderr, "Usage: %s <port> %s [-e ENABLE(0|1)] [-r RATIO(0..255)]\n", progname, argv[0]);
++            fprintf(stderr, "Default: enable=%d, ratio=%d\n", enable, ratio);
++            fprintf(stderr, "  enable=1 closes FEC block on RTP M-bit (frame boundary)\n");
++            fprintf(stderr, "  ratio scales parity for partial blocks; 2 matches typical full-block ratio\n");
++            fprintf(stderr, "WFB-ng version %s\n", WFB_VERSION);
++            fprintf(stderr, "WFB-ng home page: <http://wfb-ng.org>\n");
++            return 1;
++        }
++    }
++
++    if (ratio < 0 || ratio > 255)
++    {
++        fprintf(stderr, "ratio must be 0..255\n");
++        return 1;
++    }
++    if (enable != 0 && enable != 1)
++    {
++        fprintf(stderr, "enable must be 0 or 1\n");
++        return 1;
++    }
++
++    req.u.cmd_set_mbit.enable = (uint8_t)enable;
++    req.u.cmd_set_mbit.parity_ratio = (uint8_t)ratio;
++
++    return send_command(port, req, offsetof(cmd_req_t, u) + sizeof(req.u.cmd_set_mbit), &resp);
++}
++
++int get_mbit(char *progname, int port, int argc, char **argv)
++{
++    cmd_req_t req = { .req_id = htonl(rand()), .cmd_id = CMD_GET_MBIT };
++    cmd_resp_t resp;
++
++    int rc = send_command(port, req, offsetof(cmd_req_t, u), &resp);
++
++    if (rc == 0)
++    {
++        printf("enable=%d\n"
++               "parity_ratio=%d\n",
++               resp.u.cmd_get_mbit.enable,
++               resp.u.cmd_get_mbit.parity_ratio);
++    }
++    return rc;
++}
++
+ 
+ int main(int argc, char **argv)
+ {
+@@ -285,7 +355,7 @@ int main(int argc, char **argv)
+ 
+     if (argc < 3)
+     {
+-        fprintf(stderr, "Usage: %s <port> {set_fec | set_radio | get_fec | get_radio } ...\n", argv[0]);
++        fprintf(stderr, "Usage: %s <port> {set_fec | set_radio | get_fec | get_radio | set_mbit | get_mbit } ...\n", argv[0]);
+         fprintf(stderr, "WFB-ng version %s\n", WFB_VERSION);
+         fprintf(stderr, "WFB-ng home page: <http://wfb-ng.org>\n");
+         return 1;
+@@ -311,6 +381,14 @@ int main(int argc, char **argv)
+     {
+         return get_radio(argv[0], port, argc - 2, argv + 2);
+     }
++    else if (strcmp(command, "set_mbit") == 0)
++    {
++        return set_mbit(argv[0], port, argc - 2, argv + 2);
++    }
++    else if (strcmp(command, "get_mbit") == 0)
++    {
++        return get_mbit(argv[0], port, argc - 2, argv + 2);
++    }
+     else
+     {
+         fprintf(stderr, "Unknown command: %s\n", command);
+diff --git a/src/tx_cmd.h b/src/tx_cmd.h
+index 5e30e52..f533e6e 100644
+--- a/src/tx_cmd.h
++++ b/src/tx_cmd.h
+@@ -5,6 +5,8 @@
+ #define CMD_SET_RADIO 2
+ #define CMD_GET_FEC   3
+ #define CMD_GET_RADIO 4
++#define CMD_SET_MBIT  5   /* enable/disable RTP M-bit FEC-block close + parity ratio */
++#define CMD_GET_MBIT  6
+ 
+ typedef struct {
+     uint32_t req_id;
+@@ -26,6 +28,12 @@ typedef struct {
+             bool vht_mode;
+             uint8_t vht_nss;
+         } __attribute__ ((packed)) cmd_set_radio;
++
++        struct
++        {
++            uint8_t enable;        /* 0 = off, nonzero = on */
++            uint8_t parity_ratio;  /* partial-block parity:data scaling; 0..255 */
++        } __attribute__ ((packed)) cmd_set_mbit;
+     } __attribute__ ((packed)) u;
+ } __attribute__ ((packed)) cmd_req_t;
+ 
+@@ -50,5 +58,11 @@ typedef struct {
+             bool vht_mode;
+             uint8_t vht_nss;
+         } __attribute__ ((packed)) cmd_get_radio;
++
++        struct
++        {
++            uint8_t enable;
++            uint8_t parity_ratio;
++        } __attribute__ ((packed)) cmd_get_mbit;
+     } __attribute__ ((packed)) u;
+ } __attribute__ ((packed)) cmd_resp_t;
