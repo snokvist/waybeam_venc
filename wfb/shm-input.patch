@@ -204,7 +204,7 @@ index 1603b6e..84a8f58 100644
              break;
  
 diff --git a/src/rx.hpp b/src/rx.hpp
-index 856248e..cd0d940 100644
+index 856248e..d93fcee 100644
 --- a/src/rx.hpp
 +++ b/src/rx.hpp
 @@ -179,6 +179,14 @@ public:
@@ -212,8 +212,8 @@ index 856248e..cd0d940 100644
      void set_packet_loss_listener(PacketLossListener* listener) { packet_loss_listener_ = listener; }
  
 +    // Cleartext mode: RX silently drops WFB_PACKET_DATA (AEAD) packets when
-+    // enabled and drops WFB_PACKET_DATA_PLAIN packets when disabled.  Set
-+    // from -c on the CLI at startup; no runtime toggle for session-state
++    // disabled and drops WFB_PACKET_DATA_PLAIN packets when enabled.  Set
++    // from -x on the CLI at startup; no runtime toggle for session-state
 +    // reasons (we'd have to re-handshake).  Session packets are always
 +    // authenticated regardless.
 +    void set_encrypt_data(bool e) { encrypt_data = e; }
@@ -252,7 +252,7 @@ index 856248e..cd0d940 100644
      PacketLossListener* packet_loss_listener_ = nullptr;
  };
 diff --git a/src/tx.cpp b/src/tx.cpp
-index 0dec131..cc716ff 100644
+index 0dec131..b2ee3b9 100644
 --- a/src/tx.cpp
 +++ b/src/tx.cpp
 @@ -42,6 +42,12 @@
@@ -448,7 +448,7 @@ index 0dec131..cc716ff 100644
 +void data_source(unique_ptr<Transmitter> &t, vector<int> &rx_fd, int control_fd,
 +                 int fec_timeout, bool mirror, int log_interval,
 +                 const char *shm_name = NULL,
-+                 int mbit_close_enable = 1, int parity_ratio_q8 = 512,
++                 int mbit_close_enable = 1, int parity_ratio_q8 = 128,
 +                 int encrypt_data = 1)
  {
 +    bool use_shm = (shm_name && shm_name[0]);
@@ -1099,7 +1099,7 @@ index 0dec131..cc716ff 100644
              break;
  
 diff --git a/src/tx.hpp b/src/tx.hpp
-index 39506e6..a801bf8 100644
+index 39506e6..14601ac 100644
 --- a/src/tx.hpp
 +++ b/src/tx.hpp
 @@ -75,8 +75,31 @@ public:
@@ -1128,7 +1128,7 @@ index 39506e6..a801bf8 100644
 +    // current session state and require a re-handshake the protocol doesn't
 +    // support).  Session packets are always encrypted regardless of this flag
 +    // so RX can validate fec_k/fec_n/epoch.  Must be set before the first
-+    // send_packet / send_block_fragment; checked by assertion in debug builds.
++    // send_packet / send_block_fragment.
 +    void set_encrypt_data(bool e) { encrypt_data = e; }
 +    bool is_encrypt_data(void) const { return encrypt_data; }
      void get_fec(int &k, int &n) { k = fec_k; n = fec_n; }
@@ -1150,7 +1150,7 @@ index 39506e6..a801bf8 100644
      const uint32_t channel_id; // (link_id << 8) + port_number
      const uint32_t fec_delay; // fec packet delay [us]
 diff --git a/src/tx_cmd.c b/src/tx_cmd.c
-index 7549e44..0665cf0 100644
+index 7549e44..89880c4 100644
 --- a/src/tx_cmd.c
 +++ b/src/tx_cmd.c
 @@ -79,6 +79,7 @@ int send_command(int port, cmd_req_t req, size_t req_size, cmd_resp_t *resp)
@@ -1180,7 +1180,7 @@ index 7549e44..0665cf0 100644
 +{
 +    int opt;
 +    int enable = 1;
-+    double ratio = 2.0;
++    double ratio = 0.5;
 +    cmd_req_t req = { .req_id = htonl(rand()), .cmd_id = CMD_SET_MBIT };
 +    cmd_resp_t resp;
 +
