@@ -846,15 +846,6 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	venc_api_set_sensor_info((int)state->sensor.pad_id,
 		state->sensor.mode_index, pconf->sensor_cfg.forced_pad);
 
-	/* Resolve isp.sensorBin: configured path takes precedence; if empty
-	 * or unreadable, fall back to /etc/sensors/<sensor>.bin keyed off the
-	 * live sensor name (so a stock device with imx335.bin / imx415.bin
-	 * just works without per-host config). */
-	pipeline_common_resolve_isp_bin(
-		vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL,
-		state->sensor.plane.sensName,
-		pconf->isp_bin_path, sizeof(pconf->isp_bin_path));
-
 	sensor_width  = state->sensor.plane.capt.width;
 	sensor_height = state->sensor.plane.capt.height;
 	if (state->sensor.mode.output.width > 0 &&
@@ -953,9 +944,12 @@ static int g_isp_initialized = 0;
 static char g_last_isp_bin_path[256] = {0};
 
 /* Phase 3: assign port structs, issue all MI_SYS bind calls, init output,
- * video, ISP bin, exposure cap, cus3a, clocks, and audio. */
+ * video, ISP bin, exposure cap, cus3a, clocks, and audio.
+ * pconf is non-const because we resolve isp_bin_path in here (we need
+ * the live sensor name from state->sensor, which is only populated
+ * after Phase 2). */
 static int bind_and_finalize_pipeline(Star6ePipelineState *state,
-	const VencConfig *vcfg, const Star6ePipelineConfig *pconf,
+	const VencConfig *vcfg, Star6ePipelineConfig *pconf,
 	SdkQuietState *sdk_quiet)
 {
 	MI_U32 venc_device = 0;
@@ -1029,6 +1023,17 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 
 	star6e_video_init(&state->video, vcfg, pconf->sensor_framerate,
 		&state->output);
+
+	/* Resolve isp.sensorBin: configured path takes precedence; if empty
+	 * or unreadable, fall back to /etc/sensors/<sensor>.bin keyed off
+	 * the live sensor name.  Resolved here (rather than in
+	 * select_and_configure_sensor) so reinit also picks up SIGHUP-driven
+	 * isp.sensorBin changes — reinit reuses the existing sensor and
+	 * skips select_and_configure_sensor. */
+	pipeline_common_resolve_isp_bin(
+		vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL,
+		state->sensor.plane.sensName,
+		pconf->isp_bin_path, sizeof(pconf->isp_bin_path));
 
 	/* Load ISP bin on first start, or when the bin path changes.  Skipping
 	 * redundant reloads avoids the vendor AE resetting the sensor shutter
