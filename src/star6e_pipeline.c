@@ -733,7 +733,9 @@ typedef struct {
 	SensorSelectConfig sensor_cfg;
 	SensorUnlockConfig sensor_unlock;
 	SensorStrategy     sensor_strategy;
-	const char        *isp_bin_path;
+	char               isp_bin_path[256];   /* "" if no bin should be loaded;
+	                                         * resolved by select_and_configure_sensor()
+	                                         * after we know the live sensor name */
 	uint32_t           sensor_width;
 	uint32_t           sensor_height;
 	uint32_t           image_width;
@@ -798,7 +800,9 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	pconf->image_flip      = vcfg->image.flip   ? 1 : 0;
 	pconf->vpe_level_3dnr  = vcfg->fpv.noise_level;
 	pconf->oc_level        = vcfg->system.overclock_level;
-	pconf->isp_bin_path    = vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL;
+	/* isp_bin_path is resolved later in select_and_configure_sensor() once
+	 * the live sensor name is known.  Leave empty here. */
+	pconf->isp_bin_path[0] = '\0';
 
 	pconf->sensor_cfg = pipeline_common_build_sensor_select_config(
 		vcfg->sensor.index, vcfg->sensor.mode,
@@ -841,6 +845,15 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	/* Expose sensor info to HTTP API for /api/v1/modes */
 	venc_api_set_sensor_info((int)state->sensor.pad_id,
 		state->sensor.mode_index, pconf->sensor_cfg.forced_pad);
+
+	/* Resolve isp.sensorBin: configured path takes precedence; if empty
+	 * or unreadable, fall back to /etc/sensors/<sensor>.bin keyed off the
+	 * live sensor name (so a stock device with imx335.bin / imx415.bin
+	 * just works without per-host config). */
+	pipeline_common_resolve_isp_bin(
+		vcfg->isp.sensor_bin[0] ? vcfg->isp.sensor_bin : NULL,
+		state->sensor.plane.sensName,
+		pconf->isp_bin_path, sizeof(pconf->isp_bin_path));
 
 	sensor_width  = state->sensor.plane.capt.width;
 	sensor_height = state->sensor.plane.capt.height;
@@ -1023,7 +1036,7 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * Save&Restart, which would otherwise lock the sensor VTS at ~100 fps.
 	 * The kernel ISP driver accepts repeated loads but each one disturbs
 	 * the running sensor timing. */
-	if (pconf->isp_bin_path && *pconf->isp_bin_path &&
+	if (pconf->isp_bin_path[0] &&
 	    strcmp(pconf->isp_bin_path, g_last_isp_bin_path) != 0) {
 		ret = star6e_pipeline_load_isp_bin(pconf->isp_bin_path, sdk_quiet);
 		if (ret != 0) {
