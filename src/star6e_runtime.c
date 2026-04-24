@@ -516,6 +516,19 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	if (vcfg->record.max_mb > 0)
 		ps->ts_recorder.max_bytes = (uint64_t)vcfg->record.max_mb * 1024 * 1024;
 
+	/* PiP mode requested but Star6E backend has no implementation yet.
+	 * Coerce to "off" so we don't silently start an unrelated recorder or
+	 * leave the user thinking PiP is active. Backend-pending — see PR #57. */
+	if (vcfg->record.enabled &&
+	    (strcmp(vcfg->record.mode, "pip") == 0 ||
+	     strcmp(vcfg->record.mode, "pip-mirror") == 0)) {
+		fprintf(stderr,
+			"! record.mode=\"%s\" requested but Star6E PiP backend is "
+			"not implemented yet — coercing to \"off\".\n",
+			vcfg->record.mode);
+		snprintf(vcfg->record.mode, sizeof(vcfg->record.mode), "off");
+	}
+
 	/* Start dual VENC if mode is "dual" or "dual-stream" */
 	if (vcfg->record.enabled &&
 	    (strcmp(vcfg->record.mode, "dual") == 0 ||

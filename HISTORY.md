@@ -1,5 +1,42 @@
 # History
 
+## [0.7.15] - 2026-04-25
+
+Add Picture-in-Picture (PiP) configuration surface (Star6E backend
+pending).  Lays the groundwork for a zoom-region overlay rendered via
+MI_RGN, with an explicit format/CPU trade-off knob.
+
+- **Config:** new `pip` section in `venc.default.json` with
+  `enabled` (bool, MUT_LIVE), `format` ("grayscale"|"color",
+  MUT_RESTART), `refreshEvery` (uint8, MUT_RESTART), `zoom.{x,y,w,h}`
+  (MUT_LIVE), and `position.{x,y,w,h}` (x/y MUT_LIVE; w/h MUT_RESTART).
+  All values default to disabled / zero — must be explicitly configured.
+- **Architecture decision recorded** in the `VencConfigPip` doc comment:
+  VPE port 1 produces the zoom region; a compositor copies it into an
+  MI_RGN canvas attached to VPE port 0.  Format trades CPU vs colour:
+  I8 grayscale ≈ 0% CPU (Y-plane memcpy) vs ARGB4444 ≈ 10% CPU.
+- **HTTP API:** 11 new field descriptors (`pip.*`) registered with the
+  `/api/v1/set` table.  Live-group plumbing in place for
+  `pip.enabled`, `pip.zoom.*`, and `pip.position.{x,y}`; new callback
+  slots `apply_pip_enabled`, `apply_pip_zoom`, `apply_pip_position`,
+  `query_pip_info` added to `VencApplyCallbacks`.
+- **Validation:** alignment validators reject misaligned values at the
+  API surface — 2-px alignment for all rect coordinates, 16-px
+  alignment for `position.{w,h}` (VPE constraint).  `pip.format` must
+  be `grayscale` or `color`; `pip.refresh_every` must be ≥ 1.
+- **Runtime guard (option B):** if `record.mode` is `pip` or
+  `pip-mirror` at startup but no Star6E PiP backend is implemented
+  yet, the runtime logs a warning and coerces `record.mode` to
+  `"off"`.  Pre-empts the silent footgun where a user picks `pip` in
+  the WebUI and gets nothing.
+- **WebUI:** new Picture-in-Picture tab on the dashboard, tooltips
+  describe the format trade-off and alignment requirements, `pip.format`
+  exposed as an enum.
+- **Backend:** none yet.  No backend populates the `apply_pip_*`
+  callbacks, so live-set requests return 501 "not implemented".  This
+  PR ships the contract; the Star6E pipeline implementation is the
+  next PR.  Maruko deferred.
+
 ## [0.7.14] - 2026-04-25
 
 Drop EIS module entirely.  An empirical sensor-mode sweep on Star6E

@@ -157,6 +157,19 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->record.gop_size = 0;
 	cfg->record.server[0] = '\0';
 
+	/* pip */
+	cfg->pip.enabled = false;
+	safe_strcpy(cfg->pip.format, sizeof(cfg->pip.format), "grayscale");
+	cfg->pip.refresh_every = 1;
+	cfg->pip.zoom.x = 0;
+	cfg->pip.zoom.y = 0;
+	cfg->pip.zoom.w = 0;
+	cfg->pip.zoom.h = 0;
+	cfg->pip.position.x = 0;
+	cfg->pip.position.y = 0;
+	cfg->pip.position.w = 0;
+	cfg->pip.position.h = 0;
+
 	/* scene detection (video0) */
 	cfg->video0.scene_threshold = 0;   /* 0 = off */
 	cfg->video0.scene_holdoff = 2;
@@ -390,6 +403,31 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 		json_get_string(obj, "server", s->server));
 }
 
+static void load_pip_rect(const cJSON *parent, const char *key,
+	VencConfigRect *r)
+{
+	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(parent, key);
+	if (!obj) return;
+	r->x = (uint16_t)json_get_int(obj, "x", (int)r->x);
+	r->y = (uint16_t)json_get_int(obj, "y", (int)r->y);
+	r->w = (uint16_t)json_get_int(obj, "w", (int)r->w);
+	r->h = (uint16_t)json_get_int(obj, "h", (int)r->h);
+}
+
+static void load_pip(const cJSON *root, VencConfigPip *s)
+{
+	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "pip");
+	if (!obj) return;
+	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	safe_strcpy(s->format, sizeof(s->format),
+		json_get_string(obj, "format", s->format));
+	s->refresh_every = (uint8_t)json_get_int(obj, "refreshEvery",
+		(int)s->refresh_every);
+	if (s->refresh_every == 0) s->refresh_every = 1;
+	load_pip_rect(obj, "zoom", &s->zoom);
+	load_pip_rect(obj, "position", &s->position);
+}
+
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "fpv");
@@ -446,6 +484,7 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	load_audio(root, &cfg->audio);
 	load_imu(root, &cfg->imu);
 	load_record(root, &cfg->record);
+	load_pip(root, &cfg->pip);
 	{
 		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "debug");
 		if (obj)
@@ -675,6 +714,28 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
 		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
 		cJSON_AddStringToObject(rec, "server", cfg->record.server);
+	}
+
+	/* pip */
+	cJSON *pip = cJSON_AddObjectToObject(root, "pip");
+	if (pip) {
+		cJSON_AddBoolToObject(pip, "enabled", cfg->pip.enabled);
+		cJSON_AddStringToObject(pip, "format", cfg->pip.format);
+		cJSON_AddNumberToObject(pip, "refreshEvery", cfg->pip.refresh_every);
+		cJSON *zoom = cJSON_AddObjectToObject(pip, "zoom");
+		if (zoom) {
+			cJSON_AddNumberToObject(zoom, "x", cfg->pip.zoom.x);
+			cJSON_AddNumberToObject(zoom, "y", cfg->pip.zoom.y);
+			cJSON_AddNumberToObject(zoom, "w", cfg->pip.zoom.w);
+			cJSON_AddNumberToObject(zoom, "h", cfg->pip.zoom.h);
+		}
+		cJSON *pos = cJSON_AddObjectToObject(pip, "position");
+		if (pos) {
+			cJSON_AddNumberToObject(pos, "x", cfg->pip.position.x);
+			cJSON_AddNumberToObject(pos, "y", cfg->pip.position.y);
+			cJSON_AddNumberToObject(pos, "w", cfg->pip.position.w);
+			cJSON_AddNumberToObject(pos, "h", cfg->pip.position.h);
+		}
 	}
 
 	/* debug */

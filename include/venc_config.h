@@ -107,7 +107,8 @@ typedef struct {
 	bool enabled;
 	char dir[VENC_CONFIG_STRING_MAX];
 	char format[16];          /* "hevc" or "ts", default "ts" */
-	char mode[16];            /* "off","mirror","dual","dual-stream" */
+	char mode[16];            /* "off","mirror","dual","dual-stream",
+	                           * "pip","pip-mirror" */
 	uint32_t max_seconds;     /* rotation interval: 0=off, default 300 */
 	uint32_t max_mb;          /* rotation size in MB: 0=off, default 500 */
 	/* Dual/gemini channel settings (used when mode=dual or dual-stream) */
@@ -116,6 +117,32 @@ typedef struct {
 	double gop_size;          /* ch1 GOP in seconds, 0=match ch0 */
 	char server[VENC_CONFIG_STRING_MAX]; /* dual-stream destination URI */
 } VencConfigRecord;
+
+/* Picture-in-Picture (used when record.mode=pip or pip-mirror).
+ * Coordinates are in encode-output space (relative to video0.width/height).
+ * zoom     = source rect on the full frame (region to zoom into).
+ * position = destination rect in the output frame (where PiP window appears).
+ * All values must be 2-pixel aligned; position.{w,h} additionally 16-pixel
+ * aligned (VPE output constraint).
+ *
+ * Architecture: VPE port 1 produces the zoom region; a compositor copies it
+ * into an MI_RGN canvas attached to VPE port 0. Format choice trades CPU vs
+ * color: I8 grayscale = Y-plane memcpy (~0% CPU), ARGB4444 = full YUV→RGB
+ * conversion (~10% CPU). refreshEvery throttles the RGN update cadence. */
+typedef struct {
+	uint16_t x, y, w, h;
+} VencConfigRect;
+
+typedef struct {
+	bool enabled;            /* master show/hide; MUT_LIVE */
+	char format[16];         /* "grayscale" (I8, default) or "color" (ARGB4444);
+	                          * MUT_RESTART (RGN canvas pixfmt) */
+	uint8_t refresh_every;   /* render RGN every N frames; 1=every frame,
+	                          * default 1; MUT_RESTART (backend impl may
+	                          * promote to live when implemented) */
+	VencConfigRect zoom;     /* MUT_LIVE — VPE port 1 crop */
+	VencConfigRect position; /* x,y MUT_LIVE; w,h MUT_RESTART */
+} VencConfigPip;
 
 typedef struct {
 	bool show_osd;
@@ -134,6 +161,7 @@ typedef struct {
 	VencConfigAudio audio;
 	VencConfigImu imu;
 	VencConfigRecord record;
+	VencConfigPip pip;
 	VencConfigDebug debug;
 } VencConfig;
 

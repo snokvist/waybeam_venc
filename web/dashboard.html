@@ -604,13 +604,24 @@ const TOOLTIPS = {
 'record.enabled':'Enable recording on startup. Requires restart',
 'record.dir':'Recording output directory. Default: /tmp. Requires restart',
 'record.format':'Recording container format: ts (MPEG-TS) or hevc (raw). Default: ts. Requires restart',
-'record.mode':'Recording mode: off, mirror (copy ch0), dual (separate ch1), dual-stream (ch1 to server). Requires restart',
+'record.mode':'Recording mode: off, mirror (copy ch0), dual (separate ch1), dual-stream (ch1 to server), pip (zoom overlay, one stream), pip-mirror (zoom overlay + record). Requires restart',
 'record.maxSeconds':'Auto-rotate recording after N seconds. 0 = no rotation. Default: 300',
 'record.maxMB':'Auto-rotate recording after N megabytes. 0 = no rotation. Default: 500',
 'record.bitrate':'Dual channel (ch1) bitrate in kbps. 0 = match ch0 bitrate. Used in dual/dual-stream modes',
 'record.fps':'Dual channel (ch1) frame rate. 0 = match sensor FPS. Used in dual/dual-stream modes',
 'record.gopSize':'Dual channel (ch1) GOP interval in seconds. 0 = match ch0. Used in dual/dual-stream modes',
-'record.server':'Dual-stream destination URI (e.g. udp://192.168.1.1:5601). Only used in dual-stream mode'
+'record.server':'Dual-stream destination URI (e.g. udp://192.168.1.1:5601). Only used in dual-stream mode',
+'pip.enabled':'Show/hide PiP overlay (live — no restart). Only takes effect when record.mode is pip or pip-mirror',
+'pip.format':'PiP pixel format: grayscale (Y-plane I8 ≈ 0% CPU) or color (ARGB4444 ≈ 10% CPU). Default grayscale. Requires restart',
+'pip.refreshEvery':'Render PiP every N frames; 1 = every frame. Higher = less CPU. Default 1. Requires restart',
+'pip.zoom.x':'PiP zoom source X (px, top-left in encode-output coords). Live update',
+'pip.zoom.y':'PiP zoom source Y (px). Live update',
+'pip.zoom.w':'PiP zoom source width (px). Live update',
+'pip.zoom.h':'PiP zoom source height (px). Live update',
+'pip.position.x':'PiP window X in output frame (px). Live update',
+'pip.position.y':'PiP window Y in output frame (px). Live update',
+'pip.position.w':'PiP window width (px, 16-aligned). Requires restart',
+'pip.position.h':'PiP window height (px, 2-aligned). Requires restart'
 };
 
 const ENUMS = {
@@ -620,7 +631,8 @@ const ENUMS = {
 'isp.awbMode':['auto','ct_manual'],
 'audio.codec':['opus','pcm','g711a','g711u'],
 'record.format':['ts','hevc'],
-'record.mode':['off','mirror','dual','dual-stream'],
+'record.mode':['off','mirror','dual','dual-stream','pip','pip-mirror'],
+'pip.format':['grayscale','color'],
 'outgoing.streamMode':['rtp']
 };
 
@@ -637,7 +649,8 @@ const SECTIONS = [
 {id:'audio',title:'Audio',keys:['audio.enabled','audio.codec','audio.sampleRate','audio.channels','audio.volume','audio.mute']},
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},
-{id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']}
+{id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']},
+{id:'pip',title:'Picture-in-Picture',keys:['pip.enabled','pip.format','pip.refreshEvery','pip.zoom.x','pip.zoom.y','pip.zoom.w','pip.zoom.h','pip.position.x','pip.position.y','pip.position.w','pip.position.h']}
 ];
 
 /* ── API helpers ── */

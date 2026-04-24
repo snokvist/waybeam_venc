@@ -67,6 +67,13 @@
     "gopSize": 0,
     "server": ""
   },
+  "pip": {
+    "enabled": false,
+    "format": "grayscale",
+    "refreshEvery": 1,
+    "zoom": { "x": 0, "y": 0, "w": 0, "h": 0 },
+    "position": { "x": 0, "y": 0, "w": 0, "h": 0 }
+  },
   "debug": {
     "showOsd": false
   }

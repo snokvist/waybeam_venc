@@ -321,6 +321,38 @@ static const FieldDesc g_fields[] = {
 	FIELD(record, fps,         FT_UINT,   MUT_RESTART),
 	FIELD(record, gop_size,    FT_DOUBLE, MUT_RESTART),
 	FIELD(record, server,      FT_STRING, MUT_RESTART),
+
+	/* PiP (picture-in-picture). zoom.x/y/w/h and position.x/y are live;
+	 * position.w/h require restart because they change VPE port 1 output
+	 * dimensions (SetPortMode can only run on a disabled port).
+	 * format ("grayscale"|"color") and the RGN canvas pixfmt are coupled,
+	 * so format is restart-only. refreshEvery is live. */
+	{ "pip.enabled", FT_BOOL, MUT_LIVE,
+	  offsetof(VencConfig, pip.enabled),
+	  sizeof(((VencConfig*)0)->pip.enabled) },
+	{ "pip.format", FT_STRING, MUT_RESTART,
+	  offsetof(VencConfig, pip.format),
+	  sizeof(((VencConfig*)0)->pip.format) },
+	{ "pip.refresh_every", FT_UINT8, MUT_RESTART,
+	  offsetof(VencConfig, pip.refresh_every),
+	  sizeof(((VencConfig*)0)->pip.refresh_every) },
+	{ "pip.zoom.x", FT_UINT16, MUT_LIVE,
+	  offsetof(VencConfig, pip.zoom.x), sizeof(uint16_t) },
+	{ "pip.zoom.y", FT_UINT16, MUT_LIVE,
+	  offsetof(VencConfig, pip.zoom.y), sizeof(uint16_t) },
+	{ "pip.zoom.w", FT_UINT16, MUT_LIVE,
+	  offsetof(VencConfig, pip.zoom.w), sizeof(uint16_t) },
+	{ "pip.zoom.h", FT_UINT16, MUT_LIVE,
+	  offsetof(VencConfig, pip.zoom.h), sizeof(uint16_t) },
+	{ "pip.position.x", FT_UINT16, MUT_LIVE,
+	  offsetof(VencConfig, pip.position.x), sizeof(uint16_t) },
+	{ "pip.position.y", FT_UINT16, MUT_LIVE,
+	  offsetof(VencConfig, pip.position.y), sizeof(uint16_t) },
+	{ "pip.position.w", FT_UINT16, MUT_RESTART,
+	  offsetof(VencConfig, pip.position.w), sizeof(uint16_t) },
+	{ "pip.position.h", FT_UINT16, MUT_RESTART,
+	  offsetof(VencConfig, pip.position.h), sizeof(uint16_t) },
+
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
@@ -384,6 +416,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
 	{ "debug.showOsd", "debug.show_osd" },
+	{ "pip.refreshEvery", "pip.refresh_every" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -589,6 +622,36 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	if (strcmp(key, "video0.scene_holdoff") == 0 &&
 	    cfg->video0.scene_holdoff == 0)
 		return "video0.scene_holdoff must be >= 1";
+
+	/* PiP alignment: VPE crop/output requires 2-px alignment for all
+	 * coordinates, with position.{w,h} additionally 16-px aligned. */
+	if (strncmp(key, "pip.zoom.", 9) == 0 ||
+	    strcmp(key, "pip.position.x") == 0 ||
+	    strcmp(key, "pip.position.y") == 0) {
+		uint16_t v = 0;
+		if (strcmp(key, "pip.zoom.x") == 0) v = cfg->pip.zoom.x;
+		else if (strcmp(key, "pip.zoom.y") == 0) v = cfg->pip.zoom.y;
+		else if (strcmp(key, "pip.zoom.w") == 0) v = cfg->pip.zoom.w;
+		else if (strcmp(key, "pip.zoom.h") == 0) v = cfg->pip.zoom.h;
+		else if (strcmp(key, "pip.position.x") == 0) v = cfg->pip.position.x;
+		else if (strcmp(key, "pip.position.y") == 0) v = cfg->pip.position.y;
+		if (v & 1)
+			return "pip rect coordinates must be 2-pixel aligned";
+	}
+	if (strcmp(key, "pip.position.w") == 0 ||
+	    strcmp(key, "pip.position.h") == 0) {
+		uint16_t v = (strcmp(key, "pip.position.w") == 0)
+			? cfg->pip.position.w : cfg->pip.position.h;
+		if (v & 0xF)
+			return "pip.position.w/h must be 16-pixel aligned (VPE constraint)";
+	}
+	if (strcmp(key, "pip.format") == 0) {
+		if (strcmp(cfg->pip.format, "grayscale") != 0 &&
+		    strcmp(cfg->pip.format, "color") != 0)
+			return "pip.format must be 'grayscale' or 'color'";
+	}
+	if (strcmp(key, "pip.refresh_every") == 0 && cfg->pip.refresh_every == 0)
+		return "pip.refresh_every must be >= 1";
 	return NULL;
 }
 
@@ -714,6 +777,9 @@ typedef enum {
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
 	LIVE_GROUP_MUTE,
+	LIVE_GROUP_PIP_ENABLED,
+	LIVE_GROUP_PIP_ZOOM,
+	LIVE_GROUP_PIP_POSITION,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -724,6 +790,8 @@ typedef struct {
 	int awb_ct;
 	int outgoing_enabled;
 	int outgoing_server;
+	int pip_zoom;     /* any of pip.zoom.{x,y,w,h} touched */
+	int pip_position; /* any of pip.position.{x,y} touched */
 } LiveBatchTouched;
 
 static int make_error_json(const char *code, const char *message, char **out_json)
@@ -871,6 +939,13 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_OUTGOING;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
+	if (strcmp(canonical_key, "pip.enabled") == 0)
+		return LIVE_GROUP_PIP_ENABLED;
+	if (strncmp(canonical_key, "pip.zoom.", 9) == 0)
+		return LIVE_GROUP_PIP_ZOOM;
+	if (strcmp(canonical_key, "pip.position.x") == 0 ||
+	    strcmp(canonical_key, "pip.position.y") == 0)
+		return LIVE_GROUP_PIP_POSITION;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -896,6 +971,12 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "outgoing.*";
 	case LIVE_GROUP_MUTE:
 		return "audio.mute";
+	case LIVE_GROUP_PIP_ENABLED:
+		return "pip.enabled";
+	case LIVE_GROUP_PIP_ZOOM:
+		return "pip.zoom.*";
+	case LIVE_GROUP_PIP_POSITION:
+		return "pip.position.x/y";
 	default:
 		return "unknown";
 	}
@@ -919,6 +1000,11 @@ static void note_live_group_touch(LiveBatchTouched *touched,
 		touched->outgoing_enabled = 1;
 	else if (strcmp(canonical_key, "outgoing.server") == 0)
 		touched->outgoing_server = 1;
+	else if (strncmp(canonical_key, "pip.zoom.", 9) == 0)
+		touched->pip_zoom = 1;
+	else if (strcmp(canonical_key, "pip.position.x") == 0 ||
+	         strcmp(canonical_key, "pip.position.y") == 0)
+		touched->pip_position = 1;
 }
 
 static int parse_query_params(const char *query, SetQueryParam *params,
@@ -1040,6 +1126,12 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return 1;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute != NULL;
+	case LIVE_GROUP_PIP_ENABLED:
+		return g_cb->apply_pip_enabled != NULL;
+	case LIVE_GROUP_PIP_ZOOM:
+		return g_cb->apply_pip_zoom != NULL;
+	case LIVE_GROUP_PIP_POSITION:
+		return g_cb->apply_pip_position != NULL;
 	default:
 		return 0;
 	}
@@ -1094,6 +1186,18 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_MUTE:
 		dst->audio.mute = src->audio.mute;
+		break;
+	case LIVE_GROUP_PIP_ENABLED:
+		dst->pip.enabled = src->pip.enabled;
+		break;
+	case LIVE_GROUP_PIP_ZOOM:
+		dst->pip.zoom = src->pip.zoom;
+		break;
+	case LIVE_GROUP_PIP_POSITION:
+		if (touched && touched->pip_position) {
+			dst->pip.position.x = src->pip.position.x;
+			dst->pip.position.y = src->pip.position.y;
+		}
 		break;
 	default:
 		break;
@@ -1188,6 +1292,14 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return 0;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute(cfg->audio.mute);
+	case LIVE_GROUP_PIP_ENABLED:
+		return g_cb->apply_pip_enabled(cfg->pip.enabled);
+	case LIVE_GROUP_PIP_ZOOM:
+		return g_cb->apply_pip_zoom(cfg->pip.zoom.x, cfg->pip.zoom.y,
+			cfg->pip.zoom.w, cfg->pip.zoom.h);
+	case LIVE_GROUP_PIP_POSITION:
+		return g_cb->apply_pip_position(cfg->pip.position.x,
+			cfg->pip.position.y);
 	default:
 		return -2;
 	}

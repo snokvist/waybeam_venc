@@ -36,6 +36,12 @@ typedef struct {
 	char *(*query_iq_info)(void);
 	/* IQ set: param name + value string. Returns 0 on success, -1 on error. */
 	int (*apply_iq_param)(const char *param, const char *value);
+	/* PiP live controls — NULL if backend does not implement PiP. */
+	int (*apply_pip_enabled)(bool enabled);
+	int (*apply_pip_zoom)(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
+	int (*apply_pip_position)(uint16_t x, uint16_t y);
+	/* PiP status: returns malloc'd JSON string, caller frees. NULL if unsupported. */
+	char *(*query_pip_info)(void);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.
