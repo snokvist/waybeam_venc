@@ -3,6 +3,7 @@
 #include "debug_osd.h"
 #include "idr_rate_limit.h"
 #include "imu_bmi270.h"
+#include "pip_compositor.h"
 #include "pipeline_common.h"
 #include "scene_detector.h"
 #include "sdk_quiet.h"
@@ -113,6 +114,7 @@ typedef struct {
 	int httpd_started;
 	int pipeline_started;
 	SceneDetector scene;
+	PipCompositor *pip_comp;
 } Star6eRunnerContext;
 
 static void install_signal_handlers(void);
@@ -529,13 +531,13 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		snprintf(vcfg->record.mode, sizeof(vcfg->record.mode), "off");
 	}
 
-	/* In-process PiP architecture probe.  Runs once at startup when
-	 * pip.enabled=true to validate the production data path (VPE port-1
-	 * GetBuf → DIVP_StretchBuf → scratch).  No-op when pip is disabled.
-	 * Output is a single JSON line on stderr — grep "pip_inproc". */
+	/* PiP grayscale compositor (Star6E I8 path).  When pip.enabled,
+	 * sets up VPE port-1, an I8 RGN canvas attached to port-0, and a
+	 * compositor thread that drains port-1 → DIVP → canvas → kernel
+	 * compositor.  See include/pip_compositor.h for design notes. */
 	if (vcfg->pip.enabled) {
-		extern void pip_probe_inproc_run(const VencConfig *vcfg);
-		pip_probe_inproc_run(vcfg);
+		ctx->pip_comp = pip_compositor_create(vcfg);
+		if (ctx->pip_comp) pip_compositor_start(ctx->pip_comp);
 	}
 
 	/* Start dual VENC if mode is "dual" or "dual-stream" */
@@ -1061,6 +1063,14 @@ static void star6e_runner_teardown(void *opaque)
 	alarm(0);  /* cancel SIGALRM — watchdog replaces it */
 
 	star6e_cus3a_request_stop();
+
+	/* Stop the PiP compositor BEFORE the rest of the pipeline tears
+	 * down.  Compositor thread holds VPE port-1 buffers — releasing
+	 * them first lets pipeline_stop disable port-1 cleanly. */
+	if (ctx->pip_comp) {
+		pip_compositor_destroy(ctx->pip_comp);
+		ctx->pip_comp = NULL;
+	}
 
 	/* Pipeline stop MUST happen before recorder stop.  The recording
 	 * thread runs inside pipeline_stop() and needs the ts_recorder fd

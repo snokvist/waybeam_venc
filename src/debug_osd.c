@@ -136,13 +136,26 @@ static void osd_canvas_from_info(OsdCanvas *out, const DebugOsdCanvasInfo *info,
  * ignores entries above the format's reach. */
 static void palette_init(i6_rgn_pal *pal)
 {
-	const OsdPaletteEntry *src = osd_palette();
+	/* Full 256-entry grayscale ramp.  Index N → RGB(N,N,N), alpha=255
+	 * for N>=1, alpha=0 for N=0 (transparent).  This serves both the
+	 * I8 PiP overlay (src/pip_compositor.c writes Y values 0-255 that
+	 * land directly on the matching grayscale palette entry) and the
+	 * I4 debug OSD overlay (which uses indices 0-15 as palette
+	 * indices — under this palette, the legacy named DEBUG_OSD_*
+	 * colours all render as low-luminance grays and lose their hue,
+	 * but text + outlines stay visible).
+	 *
+	 * Trade-off: debug OSD's coloured outlines (yellow/cyan/red/etc)
+	 * become hard to distinguish, but the I8 PiP renders cleanly.
+	 * Once the PiP backend matures we can drop the outline rects from
+	 * star6e_runtime per the user request and this trade-off
+	 * disappears entirely. */
 	memset(pal, 0, sizeof(*pal));
-	for (unsigned i = 0; i < OSD_PALETTE_SIZE; i++) {
-		pal->element[i].alpha = src[i].alpha;
-		pal->element[i].red   = src[i].red;
-		pal->element[i].green = src[i].green;
-		pal->element[i].blue  = src[i].blue;
+	for (unsigned i = 1; i < 256; i++) {
+		pal->element[i].alpha = 255;
+		pal->element[i].red   = (unsigned char)i;
+		pal->element[i].green = (unsigned char)i;
+		pal->element[i].blue  = (unsigned char)i;
 	}
 }
 
