@@ -55,8 +55,24 @@ typedef int                MI_BOOL;
 
 #define MI_SUCCESS 0
 
-/* From mi_sys_datatype.h: YUV420SP is enum index 11. */
-#define E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420 11
+/* From mi_sys_datatype.h enum order:
+ *  0  YUV422_YUYV
+ *  1  ARGB8888
+ *  2  ABGR8888
+ *  3  BGRA8888
+ *  4  RGB565
+ *  5  ARGB1555
+ *  6  ARGB4444
+ *  7  I2
+ *  8  I4
+ *  9  I8
+ *  10 YUV_SEMIPLANAR_422
+ *  11 YUV_SEMIPLANAR_420
+ * DIVP supports YUV420SP and ARGB8888 only per mi_divp_datatype.h. */
+#define E_MI_SYS_PIXEL_FRAME_YUV422_YUYV          0
+#define E_MI_SYS_PIXEL_FRAME_ARGB8888             1
+#define E_MI_SYS_PIXEL_FRAME_ARGB4444             6
+#define E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420   11
 
 typedef struct {
 	MI_U16 u16X, u16Y;
@@ -128,91 +144,162 @@ static unsigned long long read_self_jiffies(void)
 /* ── Probe ────────────────────────────────────────────────────────────── */
 
 #define ALIGN_UP(x, n)   (((x) + ((n)-1)) & ~((n)-1))
-
-#define SRC_W 1920
-#define SRC_H 1080
-#define DST_W 480
-#define DST_H 270
 #define ITERATIONS 200
 
-int main(void)
+/* Compute MMA-buffer size + plane stride for the given pixfmt + dims. */
+static MI_U32 buf_size_for(int pixfmt, MI_U32 w, MI_U32 h, MI_U32 *stride_out)
 {
-	if (load_syms() != 0) {
-		printf("{\"ok\":false,\"err\":\"dlsym\"}\n");
-		return 1;
+	MI_U32 stride = 0, size = 0;
+	switch (pixfmt) {
+	case E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420:
+		stride = ALIGN_UP(w, 16);
+		size   = stride * h * 3 / 2;
+		break;
+	case E_MI_SYS_PIXEL_FRAME_ARGB8888:
+		stride = ALIGN_UP(w, 16) * 4;
+		size   = stride * h;
+		break;
+	default:
+		break;
 	}
+	if (stride_out) *stride_out = stride;
+	return size;
+}
 
-	MI_S32 ret = p_sys_init();
-	if (ret != MI_SUCCESS) {
-		printf("{\"ok\":false,\"err\":\"MI_SYS_Init\",\"code\":\"0x%x\"}\n", ret);
-		return 1;
+/* Fill src buffer with a known top-half-white / bottom-half-black pattern. */
+static void fill_src_pattern(int pixfmt, void *va, MI_U32 stride,
+	MI_U32 w, MI_U32 h)
+{
+	(void)w;
+	if (pixfmt == E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420) {
+		memset(va, 0xFF, stride * (h / 2));                  /* Y top */
+		memset((char*)va + stride * (h / 2), 0x00,
+		       stride * (h / 2));                             /* Y bot */
+		memset((char*)va + stride * h, 0x80,
+		       stride * h / 2);                                /* UV neutral */
+	} else if (pixfmt == E_MI_SYS_PIXEL_FRAME_ARGB8888) {
+		MI_U32 row;
+		for (row = 0; row < h / 2; row++)
+			memset((char*)va + row * stride, 0xFF, stride);  /* white */
+		for (row = h / 2; row < h; row++) {
+			MI_U32 col;
+			unsigned char *p = (unsigned char*)va + row * stride;
+			for (col = 0; col < stride; col += 4) {
+				p[col + 0] = 0xFF;  /* alpha */
+				p[col + 1] = 0x00;  /* R */
+				p[col + 2] = 0x00;  /* G */
+				p[col + 3] = 0x00;  /* B */
+			}
+		}
 	}
+}
 
-	const MI_U32 src_stride = ALIGN_UP(SRC_W, 16);
-	const MI_U32 src_size   = src_stride * SRC_H * 3 / 2;
-	const MI_U32 dst_stride = ALIGN_UP(DST_W, 16);
-	const MI_U32 dst_size   = dst_stride * DST_H * 3 / 2;
+/* Sample top + bottom of dst; return brightness for verification. */
+static void sample_dst(int pixfmt, void *va, MI_U32 stride, MI_U32 w, MI_U32 h,
+	int *top_out, int *bot_out)
+{
+	if (pixfmt == E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420) {
+		*top_out = ((unsigned char*)va)[stride * 1 + w / 2];
+		*bot_out = ((unsigned char*)va)[stride * (h - 2) + w / 2];
+	} else if (pixfmt == E_MI_SYS_PIXEL_FRAME_ARGB8888) {
+		/* Sample R+G+B average at one pixel — should be ~255 (top) or
+		 * ~0 (bottom). Byte order may be A,R,G,B or B,G,R,A; we
+		 * average the three non-alpha bytes either way. */
+		unsigned char *top = (unsigned char*)va + stride * 1 + (w / 2) * 4;
+		unsigned char *bot = (unsigned char*)va + stride * (h - 2) +
+		                     (w / 2) * 4;
+		*top_out = (top[0] + top[1] + top[2] + top[3]) / 4;
+		*bot_out = (bot[0] + bot[1] + bot[2] + bot[3]) / 4;
+	}
+}
+
+static int pixfmt_threshold_ok(int pixfmt, int top, int bot)
+{
+	(void)pixfmt;
+	return (top > 180 && bot < 80);
+}
+
+static const char *pixfmt_name(int pixfmt)
+{
+	switch (pixfmt) {
+	case E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420: return "yuv420sp";
+	case E_MI_SYS_PIXEL_FRAME_ARGB8888:           return "argb8888";
+	default:                                       return "unknown";
+	}
+}
+
+/* Run a single benchmark case. Returns 0 on full success, 1 otherwise. */
+static int run_case(const char *label,
+	int src_pixfmt, MI_U32 src_w, MI_U32 src_h,
+	int dst_pixfmt, MI_U32 dst_w, MI_U32 dst_h,
+	MI_U32 crop_x, MI_U32 crop_y, MI_U32 crop_w, MI_U32 crop_h)
+{
+	MI_U32 src_stride = 0, dst_stride = 0;
+	MI_U32 src_size = buf_size_for(src_pixfmt, src_w, src_h, &src_stride);
+	MI_U32 dst_size = buf_size_for(dst_pixfmt, dst_w, dst_h, &dst_stride);
 
 	MI_PHY src_phy = 0, dst_phy = 0;
-	ret = p_mma_alloc((MI_U8*)"mma_heap_name0", src_size, &src_phy);
+	MI_S32 ret = p_mma_alloc((MI_U8*)"mma_heap_name0", src_size, &src_phy);
 	if (ret != MI_SUCCESS) {
-		printf("{\"ok\":false,\"err\":\"src MMA_Alloc\",\"code\":\"0x%x\","
-		       "\"size\":%u}\n", ret, src_size);
-		p_sys_exit(); return 1;
+		printf("{\"case\":\"%s\",\"ok\":false,\"err\":\"src MMA_Alloc\","
+		       "\"code\":\"0x%x\",\"size\":%u}\n",
+		       label, ret, src_size);
+		return 1;
 	}
 	ret = p_mma_alloc((MI_U8*)"mma_heap_name0", dst_size, &dst_phy);
 	if (ret != MI_SUCCESS) {
-		printf("{\"ok\":false,\"err\":\"dst MMA_Alloc\",\"code\":\"0x%x\"}\n", ret);
-		p_mma_free(src_phy); p_sys_exit(); return 1;
+		printf("{\"case\":\"%s\",\"ok\":false,\"err\":\"dst MMA_Alloc\","
+		       "\"code\":\"0x%x\"}\n", label, ret);
+		p_mma_free(src_phy);
+		return 1;
 	}
 
-	/* Fill source: top half Y=255 (white), bottom half Y=0 (black),
-	 * UV neutral (128). DIVP should produce the same banding in dst. */
-	void *src_va = NULL;
+	void *src_va = NULL, *dst_va = NULL;
 	if (p_sys_mmap(src_phy, src_size, &src_va, 0) == MI_SUCCESS && src_va) {
-		memset(src_va, 0xFF, src_stride * (SRC_H / 2));        /* Y top */
-		memset((char*)src_va + src_stride * (SRC_H / 2), 0x00,
-		       src_stride * (SRC_H / 2));                       /* Y bot */
-		memset((char*)src_va + src_stride * SRC_H, 0x80,
-		       src_stride * SRC_H / 2);                          /* UV neutral */
+		fill_src_pattern(src_pixfmt, src_va, src_stride, src_w, src_h);
 		p_sys_munmap(src_va, src_size);
 	}
-
-	/* Pre-zero dst so we can detect change. */
-	void *dst_va = NULL;
 	if (p_sys_mmap(dst_phy, dst_size, &dst_va, 0) == MI_SUCCESS && dst_va) {
-		memset(dst_va, 0x55, dst_size); /* sentinel */
+		memset(dst_va, 0x55, dst_size);  /* sentinel */
 		p_sys_munmap(dst_va, dst_size);
 	}
 
 	MI_DIVP_DirectBuf_t src_buf = {
-		.ePixelFormat = E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420,
-		.u32Width = SRC_W, .u32Height = SRC_H,
+		.ePixelFormat = src_pixfmt,
+		.u32Width = src_w, .u32Height = src_h,
 		.u32Stride = { src_stride, src_stride, 0 },
-		.phyAddr = { src_phy, src_phy + src_stride * SRC_H, 0 }
+		.phyAddr = { src_phy,
+			src_pixfmt == E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420
+				? src_phy + src_stride * src_h : 0,
+			0 }
 	};
 	MI_DIVP_DirectBuf_t dst_buf = {
-		.ePixelFormat = E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420,
-		.u32Width = DST_W, .u32Height = DST_H,
+		.ePixelFormat = dst_pixfmt,
+		.u32Width = dst_w, .u32Height = dst_h,
 		.u32Stride = { dst_stride, dst_stride, 0 },
-		.phyAddr = { dst_phy, dst_phy + dst_stride * DST_H, 0 }
+		.phyAddr = { dst_phy,
+			dst_pixfmt == E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420
+				? dst_phy + dst_stride * dst_h : 0,
+			0 }
 	};
-	/* Crop: take the centre 960x540 region of src, scaled into 480x270 dst. */
 	MI_SYS_WindowRect_t crop = {
-		.u16X = 480, .u16Y = 270,
-		.u16Width = 960, .u16Height = 540
+		.u16X = crop_x, .u16Y = crop_y,
+		.u16Width = crop_w, .u16Height = crop_h
 	};
 
-	/* Warm-up — first call may include lazy init in the kernel driver. */
+	/* Warm-up. */
 	ret = p_divp_stretch(&src_buf, &crop, &dst_buf);
 	if (ret != MI_SUCCESS) {
-		printf("{\"ok\":false,\"err\":\"DIVP_StretchBuf warmup\","
-		       "\"code\":\"0x%x\"}\n", ret);
-		p_mma_free(src_phy); p_mma_free(dst_phy); p_sys_exit();
+		printf("{\"case\":\"%s\",\"ok\":false,"
+		       "\"err\":\"DIVP_StretchBuf warmup\",\"code\":\"0x%x\","
+		       "\"src\":\"%s %ux%u\",\"dst\":\"%s %ux%u\"}\n",
+		       label, ret,
+		       pixfmt_name(src_pixfmt), src_w, src_h,
+		       pixfmt_name(dst_pixfmt), dst_w, dst_h);
+		p_mma_free(src_phy); p_mma_free(dst_phy);
 		return 1;
 	}
 
-	/* Timed loop. */
 	struct timespec t0, t1;
 	unsigned long long jif0 = read_self_jiffies();
 	clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -231,29 +318,70 @@ int main(void)
 	long long total_ms = ns / 1000000;
 	unsigned long long jif_used = jif1 - jif0;
 
-	/* Verify dst was actually written: sample top row Y plane and
-	 * bottom row Y plane — should be ~255 and ~0 respectively. */
-	int dst_ok = 0; int top_y = -1, bot_y = -1;
+	int dst_ok = 0; int top = -1, bot = -1;
 	if (p_sys_mmap(dst_phy, dst_size, &dst_va, 0) == MI_SUCCESS && dst_va) {
-		top_y = ((unsigned char*)dst_va)[dst_stride * 1 + DST_W / 2];
-		bot_y = ((unsigned char*)dst_va)[dst_stride * (DST_H - 2) + DST_W / 2];
-		dst_ok = (top_y > 200 && bot_y < 50);
+		sample_dst(dst_pixfmt, dst_va, dst_stride, dst_w, dst_h,
+			&top, &bot);
+		dst_ok = pixfmt_threshold_ok(dst_pixfmt, top, bot);
 		p_sys_munmap(dst_va, dst_size);
 	}
 
-	printf("{\"ok\":%s,\"calls\":%d,\"success\":%d,"
+	printf("{\"case\":\"%s\",\"ok\":%s,\"calls\":%d,\"success\":%d,"
 	       "\"avg_us\":%lld,\"total_ms\":%lld,\"self_jiffies\":%llu,"
-	       "\"src\":\"%ux%u\",\"dst\":\"%ux%u\",\"crop\":\"%u,%u %ux%u\","
-	       "\"dst_top_y\":%d,\"dst_bot_y\":%d,\"dst_pattern_ok\":%s,"
+	       "\"src\":\"%s %ux%u\",\"dst\":\"%s %ux%u\","
+	       "\"crop\":\"%u,%u %ux%u\","
+	       "\"dst_top\":%d,\"dst_bot\":%d,\"dst_pattern_ok\":%s,"
 	       "\"last_err\":\"0x%x\"}\n",
+	       label,
 	       (success == ITERATIONS && dst_ok) ? "true" : "false",
 	       ITERATIONS, success, us_per, total_ms, jif_used,
-	       SRC_W, SRC_H, DST_W, DST_H,
-	       crop.u16X, crop.u16Y, crop.u16Width, crop.u16Height,
-	       top_y, bot_y, dst_ok ? "true" : "false", last_err);
+	       pixfmt_name(src_pixfmt), src_w, src_h,
+	       pixfmt_name(dst_pixfmt), dst_w, dst_h,
+	       crop_x, crop_y, crop_w, crop_h,
+	       top, bot, dst_ok ? "true" : "false", last_err);
 
 	p_mma_free(src_phy);
 	p_mma_free(dst_phy);
-	p_sys_exit();
 	return (success == ITERATIONS && dst_ok) ? 0 : 1;
+}
+
+int main(void)
+{
+	if (load_syms() != 0) {
+		printf("{\"ok\":false,\"err\":\"dlsym\"}\n");
+		return 1;
+	}
+
+	MI_S32 ret = p_sys_init();
+	if (ret != MI_SUCCESS) {
+		printf("{\"ok\":false,\"err\":\"MI_SYS_Init\",\"code\":\"0x%x\"}\n", ret);
+		return 1;
+	}
+
+	int fails = 0;
+
+	/* Case 1: YUV420SP → YUV420SP, 1920x1080 → 480x270 with 960x540 crop.
+	 * Baseline — proves DIVP can crop+scale at no host CPU cost. */
+	fails += run_case("yuv2yuv",
+		E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420, 1920, 1080,
+		E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420, 480, 270,
+		480, 270, 960, 540);
+
+	/* Case 2: YUV420SP → ARGB8888, same dims.  Tests HW colour-space
+	 * conversion — proves "color" PiP path is also free. */
+	fails += run_case("yuv2argb",
+		E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420, 1920, 1080,
+		E_MI_SYS_PIXEL_FRAME_ARGB8888,           480, 270,
+		480, 270, 960, 540);
+
+	/* Case 3: ARGB8888 → ARGB8888, 1:1.  Tests pure ARGB blit (no
+	 * conversion, no scale) — useful if we composite layered ARGB
+	 * via DIVP rather than RGN. */
+	fails += run_case("argb2argb",
+		E_MI_SYS_PIXEL_FRAME_ARGB8888, 480, 270,
+		E_MI_SYS_PIXEL_FRAME_ARGB8888, 480, 270,
+		0, 0, 480, 270);
+
+	p_sys_exit();
+	return fails ? 1 : 0;
 }
