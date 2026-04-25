@@ -1104,17 +1104,27 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* EIS */
+	/* EIS — silently stalls the encoder under several conditions on
+	 * this BSP.  Each branch refuses cleanly with a WARNING that
+	 * names the actual fix; the encoder then runs without EIS rather
+	 * than printing "waiting for encoder data..." indefinitely.  See
+	 * the EIS sweep documented in HISTORY.md for the empirical basis. */
 	if (vcfg->eis.enabled) {
+		uint64_t pixel_rate = (uint64_t)state->image_width *
+			state->image_height * pconf->sensor_framerate;
+		int vif_crops_mipi = (state->sensor.mode.output.width > 0 &&
+		                      state->sensor.mode.output.height > 0 &&
+		                      (state->sensor.mode.output.width <
+		                          state->sensor.plane.capt.width ||
+		                       state->sensor.mode.output.height <
+		                          state->sensor.plane.capt.height));
+
 		if (!state->imu && !vcfg->eis.test_mode) {
 			fprintf(stderr, "WARNING: EIS requires IMU (unless testMode), skipping\n");
 		} else if (state->active_precrop.w != state->image_width ||
 		           state->active_precrop.h != state->image_height) {
-			/* MI_VPE_SetPortCrop (used by EIS) silently stalls the
-			 * encoder when the VPE port is also scaling — VENC
-			 * never receives a frame.  Refuse cleanly so the user
-			 * sees the actual reason instead of "waiting for
-			 * encoder data..." forever. */
+			/* MI_VPE_SetPortCrop silently stalls VENC when the
+			 * port is also scaling.  Refuse cleanly. */
 			fprintf(stderr,
 				"WARNING: EIS skipped — VPE scaling active "
 				"(channel %ux%u → port %ux%u).  EIS port-crop "
@@ -1127,6 +1137,51 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 				(unsigned)state->active_precrop.h,
 				state->image_width, state->image_height,
 				state->image_width, state->image_height);
+		} else if (vif_crops_mipi) {
+			/* VIF-side crop (sensor mode declares an output
+			 * smaller than its MIPI raw — the SDK crops in VIF
+			 * with a non-zero offset).  EIS port-crop on top of
+			 * that combination starves VENC at every framerate
+			 * tested (mode 2: 2400x1350 from MIPI 2560x1440). */
+			fprintf(stderr,
+				"WARNING: EIS skipped — sensor mode crops MIPI "
+				"in VIF (raw %ux%u → usable %ux%u).  EIS port-"
+				"crop conflicts with VIF crop on this BSP; the "
+				"encoder would stall silently.\n"
+				"  Fix: pick a sensor mode whose declared "
+				"output matches its MIPI raw (modes 0, 1, 3 "
+				"on IMX335).\n",
+				state->sensor.plane.capt.width,
+				state->sensor.plane.capt.height,
+				state->sensor.mode.output.width,
+				state->sensor.mode.output.height);
+		} else if (vcfg->eis.test_mode) {
+			/* Synthetic-gyro path desyncs the encoder even on the
+			 * known-working hardware config (mode 3 + IMU works,
+			 * mode 3 + testMode starves).  Refuse until the
+			 * testMode timing is fixed. */
+			fprintf(stderr,
+				"WARNING: EIS skipped — eis.testMode is "
+				"currently broken on this BSP (synthetic gyro "
+				"sample timing desyncs the encoder).\n"
+				"  Fix: set eis.testMode=false and enable a "
+				"real IMU via imu.enabled=true.\n");
+		} else if (pixel_rate > 200000000ULL) {
+			/* VPE port-crop scaler engine has a pixel-rate ceiling
+			 * around 200 Mpx/s on this BSP.  Above it, the engine
+			 * fails to repaint each frame and VENC starves.
+			 * Verified: 1920x1080@90 (187 Mpx/s) works,
+			 * 2560x1920@60 (295 Mpx/s) starves. */
+			fprintf(stderr,
+				"WARNING: EIS skipped — pixel rate %llu Mpx/s "
+				"(image %ux%u @ %u fps) exceeds the VPE port-"
+				"crop ceiling (~200 Mpx/s on this BSP).\n"
+				"  Fix: lower video0.fps or pick a smaller "
+				"image.size — e.g. 1920x1080 @ <=90 fps or "
+				"2560x1920 @ <=30 fps.\n",
+				(unsigned long long)(pixel_rate / 1000000ULL),
+				state->image_width, state->image_height,
+				pconf->sensor_framerate);
 		} else {
 			EisConfig eis_cfg = {
 				.mode = vcfg->eis.mode,
