@@ -604,8 +604,9 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		}
 	}
 	if (strcmp(key, "video0.scene_holdoff") == 0 &&
-	    cfg->video0.scene_holdoff == 0)
-		return "video0.scene_holdoff must be >= 1";
+	    cfg->video0.scene_holdoff == 0 &&
+	    cfg->video0.scene_threshold > 0)
+		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
 	return NULL;
 }
 
