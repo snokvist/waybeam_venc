@@ -126,7 +126,7 @@ static const uint8_t g_font8x8[128][8] = {
 	[0x7E] = {0x00,0x00,0x08,0x15,0x02,0x00,0x00,0x00}, /* ~ */
 };
 
-/* ── Dirty rect ─────────────────────────────────────────────────────── */
+/* ── Dirty rect (multi-rect list) ────────────────────────────────────── */
 
 void osd_dirty_reset(OsdDirty *d, uint32_t w, uint32_t h)
 {
@@ -134,6 +134,7 @@ void osd_dirty_reset(OsdDirty *d, uint32_t w, uint32_t h)
 	d->y0 = (uint16_t)h;
 	d->x1 = 0;
 	d->y1 = 0;
+	d->count = 0;
 }
 
 int osd_dirty_empty(const OsdDirty *d)
@@ -141,18 +142,104 @@ int osd_dirty_empty(const OsdDirty *d)
 	return d->x1 < d->x0 || d->y1 < d->y0;
 }
 
-void osd_dirty_expand(OsdDirty *d, const OsdCanvas *c, int x, int y)
+/* Update the union bbox to cover (x,y), assuming (x,y) is already clamped. */
+static inline void union_bbox(OsdDirty *d, int x, int y)
 {
-	/* Clamp to canvas bounds before storing — negative values would
-	 * wrap to huge uint16_t and corrupt the dirty rect. */
-	if (x < 0) x = 0;
-	if (y < 0) y = 0;
-	if (x >= (int)c->width) x = (int)c->width - 1;
-	if (y >= (int)c->height) y = (int)c->height - 1;
 	if ((uint16_t)x < d->x0) d->x0 = (uint16_t)x;
 	if ((uint16_t)y < d->y0) d->y0 = (uint16_t)y;
 	if ((uint16_t)x > d->x1) d->x1 = (uint16_t)x;
 	if ((uint16_t)y > d->y1) d->y1 = (uint16_t)y;
+}
+
+/* Should rects A and B coalesce?  Merge only when the resulting bounding
+ * box area is at most 1.25× the sum of the originals — keeps row-adjacent
+ * char rects merging into a string strip but rejects orthogonal outline
+ * strips (top + left) which would otherwise merge into the full rect bbox
+ * and defeat the entire optimization. */
+static inline int rects_touch(uint16_t ax0, uint16_t ay0, uint16_t ax1,
+	uint16_t ay1, int bx0, int by0, int bx1, int by1)
+{
+	/* Disjoint with a one-pixel gap: never coalesce — they're truly
+	 * separate regions and merging would just enlarge the cleared area. */
+	if (bx0 > (int)ax1 + 1 || bx1 < (int)ax0 - 1 ||
+	    by0 > (int)ay1 + 1 || by1 < (int)ay0 - 1)
+		return 0;
+
+	int a_area = ((int)ax1 - (int)ax0 + 1) * ((int)ay1 - (int)ay0 + 1);
+	int b_area = (bx1 - bx0 + 1) * (by1 - by0 + 1);
+	int mx0 = (int)ax0 < bx0 ? (int)ax0 : bx0;
+	int my0 = (int)ay0 < by0 ? (int)ay0 : by0;
+	int mx1 = (int)ax1 > bx1 ? (int)ax1 : bx1;
+	int my1 = (int)ay1 > by1 ? (int)ay1 : by1;
+	int merged_area = (mx1 - mx0 + 1) * (my1 - my0 + 1);
+
+	/* Allow a small expansion (~25%) to absorb adjacent-char gap. */
+	return merged_area * 4 <= (a_area + b_area) * 5;
+}
+
+void osd_dirty_add_rect(OsdDirty *d, const OsdCanvas *c,
+	int x0, int y0, int x1, int y1)
+{
+	/* Normalize + clamp. */
+	if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+	if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+	if (x1 < 0 || y1 < 0) return;
+	if (x0 >= (int)c->width || y0 >= (int)c->height) return;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 >= (int)c->width)  x1 = (int)c->width - 1;
+	if (y1 >= (int)c->height) y1 = (int)c->height - 1;
+
+	union_bbox(d, x0, y0);
+	union_bbox(d, x1, y1);
+
+	if (d->count < 0) return;  /* already in overflow → bbox-only mode */
+
+	/* Coalesce with the previous rect if they touch.  This handles the
+	 * common case of consecutive char-cells (string) merging into one
+	 * row-strip, and adjacent strip pieces merging on the same line. */
+	if (d->count > 0) {
+		int last = d->count - 1;
+		if (rects_touch(d->rects[last].x0, d->rects[last].y0,
+		                d->rects[last].x1, d->rects[last].y1,
+		                x0, y0, x1, y1)) {
+			if ((uint16_t)x0 < d->rects[last].x0)
+				d->rects[last].x0 = (uint16_t)x0;
+			if ((uint16_t)y0 < d->rects[last].y0)
+				d->rects[last].y0 = (uint16_t)y0;
+			if ((uint16_t)x1 > d->rects[last].x1)
+				d->rects[last].x1 = (uint16_t)x1;
+			if ((uint16_t)y1 > d->rects[last].y1)
+				d->rects[last].y1 = (uint16_t)y1;
+			return;
+		}
+	}
+
+	if (d->count >= OSD_DIRTY_MAX_RECTS) {
+		/* Overflow: fall back to single-bbox clear (already maintained). */
+		d->count = -1;
+		return;
+	}
+
+	d->rects[d->count].x0 = (uint16_t)x0;
+	d->rects[d->count].y0 = (uint16_t)y0;
+	d->rects[d->count].x1 = (uint16_t)x1;
+	d->rects[d->count].y1 = (uint16_t)y1;
+	d->count++;
+}
+
+void osd_dirty_expand(OsdDirty *d, const OsdCanvas *c, int x, int y)
+{
+	/* Legacy single-point expand: clamp the point to canvas bounds and
+	 * grow the bbox unconditionally — the original behavior was to keep
+	 * out-of-bounds expand calls visible by snapping them to the edge.
+	 * add_rect rejects fully-off-canvas rects, so we route through it
+	 * only after clamping. */
+	if (x < 0) x = 0;
+	if (y < 0) y = 0;
+	if (x >= (int)c->width)  x = (int)c->width - 1;
+	if (y >= (int)c->height) y = (int)c->height - 1;
+	osd_dirty_add_rect(d, c, x, y, x, y);
 }
 
 /* ── I4 nibble helpers ──────────────────────────────────────────────
@@ -237,9 +324,27 @@ void osd_clear_dirty(const OsdCanvas *c, const OsdDirty *d)
 {
 	if (osd_dirty_empty(d))
 		return;
-	int clear_w = d->x1 - d->x0 + 1;
-	for (uint32_t y = d->y0; y <= d->y1 && y < c->height; y++)
-		osd_fill_pixels(c, d->x0, (int)y, clear_w, 0);
+
+	/* Overflow path: clear the union bbox in one go. */
+	if (d->count < 0) {
+		int clear_w = d->x1 - d->x0 + 1;
+		for (uint32_t y = d->y0; y <= d->y1 && y < c->height; y++)
+			osd_fill_pixels(c, d->x0, (int)y, clear_w, 0);
+		return;
+	}
+
+	/* Normal path: clear each tracked rect.  Adjacent rects have already
+	 * been coalesced by add_rect so this loop visits at most one rect per
+	 * disjoint region of the previous frame's painting. */
+	for (int i = 0; i < d->count; i++) {
+		int rx0 = d->rects[i].x0;
+		int ry0 = d->rects[i].y0;
+		int rx1 = d->rects[i].x1;
+		int ry1 = d->rects[i].y1;
+		int rw = rx1 - rx0 + 1;
+		for (int y = ry0; y <= ry1 && y < (int)c->height; y++)
+			osd_fill_pixels(c, rx0, y, rw, 0);
+	}
 }
 
 /* ── Rectangles ────────────────────────────────────────────────────── */
@@ -259,17 +364,22 @@ void osd_draw_rect(const OsdCanvas *c, OsdDirty *d,
 	if (x0 < 0) x0 = 0;
 	if (y0 < 0) y0 = 0;
 
-	osd_dirty_expand(d, c, x0, y0);
-	osd_dirty_expand(d, c, x1, y1);
-
 	int span = x1 - x0 + 1;
 
 	if (filled) {
+		osd_dirty_add_rect(d, c, x0, y0, x1, y1);
 		for (int row = y0; row <= y1; row++)
 			osd_fill_pixels(c, x0, row, span, color);
 	} else {
+		/* Outline: paint 4 thin strips and add each as its own dirty
+		 * rect, so the next frame's clear only zeroes the perimeter
+		 * (~4*(w+h) pixels) rather than the full inner area (w*h). */
+		osd_dirty_add_rect(d, c, x0, y0, x1, y0);          /* top */
 		osd_fill_pixels(c, x0, y0, span, color);
+		osd_dirty_add_rect(d, c, x0, y1, x1, y1);          /* bottom */
 		osd_fill_pixels(c, x0, y1, span, color);
+		osd_dirty_add_rect(d, c, x0, y0, x0, y1);          /* left */
+		osd_dirty_add_rect(d, c, x1, y0, x1, y1);          /* right */
 		for (int row = y0; row <= y1; row++) {
 			osd_put_pixel(c, x0, row, color);
 			osd_put_pixel(c, x1, row, color);

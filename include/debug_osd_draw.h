@@ -22,18 +22,49 @@ typedef struct {
 	uint32_t  height;
 } OsdCanvas;
 
+/* Multi-rect dirty tracker.
+ *
+ * Why a list and not a single bbox: clearing the dirty area at the start of
+ * each frame must zero every pixel that might have been touched.  An
+ * outline rect (e.g. PiP overlay) only paints its 4 perimeter strips, but
+ * a single bbox would force the clear to wipe the entire inner area —
+ * 100s of K pixels for a 960×540 outline, hundreds of times more than the
+ * actual paint.  A short list of small rects (one per shape, or one per
+ * strip for outlines) shrinks the clear to just the painted regions.
+ *
+ * Each draw call adds one rect (filled rect, char, line, point, etc.) or
+ * four rects (unfilled rect outline).  Adjacent/overlapping rects coalesce
+ * with the previous entry to keep the list short.  If the list overflows,
+ * we fall back to a single union bbox — slower clear, but correct.
+ *
+ * x0/y0/x1/y1 remain the computed union bbox of the list.  Legacy callers
+ * (and unit tests) inspect those four fields directly. */
+
+#define OSD_DIRTY_MAX_RECTS 32
+
 typedef struct {
-	uint16_t x0, y0, x1, y1;  /* inclusive bbox; empty when x0>x1 or y0>y1 */
+	uint16_t x0, y0, x1, y1;        /* inclusive union bbox; empty: x0>x1 */
+	int      count;                  /* rects in use; -1 = overflow → use bbox */
+	struct {
+		uint16_t x0, y0, x1, y1;
+	} rects[OSD_DIRTY_MAX_RECTS];
 } OsdDirty;
 
-/** Reset dirty bbox to empty sentinel (x0=w, y0=h, x1=0, y1=0). */
+/** Reset dirty to empty: bbox sentinel + count=0. */
 void osd_dirty_reset(OsdDirty *d, uint32_t w, uint32_t h);
 
-/** Return non-zero if dirty bbox is empty. */
+/** Return non-zero if dirty is empty. */
 int osd_dirty_empty(const OsdDirty *d);
 
-/** Expand dirty bbox to include (x,y), clamped to canvas bounds. */
+/** Expand dirty to include the point (x,y), clamped.  Adds a 1×1 rect to
+ *  the list and grows the bbox.  Equivalent to add_rect(d,c,x,y,x,y). */
 void osd_dirty_expand(OsdDirty *d, const OsdCanvas *c, int x, int y);
+
+/** Add a rectangular region to the dirty list.  Coalesces with the
+ *  previous rect if they overlap or touch.  Falls back to single-bbox
+ *  tracking if the list overflows. */
+void osd_dirty_add_rect(OsdDirty *d, const OsdCanvas *c,
+                        int x0, int y0, int x1, int y1);
 
 /** Fill `count` pixels starting at canvas (x, y) with palette index
  *  `color`.  Handles I4 nibble packing internally including unaligned
