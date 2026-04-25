@@ -609,6 +609,34 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	return NULL;
 }
 
+const char *venc_api_validate_loaded_config(const VencConfig *cfg)
+{
+	/* Keys with rules in validate_field_cfg().  Backend-coupled checks
+	 * (validate_backend_config) intentionally excluded — g_backend is
+	 * registered after config load, so they cannot run here. */
+	static const char *const keys[] = {
+		"isp.awb_mode",
+		"video0.bitrate",
+		"video0.qp_delta",
+		"video0.size",
+		"video0.scene_holdoff",
+		"fpv.roi_qp",
+		"fpv.roi_steps",
+		"fpv.roi_center",
+	};
+	size_t i;
+
+	if (!cfg)
+		return "invalid config state";
+
+	for (i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+		const char *err = validate_field_cfg(cfg, keys[i]);
+		if (err)
+			return err;
+	}
+	return NULL;
+}
+
 /* ── Config validation ───────────────────────────────────────────────── */
 
 /* Check config consistency after a field change.  Returns NULL if valid,
