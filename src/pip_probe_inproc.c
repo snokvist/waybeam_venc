@@ -499,9 +499,125 @@ void pip_probe_inproc_run(const VencConfig *vcfg)
 
 	if (p2_get1_ret == MI_SUCCESS) p_chn_put(handle_p2);
 
-	/* Don't destroy the RGN region — leave it attached so the user can
-	 * visually confirm a single-frame PiP overlay on the live stream.
-	 * Destroyed on next venc restart automatically. */
+	/* ── Phase 3: I8 RGN canvas + DIVP Y-plane direct write ──────────
+	 *
+	 * Critical question: will DIVP accept an RGN canvas phys addr as
+	 * its destination (cross-module memory)?  The expected production
+	 * path for grayscale PiP is:
+	 *   - Create RGN region with pixfmt=I8 (1 byte / pixel)
+	 *   - DIVP src=YUV420SP port-1 buf, dst=YUV420SP with
+	 *     phyAddr[0] = RGN canvas (Y plane lands here)
+	 *     phyAddr[1] = small scratch UV buffer (UV plane discarded)
+	 *   - UpdateCanvas — kernel composites grayscale onto port-0
+	 *
+	 * A grayscale palette would be needed for proper display, but
+	 * we don't touch the palette here (debug_osd already configured
+	 * it).  Visual will look weird (palette mismatch); the JSON tells
+	 * us whether the technical path is sound. */
+	int p3_destroy_ret = -1, p3_create_ret = -1, p3_attach_ret = -1;
+	int p3_canvas_ret = -1, p3_divp_ret = -999, p3_update_ret = -1;
+	long p3_divp_us = -1;
+	uint64_t p3_canvas_phy = 0;
+	uint32_t p3_canvas_stride = 0;
+	int p3_pix_fmt = -1;
+	MI_PHY uv_scratch_phy = 0;
+
+	/* Tear down phase 2 region before creating phase 3 (same VPE chn). */
+	MI_SYS_ChnPort_t rgn_vpe_bind = {
+		.module = 0, .device = 0, .channel = 0, .port = 0
+	};
+	if (rgn_attach_ret == 0)
+		p_rgn_detach(PROBE_RGN_HANDLE, &rgn_vpe_bind);
+	if (rgn_create_ret == 0)
+		p3_destroy_ret = p_rgn_destroy(PROBE_RGN_HANDLE);
+
+	/* GetBuf again for phase 3. */
+	MI_SYS_BufInfo_t info_p3;
+	memset(&info_p3, 0, sizeof(info_p3));
+	MI_SYS_BUF_HANDLE handle_p3 = 0;
+	int p3_get1_ret = p_chn_get(&p1, &info_p3, &handle_p3);
+
+	if (p3_get1_ret == MI_SUCCESS) {
+		probe_rgn_cnf cnf = {
+			.type = 0,
+			.pixFmt = I6_RGN_PIXFMT_I8_p,
+			.size = { .width = dst_w, .height = dst_h }
+		};
+		p3_create_ret = p_rgn_create(PROBE_RGN_HANDLE, &cnf);
+
+		if (p3_create_ret == 0) {
+			probe_rgn_chn chn = {0};
+			chn.show = 1;
+			chn.point.x = vcfg->pip.position.x;
+			chn.point.y = vcfg->pip.position.y;
+			chn.osd.layer = 1;
+			chn.osd.constAlphaOn = 0;
+			p3_attach_ret = p_rgn_attach(PROBE_RGN_HANDLE,
+				&rgn_vpe_bind, &chn);
+
+			if (p3_attach_ret == 0) {
+				probe_rgn_canvas canvas;
+				memset(&canvas, 0, sizeof(canvas));
+				p3_canvas_ret = p_rgn_get_canvas(
+					PROBE_RGN_HANDLE, &canvas);
+				p3_canvas_phy = canvas.phyAddr;
+				p3_canvas_stride = canvas.u32Stride;
+				p3_pix_fmt = canvas.ePixelFmt;
+
+				/* Allocate UV scratch — DIVP will write here
+				 * but we ignore the result. */
+				MI_U32 uv_size = canvas.u32Stride *
+					canvas.stSize.u32Height / 2;
+				p_mma_alloc((MI_U8*)"mma_heap_name0", uv_size,
+					&uv_scratch_phy);
+
+				if (p3_canvas_ret == 0 && canvas.phyAddr &&
+				    uv_scratch_phy) {
+					MI_DIVP_DirectBuf_t src = {
+						.ePixelFormat =
+							info_p3.stFrameData.ePixelFormat,
+						.u32Width = info_p3.stFrameData.u16Width,
+						.u32Height = info_p3.stFrameData.u16Height,
+						.u32Stride = {
+							info_p3.stFrameData.u32Stride[0],
+							info_p3.stFrameData.u32Stride[1], 0 },
+						.phyAddr = {
+							info_p3.stFrameData.phyAddr[0],
+							info_p3.stFrameData.phyAddr[1], 0 }
+					};
+					MI_DIVP_DirectBuf_t dst = {
+						.ePixelFormat = DIVP_PIXFMT_YUV420SP,
+						.u32Width = dst_w,
+						.u32Height = dst_h,
+						.u32Stride = {
+							canvas.u32Stride,
+							canvas.u32Stride, 0 },
+						.phyAddr = {
+							canvas.phyAddr,        /* Y → RGN */
+							uv_scratch_phy, 0 }    /* UV → scratch */
+					};
+					MI_SYS_WindowRect_t crop_p3 = {
+						.u16X = 0, .u16Y = 0,
+						.u16Width = src.u32Width,
+						.u16Height = src.u32Height
+					};
+					struct timespec t0, t1;
+					clock_gettime(CLOCK_MONOTONIC, &t0);
+					p3_divp_ret = p_divp_stretch(
+						&src, &crop_p3, &dst);
+					clock_gettime(CLOCK_MONOTONIC, &t1);
+					p3_divp_us = (t1.tv_sec - t0.tv_sec) *
+						1000000L +
+						(t1.tv_nsec - t0.tv_nsec) / 1000L;
+
+					if (p3_divp_ret == 0)
+						p3_update_ret =
+							p_rgn_update_canvas(PROBE_RGN_HANDLE);
+				}
+			}
+		}
+		p_chn_put(handle_p3);
+	}
 
 	fprintf(stderr, "{\"probe\":\"pip_inproc\","
 		"\"port1_set_mode\":\"0x%x\","
@@ -526,7 +642,17 @@ void pip_probe_inproc_run(const VencConfig *vcfg)
 		"\"rgn_canvas_pix_fmt\":%d,"
 		"\"rgn_divp_ret\":\"0x%x\","
 		"\"rgn_divp_us\":%ld,"
-		"\"rgn_update_ret\":\"0x%x\""
+		"\"rgn_update_ret\":\"0x%x\","
+		"\"p3_destroy_ret\":\"0x%x\","
+		"\"p3_create_ret\":\"0x%x\","
+		"\"p3_attach_ret\":\"0x%x\","
+		"\"p3_canvas_ret\":\"0x%x\","
+		"\"p3_canvas_phy\":\"0x%llx\","
+		"\"p3_canvas_stride\":%u,"
+		"\"p3_pix_fmt\":%d,"
+		"\"p3_divp_ret\":\"0x%x\","
+		"\"p3_divp_us\":%ld,"
+		"\"p3_update_ret\":\"0x%x\""
 		"}\n",
 		(unsigned)set_mode_ret, (unsigned)crop_ret,
 		(unsigned)enable_ret,
@@ -546,7 +672,14 @@ void pip_probe_inproc_run(const VencConfig *vcfg)
 		(unsigned long long)rgn_canvas_phy,
 		(unsigned)rgn_canvas_stride, rgn_pix_fmt,
 		(unsigned)rgn_divp_ret, rgn_divp_us,
-		(unsigned)rgn_update_ret);
+		(unsigned)rgn_update_ret,
+		(unsigned)p3_destroy_ret,
+		(unsigned)p3_create_ret, (unsigned)p3_attach_ret,
+		(unsigned)p3_canvas_ret,
+		(unsigned long long)p3_canvas_phy,
+		(unsigned)p3_canvas_stride, p3_pix_fmt,
+		(unsigned)p3_divp_ret, p3_divp_us,
+		(unsigned)p3_update_ret);
 	fflush(stderr);
 
 	MI_VPE_DisablePort(0, 1);
