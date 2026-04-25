@@ -859,6 +859,39 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		debug_osd_text(ps->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ps->debug_osd));
 
+		/* PiP debug — show configured rects even when backend is not yet
+		 * implemented, so the operator can verify config plumbing. */
+		if (vcfg->pip.enabled) {
+			debug_osd_text(ps->debug_osd, 2, "pip",
+				"%s/x%u", vcfg->pip.format,
+				(unsigned)vcfg->pip.refresh_every);
+			debug_osd_text(ps->debug_osd, 3, "pos",
+				"%u,%u %ux%u",
+				(unsigned)vcfg->pip.position.x,
+				(unsigned)vcfg->pip.position.y,
+				(unsigned)vcfg->pip.position.w,
+				(unsigned)vcfg->pip.position.h);
+			debug_osd_text(ps->debug_osd, 4, "zoom",
+				"%u,%u %ux%u",
+				(unsigned)vcfg->pip.zoom.x,
+				(unsigned)vcfg->pip.zoom.y,
+				(unsigned)vcfg->pip.zoom.w,
+				(unsigned)vcfg->pip.zoom.h);
+
+			/* Outline rects: cyan = zoom source, yellow = PiP destination.
+			 * Only draw if rect has non-zero size. */
+			if (vcfg->pip.zoom.w && vcfg->pip.zoom.h)
+				debug_osd_rect(ps->debug_osd,
+					vcfg->pip.zoom.x, vcfg->pip.zoom.y,
+					vcfg->pip.zoom.w, vcfg->pip.zoom.h,
+					DEBUG_OSD_CYAN, 0);
+			if (vcfg->pip.position.w && vcfg->pip.position.h)
+				debug_osd_rect(ps->debug_osd,
+					vcfg->pip.position.x, vcfg->pip.position.y,
+					vcfg->pip.position.w, vcfg->pip.position.h,
+					DEBUG_OSD_YELLOW, 0);
+		}
+
 		debug_osd_end_frame(ps->debug_osd);
 	}
 
