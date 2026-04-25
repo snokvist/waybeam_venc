@@ -529,6 +529,15 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		snprintf(vcfg->record.mode, sizeof(vcfg->record.mode), "off");
 	}
 
+	/* In-process PiP architecture probe.  Runs once at startup when
+	 * pip.enabled=true to validate the production data path (VPE port-1
+	 * GetBuf → DIVP_StretchBuf → scratch).  No-op when pip is disabled.
+	 * Output is a single JSON line on stderr — grep "pip_inproc". */
+	if (vcfg->pip.enabled) {
+		extern void pip_probe_inproc_run(const VencConfig *vcfg);
+		pip_probe_inproc_run(vcfg);
+	}
+
 	/* Start dual VENC if mode is "dual" or "dual-stream" */
 	if (vcfg->record.enabled &&
 	    (strcmp(vcfg->record.mode, "dual") == 0 ||
