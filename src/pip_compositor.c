@@ -567,15 +567,23 @@ static void *pip_thread_fn(void *arg)
 			.u16X = zx, .u16Y = zy, .u16Width = zw, .u16Height = zh
 		};
 		if (c->p_divp_stretch(&src, &crop, &dst) == MI_SUCCESS) {
-			/* DIVP wrote via DMA at canvas.phyAddr; userspace
-			 * caches at canvas.virtAddr are stale.  Flush+invalidate
-			 * so the SDK's dirty-page tracking marks the front
-			 * buffer as written before UpdateCanvas. */
-			if (canvas.virtAddr)
+			/* DIVP writes via DMA so the SDK's userspace dirty-
+			 * page tracking doesn't see the change.  Touch one
+			 * byte via virtAddr (kernel marks the page dirty),
+			 * then FlushInvCache to sync caches both directions
+			 * so UpdateCanvas's commit sees the DMA-written data
+			 * AND the kernel-side state machine accepts the
+			 * front-buffer as ready. */
+			if (canvas.virtAddr) {
+				volatile uint8_t *p =
+					(volatile uint8_t *)
+					(uintptr_t)canvas.virtAddr;
+				p[0] = p[0];   /* RMW touch — marks dirty */
 				c->p_sys_flush_inv_cache(
 					(void*)(uintptr_t)canvas.virtAddr,
 					canvas.u32Stride *
 					canvas.stSize.u32Height);
+			}
 			c->p_rgn_update_canvas(PIP_RGN_HANDLE);
 		}
 		c->p_chn_put(handle);
