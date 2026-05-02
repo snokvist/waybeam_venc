@@ -1,5 +1,35 @@
 # History
 
+## [0.9.6] - 2026-05-02
+
+Shrink the `g_cfg_mutex` critical section in `apply_live_set_query()`
+and document the hold-time contract.
+
+- **`src/venc_api.c`** — moved `stage_params_into_cfg()` and
+  `preflight_live_group_callbacks()` out of the mutex region.  Both
+  helpers operate purely on the local `new_cfg` copy and only read
+  write-once globals (`g_backend` and the `g_cb` function-pointer
+  table set at register time), so they have no business holding
+  `g_cfg_mutex`.  The `old_cfg` snapshot is now taken under a brief
+  lock-snapshot-unlock and the mutex is re-acquired just before the
+  apply sequence + commit + response-build phase.  Safe because the
+  httpd is single-threaded — no other writer can mutate `g_cfg` in
+  the unlock/relock window.
+- **Documentation** — expanded the `g_cfg_mutex` comment to explain
+  the irreducible hold-time policy: backends register their own
+  `VencConfig` pointer as `g_cfg` (e.g. `&ctx->vcfg`), and
+  `apply_*` callbacks may read fields beyond the value passed in
+  (e.g. `apply_bitrate` reads `vcfg->video0.frame_lost`), so
+  `apply_live_group_for_cfg` commits the staged value to `g_cfg`
+  before each callback and the mutex must remain held across the
+  whole apply sequence to keep that commit/read pair coherent.
+- **Out of scope.** The original CR P1 also asked to "snapshot
+  `g_cfg` per-frame, route `apply_*` callbacks to a deferred queue."
+  That requires changing the apply-callback contract so each
+  callback receives its inputs purely as parameters — every
+  backend-side read of `vcfg->...` outside the passed-in value
+  would have to be removed first.  Not in this PR.
+
 ## [0.9.2] - 2026-04-28
 
 Transport-pressure observability (the prior "Level 2 — local FPS skip"
