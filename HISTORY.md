@@ -1,5 +1,20 @@
 # History
 
+## [0.9.4] - 2026-05-02
+
+Repo hygiene: relocate orphaned standalone harnesses out of `src/`.
+
+- **`src/snr_sequence_probe.c` → `tools/snr_sequence_probe.c`** and
+  **`src/snr_toggle_test.c` → `tools/snr_toggle_test.c`**.  Both are
+  standalone `main()` programs, ~1.2k LOC each, that were dropped from
+  the Makefile in 0.6.2 ("unbuildable without direct MI linking") but
+  left sitting in `src/`.  `src/` is the active implementation tree —
+  the residue confused new readers and made `src/` look ~2.5k LOC
+  heavier than it is.  No build wiring: they remain reference-only
+  source.  Updated the `REFACTORING_PLAN.md` path references; the
+  historical `IMPLEMENTATION_PHASES.md` and binary-name references in
+  `SENSOR_UNLOCK_IMX415_IMX335.md` are intentionally left untouched.
+
 ## [0.9.2] - 2026-04-28
 
 Transport-pressure observability (the prior "Level 2 — local FPS skip"
