@@ -65,4 +65,24 @@ int output_socket_get_fill_pct(int socket_handle, int sndbuf_capacity,
  * getsockopt failure or fd < 0. */
 int output_socket_capture_capacity(int socket_handle, int *out_capacity);
 
+/** Consistent snapshot of a transport tuple guarded by a seqlock. */
+typedef struct {
+	int fd;
+	struct sockaddr_storage dst;
+	socklen_t dst_len;
+	int connected_udp;
+} OutputTransportSnapshot;
+
+/** Acquire-load the seqlock at @p transport_gen, snapshot the transport
+ *  tuple (@p socket_handle, *@p dst, *@p dst_len, *@p connected_udp) into
+ *  @p out, and retry if a writer (apply_server) was in progress or
+ *  completed between the two loads.  Lets callers on the encoder thread
+ *  read the live transport state without racing the HTTP thread closing
+ *  and reusing the fd.  Mirrors the pattern used in *_output_begin_frame
+ *  to populate the per-frame batch. */
+void output_transport_snapshot(const uint32_t *transport_gen,
+	const int *socket_handle, const struct sockaddr_storage *dst,
+	const socklen_t *dst_len, const int *connected_udp,
+	OutputTransportSnapshot *out);
+
 #endif /* OUTPUT_SOCKET_H */

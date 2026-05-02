@@ -272,3 +272,30 @@ int output_socket_get_fill_pct(int socket_handle, int sndbuf_capacity,
 	*out_pct = (uint8_t)pct;
 	return 0;
 }
+
+void output_transport_snapshot(const uint32_t *transport_gen,
+	const int *socket_handle, const struct sockaddr_storage *dst,
+	const socklen_t *dst_len, const int *connected_udp,
+	OutputTransportSnapshot *out)
+{
+	uint32_t gen_before, gen_after;
+
+	if (!transport_gen || !socket_handle || !dst || !dst_len ||
+	    !connected_udp || !out)
+		return;
+
+	/* Seqlock read: retry while apply_server() holds an odd generation
+	 * or completes between our two loads. */
+	for (;;) {
+		gen_before = __atomic_load_n(transport_gen, __ATOMIC_ACQUIRE);
+		if (gen_before & 1u)
+			continue;
+		out->fd = *socket_handle;
+		out->dst = *dst;
+		out->dst_len = *dst_len;
+		out->connected_udp = *connected_udp;
+		gen_after = __atomic_load_n(transport_gen, __ATOMIC_ACQUIRE);
+		if (gen_before == gen_after)
+			return;
+	}
+}

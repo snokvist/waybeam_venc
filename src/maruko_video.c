@@ -2,6 +2,7 @@
 
 #include "h26x_util.h"
 #include "hevc_rtp.h"
+#include "output_socket.h"
 #include "rtp_packetizer.h"
 #include "rtp_session.h"
 
@@ -21,6 +22,7 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 {
 	const MarukoRtpWriteContext *ctx = opaque;
 	MarukoOutput *output;
+	OutputTransportSnapshot snap;
 	struct iovec vec[3];
 	struct msghdr msg;
 	int iovcnt;
@@ -52,15 +54,25 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 		 * already queued (to preserve ordering), then fall through to
 		 * immediate send. */
 		(void)maruko_output_end_frame(output);
-		/* Reopen the batch for subsequent packets in this frame. */
+		/* Reopen the batch for subsequent packets in this frame —
+		 * also re-snapshots transport state under the seqlock. */
 		maruko_output_begin_frame(output);
+		/* Reuse the freshly taken batch snapshot for the immediate
+		 * send so we don't race apply_server() on the HTTP thread. */
+		snap.fd = output->batch.socket_handle;
+		snap.dst = output->batch.dst;
+		snap.dst_len = output->batch.dst_len;
+		snap.connected_udp = output->batch.connected_udp;
+	} else {
+		/* Batch inactive: take a fresh seqlock snapshot. */
+		output_transport_snapshot(&output->transport_gen,
+			&output->socket_handle, &output->dst,
+			&output->dst_len, &output->connected_udp, &snap);
 	}
 
-	/* Fallback: either batch inactive or packet too big for scratch —
-	 * send immediately via sendmsg(). */
-	if (output->socket_handle < 0)
+	if (snap.fd < 0)
 		return -1;
-	if (!output->connected_udp && output->dst_len == 0)
+	if (!snap.connected_udp && snap.dst_len == 0)
 		return -1;
 
 	vec[0].iov_base = (void *)header;
@@ -75,16 +87,16 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 	}
 
 	memset(&msg, 0, sizeof(msg));
-	if (output->connected_udp) {
+	if (snap.connected_udp) {
 		msg.msg_name = NULL;
 		msg.msg_namelen = 0;
 	} else {
-		msg.msg_name = (void *)&output->dst;
-		msg.msg_namelen = output->dst_len;
+		msg.msg_name = (void *)&snap.dst;
+		msg.msg_namelen = snap.dst_len;
 	}
 	msg.msg_iov = vec;
 	msg.msg_iovlen = iovcnt;
-	if (sendmsg(output->socket_handle, &msg, 0) < 0) {
+	if (sendmsg(snap.fd, &msg, 0) < 0) {
 		output->send_errors++;
 		return -1;
 	}
@@ -330,9 +342,18 @@ size_t maruko_video_send_frame(const i6c_venc_strm *stream,
 		total_bytes = maruko_send_frame_rtp(stream, output, rtp, params,
 			cfg->rc_codec, cfg->rtp_payload_size, stats);
 	} else if (!output->ring) {
-		total_bytes = maruko_send_frame_compact(stream,
-			output->socket_handle, &output->dst, output->dst_len,
-			output->connected_udp, cfg->max_frame_size);
+		/* Compact path: snapshot transport state under the seqlock so
+		 * a concurrent apply_server() on the HTTP thread can't
+		 * retarget mid-frame. */
+		OutputTransportSnapshot snap;
+		output_transport_snapshot(&output->transport_gen,
+			&output->socket_handle, &output->dst,
+			&output->dst_len, &output->connected_udp, &snap);
+		if (snap.fd < 0)
+			return 0;
+		total_bytes = maruko_send_frame_compact(stream, snap.fd,
+			&snap.dst, snap.dst_len, snap.connected_udp,
+			cfg->max_frame_size);
 	} else {
 		/* Compact mode not supported over SHM */
 		return 0;

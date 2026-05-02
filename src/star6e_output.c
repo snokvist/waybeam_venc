@@ -488,6 +488,8 @@ int star6e_output_send_rtp_parts(Star6eOutput *output,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len)
 {
+	OutputTransportSnapshot snap;
+
 	if (!output || !header || !payload1 || header_len == 0 || payload1_len == 0)
 		return -1;
 
@@ -507,15 +509,29 @@ int star6e_output_send_rtp_parts(Star6eOutput *output,
 			return 0;
 		/* Scratch slot too small for this packet — flush anything
 		 * we already have (to preserve ordering), then fall through
-		 * to immediate send for this one packet. */
+		 * to immediate send for this one packet, reusing the batch's
+		 * transport snapshot (taken at begin_frame). */
+		snap.fd = output->batch.socket_handle;
+		snap.dst = output->batch.dst;
+		snap.dst_len = output->batch.dst_len;
+		snap.connected_udp = output->batch.connected_udp;
 		star6e_batch_flush(output);
+	} else {
+		/* Batching inactive (probe/audio/compact paths): take a fresh
+		 * seqlock snapshot of transport state so a concurrent
+		 * apply_server() on the HTTP thread cannot send to a closed
+		 * fd or the wrong destination. */
+		output_transport_snapshot(&output->transport_gen,
+			&output->socket_handle, &output->dst,
+			&output->dst_len, &output->connected_udp, &snap);
 	}
 
-	/* Fallback: either batching inactive (probe/audio/compact paths) or
-	 * a packet too big for scratch — send immediately. */
-	if (output_socket_send_parts(output->socket_handle, &output->dst,
-	    output->dst_len, output->connected_udp,
-	    header, header_len, payload1, payload1_len,
+	if (snap.fd < 0) {
+		output->send_errors++;
+		return -1;
+	}
+	if (output_socket_send_parts(snap.fd, &snap.dst, snap.dst_len,
+	    snap.connected_udp, header, header_len, payload1, payload1_len,
 	    payload2, payload2_len) != 0) {
 		output->send_errors++;
 		return -1;
@@ -526,6 +542,7 @@ int star6e_output_send_rtp_parts(Star6eOutput *output,
 int star6e_output_send_compact_packet(Star6eOutput *output,
 	const uint8_t *packet, uint32_t packet_size, uint32_t max_size)
 {
+	OutputTransportSnapshot snap;
 	uint32_t payload_offset = STAR6E_RTP_HEADER_SIZE;
 	uint32_t payload_size;
 	const uint8_t *payload;
@@ -536,15 +553,25 @@ int star6e_output_send_compact_packet(Star6eOutput *output,
 	uint32_t ssrc_id;
 	uint32_t max_fragment;
 
-	if (!output || output->socket_handle < 0 ||
+	if (!output ||
 	    output->transport == VENC_OUTPUT_URI_SHM ||
 	    !packet || packet_size == 0) {
 		return -1;
 	}
 
+	/* Snapshot transport state under the seqlock so a concurrent
+	 * apply_server() on the HTTP thread cannot retarget mid-packet. */
+	output_transport_snapshot(&output->transport_gen,
+		&output->socket_handle, &output->dst, &output->dst_len,
+		&output->connected_udp, &snap);
+	if (snap.fd < 0) {
+		output->send_errors++;
+		return -1;
+	}
+
 	if (packet_size <= max_size) {
-		ssize_t sent = sendto(output->socket_handle, packet, packet_size, 0,
-			(const struct sockaddr *)&output->dst, output->dst_len);
+		ssize_t sent = sendto(snap.fd, packet, packet_size, 0,
+			(const struct sockaddr *)&snap.dst, snap.dst_len);
 
 		if (sent < 0) {
 			output->send_errors++;
@@ -586,11 +613,11 @@ int star6e_output_send_compact_packet(Star6eOutput *output,
 		vec[1].iov_len = fragment_size;
 
 		memset(&msg, 0, sizeof(msg));
-		msg.msg_name = (void *)&output->dst;
-		msg.msg_namelen = output->dst_len;
+		msg.msg_name = (void *)&snap.dst;
+		msg.msg_namelen = snap.dst_len;
 		msg.msg_iov = vec;
 		msg.msg_iovlen = 2;
-		if (sendmsg(output->socket_handle, &msg, 0) < 0) {
+		if (sendmsg(snap.fd, &msg, 0) < 0) {
 			output->send_errors++;
 			return -1;
 		}
