@@ -1,5 +1,33 @@
 # History
 
+## [0.9.7] - 2026-05-02
+
+Split `maruko_pipeline_run()` to mirror the Star6E shape.
+
+- **`src/maruko_pipeline.c`** — extracted the 301-line
+  `maruko_pipeline_run()` into a small set of focused helpers:
+  - `MarukoStreamRuntime` struct holds the per-iteration state
+    (RTP state, sidecar, packs cache, fd, idle timers, metrics)
+    so helpers don't need an unwieldy parameter list.
+  - `maruko_pipeline_init_streaming()` /
+    `maruko_pipeline_cleanup_streaming()` for setup/teardown of
+    that runtime.
+  - `maruko_pipeline_await_frame()` owns the fd-poll, fallback
+    spin path, idle warn/abort, and `MI_VENC_Query` — returns
+    1=ready, 0=retry, -1=fatal.
+  - `maruko_pipeline_process_stream()` owns the per-frame work
+    (`MI_VENC_GetStream`, scene update, send, release, sidecar
+    trailer, optional verbose log) — mirrors
+    `star6e_runtime_process_stream()` in star6e_runtime.c.
+  - `maruko_pipeline_log_verbose_frame()` and
+    `maruko_pipeline_check_idle_abort()` factored out of the
+    body for readability.
+  - `maruko_pipeline_run()` is now a 50-line orchestrator: init,
+    loop (reinit check → await → process), cleanup.
+  No semantic change.  Idle-warn/abort timers, FPS kick at frame ==
+  fps, sidecar pressure read, verbose logging cadence all preserved
+  as-is.
+
 ## [0.9.2] - 2026-04-28
 
 Transport-pressure observability (the prior "Level 2 — local FPS skip"
