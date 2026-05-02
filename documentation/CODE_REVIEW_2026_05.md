@@ -241,31 +241,133 @@ source tree.
 
 ---
 
-## Recommended follow-up PRs
+## Follow-up PRs — initial three (all merged / open)
 
 Three highest-leverage PRs, each closing multiple findings:
 
 1. **`fix/ts-recorder-corruption-and-stack`** — Bug #1 + Bug #3 + Perf #2.
    Single file, small diff. Closes a silent corruption bug, removes a
    stack-overflow timebomb under non-glibc, and is the largest per-frame
-   perf win when recording is active.
+   perf win when recording is active. **Status: PR [#72][pr72] open.**
 
-2. **`refactor/output-common`** — Improvement #1 + Cleanup #1 (and Bug #2).
-   Medium effort. Extracting `output_common.c` is the natural moment to
-   fix the immediate-send-fallback fd UAF properly. Closes the active
-   Star6E↔Maruko drift surface in one stroke.
+2. **`fix/output-fallback-fd-uaf`** — Bug #2 only (narrowed scope from
+   the original `refactor/output-common` proposal). Adds a shared
+   `output_transport_snapshot()` helper and applies the existing
+   seqlock pattern to every immediate-send fallback path. Defers the
+   full `output_common.c` extraction (Improvement #1 / Cleanup #1) to
+   a separate PR — that requires struct-ABI changes touching 23
+   external field references and is now bug-fix-free since this PR
+   closes Bug #2 in-place. **Status: PR [#74][pr74] open.**
 
 3. **`perf/record-mutex-atomic`** — Perf #1. Trivial, well-scoped. Removes
    a real contention risk between HTTP thread and the 120 fps consumer
    that's only invisible because nobody hammers `/record` today.
+   **Status: PR [#73][pr73] open.**
 
-Deferred (real but lower payoff right now):
-- Improvement #2 (NAL iteration vtable) — aesthetic divergence, no current
-  bug payoff. Park until next backend lands.
-- Cleanup #2 (`iq_engine.c`) — same; large enough to deserve its own PR
-  after #1 lands.
-- Improvement #3 (split monster functions) — pair with the relevant
-  feature work that touches each function.
+[pr72]: https://github.com/snokvist/waybeam_venc/pull/72
+[pr73]: https://github.com/snokvist/waybeam_venc/pull/73
+[pr74]: https://github.com/snokvist/waybeam_venc/pull/74
+
+## Top 5 deferred items — prioritized
+
+Ranked by **bug/security severity × repro likelihood × LOC ratio** after
+the initial three PRs landed.
+
+### Priority 1 — Issue #1 — `g_cfg_mutex` blocking syscalls + torn-string reads
+- **Location:** `src/venc_api.c:1577`, `1264-1294`
+- **Why:** Two real hazards stacked. (a) HTTP thread calls `apply_server`
+  (`socket()/connect()/close()`) **under** `g_cfg_mutex` — a slow DNS
+  resolution stalls the encoder thread for tens of ms. (b) Encoder
+  reads `outgoing.server` / `awb_mode` strings at 120 fps **without**
+  taking that mutex → torn-string reads on every HTTP `/set`.
+- **Fix shape:** Snapshot `g_cfg` per-frame on the encoder thread (or
+  RCU-style shadow swap); never call `apply_*` callbacks under
+  `g_cfg_mutex` (move them to a deferred queue applied between frames).
+- **Effort:** Medium.
+
+### Priority 2 — `venc_httpd.c:364` — `Content-Length` header smuggling
+- **Location:** `httpd_strcasestr(headers, "content-length:")`
+- **Why:** Substring match is unanchored —
+  `X-Original-Content-Length:` (or any header whose name contains the
+  substring) is recognized as the body size header → request smuggling
+  on a network-exposed WebUI. Real vulnerability class, not theoretical.
+- **Fix shape:** Parse headers line-by-line and anchor `Content-Length:`
+  to the start of a header line.
+- **Effort:** Small. Single function + helper.
+
+### Priority 3 — Issue #3 — SHM single-instance race
+- **Location:** `src/venc_ring.c:68-69` + `prctl(PR_SET_NAME)` after
+  `main()` start
+- **Why:** Two venc instances starting near-simultaneously can both
+  pass the "is another venc running" probe and `shm_unlink` each
+  other's mapping. Downstream (`wfb_tx`, `link_controller`) sees a
+  corrupted/half-initialized ring. The cold-restart SIGHUP path (default
+  since v0.9.0) widens the window meaningfully.
+- **Fix shape:** Pidfile + `flock`, or `flock` directly on the SHM fd.
+- **Effort:** Small-medium. Self-contained in `venc_ring.c`.
+
+### Priority 4 — Cleanup #3 — move SNR investigation tools out of `src/`
+- **Location:** `src/snr_sequence_probe.c` (1266 LOC) +
+  `src/snr_toggle_test.c` (1256 LOC)
+- **Why:** Each has its own `main()`; neither is in `STAR6E_ONLY_SRC`.
+  Diagnostic artifacts cluttering the main tree. Removes ~2.5k LOC
+  from `src/` for a Makefile + `git mv` change. Highest LOC-per-effort
+  ratio in the backlog.
+- **Fix shape:** Create or extend `tools/` (`clock_bench.c` already
+  lives there), move both files, update Makefile.
+- **Effort:** Trivial.
+
+### Priority 5 — Improvement #3 (partial) — split `maruko_pipeline_run`
+- **Location:** `src/maruko_pipeline.c:1265` (301 lines)
+- **Why:** Identified as the main reason the two backends drift in
+  control flow — Star6E is already split
+  (`star6e_runtime_process_stream`), Maruko isn't. Bug #2 (just fixed
+  in PR #74) had to be patched in two different file structures
+  precisely because of this drift. Splitting Maruko to mirror the
+  Star6E shape collapses future cross-backend fixes to a single
+  shape.
+- **Fix shape:** Factor out `prepare_pipeline_config`,
+  `select_and_configure_sensor`, `bind_and_finalize_pipeline`,
+  `process_stream`, `pipeline_stop` mirroring `star6e_pipeline.c`.
+- **Effort:** Medium-high. Pure refactor (no behavior change), but
+  the function is dense and the SDK calls are subtle.
+
+### Suggested execution order
+
+`#2 (security)` → `#4 (trivial cleanup)` → `#3 (SHM race)` → `#1
+(config-mutex)` → `#5 (Maruko split)`. Quick wins first; #1 is the
+highest-leverage architectural fix; #5 sets up future work and is the
+natural last step.
+
+## Other deferred items (lower priority)
+
+Listed for completeness; revisit after the top 5 lands.
+
+- **Improvement #1 / Cleanup #1** — full `output_common.c` extraction.
+  Was high-priority because of Bug #2; with PR #74 landed, the
+  remaining payoff is duplication cleanup only, no correctness lever.
+- **Improvement #2** — NAL iteration vtable. Aesthetic divergence; no
+  current bug payoff. Park until next backend lands.
+- **Cleanup #2** — `iq_engine.c` extraction (~250 LOC). No correctness
+  lever; do after `output_common.c` lands.
+- **Issue #2** — torn pointer load on `state->rec_ring`. Latent —
+  worst case today is a few stale frames pushed after stop because
+  the ring lives until teardown. Becomes a UAF only if the ring
+  lifecycle tightens.
+- **`parse_query_params` duplicate-key dedup** — duplicate `server=…`
+  fires `apply_server` twice. Real but bounded (2× socket close+open
+  per duplicate, no corruption); seqlock pattern in PR #74 handles
+  concurrent writers correctly.
+- **Bug honorable mentions** — `handle_record_start` NULL deref
+  (`venc_api.c:2152`), `venc_ring_read` silent truncation
+  (`venc_ring.h:273-274`). Narrow trigger paths, no live consumer
+  hits them today.
+- **Improvement #3 (rest)** — split `cus3a_thread` (269), `venc_config_save`
+  (183), `process_stream` (175). Pair with feature work that touches
+  each function.
+- **Perf honorable mentions** — `hevc_rtp_prepend_param_sets` fast-out,
+  packed RTP header. Sub-µs wins; Tier A/B/C and the TS recorder buffer
+  move have already taken the big perf items.
 
 ## Reviewer notes
 
