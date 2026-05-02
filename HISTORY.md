@@ -1,5 +1,28 @@
 # History
 
+## [0.9.5] - 2026-05-02
+
+Make single-instance enforcement race-free.
+
+- **`src/main.c`** — added `acquire_pidfile_lock()` as the primary
+  startup gate.  `open(O_CREAT|O_RDWR|O_CLOEXEC) + flock(LOCK_EX|
+  LOCK_NB)` against `/var/run/venc.pid` (falls back to `/tmp/venc.pid`
+  when the former is unavailable on minimal images) is atomic from
+  the kernel's perspective — two `venc` binaries starting nearly
+  simultaneously cannot both pass the gate.  Previously the only
+  guard was a `/proc/*/comm` walk, which is TOCTOU-prone: a
+  second `venc` that has not yet called `prctl(PR_SET_NAME, "venc")`
+  is invisible to the first one's scan, so both can proceed and
+  race the `shm_unlink + O_EXCL` sequence in `venc_ring_create()`.
+  The legacy `/proc` scan is kept as a fallback when the pidfile
+  filesystem is unavailable.  `O_CLOEXEC` ensures the SIGHUP /
+  `/api/v1/restart` `execv` respawn path can re-acquire the lock
+  cleanly: the inherited fd closes on `execv`, releasing the BSD
+  lock, and the new image's own `acquire_pidfile_lock()` re-takes
+  it.
+- **`src/venc_ring.c`** — comment updated to point at the new
+  mechanism.  Code unchanged.
+
 ## [0.9.2] - 2026-04-28
 
 Transport-pressure observability (the prior "Level 2 — local FPS skip"
