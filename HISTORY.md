@@ -1,5 +1,24 @@
 # History
 
+## [0.9.3] - 2026-05-02
+
+Security fix: anchor `Content-Length` header parsing in the embedded HTTP
+server.
+
+- **`src/venc_httpd.c`** — `parse_request()` previously located the
+  request body length with `httpd_strcasestr(headers, "content-length:")`,
+  an unanchored case-insensitive substring search across the full header
+  blob.  An attacker who could control any header value could embed
+  `content-length: <forged>` inside that value (e.g.
+  `X-Foo: content-length: 9999`) and have it picked up before — or
+  instead of — the real `Content-Length` header, allowing the server
+  to over- or under-read the body and smuggle bytes into the next
+  request on a keep-alive socket.  Replaced the lookup with a
+  line-by-line walk between the request line and the body delimiter
+  (`\r\n\r\n`); `Content-Length:` is only honoured when the name appears
+  at column 0 of a header line.  Removed the now-unused
+  `httpd_strcasestr` helper.
+
 ## [0.9.2] - 2026-04-28
 
 Transport-pressure observability (the prior "Level 2 — local FPS skip"

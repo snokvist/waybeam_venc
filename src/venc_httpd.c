@@ -19,19 +19,6 @@
 #define MSG_NOSIGNAL 0
 #endif
 
-/* Case-insensitive substring search (portable, no _GNU_SOURCE needed). */
-static char *httpd_strcasestr(const char *haystack, const char *needle)
-{
-	size_t nlen = strlen(needle);
-	if (nlen == 0) return (char *)haystack;
-	for (; *haystack; haystack++) {
-		if (tolower((unsigned char)*haystack) == tolower((unsigned char)*needle) &&
-		    strncasecmp(haystack, needle, nlen) == 0)
-			return (char *)haystack;
-	}
-	return NULL;
-}
-
 /* ── Route table ─────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -360,13 +347,26 @@ static int parse_request(int fd, HttpRequest *req)
 	char *body_start = strstr(headers_start, "\r\n\r\n");
 	if (body_start) {
 		body_start += 4;
-		/* Find Content-Length */
-		char *cl = httpd_strcasestr(headers_start, "content-length:");
+		/* Find Content-Length, anchored at the start of a header line.
+		 * A bare substring search would also match values like
+		 *   X-Foo: content-length: 9999
+		 * which an attacker can use to forge a body length and smuggle
+		 * a follow-up request through the persistent socket buffer. */
 		int content_len = 0;
-		if (cl) {
-			content_len = atoi(cl + 15);
-			if (content_len < 0) content_len = 0;
-			if (content_len >= HTTPD_MAX_BODY) content_len = HTTPD_MAX_BODY - 1;
+		const char *p = headers_start;
+		while (p && p < body_start - 2) {
+			if (strncasecmp(p, "content-length:", 15) == 0) {
+				const char *v = p + 15;
+				while (*v == ' ' || *v == '\t') v++;
+				content_len = atoi(v);
+				if (content_len < 0) content_len = 0;
+				if (content_len >= HTTPD_MAX_BODY)
+					content_len = HTTPD_MAX_BODY - 1;
+				break;
+			}
+			const char *next = strstr(p, "\r\n");
+			if (!next) break;
+			p = next + 2;
 		}
 
 		/* Copy what we already have */
