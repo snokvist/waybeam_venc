@@ -196,16 +196,19 @@ void venc_api_request_record_start(const char *dir)
 	pthread_mutex_lock(&g_record_mutex);
 	snprintf(g_record_start_dir, sizeof(g_record_start_dir), "%s",
 		dir ? dir : RECORDER_DEFAULT_DIR);
-	g_record_start_pending = 1;
-	g_record_stop_pending = 0;
+	__atomic_store_n(&g_record_stop_pending, 0, __ATOMIC_RELAXED);
+	/* Release: pairs with the acquire-load fast path in
+	 * venc_api_get_record_start; ensures the dir write is visible
+	 * before the flag transition is observed. */
+	__atomic_store_n(&g_record_start_pending, 1, __ATOMIC_RELEASE);
 	pthread_mutex_unlock(&g_record_mutex);
 }
 
 void venc_api_request_record_stop(void)
 {
 	pthread_mutex_lock(&g_record_mutex);
-	g_record_stop_pending = 1;
-	g_record_start_pending = 0;
+	__atomic_store_n(&g_record_start_pending, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&g_record_stop_pending, 1, __ATOMIC_RELEASE);
 	pthread_mutex_unlock(&g_record_mutex);
 }
 
@@ -213,11 +216,16 @@ int venc_api_get_record_start(char *buf, size_t buf_size)
 {
 	int pending;
 
+	/* Fast path: no pending request, skip the mutex. Avoids ~240
+	 * uncontended lock/unlock pairs/sec at 120 fps when /record is idle. */
+	if (__atomic_load_n(&g_record_start_pending, __ATOMIC_ACQUIRE) == 0)
+		return 0;
+
 	pthread_mutex_lock(&g_record_mutex);
 	pending = g_record_start_pending;
 	if (pending && buf && buf_size > 0)
 		snprintf(buf, buf_size, "%s", g_record_start_dir);
-	g_record_start_pending = 0;
+	__atomic_store_n(&g_record_start_pending, 0, __ATOMIC_RELAXED);
 	pthread_mutex_unlock(&g_record_mutex);
 	return pending;
 }
@@ -226,9 +234,12 @@ int venc_api_get_record_stop(void)
 {
 	int pending;
 
+	if (__atomic_load_n(&g_record_stop_pending, __ATOMIC_ACQUIRE) == 0)
+		return 0;
+
 	pthread_mutex_lock(&g_record_mutex);
 	pending = g_record_stop_pending;
-	g_record_stop_pending = 0;
+	__atomic_store_n(&g_record_stop_pending, 0, __ATOMIC_RELAXED);
 	pthread_mutex_unlock(&g_record_mutex);
 	return pending;
 }
