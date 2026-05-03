@@ -63,7 +63,6 @@ static int g_mi_isp_dev_created = 0;
 static int g_mi_scl_dev_created = 0;
 static int g_mi_isp_chn_created = 0;
 static int g_mi_scl_chn_created = 0;
-static int g_mi_scl_port1_enabled = 0; /* SCL port 1 live when Maruko zoom active */
 
 static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
 	MI_U16 max_width, MI_U16 max_height, MI_U16 ring_line)
@@ -489,110 +488,16 @@ fail:
 	return ret ? ret : -1;
 }
 
-/* Compute a zoom sub-rect within (vpe_w × vpe_h) that, when scaled to
- * (out_w × out_h), stays within the 2× upscale limit of the Maruko SCL.
- * Same alignment rules as Star6E VPE: 16-px width/height, 8-px x/y.
- * Crop is grown when pct would produce an upscale ratio > 2×. */
-static i6_common_rect compute_zoom_rect_maruko(uint32_t vpe_w, uint32_t vpe_h,
-	uint32_t out_w, uint32_t out_h, double pct, double x, double y)
-{
-	const uint32_t WH_ALIGN = 16;
-	const uint32_t XY_ALIGN = 8;
-	const uint32_t MAX_UPSCALE = 2;
-	i6_common_rect r;
-	double cw, ch, cx, cy;
-	uint32_t rw, rh, rx, ry;
-	uint32_t min_w, min_h;
-
-	if (pct <= 0.0) pct = 1.0;
-	if (pct > 1.0) pct = 1.0;
-	if (x < 0.0) x = 0.0;
-	if (x > 1.0) x = 1.0;
-	if (y < 0.0) y = 0.0;
-	if (y > 1.0) y = 1.0;
-
-	cw = (double)vpe_w * pct;
-	ch = (double)vpe_h * pct;
-
-	min_w = (out_w + MAX_UPSCALE - 1) / MAX_UPSCALE;
-	min_h = (out_h + MAX_UPSCALE - 1) / MAX_UPSCALE;
-	min_w = (min_w + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
-	min_h = (min_h + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
-	if (cw < (double)min_w) cw = (double)min_w;
-	if (ch < (double)min_h) ch = (double)min_h;
-	if (cw > (double)vpe_w) cw = (double)vpe_w;
-	if (ch > (double)vpe_h) ch = (double)vpe_h;
-
-	cx = (double)vpe_w * x - cw * 0.5;
-	cy = (double)vpe_h * y - ch * 0.5;
-	if (cx < 0.0) cx = 0.0;
-	if (cy < 0.0) cy = 0.0;
-	if (cx + cw > (double)vpe_w) cx = (double)vpe_w - cw;
-	if (cy + ch > (double)vpe_h) cy = (double)vpe_h - ch;
-
-	rw = (uint32_t)(cw + 0.5) & ~(WH_ALIGN - 1);
-	rh = (uint32_t)(ch + 0.5) & ~(WH_ALIGN - 1);
-	if (rw == 0) rw = WH_ALIGN;
-	if (rh == 0) rh = WH_ALIGN;
-	rx = (uint32_t)(cx + 0.5) & ~(XY_ALIGN - 1);
-	ry = (uint32_t)(cy + 0.5) & ~(XY_ALIGN - 1);
-	if (rx + rw > vpe_w) rx = vpe_w > rw ? vpe_w - rw : 0;
-	if (ry + rh > vpe_h) ry = vpe_h > rh ? vpe_h - rh : 0;
-
-	r.x = (MI_U16)rx;
-	r.y = (MI_U16)ry;
-	r.width = (MI_U16)rw;
-	r.height = (MI_U16)rh;
-	return r;
-}
-
-/* Enable SCL output port 1 with a sub-rect zoom crop scaled to out_w×out_h.
- * The Maruko SCL device is created with scl_bind=0xF (all 4 HW ports active),
- * so port 1 is already hardware-enabled; only configuration + enable needed.
- * IFC compress is required for HW_RING binding from SCL → VENC. */
-static int zoom_configure_scl_port1(uint32_t scl_in_w, uint32_t scl_in_h,
-	uint32_t out_w, uint32_t out_h, double pct, double x, double y)
-{
-	i6c_scl_port scl_port;
-	i6_common_rect rect;
-	MI_S32 ret;
-
-	memset(&scl_port, 0, sizeof(scl_port));
-	rect = compute_zoom_rect_maruko(scl_in_w, scl_in_h, out_w, out_h,
-		pct, x, y);
-	scl_port.crop = rect;
-	scl_port.output.width = (unsigned short)out_w;
-	scl_port.output.height = (unsigned short)out_h;
-	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
-	scl_port.compress = (i6_common_compr)6; /* IFC */
-
-	ret = g_mi_scl.fnSetPortConfig(0, 0, 1, &scl_port);
-	if (ret != 0) {
-		fprintf(stderr,
-			"WARNING: [maruko] zoom SCL_SetOutputPortParam(port=1)"
-			" failed %d\n", (int)ret);
-		return (int)ret;
-	}
-	ret = g_mi_scl.fnEnablePort(0, 0, 1);
-	if (ret != 0) {
-		fprintf(stderr,
-			"WARNING: [maruko] zoom SCL_EnableOutputPort(port=1)"
-			" failed %d\n", (int)ret);
-		return (int)ret;
-	}
-	g_mi_scl_port1_enabled = 1;
-	printf("> [maruko] zoom: SCL port 1 enabled, crop=%ux%u@(%u,%u)"
-		" → %ux%u (pct=%.3f x=%.3f y=%.3f)\n",
-		rect.width, rect.height, rect.x, rect.y,
-		out_w, out_h, pct, x, y);
-	return 0;
-}
+/* Per-channel zoom on Maruko (independent ch1 crop) was investigated and
+ * found infeasible at the hardware level — see HISTORY.md [0.9.16] notes
+ * for the empirical findings.  The zoom_pct config field is preserved so
+ * configs can be shared with Star6E, but it is silently ignored here
+ * (warning logged at start_dual time).  ch1 always mirrors ch0 on Maruko
+ * via the SDK's HW fan-out (chn 0 → chn 1, NORMAL_FRMBASE). */
 
 static int configure_maruko_scl(const SensorSelectResult *sensor,
 	uint32_t out_width, uint32_t out_height,
-	const PipelinePrecropRect *precrop,
-	double zoom_pct, double zoom_x, double zoom_y,
-	uint32_t zoom_out_w, uint32_t zoom_out_h)
+	const PipelinePrecropRect *precrop)
 {
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
@@ -687,24 +592,6 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	if (precrop)
 		venc_api_set_active_precrop(precrop->x, precrop->y,
 			precrop->w, precrop->h);
-
-	/* Optional port 1 zoom: compute SCL input dims from sensor, configure
-	 * port 1 with zoom crop when requested.  Port 1 output uses
-	 * zoom_out_w/h when set, else falls back to out_width/out_height. */
-	if (zoom_pct > 0.0) {
-		uint32_t scl_in_w = sensor->plane.capt.width;
-		uint32_t scl_in_h = sensor->plane.capt.height;
-		if (sensor->mode.output.width > 0 &&
-		    sensor->mode.output.width < scl_in_w) {
-			scl_in_w = sensor->mode.output.width;
-			scl_in_h = sensor->mode.output.height;
-		}
-		uint32_t z_out_w = zoom_out_w ? zoom_out_w : out_width;
-		uint32_t z_out_h = zoom_out_h ? zoom_out_h : out_height;
-		/* Non-fatal: zoom port 1 failure leaves chn 1 using HW fan-out. */
-		(void)zoom_configure_scl_port1(scl_in_w, scl_in_h,
-			z_out_w, z_out_h, zoom_pct, zoom_x, zoom_y);
-	}
 	return 0;
 
 fail:
@@ -721,9 +608,7 @@ fail:
 
 static int maruko_start_vpe(const SensorSelectResult *sensor,
 	uint32_t out_width, uint32_t out_height, int vpe_level_3dnr,
-	const PipelinePrecropRect *precrop,
-	double zoom_pct, double zoom_x, double zoom_y,
-	uint32_t zoom_out_w, uint32_t zoom_out_h)
+	const PipelinePrecropRect *precrop)
 {
 	int isp_started = 0;
 
@@ -731,8 +616,7 @@ static int maruko_start_vpe(const SensorSelectResult *sensor,
 		return -1;
 	isp_started = 1;
 
-	if (configure_maruko_scl(sensor, out_width, out_height, precrop,
-	    zoom_pct, zoom_x, zoom_y, zoom_out_w, zoom_out_h) != 0)
+	if (configure_maruko_scl(sensor, out_width, out_height, precrop) != 0)
 		goto fail_scl;
 
 	return 0;
@@ -754,10 +638,6 @@ fail_scl:
 static void maruko_stop_vpe_channels(void)
 {
 	if (g_mi_scl_chn_created) {
-		if (g_mi_scl_port1_enabled) {
-			(void)g_mi_scl.fnDisablePort(0, 0, 1);
-			g_mi_scl_port1_enabled = 0;
-		}
 		(void)g_mi_scl.fnDisablePort(0, 0, 0);
 		(void)g_mi_scl.fnStopChannel(0, 0);
 		(void)g_mi_scl.fnDestroyChannel(0, 0);
@@ -1591,16 +1471,6 @@ struct MarukoDualVenc {
 	 * the cached cap. */
 	i6c_venc_pack *stream_packs;
 	uint32_t stream_packs_cap;
-	/* Zoom via SCL port 1.  scl_port1_bound=1 when SCL/0/0/1→VENC/0/1/0
-	 * is active; 0 when HW fan-out (chn0→chn1) is used instead. */
-	int scl_port1_bound;
-	double zoom_pct;
-	double zoom_x;
-	double zoom_y;
-	uint32_t out_w;
-	uint32_t out_h;
-	uint32_t scl_in_w;
-	uint32_t scl_in_h;
 };
 
 static i6c_venc_pack *dual_ensure_packs(i6c_venc_pack **packs,
@@ -1861,17 +1731,19 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	if (server)
 		snprintf(d->server, sizeof(d->server), "%s", server);
 	d->output.socket_handle = -1;
-	d->zoom_pct = zoom_pct;
-	d->zoom_x = zoom_x;
-	d->zoom_y = zoom_y;
-	d->out_w = zoom_out_w ? zoom_out_w : ctx->cfg.image_width;
-	d->out_h = zoom_out_h ? zoom_out_h : ctx->cfg.image_height;
-	d->scl_in_w = ctx->sensor.plane.capt.width;
-	d->scl_in_h = ctx->sensor.plane.capt.height;
-	if (ctx->sensor.mode.output.width > 0 &&
-	    ctx->sensor.mode.output.width < d->scl_in_w) {
-		d->scl_in_w = ctx->sensor.mode.output.width;
-		d->scl_in_h = ctx->sensor.mode.output.height;
+
+	/* Per-channel zoom on Maruko is a hardware-level no-op (HWSCL1 cannot
+	 * drive a VENC encoder via either RING or REALTIME bind — see HISTORY).
+	 * Warn if user requested it so the silent no-op is visible. */
+	(void)zoom_x;
+	(void)zoom_y;
+	(void)zoom_out_w;
+	(void)zoom_out_h;
+	if (zoom_pct > 0.0) {
+		fprintf(stderr,
+			"WARNING: [maruko][dual] record.zoom_pct=%.3f ignored —"
+			" per-channel zoom is not supported on Maruko hardware"
+			" (ch1 will mirror ch0 via HW fan-out)\n", zoom_pct);
 	}
 
 	/* SDK pattern: both VENC channels must exist before SCL -> chn 0
@@ -1894,11 +1766,8 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	 * already provisioned for chn 0 in maruko_start_venc; no
 	 * second pool reservation is required for chn 1. */
 	i6c_venc_chn attr = {0};
-	uint32_t ch1_w = (zoom_pct > 0.0 && zoom_out_w) ?
-		zoom_out_w : ctx->cfg.image_width;
-	uint32_t ch1_h = (zoom_pct > 0.0 && zoom_out_h) ?
-		zoom_out_h : ctx->cfg.image_height;
-	dual_fill_attr(&attr, &ctx->cfg, ch1_w, ch1_h, bitrate, fps, gop_frames);
+	dual_fill_attr(&attr, &ctx->cfg, ctx->cfg.image_width,
+		ctx->cfg.image_height, bitrate, fps, gop_frames);
 	ret = maruko_mi_venc_create_chn(dev, chn, &attr);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -1914,34 +1783,18 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 		return -1;
 	}
 
-	/* Maruko dual-VENC topology — two paths:
+	/* Maruko dual-VENC topology (per Maruko SDK sample_venc.c):
+	 * chn 1 is sourced from chn 0's VENC output port (NOT from SCL).
+	 * The VENC hardware exposes a chn 0 -> chn 1 HW_RING fan-out so
+	 * the second encoder sees the same input frames.  Confirmed
+	 * empirically: binding SCL/0/0/0 -> VENC/0/1/0 directly returns
+	 * 0xA0092012 (SYS busy) because chn 0 already holds the SCL
+	 * output port in RING mode, and the SCL port cannot multi-consume.
 	 *
-	 * A) HW fan-out (no zoom, default):
-	 *    SCL/0/0/0 → VENC chn 0 (HW_RING).  chn 1 input source stays
-	 *    NORMAL_FRMBASE (SDK default) so the HW fan-out from chn 0 feeds
-	 *    it automatically.  Binding SCL/0/0/0→VENC/0/1/0 directly fails
-	 *    (0xA0092012) because SCL port 0 is exclusively held by chn 0.
-	 *
-	 * B) SCL port 1 zoom (zoom_pct > 0 + g_mi_scl_port1_enabled):
-	 *    SCL/0/0/1 → VENC chn 1 (HW_RING explicit bind).  Port 1 was
-	 *    configured with a zoom crop in configure_maruko_scl().
-	 *    SetInputSourceConfig(chn=1, RING_DMA) switches chn 1 to expect
-	 *    frames from an explicit ring bind rather than the fan-out.
-	 *    The SCL device is created with scl_bind=0xF so all 4 HW output
-	 *    ports are available; port 1 is otherwise idle. */
-	int use_scl_port1 = (zoom_pct > 0.0 && g_mi_scl_port1_enabled);
-
-	if (use_scl_port1) {
-		i6c_venc_src_conf src = I6C_VENC_SRC_CONF_RING_DMA;
-		MI_S32 src_ret = maruko_mi_venc_set_input_source(dev, chn, &src);
-		if (src_ret != 0) {
-			fprintf(stderr,
-				"WARNING: [maruko][dual] zoom SetInputSourceConfig"
-				"(chn=%d, RING_DMA) failed %d — falling back to"
-				" HW fan-out\n", (int)chn, (int)src_ret);
-			use_scl_port1 = 0;
-		}
-	}
+	 * The SDK sample does NOT call SetInputSourceConfig on chn 1 —
+	 * sub-channels default to NORMAL_FRMBASE (handshake by ~3-buffer
+	 * frame mode) which is what chn 0 -> chn 1 HW_RING expects on
+	 * the destination side. */
 
 	ret = maruko_mi_venc_start_recv(dev, chn);
 	if (ret != 0) {
@@ -1988,55 +1841,34 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 		(void)maruko_mi_venc_set_frame_lost(dev, chn, &lost);
 	}
 
+	/* Source: chn 0's VENC output port.  Dst: chn 1 input.
+	 * Maruko SDK sample_venc.c:
+	 *   src = VENC/dev/MainChn/0  (chn 0 output)
+	 *   dst = VENC/dev/SubChn/0   (chn 1)
+	 *   bind type = HW_RING
+	 */
+	MI_SYS_ChnPort_t src_port = {
+		.module = I6_SYS_MOD_VENC, .device = (MI_U32)dev,
+		.channel = ctx->venc_channel, .port = 0,
+	};
 	d->port = (MI_SYS_ChnPort_t){
 		.module = I6_SYS_MOD_VENC, .device = (MI_U32)dev,
 		.channel = chn, .port = 0,
 	};
 
-	if (use_scl_port1) {
-		/* Path B: SCL port 1 → VENC chn 1 (independent zoom source). */
-		MI_SYS_ChnPort_t scl1_port = {
-			.module = I6_SYS_MOD_SCL, .device = 0,
-			.channel = 0, .port = 1,
-		};
-		ret = MI_SYS_BindChnPort2(&scl1_port, &d->port,
-			sensor_fps, fps, I6_SYS_LINK_RING, 0);
-		if (ret != 0) {
-			fprintf(stderr,
-				"WARNING: [maruko][dual] zoom bind SCL/0/0/1"
-				"->chn%d failed %d — falling back to HW fan-out\n",
-				(int)chn, ret);
-			use_scl_port1 = 0;
-		} else {
-			d->scl_port1_bound = 1;
-			d->bind_src = scl1_port;
-			d->bound = 1;
-			printf("> [maruko][dual] zoom: SCL port 1 → chn%d"
-				" (pct=%.3f x=%.3f y=%.3f)\n",
-				(int)chn, zoom_pct, zoom_x, zoom_y);
-		}
+	ret = MI_SYS_BindChnPort2(&src_port, &d->port,
+		sensor_fps, fps, I6_SYS_LINK_RING, 0);
+	if (ret != 0) {
+		fprintf(stderr,
+			"WARNING: [maruko][dual] bind VENC chn0->chn%d"
+			" failed %d\n", (int)chn, ret);
+		(void)maruko_mi_venc_stop_recv(dev, chn);
+		(void)maruko_mi_venc_destroy_chn(dev, chn);
+		free(d);
+		return -1;
 	}
-
-	if (!use_scl_port1) {
-		/* Path A: HW fan-out from VENC chn 0 → chn 1 (no zoom). */
-		MI_SYS_ChnPort_t src_port = {
-			.module = I6_SYS_MOD_VENC, .device = (MI_U32)dev,
-			.channel = ctx->venc_channel, .port = 0,
-		};
-		ret = MI_SYS_BindChnPort2(&src_port, &d->port,
-			sensor_fps, fps, I6_SYS_LINK_RING, 0);
-		if (ret != 0) {
-			fprintf(stderr,
-				"WARNING: [maruko][dual] bind VENC chn0->chn%d"
-				" failed %d\n", (int)chn, ret);
-			(void)maruko_mi_venc_stop_recv(dev, chn);
-			(void)maruko_mi_venc_destroy_chn(dev, chn);
-			free(d);
-			return -1;
-		}
-		d->bound = 1;
-		d->bind_src = src_port;
-	}
+	d->bound = 1;
+	d->bind_src = src_port;
 
 	(void)MI_SYS_SetChnOutputPortDepth(&d->port, 1, 3);
 
@@ -2090,59 +1922,14 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	return 0;
 }
 
-/* Live pan/zoom update for Maruko ch1 (SCL port 1 path only).
- * Reconfigures SCL port 1 crop by disabling → SetPortConfig → enabling.
- * Topology changes (zoom_pct=0 ↔ pct>0) require restart; returns -1. */
+/* Per-channel zoom on Maruko: hardware-level no-op.  Always returns -1
+ * so the live-apply layer stages the change for next restart (where the
+ * start_dual warning will fire).  See HISTORY [0.9.16] for why. */
 int maruko_pipeline_update_zoom(MarukoBackendContext *ctx,
 	double pct, double x, double y)
 {
-	if (!ctx || !ctx->dual || !ctx->dual->scl_port1_bound)
-		return -1;
-
-	struct MarukoDualVenc *d = ctx->dual;
-
-	/* Topology change: zoom off requires stop/restart. */
-	if ((pct > 0.0) != (d->zoom_pct > 0.0))
-		return -1;
-	if (pct <= 0.0)
-		return -1; /* nothing to update */
-
-	i6c_scl_port scl_port;
-	memset(&scl_port, 0, sizeof(scl_port));
-	scl_port.crop = compute_zoom_rect_maruko(d->scl_in_w, d->scl_in_h,
-		d->out_w, d->out_h, pct, x, y);
-	scl_port.output.width = (unsigned short)d->out_w;
-	scl_port.output.height = (unsigned short)d->out_h;
-	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
-	scl_port.compress = (i6_common_compr)6; /* IFC */
-
-	/* Disable → reconfigure → enable to guarantee the new crop takes
-	 * effect (MI_SCL_SetOutputPortParam may not be hot-pluggable). */
-	(void)g_mi_scl.fnDisablePort(0, 0, 1);
-	MI_S32 ret = g_mi_scl.fnSetPortConfig(0, 0, 1, &scl_port);
-	if (ret != 0) {
-		/* Re-enable with old config to keep the stream alive. */
-		i6c_scl_port old_port = scl_port;
-		old_port.crop = compute_zoom_rect_maruko(d->scl_in_w, d->scl_in_h,
-			d->out_w, d->out_h, d->zoom_pct, d->zoom_x, d->zoom_y);
-		(void)g_mi_scl.fnSetPortConfig(0, 0, 1, &old_port);
-		(void)g_mi_scl.fnEnablePort(0, 0, 1);
-		fprintf(stderr,
-			"WARNING: [maruko] zoom update SCL_SetOutputPortParam"
-			" failed %d\n", (int)ret);
-		return -1;
-	}
-	(void)g_mi_scl.fnEnablePort(0, 0, 1);
-
-	d->zoom_pct = pct;
-	d->zoom_x = x;
-	d->zoom_y = y;
-	printf("> [maruko] zoom updated: crop=%ux%u@(%u,%u)"
-		" (pct=%.3f x=%.3f y=%.3f)\n",
-		(uint32_t)scl_port.crop.width, (uint32_t)scl_port.crop.height,
-		(uint32_t)scl_port.crop.x, (uint32_t)scl_port.crop.y,
-		pct, x, y);
-	return 0;
+	(void)ctx; (void)pct; (void)x; (void)y;
+	return -1;
 }
 
 void maruko_pipeline_stop_dual(MarukoBackendContext *ctx)
@@ -2166,13 +1953,6 @@ void maruko_pipeline_stop_dual(MarukoBackendContext *ctx)
 	if (d->bound) {
 		(void)MI_SYS_UnBindChnPort(&d->bind_src, &d->port);
 		d->bound = 0;
-	}
-	/* SCL port 1 consumer is now gone; disable the port so the next
-	 * pipeline start can reconfigure it cleanly. */
-	if (d->scl_port1_bound && g_mi_scl_port1_enabled) {
-		(void)g_mi_scl.fnDisablePort(0, 0, 1);
-		g_mi_scl_port1_enabled = 0;
-		d->scl_port1_bound = 0;
 	}
 	(void)maruko_mi_venc_destroy_chn(dev, d->channel);
 
@@ -2219,10 +1999,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	ctx->vif_started = 1;
 
 	if (maruko_start_vpe(&ctx->sensor, out_w, out_h,
-	    ctx->cfg.vpe_level_3dnr, &precrop,
-	    ctx->cfg.record.zoom_pct, ctx->cfg.record.zoom_x,
-	    ctx->cfg.record.zoom_y, ctx->cfg.record.zoom_out_w,
-	    ctx->cfg.record.zoom_out_h) != 0)
+	    ctx->cfg.vpe_level_3dnr, &precrop) != 0)
 		return -1;
 	ctx->vpe_started = 1;
 

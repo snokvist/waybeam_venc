@@ -36,28 +36,45 @@ output despite `MI_VPE_SetPortCrop` returning success.  pct values that
 would exceed the cap are grown to the smallest legal crop instead of
 producing a black stream.
 
-Maruko: implemented via SCL port 1.  The Maruko SCL device is created with
-`scl_bind=0xF` (all 4 HW output ports active), but only port 0 is used by
-the main encode path.  When `zoomPct > 0`, `configure_maruko_scl` configures
-SCL port 1 with a zoom crop (`MI_SCL_SetOutputPortParam(port=1)`), then
-`maruko_pipeline_start_dual` calls `SetInputSourceConfig(chn=1, RING_DMA)`
-to switch chn 1 away from the implicit chn-0 HW fan-out, then binds
-`SCL/0/0/1 → VENC/0/1/0` explicitly (RING mode — same bind type as the main
-path).  chn 1's encoder attribute uses `zoom_out_w/h` for its image
-dimensions when set.
+Maruko: not feasible at the hardware level — investigated and confirmed
+empirically on 192.168.2.12 (IMX415 @ 1472×816@120fps).  The
+`MarukoBackendConfigRecord` carries the `zoom_*` fields for config-sharing
+parity with Star6E, but they are silently ignored at start_dual with a
+visible warning: `record.zoom_pct=… ignored — per-channel zoom is not
+supported on Maruko hardware (ch1 will mirror ch0 via HW fan-out)`.
 
-The key insight that makes this possible: binding SCL/0/0/**0** → VENC/0/1
-fails (0xA0092012) because port 0 is exclusively held by chn 0.  Port 1 is
-independent and has no consumer, so the bind succeeds.
+What was tried and why each failed:
 
-Live zoom updates (`/api/v1/set?record.zoom_pct=...`) call
-`MI_SCL_DisablePort(port=1)` → `SetOutputPortParam` → `EnablePort(port=1)`
-to update the crop without restarting the pipeline.  Topology flips
-(pct 0 ↔ >0) require restart, same as Star6E.
+1. **SCL port 1 + IFC compress + RING bind** — `MI_SCL_SetOutputPortParam`
+   returns `0xA0222003` (SCL/E_MI_ERR_ILLEGAL_PARAM).  Per the Maruko SCL
+   spec (`SigmaStarDocs/sigdoc/platform/MI/scl_en.html` → Specification
+   table), `Ring_H26x` and `HalfRing_H26x` modes are **not supported on
+   any Maruko HWSCL**, and `MulitRing_H26x` is supported only on HWSCL0.
+   IFC compress on HWSCL1 is therefore rejected.
 
-Fallback: if `SetInputSourceConfig` or the SCL→VENC bind fail at runtime,
-`start_dual` logs a warning and falls back to the HW fan-out path (no
-zoom, mirror of ch0), so dual mode still comes up.
+2. **SCL port 1 + compress=NONE + RING bind** — `MI_SYS_BindChnPort2`
+   returns `0xA0092008` (SYS/E_MI_ERR_NOT_SUPPORT).  The combination of
+   uncompressed SCL output + RING bind type to VENC is not a valid pair.
+
+3. **SCL port 1 + compress=NONE + REALTIME bind, post-StartRecv** —
+   returns `0xA0092012` (SYS/E_MI_ERR_BUSY).  By this point chn 1 has
+   already been wired to chn 0 via the implicit HW fan-out (which
+   activates as soon as the SCL→chn0 RING bind is re-established), so
+   the second source bind is rejected.
+
+4. **SCL port 1 + compress=NONE + REALTIME bind, pre-StartRecv** —
+   returns `0xA0092008` (SYS/E_MI_ERR_NOT_SUPPORT).  REALTIME from SCL
+   to VENC isn't supported either; SCL→VENC requires RING.
+
+5. **MI_DIVP shim** — not viable: `/proc/mi_modules/` on Maruko shows
+   no `mi_divp` device.  No userland scaler is available between SCL and
+   VENC chn 1.
+
+Net: per-channel ch1 zoom on Maruko would require either a
+SCL-via-DRAM-RDMA topology (write SCL output to memory, read back via a
+second SCL device with a different crop, bind to VENC) or kernel-level
+work to expose Ring_H26x on HWSCL1 — both well out of scope.  ch1 on
+Maruko continues to mirror ch0 via the HW fan-out (today's behavior).
 
 ## [0.9.15] - 2026-05-02
 
