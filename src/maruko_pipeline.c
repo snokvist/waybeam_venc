@@ -14,6 +14,7 @@
 #include "maruko_video.h"
 #include "output_socket.h"
 #include "pipeline_common.h"
+#include "pipeline_lifetime.h"
 #include "rtp_sidecar.h"
 #include "sensor_select.h"
 #include "stream_metrics.h"
@@ -2943,7 +2944,13 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 
 void maruko_pipeline_teardown(MarukoBackendContext *ctx)
 {
+	/* venc_httpd_stop() only detaches the worker thread — an in-flight
+	 * HTTP handler may still be running during the SDK teardown below.
+	 * Hold the pipeline-lifetime wrlock across the entire window so any
+	 * surviving handler either finishes against a live pipeline or
+	 * blocks until process exit drops every thread together. */
 	venc_httpd_stop();
+	pipeline_lifetime_wrlock();
 	maruko_cus3a_stop();
 	maruko_pipeline_teardown_graph(ctx);
 	if (ctx && ctx->system_initialized) {
@@ -2952,4 +2959,5 @@ void maruko_pipeline_teardown(MarukoBackendContext *ctx)
 		printf("> [maruko] stage teardown: MI_SYS_Exit\n");
 	}
 	maruko_mi_deinit();
+	pipeline_lifetime_wrunlock();
 }

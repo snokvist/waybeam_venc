@@ -4,6 +4,7 @@
 #include "maruko_controls.h"
 #include "maruko_iq.h"
 #include "maruko_pipeline.h"
+#include "pipeline_lifetime.h"
 #include "scene_detector.h"
 #include "star6e_recorder.h"
 #include "star6e_ts_recorder.h"
@@ -183,13 +184,22 @@ static int maruko_runner_run(void *opaque)
 		if (result != 1)
 			break;
 
+		/* Hold the pipeline-lifetime wrlock for the entire teardown +
+		 * reinit window.  Vendor SDK handles (ISP/SCL/VENC channels,
+		 * audio capture, output socket) are destroyed and recreated
+		 * inside; HTTP apply_* / query_* callers blocked on the rdlock
+		 * are released only once the pipeline is back to a consistent
+		 * state. */
+		pipeline_lifetime_wrlock();
 		printf("> [maruko] reinit: tearing down pipeline graph\n");
 		maruko_pipeline_teardown_graph(&ctx->backend);
 
 		if (maruko_reinit_pipeline(ctx) != 0) {
+			pipeline_lifetime_wrunlock();
 			result = -1;
 			break;
 		}
+		pipeline_lifetime_wrunlock();
 	}
 
 	return result;

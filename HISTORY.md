@@ -1,5 +1,50 @@
 # History
 
+## [0.10.1] - 2026-05-03
+
+Pipeline-lifetime rwlock — close the HTTP↔runner race on every `apply_*`
+and `query_*` callback.
+
+The httpd worker dispatches into vendor SDK handles (VENC channels,
+ISP/SCL/VPE channels, audio capture, output socket) that the runner
+thread can be destroying and recreating during reinit or shutdown.  The
+race was endemic — every callback in `star6e_controls.c` and
+`maruko_controls.c` checked flags such as `g_mi_isp_chn_created` or
+dereferenced static pipeline pointers without synchronisation.  Symptoms
+ranged from `MI_*` errors logged from a destroyed channel to outright
+segfaults under heavy WebUI traffic during a SIGHUP reinit.
+
+Fix: a single `pthread_rwlock_t` (`pipeline_lifetime.{c,h}`) gated by
+the existing dispatch points.
+
+- HTTP side (`venc_api.c`): rdlock around the live-set apply phase,
+  every `query_*` handler, the IQ get/set/import paths, the IDR
+  endpoints (single + dual), the dual VENC bitrate/gop set, and the
+  record-status callback.
+- Runner side: wrlock across the Maruko in-process reinit window
+  (`teardown_graph` → `reinit_pipeline`), Maruko final teardown, and
+  Star6E shutdown teardown (controls reset + pipeline stop + httpd
+  stop).  In-flight HTTP handlers either complete against a live
+  pipeline or block until the rebuild is done.
+
+Lock ordering: rdlock outside `g_cfg_mutex`.  No new init/destroy —
+backed by `PTHREAD_RWLOCK_INITIALIZER`.
+
+Validation:
+
+- Star6E (192.168.1.13): 8 SIGHUP fork+exec respawns under sustained
+  ~245 req/sec mixed `apply_*` / `query_*` traffic — no segfaults, no
+  kernel oopses, daemon survives all cycles.  Connection-refused
+  observed only during the brief port-80 rebind window between exec
+  and the new daemon binding (expected).
+- Maruko (192.168.2.12): in-process reinit sweep deferred.  The
+  rwlock now serialises HTTP across the
+  `teardown_graph` → `reinit_pipeline` window; if reinit is slow on
+  Maruko, clients see HTTP hangs for the duration.  Follow-up:
+  measure the wrlock duration on Maruko and decide whether queries
+  should fall back to a `pthread_rwlock_tryrdlock` + 503 instead of
+  blocking.
+
 ## [0.10.0] - 2026-05-03
 
 `video0` digital zoom (Approach C) — Star6E + Maruko parity.

@@ -2,6 +2,7 @@
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
 #include "pipeline_common.h"
+#include "pipeline_lifetime.h"
 #if HAVE_BACKEND_STAR6E
 #include "star6e_pipeline.h"
 #endif
@@ -283,8 +284,11 @@ void venc_api_fill_record_status(VencRecordStatus *out)
 {
 	if (!out) return;
 	memset(out, 0, sizeof(*out));
-	if (g_record_status_fn)
+	if (g_record_status_fn) {
+		pipeline_lifetime_rdlock();
 		g_record_status_fn(out);
+		pipeline_lifetime_rdunlock();
+	}
 }
 
 /* ── Field descriptor table ──────────────────────────────────────────── */
@@ -1668,17 +1672,26 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 	if (rc != 0)
 		return rc > 0 ? 0 : rc;
 
+	/* Pipeline-lifetime rdlock spans the apply phase to block against the
+	 * runner's teardown/reinit window — every g_cb->apply_* call below
+	 * dereferences vendor SDK handles that the runner can destroy.  Held
+	 * outside g_cfg_mutex (the runner never touches g_cfg under wrlock,
+	 * so there is no inversion).  Released before disk save to keep the
+	 * rwlock window short and not block the runner across fsync. */
+	pipeline_lifetime_rdlock();
 	pthread_mutex_lock(&g_cfg_mutex);
 
 	rc = apply_live_group_sequence_locked(group_order, group_count, &touched,
 		&old_cfg, &new_cfg, &actual_cfg, status_code, response_json);
 	if (rc != 0) {
 		pthread_mutex_unlock(&g_cfg_mutex);
+		pipeline_lifetime_rdunlock();
 		return rc > 0 ? 0 : rc;
 	}
 
 	if (commit_config_locked(&actual_cfg) != 0) {
 		pthread_mutex_unlock(&g_cfg_mutex);
+		pipeline_lifetime_rdunlock();
 		return -1;
 	}
 
@@ -1686,10 +1699,12 @@ static int apply_live_set_query(SetQueryParam *params, size_t param_count,
 		single_response, status_code, response_json);
 	if (rc != 0) {
 		pthread_mutex_unlock(&g_cfg_mutex);
+		pipeline_lifetime_rdunlock();
 		return rc;
 	}
 
 	pthread_mutex_unlock(&g_cfg_mutex);
+	pipeline_lifetime_rdunlock();
 	/* Persist LIVE changes too.  Matches user expectation that a
 	 * /api/v1/set round-trip (WebUI slider, curl, etc.) survives restart.
 	 * Done after the mutex is released to avoid holding it across fsync.
@@ -1950,8 +1965,11 @@ static int handle_fps_live(int fd, const HttpRequest *req, void *ctx)
 
 	(void)req;
 	(void)ctx;
-	if (g_cb && g_cb->query_live_fps)
+	if (g_cb && g_cb->query_live_fps) {
+		pipeline_lifetime_rdlock();
 		fps = g_cb->query_live_fps();
+		pipeline_lifetime_rdunlock();
+	}
 	if (fps == 0) {
 		pthread_mutex_lock(&g_cfg_mutex);
 		fps = g_cfg ? g_cfg->video0.fps : 0;
@@ -2020,7 +2038,9 @@ static int handle_awb(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"AWB query not available");
 	}
+	pipeline_lifetime_rdlock();
 	char *json = g_cb->query_awb_info();
+	pipeline_lifetime_rdunlock();
 	if (!json) {
 		return httpd_send_error(fd, 500, "internal_error",
 			"AWB query failed");
@@ -2037,7 +2057,9 @@ static int handle_iq(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"IQ query not available");
 	}
+	pipeline_lifetime_rdlock();
 	char *json = g_cb->query_iq_info();
+	pipeline_lifetime_rdunlock();
 	if (!json) {
 		return httpd_send_error(fd, 500, "internal_error",
 			"IQ query failed");
@@ -2071,7 +2093,10 @@ static int handle_iq_set(int fd, const HttpRequest *req, void *ctx)
 				"value must be numeric (comma-separated for arrays)");
 		}
 	}
-	if (g_cb->apply_iq_param(key, val) != 0) {
+	pipeline_lifetime_rdlock();
+	int iq_rc = g_cb->apply_iq_param(key, val);
+	pipeline_lifetime_rdunlock();
+	if (iq_rc != 0) {
 		return httpd_send_error(fd, 400, "apply_failed",
 			"IQ parameter set failed");
 	}
@@ -2102,11 +2127,13 @@ static int handle_iq_import(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 400, "invalid_request",
 			"POST JSON body required (output of /api/v1/iq)");
 	}
+	pipeline_lifetime_rdlock();
 #if HAVE_BACKEND_STAR6E
 	int ret = star6e_iq_import(req->body);
 #else
 	int ret = maruko_iq_import(req->body);
 #endif
+	pipeline_lifetime_rdunlock();
 	if (ret != 0)
 		return httpd_send_error(fd, 500, "import_partial",
 			"some parameters failed to apply");
@@ -2125,7 +2152,9 @@ static int handle_ae(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"AE query not available");
 	}
+	pipeline_lifetime_rdlock();
 	char *json = g_cb->query_ae_info();
+	pipeline_lifetime_rdunlock();
 	if (!json) {
 		return httpd_send_error(fd, 500, "internal_error",
 			"AE query failed");
@@ -2142,7 +2171,9 @@ static int handle_isp_metrics(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"ISP metrics not available");
 	}
+	pipeline_lifetime_rdlock();
 	char *text = g_cb->query_isp_metrics();
+	pipeline_lifetime_rdunlock();
 	if (!text) {
 		return httpd_send_error(fd, 500, "internal_error",
 			"ISP metrics query failed");
@@ -2159,7 +2190,9 @@ static int handle_transport_status(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"transport status not available on this backend");
 	}
+	pipeline_lifetime_rdlock();
 	char *text = g_cb->query_transport_status();
+	pipeline_lifetime_rdunlock();
 	if (!text) {
 		return httpd_send_error(fd, 500, "internal_error",
 			"transport status query failed");
@@ -2176,7 +2209,9 @@ static int handle_audio_status(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"audio status not available on this backend");
 	}
+	pipeline_lifetime_rdlock();
 	char *text = g_cb->query_audio_status();
+	pipeline_lifetime_rdunlock();
 	if (!text) {
 		return httpd_send_error(fd, 500, "internal_error",
 			"audio status query failed");
@@ -2238,7 +2273,10 @@ static int handle_idr(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 501, "not_implemented",
 			"IDR request not available");
 	}
-	if (g_cb->request_idr() != 0) {
+	pipeline_lifetime_rdlock();
+	int idr_rc = g_cb->request_idr();
+	pipeline_lifetime_rdunlock();
+	if (idr_rc != 0) {
 		return httpd_send_error(fd, 500, "internal_error",
 			"IDR request failed");
 	}
@@ -2320,8 +2358,11 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 	char buf[1024];
 
 	memset(&st, 0, sizeof(st));
-	if (g_record_status_fn)
+	if (g_record_status_fn) {
+		pipeline_lifetime_rdlock();
 		g_record_status_fn(&st);
+		pipeline_lifetime_rdunlock();
+	}
 
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
@@ -2495,14 +2536,19 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 
 	(void)ctx;
 
+	/* rdlock outside g_dual_mutex: dual_apply_* call MI_VENC on
+	 * g_dual.channel which the runner can destroy during teardown. */
+	pipeline_lifetime_rdlock();
 	pthread_mutex_lock(&g_dual_mutex);
 	if (!g_dual.active) {
 		pthread_mutex_unlock(&g_dual_mutex);
+		pipeline_lifetime_rdunlock();
 		return httpd_send_error(fd, 404, "not_active",
 			"Dual VENC channel is not active");
 	}
 	if (!*req->query) {
 		pthread_mutex_unlock(&g_dual_mutex);
+		pipeline_lifetime_rdunlock();
 		return httpd_send_error(fd, 400, "missing_param",
 			"Usage: /api/v1/dual/set?bitrate=N or ?gop=N");
 	}
@@ -2516,12 +2562,14 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 		if (end == q + 8 || (*end != '\0' && *end != '&') ||
 		    val == 0 || val > 200000) {
 			pthread_mutex_unlock(&g_dual_mutex);
+			pipeline_lifetime_rdunlock();
 			return httpd_send_error(fd, 400, "invalid_value",
 				"bitrate must be 1-200000 kbps");
 		}
 		kbps = (uint32_t)val;
 		ret = dual_apply_bitrate(kbps);
 		pthread_mutex_unlock(&g_dual_mutex);
+		pipeline_lifetime_rdunlock();
 		if (ret != 0)
 			return httpd_send_error(fd, 500, "apply_failed",
 				"MI_VENC_SetChnAttr failed");
@@ -2536,6 +2584,7 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 		uint32_t frames;
 		if (gop_sec <= 0) {
 			pthread_mutex_unlock(&g_dual_mutex);
+			pipeline_lifetime_rdunlock();
 			return httpd_send_error(fd, 400, "invalid_value",
 				"gop must be > 0 (seconds)");
 		}
@@ -2543,6 +2592,7 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 		if (frames < 1) frames = 1;
 		ret = dual_apply_gop(frames);
 		pthread_mutex_unlock(&g_dual_mutex);
+		pipeline_lifetime_rdunlock();
 		if (ret != 0)
 			return httpd_send_error(fd, 500, "apply_failed",
 				"MI_VENC_SetChnAttr failed");
@@ -2553,6 +2603,7 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 	}
 
 	pthread_mutex_unlock(&g_dual_mutex);
+	pipeline_lifetime_rdunlock();
 	return httpd_send_error(fd, 400, "unknown_param",
 		"Supported: bitrate, gop");
 }
@@ -2739,7 +2790,9 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_json(fd, 200,
 			"{\"ok\":true,\"data\":{\"idr\":true,\"coalesced\":true}}");
 
+	pipeline_lifetime_rdlock();
 	ret = MI_VENC_RequestIdr(ch, 1);
+	pipeline_lifetime_rdunlock();
 	if (ret != 0)
 		return httpd_send_error(fd, 500, "idr_failed",
 			"MI_VENC_RequestIdr failed");

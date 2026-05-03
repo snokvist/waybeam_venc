@@ -4,6 +4,7 @@
 #include "idr_rate_limit.h"
 #include "imu_bmi270.h"
 #include "pipeline_common.h"
+#include "pipeline_lifetime.h"
 #include "scene_detector.h"
 #include "sdk_quiet.h"
 #include "star6e_controls.h"
@@ -1081,6 +1082,14 @@ static void star6e_runner_teardown(void *opaque)
 	}
 	alarm(0);  /* cancel SIGALRM — watchdog replaces it */
 
+	/* Hold the pipeline-lifetime wrlock across the SDK teardown window:
+	 * the httpd worker is still alive (venc_httpd_stop runs later, and
+	 * even then it only detaches), so any in-flight HTTP handler would
+	 * dereference the static control context that star6e_controls_reset
+	 * is about to zero, plus VENC channels that star6e_pipeline_stop
+	 * destroys.  The rwlock is released after httpd_stop returns so a
+	 * final detached handler exits cleanly. */
+	pipeline_lifetime_wrlock();
 	star6e_cus3a_request_stop();
 
 	/* Pipeline stop MUST happen before recorder stop.  The recording
@@ -1107,6 +1116,7 @@ static void star6e_runner_teardown(void *opaque)
 		venc_httpd_stop();
 		ctx->httpd_started = 0;
 	}
+	pipeline_lifetime_wrunlock();
 	if (ctx->system_initialized) {
 		MI_SYS_Exit();
 		ctx->system_initialized = 0;
