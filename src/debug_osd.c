@@ -106,7 +106,6 @@ struct DebugOsdState {
 	uint32_t width, height;
 	DebugOsdCanvasInfo canvas;
 	i6_sys_bind vpe_bind;
-	uint16_t point_x, point_y;  /* current chn.point — moved by debug_osd_set_offset */
 	OsdDirty dirty;           /* previous frame's drawn area */
 	int font_scale;           /* pixel scaling factor for text */
 
@@ -123,9 +122,6 @@ struct DebugOsdState {
 	int (*fnDetachChannel)(unsigned int, i6_sys_bind *);
 	int (*fnGetCanvasInfo)(unsigned int, DebugOsdCanvasInfo *);
 	int (*fnUpdateCanvas)(unsigned int);
-	/* Optional: live position update.  NULL on SDK builds without it; in
-	 * that case debug_osd_set_offset falls back to detach + reattach. */
-	int (*fnSetDisplayAttr)(unsigned int, i6_sys_bind *, i6_rgn_chn *);
 };
 
 static void osd_canvas_from_info(OsdCanvas *out, const DebugOsdCanvasInfo *info,
@@ -185,9 +181,6 @@ static int rgn_load(DebugOsdState *ctx)
 	LOAD_SYM(fnUpdateCanvas,   "MI_RGN_UpdateCanvas");
 
 #undef LOAD_SYM
-	/* Optional — silent if missing.  Used to move the canvas without
-	 * tearing it down (fast path for live zoom pan). */
-	ctx->fnSetDisplayAttr = dlsym(ctx->lib, "MI_RGN_SetDisplayAttr");
 	return 0;
 }
 
@@ -237,8 +230,6 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 
 	ctx->width = frame_w;
 	ctx->height = frame_h;
-	ctx->point_x = 0;
-	ctx->point_y = 0;
 	ctx->font_scale = 3;
 	/* MI_RGN uses its own module ID enum (VPE=0), not the system
 	 * i6_sys_mod enum (where VPE=11).  Build the RGN ChnPort manually. */
@@ -341,38 +332,6 @@ void debug_osd_destroy(DebugOsdState *osd)
 	if (osd->lib)
 		dlclose(osd->lib);
 	free(osd);
-}
-
-/* Star6E: shift the OSD canvas to (x, y) within the VPE channel.  Used by
- * the zoom path so the canvas (= SCL crop dim) lines up with the SCL crop
- * rect — without this, MI_RGN renders the canvas at (0, 0) of VPE input
- * and the SCL-cropped frame either misses the OSD or shows it pixelated
- * after a round-trip stretch. */
-void debug_osd_set_offset(DebugOsdState *osd, uint16_t x, uint16_t y)
-{
-	if (!osd)
-		return;
-	if (osd->point_x == x && osd->point_y == y)
-		return;
-	osd->point_x = x;
-	osd->point_y = y;
-
-	i6_rgn_chn chn;
-	memset(&chn, 0, sizeof(chn));
-	chn.show = 1;
-	chn.point.x = x;
-	chn.point.y = y;
-	chn.osd.layer = 0;
-	chn.osd.constAlphaOn = 0;
-
-	if (osd->fnSetDisplayAttr) {
-		(void)osd->fnSetDisplayAttr(RGN_HANDLE, &osd->vpe_bind, &chn);
-		return;
-	}
-	/* Fallback: detach + reattach.  Slower (brief OSD blank) but
-	 * functional on SDK builds without SetDisplayAttr. */
-	(void)osd->fnDetachChannel(RGN_HANDLE, &osd->vpe_bind);
-	(void)osd->fnAttachChannel(RGN_HANDLE, &osd->vpe_bind, &chn);
 }
 
 void debug_osd_begin_frame(DebugOsdState *osd)
@@ -829,13 +788,6 @@ void debug_osd_destroy(DebugOsdState *osd)
 	free(osd);
 }
 
-void debug_osd_set_offset(DebugOsdState *osd, uint16_t x, uint16_t y)
-{
-	/* Maruko's RGN attaches to the SCL output port, which is already 1:1
-	 * with the encoded frame regardless of zoom — no offset needed. */
-	(void)osd; (void)x; (void)y;
-}
-
 void debug_osd_begin_frame(DebugOsdState *osd)
 {
 	if (!osd) return;
@@ -939,8 +891,6 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 { (void)frame_w; (void)frame_h; (void)vpe_port; return NULL; }
 
 void debug_osd_destroy(DebugOsdState *osd) { (void)osd; }
-void debug_osd_set_offset(DebugOsdState *osd, uint16_t x, uint16_t y)
-{ (void)osd; (void)x; (void)y; }
 void debug_osd_begin_frame(DebugOsdState *osd) { (void)osd; }
 void debug_osd_end_frame(DebugOsdState *osd) { (void)osd; }
 

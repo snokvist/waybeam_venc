@@ -636,12 +636,6 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 		return -1;
 	}
 
-	/* Move the OSD canvas so it stays inside the SCL crop area; without
-	 * this the canvas is at (0, 0) of VPE input and the cropped frame
-	 * either misses the OSD or shows a distorted slice of it. */
-	if (state->debug_osd)
-		debug_osd_set_offset(state->debug_osd, rect.x, rect.y);
-
 	return 0;
 }
 
@@ -1361,23 +1355,14 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* Debug OSD.  When zoom is engaged, position the canvas at the SCL
-	 * crop offset so the OSD stays 1:1 with the encoded frame instead
-	 * of being stretched / clipped by the VPE-side rendering. */
+	/* Debug OSD.  Canvas dim is the encoded frame dim; on Star6E RGN
+	 * attaches at the VPE port output (post-SCL crop), so the canvas is
+	 * already 1:1 with the encoded frame and needs no zoom-time offset. */
 	if (vcfg->debug.show_osd) {
 		state->debug_osd = debug_osd_create(
 			state->image_width, state->image_height, &state->vpe_port);
-		if (!state->debug_osd) {
+		if (!state->debug_osd)
 			fprintf(stderr, "WARNING: debug OSD requested but MI_RGN unavailable\n");
-		} else if (vcfg->video0.zoom_pct > 0.0 &&
-		           vcfg->video0.zoom_pct < 1.0 &&
-		           state->active_precrop.w && state->active_precrop.h) {
-			i6_common_rect r = star6e_compute_zoom_rect(
-				state->active_precrop.w, state->active_precrop.h,
-				state->image_width, state->image_height,
-				vcfg->video0.zoom_x, vcfg->video0.zoom_y);
-			debug_osd_set_offset(state->debug_osd, r.x, r.y);
-		}
 	}
 
 	return 0;
