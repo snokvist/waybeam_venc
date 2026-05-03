@@ -520,66 +520,85 @@ static void star6e_pipeline_stop_vpe(void)
 	MI_VPE_DestroyChannel(0);
 }
 
-/* Build a VPE port-crop rect from fractional zoom params.
+/* Compute the effective output dim for digital zoom.
  *
- * vpe_w/h = VPE input dims (= active VIF precrop), out_w/h = port output
- * dims.  pct ≤ 0 returns the full-frame rect (passthrough).  Alignment:
- * 16-px W/H, 8-px X/Y.  Empirical Star6E SCL upscale cap is 2× — ratios
- * at 2.22× and higher silently produce zero output even though SetPortCrop
- * returns success.  When pct would exceed the cap, the crop is grown to
- * the smallest legal size so the user gets the tightest legal zoom rather
- * than a black frame.  See memory/venc_zoom_max_upscale.md. */
-static i6_common_rect star6e_compute_zoom_rect(uint32_t vpe_w, uint32_t vpe_h,
-	uint32_t out_w, uint32_t out_h, double pct, double x, double y)
+ * Approach C: zoom_pct shrinks BOTH crop and encoded output.  SCL output
+ * dim == crop dim → 1:1 read/write, no upscale, no SCL bandwidth pressure.
+ * The receiver sees the smaller frame in SPS/PPS and renders accordingly.
+ *
+ * Alignment 16 matches VENC and SCL.  Floor at 64 keeps the smallest
+ * crop sane.  pct outside (0, 1) returns image dim unchanged. */
+static void star6e_compute_zoom_dim(uint32_t image_w, uint32_t image_h,
+	double pct, uint32_t *out_w, uint32_t *out_h)
 {
-	const uint32_t WH_ALIGN = 16;
-	const uint32_t XY_ALIGN = 8;
-	const uint32_t MAX_UPSCALE = 2;
-	i6_common_rect r;
-	double cw, ch, cx, cy;
-	uint32_t rw, rh, rx, ry;
-	uint32_t min_w, min_h;
+	const uint32_t ALIGN = 16;
+	const uint32_t MIN_DIM = 64;
+	double dw, dh;
+	uint32_t w, h;
 
-	if (pct <= 0.0) pct = 1.0;
-	if (pct > 1.0) pct = 1.0;
+	if (!isfinite(pct) || pct <= 0.0 || pct >= 1.0) {
+		if (out_w) *out_w = image_w;
+		if (out_h) *out_h = image_h;
+		return;
+	}
+
+	dw = (double)image_w * pct;
+	dh = (double)image_h * pct;
+	w = (uint32_t)(dw + 0.5);
+	h = (uint32_t)(dh + 0.5);
+	w &= ~(ALIGN - 1);
+	h &= ~(ALIGN - 1);
+	if (w < MIN_DIM) w = MIN_DIM;
+	if (h < MIN_DIM) h = MIN_DIM;
+	if (w > image_w) w = image_w & ~(ALIGN - 1);
+	if (h > image_h) h = image_h & ~(ALIGN - 1);
+	if (out_w) *out_w = w;
+	if (out_h) *out_h = h;
+}
+
+/* Build a VPE port-crop rect that places a (rect_w × rect_h) 1:1 window
+ * inside (vpe_w × vpe_h) input, centred at fractional (x, y).  No scaling:
+ * the VPE port output is set to the same (rect_w × rect_h) by SetPortMode,
+ * so SCL reads the rect verbatim and emits it unchanged.  X/Y are 8-px
+ * aligned (VPE requirement); rect_w/h are 16-px-aligned by the caller via
+ * compute_zoom_dim. */
+static i6_common_rect star6e_compute_zoom_rect(uint32_t vpe_w, uint32_t vpe_h,
+	uint32_t rect_w, uint32_t rect_h, double x, double y)
+{
+	const uint32_t XY_ALIGN = 8;
+	i6_common_rect r;
+	double cx, cy;
+	uint32_t rx, ry;
+
+	if (!isfinite(x)) x = 0.5;
+	if (!isfinite(y)) y = 0.5;
 	if (x < 0.0) x = 0.0; if (x > 1.0) x = 1.0;
 	if (y < 0.0) y = 0.0; if (y > 1.0) y = 1.0;
+	if (rect_w > vpe_w) rect_w = vpe_w & ~(XY_ALIGN - 1);
+	if (rect_h > vpe_h) rect_h = vpe_h & ~(XY_ALIGN - 1);
 
-	cw = (double)vpe_w * pct;
-	ch = (double)vpe_h * pct;
-
-	min_w = (out_w + MAX_UPSCALE - 1) / MAX_UPSCALE;
-	min_h = (out_h + MAX_UPSCALE - 1) / MAX_UPSCALE;
-	min_w = (min_w + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
-	min_h = (min_h + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
-	if (cw < (double)min_w) cw = (double)min_w;
-	if (ch < (double)min_h) ch = (double)min_h;
-	if (cw > (double)vpe_w) cw = (double)vpe_w;
-	if (ch > (double)vpe_h) ch = (double)vpe_h;
-
-	cx = (double)vpe_w * x - cw * 0.5;
-	cy = (double)vpe_h * y - ch * 0.5;
+	cx = (double)vpe_w * x - (double)rect_w * 0.5;
+	cy = (double)vpe_h * y - (double)rect_h * 0.5;
 	if (cx < 0.0) cx = 0.0;
 	if (cy < 0.0) cy = 0.0;
-	if (cx + cw > (double)vpe_w) cx = (double)vpe_w - cw;
-	if (cy + ch > (double)vpe_h) cy = (double)vpe_h - ch;
+	if (cx + (double)rect_w > (double)vpe_w) cx = (double)(vpe_w - rect_w);
+	if (cy + (double)rect_h > (double)vpe_h) cy = (double)(vpe_h - rect_h);
 
-	rw = (uint32_t)(cw + 0.5) & ~(WH_ALIGN - 1);
-	rh = (uint32_t)(ch + 0.5) & ~(WH_ALIGN - 1);
 	rx = (uint32_t)(cx + 0.5) & ~(XY_ALIGN - 1);
 	ry = (uint32_t)(cy + 0.5) & ~(XY_ALIGN - 1);
-	if (rw < WH_ALIGN) rw = WH_ALIGN;
-	if (rh < WH_ALIGN) rh = WH_ALIGN;
-	if (rx + rw > vpe_w) rx = (vpe_w - rw) & ~(XY_ALIGN - 1);
-	if (ry + rh > vpe_h) ry = (vpe_h - rh) & ~(XY_ALIGN - 1);
+	if (rx + rect_w > vpe_w) rx = (vpe_w - rect_w) & ~(XY_ALIGN - 1);
+	if (ry + rect_h > vpe_h) ry = (vpe_h - rect_h) & ~(XY_ALIGN - 1);
 
 	r.x = (unsigned short)rx;
 	r.y = (unsigned short)ry;
-	r.width = (unsigned short)rw;
-	r.height = (unsigned short)rh;
+	r.width = (unsigned short)rect_w;
+	r.height = (unsigned short)rect_h;
 	return r;
 }
 
+/* Live pan: zoom_pct is MUT_RESTART (changing crop dim resizes VPE port and
+ * VENC, which needs reinit), so the live path only handles x/y.  pct is
+ * accepted just to short-circuit when zoom is off (rect dim == image dim). */
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y)
 {
@@ -590,18 +609,21 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	if (!state) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
+	if (pct <= 0.0 || pct >= 1.0)
+		return 0;  /* zoom off — nothing to pan */
+
 	in_w = state->active_precrop.w;
 	in_h = state->active_precrop.h;
 	if (in_w == 0 || in_h == 0)
 		return -1;  /* VPE not started yet */
 
 	rect = star6e_compute_zoom_rect(in_w, in_h,
-		state->image_width, state->image_height, pct, x, y);
+		state->image_width, state->image_height, x, y);
 	ret = MI_VPE_SetPortCrop(0, 0, &rect);
 	if (ret != 0) {
 		fprintf(stderr,
-			"WARNING: MI_VPE_SetPortCrop(0,0) pct=%.3f failed %d\n",
-			pct, (int)ret);
+			"WARNING: MI_VPE_SetPortCrop(0,0) pan x=%.3f y=%.3f failed %d\n",
+			x, y, (int)ret);
 		return -1;
 	}
 	return 0;
@@ -880,20 +902,9 @@ static void star6e_pipeline_set_hw_clocks(int oc_level, int verbose)
 	static const struct {
 		const char *path;
 		const char *label;
-		const char *value;
-		unsigned int mhz;
 	} clocks[] = {
-		{ "/sys/devices/virtual/mstar/isp0/isp_clk", "ISP",
-			"384000000\n", 384 },
-		/* SCL at 432 MHz (Star6E clock-tree max — 480/533 rejected
-		 * by the SoC).  At the prior 384 MHz default, port-0 SCL
-		 * upscale beyond ~1.2× at 1080p60 stalled the pipeline
-		 * (visible as ISP P0 FIFO FULL / "waiting for encoder
-		 * data").  432 MHz pushes the practical upscale ceiling
-		 * to ~1.43× at 1080p60, matching the hardware bandwidth
-		 * needed for video0 zoom. */
-		{ "/sys/devices/virtual/mstar/mscl/clk", "SCL",
-			"432000000\n", 432 },
+		{ "/sys/devices/virtual/mstar/isp0/isp_clk", "ISP" },
+		{ "/sys/devices/virtual/mstar/mscl/clk", "SCL" },
 	};
 	unsigned int i;
 
@@ -903,11 +914,10 @@ static void star6e_pipeline_set_hw_clocks(int oc_level, int verbose)
 		if (!handle)
 			continue;
 
-		fputs(clocks[i].value, handle);
+		fprintf(handle, "384000000\n");
 		fclose(handle);
 		if (verbose)
-			printf("> Set %s clock to %u MHz\n",
-				clocks[i].label, clocks[i].mhz);
+			printf("> Set %s clock to 384 MHz\n", clocks[i].label);
 	}
 
 	if (oc_level >= 1) {
@@ -1087,12 +1097,36 @@ static int select_and_configure_sensor(Star6ePipelineState *state,
 	}
 	pipeline_common_clamp_image_size("", sensor_width, sensor_height,
 		&pconf->image_width, &pconf->image_height);
-	state->image_width  = pconf->image_width;
-	state->image_height = pconf->image_height;
 
+	/* Precrop is computed BEFORE the zoom override so the VIF→VPE window
+	 * keeps the user-configured aspect ratio against the full sensor.
+	 * Zoom is applied as a 1:1 sub-rect of the VPE output (not by shrinking
+	 * the sensor read area). */
 	pconf->precrop = star6e_pipeline_compute_precrop(sensor_width,
 		sensor_height, pconf->image_width, pconf->image_height,
 		vcfg->isp.keep_aspect);
+
+	/* Approach C zoom: when zoom_pct ∈ (0, 1), shrink image_width/height
+	 * to the crop dim.  VPE port output, SetPortCrop rect, and VENC channel
+	 * all run at this smaller dim — no SCL upscale, no bandwidth pressure.
+	 * The receiver sees the smaller resolution in SPS/PPS.  zoom_pct is
+	 * MUT_RESTART so this only runs at start; live x/y pan stays in
+	 * apply_zoom which only moves the rect inside VPE input. */
+	if (vcfg->video0.zoom_pct > 0.0 && vcfg->video0.zoom_pct < 1.0) {
+		uint32_t zw = pconf->image_width;
+		uint32_t zh = pconf->image_height;
+		star6e_compute_zoom_dim(pconf->image_width, pconf->image_height,
+			vcfg->video0.zoom_pct, &zw, &zh);
+		if (vcfg->system.verbose)
+			printf("> Zoom: pct=%.3f → %ux%u (from image %ux%u)\n",
+				vcfg->video0.zoom_pct, zw, zh,
+				pconf->image_width, pconf->image_height);
+		pconf->image_width  = zw;
+		pconf->image_height = zh;
+	}
+
+	state->image_width  = pconf->image_width;
+	state->image_height = pconf->image_height;
 	overscan_x = (uint16_t)(((state->sensor.plane.capt.width  - sensor_width)
 		/ 2) & ~1u);
 	overscan_y = (uint16_t)(((state->sensor.plane.capt.height - sensor_height)

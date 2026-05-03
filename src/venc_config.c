@@ -335,7 +335,10 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->zoom_y   = json_get_double(obj, "zoomY",   v->zoom_y);
 	if (v->zoom_pct < 0.0) v->zoom_pct = 0.0;
 	if (v->zoom_pct > 1.0) v->zoom_pct = 1.0;
-	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.05) v->zoom_pct = 0.05;
+	/* Min 0.2 keeps the zoom output ≥ 384x208 at 1080p (above the
+	 * VENC create minimum); below this VENC_CreateChn rejects the
+	 * smaller dim and the daemon respawn-loops on the saved value. */
+	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.2) v->zoom_pct = 0.2;
 	if (v->zoom_x < 0.0) v->zoom_x = 0.0; if (v->zoom_x > 1.0) v->zoom_x = 1.0;
 	if (v->zoom_y < 0.0) v->zoom_y = 0.0; if (v->zoom_y > 1.0) v->zoom_y = 1.0;
 }

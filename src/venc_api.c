@@ -385,7 +385,11 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
 	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
-	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_LIVE),
+	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
+	 * upscale, no bandwidth pressure) — that requires resizing the VPE
+	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
+	 * smooth panning at the same crop dim via MI_VPE_SetPortCrop. */
+	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
 	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
