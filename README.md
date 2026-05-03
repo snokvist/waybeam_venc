@@ -486,6 +486,18 @@ Mode targets (self-heal window from packet loss to fully-refreshed picture):
 | `balanced` | 500 ms | general FPV (recommended starting point) |
 | `robust` | 1000 ms | lossy long-range, high packet loss |
 
+Stripe QP defaults (codec-aware, lower = better quality + more bitrate cost):
+
+| Mode | H.265 QP | H.264 QP |
+|------|----------|----------|
+| `fast` | 36 | 33 |
+| `balanced` | 32 | 29 |
+| `robust` | 28 | 25 |
+
+Robust runs the lowest QP because lossy links want the cleanest possible
+recovery anchor; fast runs the highest because clean links can absorb minor
+stripe banding without artifacts. Override with `intraRefreshQp` (1–51).
+
 When a mode is active the encoder computes:
 
 ```
@@ -498,6 +510,39 @@ auto_gop       = ceil(total_rows / effective_lines)   // one IDR per GDR pass
 Auto-GOP overrides `gop_size` so each IDR aligns with one full GDR pass —
 no half-cycles, no cycle without a hard recovery anchor. Setting an explicit
 `gopSize > 0` suppresses auto-GOP and keeps the user value (logged at boot).
+
+#### Precomputed values @ 60 fps H.265
+
+For other framerates: `gop_sec` scales as `60 / fps`. Lines stays the same
+unless `refresh_frames` rounds differently — at 30 fps `fast` doubles its
+window, at 120 fps it halves.
+
+| Resolution | total_rows | mode | lines | gop frames | gop sec | qp |
+|---|---:|---|---:|---:|---:|---:|
+| 1280×720 | 23 | fast | 3 | 8 | 0.133 | 36 |
+| 1280×720 | 23 | balanced | 1 | 23 | 0.383 | 32 |
+| 1280×720 | 23 | robust | 1 | 23 | 0.383 ⚠ | 28 |
+| 1456×816 | 26 | fast | 3 | 9 | 0.150 | 36 |
+| 1456×816 | 26 | balanced | 1 | 26 | 0.433 | 32 |
+| 1456×816 | 26 | robust | 1 | 26 | 0.433 ⚠ | 28 |
+| 1920×1080 | 34 | fast | 4 | 9 | 0.150 | 36 |
+| 1920×1080 | 34 | balanced | 2 | 17 | 0.283 | 32 |
+| 1920×1080 | 34 | robust | 1 | 34 | 0.567 | 28 |
+| 2560×1440 | 45 | fast | 5 | 9 | 0.150 | 36 |
+| 2560×1440 | 45 | balanced | 2 | 23 | 0.383 | 32 |
+| 2560×1440 | 45 | robust | 1 | 45 | 0.750 | 28 |
+| 3840×2160 | 68 | fast | 8 | 9 | 0.150 | 36 |
+| 3840×2160 | 68 | balanced | 3 | 23 | 0.383 | 32 |
+| 3840×2160 | 68 | robust | 2 | 34 | 0.567 | 28 |
+
+⚠ At 720p and below, `robust` and `balanced` collapse to identical numbers
+because `total_rows` is small enough that even balanced refreshes in 1
+line per P-frame. The mode label still ships through (recorded in status
+endpoint) but the encoder behavior is identical.
+
+H.264 doubles `total_rows` (lcu_h = 16 → 720p has 45 rows, 1080p has 68
+rows) so lines and gop scale up roughly 2×, but the gop seconds match the
+H.265 column closely.
 
 Quick start — one HTTP call:
 
@@ -534,7 +579,7 @@ curl http://<device>/api/v1/intra/status
 #     "target_ms": 500,
 #     "total_rows": 34,
 #     "lines": { "requested": 0,    "effective": 2,    "clamped": false },
-#     "qp":    { "requested": 0,    "effective": 48 },
+#     "qp":    { "requested": 0,    "effective": 32 },
 #     "gop":   { "explicit_sec": 0.0, "effective_sec": 0.283, "auto": true }
 # }}
 ```
@@ -542,8 +587,20 @@ curl http://<device>/api/v1/intra/status
 Boot log (from stderr):
 
 ```
-[venc] intraRefresh: mode=balanced lines/P=2 qp=48 gop=0.28s (auto)
+[venc] intraRefresh: mode=balanced lines/P=2 qp=32 gop=0.28s (auto)
 ```
+
+When `debug.showOsd=true` and a mode is active, two extra OSD rows render
+the live values:
+
+```
+intra balanced L2 q32
+gop   0.28s auto
+```
+
+`intra` shows mode, effective stripe lines per P-frame, and effective QP.
+`gop` shows the IDR period in seconds and whether it came from auto or an
+explicit `gopSize` override.
 
 #### Outgoing (Streaming)
 

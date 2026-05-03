@@ -11,7 +11,12 @@
  *   robust    ~1000 ms self-heal window (lossy long-range)
  *
  * Per-field overrides (intra_refresh_lines, intra_refresh_qp, gop_size) are
- * applied on top of the mode defaults; non-zero wins. */
+ * applied on top of the mode defaults; non-zero wins.
+ *
+ * Per-mode stripe QP defaults (codec-dependent). Lower QP = better stripe
+ * quality + more bitrate cost. Robust runs the lowest QP because lossy
+ * links want the cleanest possible recovery anchor; fast runs the highest
+ * because clean links can absorb minor stripe banding without artifacts. */
 
 typedef enum {
 	INTRA_MODE_OFF = 0,

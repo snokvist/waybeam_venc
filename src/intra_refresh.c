@@ -14,6 +14,19 @@ static uint32_t mode_target_ms(IntraRefreshMode m)
 	}
 }
 
+/* Per-mode stripe QP. H.264 runs ~3 lower than H.265 for equivalent
+ * perceived quality (PSNR/SSIM differ across the codecs at the same QP). */
+static uint32_t mode_default_qp(IntraRefreshMode m, int is_h265)
+{
+	switch (m) {
+	case INTRA_MODE_FAST:     return is_h265 ? 36u : 33u;
+	case INTRA_MODE_BALANCED: return is_h265 ? 32u : 29u;
+	case INTRA_MODE_ROBUST:   return is_h265 ? 28u : 25u;
+	case INTRA_MODE_OFF:
+	default:                  return 0;
+	}
+}
+
 IntraRefreshMode intra_refresh_parse_mode(const char *s)
 {
 	if (!s || !*s) return INTRA_MODE_OFF;
@@ -91,7 +104,7 @@ void intra_refresh_compute(
 
 	uint32_t req_iqp = override_qp > 0
 		? override_qp
-		: (is_h265 ? 48u : 45u);
+		: mode_default_qp(mode, is_h265);
 
 	out->target_ms  = target_ms;
 	out->total_rows = total_rows;

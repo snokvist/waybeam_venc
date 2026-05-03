@@ -2436,6 +2436,21 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		debug_osd_text(ctx->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ctx->debug_osd));
 
+		{
+			MarukoIntraRefreshStatus ir;
+			maruko_pipeline_intra_refresh_status(&ir);
+			if (ir.active) {
+				debug_osd_text(ctx->debug_osd, 2, "intra",
+					"%s L%u q%u",
+					ir.mode_name, ir.effective_lines_per_p,
+					ir.effective_qp);
+				debug_osd_text(ctx->debug_osd, 3, "gop",
+					"%.2fs %s",
+					ir.effective_gop_sec,
+					ir.gop_auto ? "auto" : "fixed");
+			}
+		}
+
 		debug_osd_end_frame(ctx->debug_osd);
 	}
 

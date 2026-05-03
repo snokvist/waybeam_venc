@@ -46,7 +46,7 @@ int test_intra_refresh(void)
 	/* gop_frames = ceil(34/4) = 9 → 9/60 = 0.15s */
 	CHECK("1080p60_h265_fast_gop_frames", ir.gop_frames == 9);
 	CHECK("1080p60_h265_fast_gop_sec",    approx(ir.gop_sec, 9.0/60.0));
-	CHECK("1080p60_h265_fast_qp_default", ir.req_iqp == 48);
+	CHECK("1080p60_h265_fast_qp_default", ir.req_iqp == 36);
 	CHECK("1080p60_h265_fast_target_ms",  ir.target_ms == 150);
 	CHECK("1080p60_h265_fast_no_clamp",   ir.lines_clamped == 0);
 	CHECK("1080p60_h265_fast_gop_auto",   ir.gop_overridden == 0);
@@ -71,7 +71,7 @@ int test_intra_refresh(void)
 	/* ── H.264 default QP = 45, lcu_h = 16 ──────────────────────── */
 	intra_refresh_compute(INTRA_MODE_BALANCED, 1080, 30, 0, 0, 0, 0.0, &ir);
 	CHECK("1080p30_h264_total_rows", ir.total_rows == 68); /* ceil(1080/16) */
-	CHECK("1080p30_h264_qp_default", ir.req_iqp == 45);
+	CHECK("1080p30_h264_qp_default", ir.req_iqp == 29);
 
 	/* ── Override: explicit lines wins, auto-GOP recomputes ─────── */
 	intra_refresh_compute(INTRA_MODE_BALANCED, 1080, 60, 1, 4, 0, 0.0, &ir);
@@ -94,7 +94,21 @@ int test_intra_refresh(void)
 	CHECK("override_gop_flag",       ir.gop_overridden == 1);
 	CHECK("override_gop_zero",       ir.gop_frames == 0);
 	CHECK("override_gop_lines_kept", ir.lines == 2);
-	CHECK("override_gop_qp_kept",    ir.req_iqp == 48);
+	CHECK("override_gop_qp_kept",    ir.req_iqp == 32);  /* balanced default */
+
+	/* ── Per-mode QP defaults (codec-aware) ─────────────────────── */
+	intra_refresh_compute(INTRA_MODE_FAST,     1080, 60, 1, 0, 0, 0.0, &ir);
+	CHECK("h265_fast_qp",     ir.req_iqp == 36);
+	intra_refresh_compute(INTRA_MODE_BALANCED, 1080, 60, 1, 0, 0, 0.0, &ir);
+	CHECK("h265_balanced_qp", ir.req_iqp == 32);
+	intra_refresh_compute(INTRA_MODE_ROBUST,   1080, 60, 1, 0, 0, 0.0, &ir);
+	CHECK("h265_robust_qp",   ir.req_iqp == 28);
+	intra_refresh_compute(INTRA_MODE_FAST,     1080, 60, 0, 0, 0, 0.0, &ir);
+	CHECK("h264_fast_qp",     ir.req_iqp == 33);
+	intra_refresh_compute(INTRA_MODE_BALANCED, 1080, 60, 0, 0, 0, 0.0, &ir);
+	CHECK("h264_balanced_qp", ir.req_iqp == 29);
+	intra_refresh_compute(INTRA_MODE_ROBUST,   1080, 60, 0, 0, 0, 0.0, &ir);
+	CHECK("h264_robust_qp",   ir.req_iqp == 25);
 
 	/* ── Edge: zero height/fps treated as off ───────────────────── */
 	intra_refresh_compute(INTRA_MODE_BALANCED, 0, 60, 1, 0, 0, 0.0, &ir);
