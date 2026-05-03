@@ -47,6 +47,9 @@ typedef struct {
    * mirror mode the chn 0 frame loop drives it; in dual mode the chn 1
    * drain thread does. */
   Star6eTsRecorderState ts_recorder;
+  /* ISP digital zoom state — set by maruko_pipeline_apply_zoom so
+   * StopPortZoom is only called when something is actually running. */
+  int isp_zoom_active;
   /* Audio capture + RTP/UDP output (Phase 5).  Inactive when
    * audio.enabled=false or libmi_ai.so is missing. */
   MarukoAudioState audio;
@@ -96,6 +99,15 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 /** Tear down the secondary VENC channel if active.  Safe to call when
  *  ctx->dual is NULL (no-op). */
 void maruko_pipeline_stop_dual(MarukoBackendContext *ctx);
+
+/** Apply ISP digital zoom on chn 0.  pct=0 disables (full sensor frame).
+ *  Implementation uses MI_ISP_LoadPortZoomTable + MI_ISP_StartPortZoom
+ *  with a single-entry table.  3A statistics follow the cropped region
+ *  (per SDK spec).  Affects ch1 mirror as well — the SCL fan-out happens
+ *  downstream of the ISP.  Returns 0 on success, -1 if the SDK lacks
+ *  zoom symbols or the rect was rejected. */
+int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
+  double pct, double x, double y);
 
 extern volatile sig_atomic_t g_maruko_running;
 
