@@ -880,9 +880,20 @@ static void star6e_pipeline_set_hw_clocks(int oc_level, int verbose)
 	static const struct {
 		const char *path;
 		const char *label;
+		const char *value;
+		unsigned int mhz;
 	} clocks[] = {
-		{ "/sys/devices/virtual/mstar/isp0/isp_clk", "ISP" },
-		{ "/sys/devices/virtual/mstar/mscl/clk", "SCL" },
+		{ "/sys/devices/virtual/mstar/isp0/isp_clk", "ISP",
+			"384000000\n", 384 },
+		/* SCL at 432 MHz (Star6E clock-tree max — 480/533 rejected
+		 * by the SoC).  At the prior 384 MHz default, port-0 SCL
+		 * upscale beyond ~1.2× at 1080p60 stalled the pipeline
+		 * (visible as ISP P0 FIFO FULL / "waiting for encoder
+		 * data").  432 MHz pushes the practical upscale ceiling
+		 * to ~1.43× at 1080p60, matching the hardware bandwidth
+		 * needed for video0 zoom. */
+		{ "/sys/devices/virtual/mstar/mscl/clk", "SCL",
+			"432000000\n", 432 },
 	};
 	unsigned int i;
 
@@ -892,10 +903,11 @@ static void star6e_pipeline_set_hw_clocks(int oc_level, int verbose)
 		if (!handle)
 			continue;
 
-		fprintf(handle, "384000000\n");
+		fputs(clocks[i].value, handle);
 		fclose(handle);
 		if (verbose)
-			printf("> Set %s clock to 384 MHz\n", clocks[i].label);
+			printf("> Set %s clock to %u MHz\n",
+				clocks[i].label, clocks[i].mhz);
 	}
 
 	if (oc_level >= 1) {
