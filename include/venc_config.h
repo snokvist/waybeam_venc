@@ -82,9 +82,10 @@ typedef struct {
 	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
 	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth
 	 * pressure.  The receiver sees the smaller resolution in SPS/PPS.
-	 * 0 = off (full image), 0.2..1.0 = crop fraction (parser clamps
-	 * below 0.2 to keep VENC dim above its create-time minimum).  pct
-	 * change requires reinit (encoder size change); x/y pan is live. */
+	 * 0 = off (full image), 0.25..1.0 = crop fraction (parser clamps
+	 * below 0.25 — receivers that ignore mid-stream SPS changes render
+	 * deeper zoom invisibly).  pct change requires reinit (encoder size
+	 * change); x/y pan is live. */
 	double zoom_pct;
 	double zoom_x;             /* crop centre x, 0..1 */
 	double zoom_y;             /* crop centre y, 0..1 */

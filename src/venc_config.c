@@ -335,10 +335,12 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->zoom_y   = json_get_double(obj, "zoomY",   v->zoom_y);
 	if (v->zoom_pct < 0.0) v->zoom_pct = 0.0;
 	if (v->zoom_pct > 1.0) v->zoom_pct = 1.0;
-	/* Min 0.2 keeps the zoom output ≥ 384x208 at 1080p (above the
-	 * VENC create minimum); below this VENC_CreateChn rejects the
-	 * smaller dim and the daemon respawn-loops on the saved value. */
-	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.2) v->zoom_pct = 0.2;
+	/* Min 0.25 keeps the encoded frame large enough for receiver-side
+	 * decoders that ignore mid-stream SPS resolution changes (going
+	 * smaller produces a stream the receiver still renders at the first
+	 * SPS dim, so deeper zoom is invisible).  This also stays comfortably
+	 * above the VENC_CreateChn minimum dim. */
+	if (v->zoom_pct > 0.0 && v->zoom_pct < 0.25) v->zoom_pct = 0.25;
 	if (v->zoom_x < 0.0) v->zoom_x = 0.0; if (v->zoom_x > 1.0) v->zoom_x = 1.0;
 	if (v->zoom_y < 0.0) v->zoom_y = 0.0; if (v->zoom_y > 1.0) v->zoom_y = 1.0;
 }
