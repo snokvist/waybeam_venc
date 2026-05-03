@@ -385,6 +385,9 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
 	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
+	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_LIVE),
+	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
+	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -446,6 +449,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.intraRefreshMode", "video0.intra_refresh_mode" },
 	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
+	{ "video0.zoomPct", "video0.zoom_pct" },
+	{ "video0.zoomX", "video0.zoom_x" },
+	{ "video0.zoomY", "video0.zoom_y" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -841,6 +847,7 @@ typedef enum {
 	LIVE_GROUP_OUTGOING,
 	LIVE_GROUP_MAX_PAYLOAD,
 	LIVE_GROUP_MUTE,
+	LIVE_GROUP_ZOOM,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1000,6 +1007,10 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_MAX_PAYLOAD;
 	if (strcmp(canonical_key, "audio.mute") == 0)
 		return LIVE_GROUP_MUTE;
+	if (strcmp(canonical_key, "video0.zoom_pct") == 0 ||
+	    strcmp(canonical_key, "video0.zoom_x") == 0 ||
+	    strcmp(canonical_key, "video0.zoom_y") == 0)
+		return LIVE_GROUP_ZOOM;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1027,6 +1038,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "outgoing.max_payload_size";
 	case LIVE_GROUP_MUTE:
 		return "audio.mute";
+	case LIVE_GROUP_ZOOM:
+		return "video0.zoom_*";
 	default:
 		return "unknown";
 	}
@@ -1173,6 +1186,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_max_payload_size != NULL;
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute != NULL;
+	case LIVE_GROUP_ZOOM:
+		return g_cb->apply_zoom != NULL;
 	default:
 		return 0;
 	}
@@ -1230,6 +1245,11 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_MUTE:
 		dst->audio.mute = src->audio.mute;
+		break;
+	case LIVE_GROUP_ZOOM:
+		dst->video0.zoom_pct = src->video0.zoom_pct;
+		dst->video0.zoom_x   = src->video0.zoom_x;
+		dst->video0.zoom_y   = src->video0.zoom_y;
 		break;
 	default:
 		break;
@@ -1326,6 +1346,9 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_max_payload_size(cfg->outgoing.max_payload_size);
 	case LIVE_GROUP_MUTE:
 		return g_cb->apply_mute(cfg->audio.mute);
+	case LIVE_GROUP_ZOOM:
+		return g_cb->apply_zoom(cfg->video0.zoom_pct,
+			cfg->video0.zoom_x, cfg->video0.zoom_y);
 	default:
 		return -2;
 	}
