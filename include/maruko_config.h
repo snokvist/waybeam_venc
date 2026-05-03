@@ -30,6 +30,11 @@ typedef struct {
 	uint32_t max_seconds;   /* segment rotation, 0 = no time limit */
 	uint32_t max_mb;        /* segment rotation, 0 = no size limit */
 	int frame_lost;         /* mirror video0.frame_lost on chn 1 */
+	double zoom_pct;        /* ch1 zoom: 0 = off; 0.05–1.0 = crop fraction */
+	double zoom_x;          /* crop centre x, 0–1 */
+	double zoom_y;          /* crop centre y, 0–1 */
+	uint32_t zoom_out_w;    /* ch1 output width, 0 = match ch0 */
+	uint32_t zoom_out_h;    /* ch1 output height, 0 = match ch0 */
 } MarukoBackendConfigRecord;
 
 typedef struct {

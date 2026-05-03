@@ -1067,6 +1067,11 @@ static char *maruko_query_audio_status(void)
 	return maruko_audio_query_status(&backend->audio);
 }
 
+static int maruko_apply_zoom_rect(double pct, double x, double y)
+{
+	return maruko_pipeline_update_zoom(g_ctx.backend, pct, x, y);
+}
+
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
 	.apply_fps = maruko_apply_fps,
@@ -1089,6 +1094,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_max_payload_size = maruko_apply_max_payload_size,
 	.query_transport_status = maruko_query_transport_status,
 	.query_audio_status = maruko_query_audio_status,
+	.apply_zoom_rect = maruko_apply_zoom_rect,
 };
 
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)

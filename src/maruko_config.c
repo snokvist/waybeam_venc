@@ -138,6 +138,11 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 	cfg->record.max_seconds = vcfg->record.max_seconds;
 	cfg->record.max_mb = vcfg->record.max_mb;
 	cfg->record.frame_lost = vcfg->video0.frame_lost ? 1 : 0;
+	cfg->record.zoom_pct = vcfg->record.zoom_pct;
+	cfg->record.zoom_x = vcfg->record.zoom_x;
+	cfg->record.zoom_y = vcfg->record.zoom_y;
+	cfg->record.zoom_out_w = vcfg->record.zoom_out_w;
+	cfg->record.zoom_out_h = vcfg->record.zoom_out_h;
 
 	return 0;
 }

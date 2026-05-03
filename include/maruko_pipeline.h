@@ -91,7 +91,14 @@ void maruko_pipeline_install_signal_handlers(void);
  *  only — non-fatal degradation. */
 int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
   uint32_t bitrate, uint32_t fps, double gop_sec,
-  const char *mode, const char *server, int frame_lost);
+  const char *mode, const char *server, int frame_lost,
+  double zoom_pct, double zoom_x, double zoom_y,
+  uint32_t zoom_out_w, uint32_t zoom_out_h);
+
+/** Live pan/zoom update for ch1 via SCL port 1.  Returns -1 if zoom is not
+ *  active or a topology change is requested (requires restart). */
+int maruko_pipeline_update_zoom(MarukoBackendContext *ctx,
+  double pct, double x, double y);
 
 /** Tear down the secondary VENC channel if active.  Safe to call when
  *  ctx->dual is NULL (no-op). */

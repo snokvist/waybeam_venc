@@ -36,15 +36,28 @@ output despite `MI_VPE_SetPortCrop` returning success.  pct values that
 would exceed the cap are grown to the smallest legal crop instead of
 producing a black stream.
 
-Maruko: not feasible with the current dual-VENC topology.  Maruko's ch1
-is sourced from VENC chn 0's encoded-output HW_RING fan-out (see
-`src/maruko_pipeline.c:1763-1776`); the SCL output port is held by chn 0
-in RING mode and cannot multi-consume.  ch1 therefore sees the exact same
-image as ch0 — there is no VPE/SCL stage in ch1's path where a crop could
-be inserted.  Per-channel zoom on Maruko would need either an MI_DIVP
-module between VPE and ch1, or a different dual-VENC topology that gives
-each channel an independent VPE port.  Both are bigger investigations and
-out of scope for this PR.
+Maruko: implemented via SCL port 1.  The Maruko SCL device is created with
+`scl_bind=0xF` (all 4 HW output ports active), but only port 0 is used by
+the main encode path.  When `zoomPct > 0`, `configure_maruko_scl` configures
+SCL port 1 with a zoom crop (`MI_SCL_SetOutputPortParam(port=1)`), then
+`maruko_pipeline_start_dual` calls `SetInputSourceConfig(chn=1, RING_DMA)`
+to switch chn 1 away from the implicit chn-0 HW fan-out, then binds
+`SCL/0/0/1 → VENC/0/1/0` explicitly (RING mode — same bind type as the main
+path).  chn 1's encoder attribute uses `zoom_out_w/h` for its image
+dimensions when set.
+
+The key insight that makes this possible: binding SCL/0/0/**0** → VENC/0/1
+fails (0xA0092012) because port 0 is exclusively held by chn 0.  Port 1 is
+independent and has no consumer, so the bind succeeds.
+
+Live zoom updates (`/api/v1/set?record.zoom_pct=...`) call
+`MI_SCL_DisablePort(port=1)` → `SetOutputPortParam` → `EnablePort(port=1)`
+to update the crop without restarting the pipeline.  Topology flips
+(pct 0 ↔ >0) require restart, same as Star6E.
+
+Fallback: if `SetInputSourceConfig` or the SCL→VENC bind fail at runtime,
+`start_dual` logs a warning and falls back to the HW fan-out path (no
+zoom, mirror of ch0), so dual mode still comes up.
 
 ## [0.9.15] - 2026-05-02
 
