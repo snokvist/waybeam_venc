@@ -13,6 +13,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -587,6 +588,8 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	uint32_t in_w, in_h;
 
 	if (!state) return -1;
+	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
+		return -1;
 	in_w = state->active_precrop.w;
 	in_h = state->active_precrop.h;
 	if (in_w == 0 || in_h == 0)

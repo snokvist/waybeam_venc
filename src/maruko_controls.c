@@ -1072,13 +1072,10 @@ static int maruko_apply_zoom(double pct, double x, double y)
 	MarukoBackendContext *backend = g_ctx.backend;
 	if (!backend)
 		return -1;
-	/* Mirror into ctx->cfg so subsequent reinit (e.g. SIGHUP) sees the
-	 * latest value.  The next maruko_config_from_venc() will overwrite
-	 * with the canonical vcfg values, but until then we want the running
-	 * config to reflect what the hardware is actually doing. */
-	backend->cfg.zoom_pct = pct;
-	backend->cfg.zoom_x   = x;
-	backend->cfg.zoom_y   = y;
+	/* Don't mirror into ctx->cfg — venc_api owns the canonical config and
+	 * the next maruko_config_from_venc() (SIGHUP / reinit) reads from
+	 * VencConfig directly.  Avoiding the cfg write also avoids a torn
+	 * 8-byte double race with the runner thread on 32-bit ARM. */
 	return maruko_pipeline_apply_zoom(backend, pct, x, y);
 }
 

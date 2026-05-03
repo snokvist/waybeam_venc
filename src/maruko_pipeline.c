@@ -25,6 +25,7 @@
 #include <sys/ioctl.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -638,9 +639,11 @@ static void maruko_stop_vpe_channels(void)
 		g_mi_scl_chn_created = 0;
 	}
 	if (g_mi_isp_chn_created) {
-		/* Stop port-zoom before tearing down the channel — leaving it
-		 * active across StopChannel produces a stale internal state
-		 * that the next start_pipeline can't recover from. */
+		/* Stop port-zoom before disabling the port — zoom is a
+		 * feature of the running channel, so unwind in reverse of
+		 * setup order.  Leaving it active across StopChannel produces
+		 * a stale internal state that the next start_pipeline can't
+		 * recover from. */
 		if (g_mi_isp.fnStopPortZoom)
 			(void)g_mi_isp.fnStopPortZoom(0, 0);
 		(void)g_mi_isp.fnDisablePort(0, 0, 0);
@@ -783,33 +786,44 @@ static void fill_maruko_rc_attr(i6c_venc_chn *attr,
  * from==to).
  */
 
-/* SDK struct mirrors — must byte-match libmi_isp's vendored headers.
- * Pulled from Maruko_work_dir/.../mi_isp_datatype.h. */
-typedef struct { int16_t x, y; uint16_t u16Width, u16Height; } MaruWindowRect_t;
+/* SDK struct mirrors — verified against
+ * Maruko_work_dir/SourceCode/project/release/include/{mi_sys_datatype.h,
+ * isp/mi_isp_datatype.h}.  ZoomEntry total size is 20 bytes on ARM
+ * (8 + 1 + 3 pad + 4 enum + 4 size). */
+typedef struct {
+	uint16_t u16X, u16Y, u16Width, u16Height;
+} MaruWindowRect_t;
 typedef struct {
 	MaruWindowRect_t stCropWin;
 	uint8_t  u8ZoomSensorId;
-	uint32_t eSensorPixFormat;          /* MI_SYS_PixelFormat_e */
+	uint32_t eSensorPixFormat;          /* MI_SYS_PixelFormat_e (enum, int) */
 	struct { uint16_t u16Width, u16Height; } stSensorRes;
 } MaruIspZoomEntry_t;
 typedef struct { uint32_t u32EntryNum; MaruIspZoomEntry_t *pVirTableAddr; }
 	MaruIspZoomTable_t;
 typedef struct { uint32_t u32From, u32To, u32Cur; } MaruIspZoomAttr_t;
 
+/* Catches enum-size drift (e.g. -fshort-enums) that would silently break
+ * the byte layout libmi_isp.so expects. */
+_Static_assert(sizeof(MaruIspZoomEntry_t) == 20,
+	"MaruIspZoomEntry_t must match SDK layout");
+
 /* Build the crop rect for a static zoom, in sensor coordinates.
- * Alignment per ISP spec: x/y/w/h all 2-px aligned.  Output dims (out_w/h)
- * inform the upscale-cap floor — SCL on Maruko has the same empirical 2×
- * limit as Star6E in practice; cap to be safe and grow the rect if pct
- * would exceed it. */
+ * Alignment per ISP spec: x/y/w/h all 2-px aligned.  No upscale cap on
+ * Maruko — let MI_ISP_LoadPortZoomTable / SCL surface their own limits.
+ * (Out_w/h are unused for now; kept in the signature to mirror the
+ * Star6E helper and to leave room for a cap if validation shows we need
+ * one.) */
 static MaruWindowRect_t maruko_compute_zoom_rect(
 	uint32_t sensor_w, uint32_t sensor_h,
 	uint32_t out_w, uint32_t out_h, double pct, double x, double y)
 {
 	const uint32_t ALIGN = 2;
-	const uint32_t MAX_UPSCALE = 2;
 	MaruWindowRect_t r;
 	double cw, ch, cx, cy;
-	uint32_t rw, rh, rx, ry, min_w, min_h;
+	uint32_t rw, rh, rx, ry;
+
+	(void)out_w; (void)out_h;
 
 	if (pct <= 0.0) pct = 1.0;
 	if (pct > 1.0) pct = 1.0;
@@ -818,12 +832,6 @@ static MaruWindowRect_t maruko_compute_zoom_rect(
 
 	cw = (double)sensor_w * pct;
 	ch = (double)sensor_h * pct;
-	min_w = (out_w + MAX_UPSCALE - 1) / MAX_UPSCALE;
-	min_h = (out_h + MAX_UPSCALE - 1) / MAX_UPSCALE;
-	min_w = (min_w + ALIGN - 1) & ~(ALIGN - 1);
-	min_h = (min_h + ALIGN - 1) & ~(ALIGN - 1);
-	if (cw < (double)min_w) cw = (double)min_w;
-	if (ch < (double)min_h) ch = (double)min_h;
 	if (cw > (double)sensor_w) cw = (double)sensor_w;
 	if (ch > (double)sensor_h) ch = (double)sensor_h;
 
@@ -843,8 +851,8 @@ static MaruWindowRect_t maruko_compute_zoom_rect(
 	if (rx + rw > sensor_w) rx = (sensor_w - rw) & ~(ALIGN - 1);
 	if (ry + rh > sensor_h) ry = (sensor_h - rh) & ~(ALIGN - 1);
 
-	r.x = (int16_t)rx;
-	r.y = (int16_t)ry;
+	r.u16X = (uint16_t)rx;
+	r.u16Y = (uint16_t)ry;
 	r.u16Width  = (uint16_t)rw;
 	r.u16Height = (uint16_t)rh;
 	return r;
@@ -860,6 +868,10 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	int want_zoom;
 
 	if (!ctx) return -1;
+	/* Reject non-finite values up front — the cast (uint32_t)(NaN+0.5)
+	 * inside compute_zoom_rect is undefined behavior in C. */
+	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
+		return -1;
 	want_zoom = (pct > 0.0);
 
 	/* ISP channel must be running for the zoom API to take effect. */
@@ -904,10 +916,10 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	if (ret != 0) {
 		fprintf(stderr,
 			"[maruko] WARNING: MI_ISP_LoadPortZoomTable failed %d "
-			"(rect %dx%d+%d+%d, sensor %ux%u)\n",
+			"(rect %ux%u+%u+%u, sensor %ux%u)\n",
 			(int)ret, entry.stCropWin.u16Width,
 			entry.stCropWin.u16Height,
-			entry.stCropWin.x, entry.stCropWin.y,
+			entry.stCropWin.u16X, entry.stCropWin.u16Y,
 			ctx->cfg.sensor_width, ctx->cfg.sensor_height);
 		return -1;
 	}
@@ -920,6 +932,9 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 		fprintf(stderr,
 			"[maruko] WARNING: MI_ISP_StartPortZoom failed %d\n",
 			(int)ret);
+		/* Discard the loaded-but-not-started table to keep SDK state
+		 * consistent.  Errors here are best-effort. */
+		(void)g_mi_isp.fnStopPortZoom(0, 0);
 		return -1;
 	}
 	ctx->isp_zoom_active = 1;
@@ -2760,8 +2775,9 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	if (!ctx)
 		return;
 
-	if (ctx->isp_zoom_active && g_mi_isp.fnStopPortZoom)
-		(void)g_mi_isp.fnStopPortZoom(0, 0);
+	/* StopPortZoom runs from maruko_stop_vpe_channels — no need to issue
+	 * it again here.  Just clear the tracking flag so the next reinit's
+	 * apply_zoom doesn't think a stale zoom is still loaded. */
 	ctx->isp_zoom_active = 0;
 
 	venc_api_clear_active_precrop();
