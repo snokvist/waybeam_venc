@@ -835,8 +835,14 @@ static MaruWindowRect_t maruko_compute_zoom_rect(
 
 	if (!isfinite(x)) x = 0.5;
 	if (!isfinite(y)) y = 0.5;
-	if (x < 0.0) x = 0.0; if (x > 1.0) x = 1.0;
-	if (y < 0.0) y = 0.0; if (y > 1.0) y = 1.0;
+	if (x < 0.0)
+		x = 0.0;
+	if (x > 1.0)
+		x = 1.0;
+	if (y < 0.0)
+		y = 0.0;
+	if (y > 1.0)
+		y = 1.0;
 	if (rect_w > in_w) rect_w = in_w & ~(XY_ALIGN - 1);
 	if (rect_h > in_h) rect_h = in_h & ~(XY_ALIGN - 1);
 
@@ -859,6 +865,53 @@ static MaruWindowRect_t maruko_compute_zoom_rect(
 	return r;
 }
 
+static MarukoZoomStatus g_zoom_status;
+static pthread_mutex_t g_zoom_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t maruko_zoom_level_x100(double pct)
+{
+	if (!isfinite(pct) || pct <= 0.0)
+		return 0;
+	return (uint32_t)(100.0 / pct + 0.5);
+}
+
+static void maruko_pipeline_set_zoom_status(double pct,
+	uint32_t output_w, uint32_t output_h,
+	uint32_t crop_x, uint32_t crop_y, uint32_t crop_w, uint32_t crop_h)
+{
+	MarukoZoomStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	snap.active = 1;
+	snap.level_x100 = maruko_zoom_level_x100(pct);
+	snap.output_w = output_w;
+	snap.output_h = output_h;
+	snap.crop_x = crop_x;
+	snap.crop_y = crop_y;
+	snap.crop_w = crop_w;
+	snap.crop_h = crop_h;
+
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	g_zoom_status = snap;
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
+static void maruko_pipeline_clear_zoom_status(void)
+{
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	memset(&g_zoom_status, 0, sizeof(g_zoom_status));
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
+void maruko_pipeline_zoom_status(MarukoZoomStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	*out = g_zoom_status;
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
 /* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
  * only updates x/y.  Re-issues SCL SetPortConfig with the same output dim
  * but new crop offsets.  pct is accepted to short-circuit when zoom is
@@ -868,31 +921,38 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 {
 	MaruWindowRect_t rect;
 	i6c_scl_port scl_port;
-	uint32_t scl_in_w, scl_in_h;
+	uint32_t scl_crop_x, scl_crop_y, scl_crop_w, scl_crop_h;
+	uint32_t crop_x, crop_y;
 	MI_S32 ret;
 
 	if (!ctx) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
-	if (pct <= 0.0 || pct >= 1.0)
+	if (pct <= 0.0 || pct >= 1.0) {
+		maruko_pipeline_clear_zoom_status();
 		return 0;  /* zoom off — nothing to pan */
+	}
 
 	/* SCL channel must be created; otherwise SetPortConfig has nothing
 	 * to update. */
 	if (!g_mi_scl_chn_created)
 		return -1;
 
-	scl_in_w = ctx->scl_in_w;
-	scl_in_h = ctx->scl_in_h;
-	if (scl_in_w == 0 || scl_in_h == 0)
+	scl_crop_x = ctx->scl_crop_x;
+	scl_crop_y = ctx->scl_crop_y;
+	scl_crop_w = ctx->scl_crop_w;
+	scl_crop_h = ctx->scl_crop_h;
+	if (scl_crop_w == 0 || scl_crop_h == 0)
 		return -1;
 
-	rect = maruko_compute_zoom_rect(scl_in_w, scl_in_h,
+	rect = maruko_compute_zoom_rect(scl_crop_w, scl_crop_h,
 		ctx->cfg.image_width, ctx->cfg.image_height, x, y);
+	crop_x = scl_crop_x + rect.u16X;
+	crop_y = scl_crop_y + rect.u16Y;
 
 	memset(&scl_port, 0, sizeof(scl_port));
-	scl_port.crop.x = rect.u16X;
-	scl_port.crop.y = rect.u16Y;
+	scl_port.crop.x = (unsigned short)crop_x;
+	scl_port.crop.y = (unsigned short)crop_y;
 	scl_port.crop.width = rect.u16Width;
 	scl_port.crop.height = rect.u16Height;
 	scl_port.output.width = (unsigned short)ctx->cfg.image_width;
@@ -906,10 +966,13 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 			"[maruko] WARNING: SCL pan SetPortConfig failed %d "
 			"(rect %ux%u+%u+%u out %ux%u)\n",
 			(int)ret, rect.u16Width, rect.u16Height,
-			rect.u16X, rect.u16Y,
+			crop_x, crop_y,
 			ctx->cfg.image_width, ctx->cfg.image_height);
 		return -1;
 	}
+	maruko_pipeline_set_zoom_status(pct, ctx->cfg.image_width,
+		ctx->cfg.image_height, crop_x, crop_y,
+		rect.u16Width, rect.u16Height);
 	return 0;
 }
 
@@ -1198,6 +1261,7 @@ static void maruko_stop_venc(MI_VENC_DEV venc_dev, MI_VENC_CHN chn,
 	pthread_mutex_lock(&g_intra_status_mutex);
 	memset(&g_intra_status, 0, sizeof(g_intra_status));
 	pthread_mutex_unlock(&g_intra_status_mutex);
+	maruko_pipeline_clear_zoom_status();
 }
 
 static void maruko_sysfs_write(const char *path, const char *value)
@@ -2127,6 +2191,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	}
 	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
 		scl_in_w, scl_in_h, out_w, out_h, ctx->cfg.keep_aspect ? true : false);
+	PipelinePrecropRect base_precrop = precrop;
 	if (ctx->cfg.verbose) {
 		if (precrop.x || precrop.y ||
 		    precrop.w != scl_in_w || precrop.h != scl_in_h) {
@@ -2168,9 +2233,13 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		precrop.w = zrect.u16Width;
 		precrop.h = zrect.u16Height;
 	}
-	/* Stash SCL input dim for live pan to reposition the rect. */
-	ctx->scl_in_w = scl_in_w;
-	ctx->scl_in_h = scl_in_h;
+	/* Stash the AR-matched base crop for live pan.  The zoom rect is
+	 * always positioned inside this surface, not inside the full SCL
+	 * input, or panning can leak outside keep-aspect framing. */
+	ctx->scl_crop_x = base_precrop.x;
+	ctx->scl_crop_y = base_precrop.y;
+	ctx->scl_crop_w = base_precrop.w;
+	ctx->scl_crop_h = base_precrop.h;
 
 	if (maruko_start_vif(&ctx->sensor) != 0)
 		return -1;
@@ -2180,6 +2249,13 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	    ctx->cfg.vpe_level_3dnr, &precrop) != 0)
 		return -1;
 	ctx->vpe_started = 1;
+	if (ctx->cfg.zoom_pct > 0.0 && ctx->cfg.zoom_pct < 1.0) {
+		maruko_pipeline_set_zoom_status(ctx->cfg.zoom_pct,
+			out_w, out_h, precrop.x, precrop.y,
+			precrop.w, precrop.h);
+	} else {
+		maruko_pipeline_clear_zoom_status();
+	}
 
 	/* Debug OSD must initialise on the main thread BEFORE the VENC
 	 * kthread spawns: the kernel mi_rgn driver creates a singlethread
@@ -2626,17 +2702,32 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			debug_osd_get_cpu(ctx->debug_osd));
 
 		{
+			int osd_row = 2;
 			MarukoIntraRefreshStatus ir;
 			maruko_pipeline_intra_refresh_status(&ir);
 			if (ir.active) {
-				debug_osd_text(ctx->debug_osd, 2, "intra",
+				debug_osd_text(ctx->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",
 					ir.mode_name, ir.effective_lines_per_p,
 					ir.effective_qp);
-				debug_osd_text(ctx->debug_osd, 3, "gop",
+				debug_osd_text(ctx->debug_osd, osd_row++, "gop",
 					"%.2fs %s",
 					ir.effective_gop_sec,
 					ir.gop_auto ? "auto" : "fixed");
+			}
+
+			MarukoZoomStatus zoom;
+			maruko_pipeline_zoom_status(&zoom);
+			if (zoom.active) {
+				debug_osd_text(ctx->debug_osd, osd_row++, "zoom",
+					"%u.%02ux %ux%u",
+					zoom.level_x100 / 100,
+					zoom.level_x100 % 100,
+					zoom.output_w, zoom.output_h);
+				debug_osd_text(ctx->debug_osd, osd_row++, "crop",
+					"%ux%u+%u+%u",
+					zoom.crop_w, zoom.crop_h,
+					zoom.crop_x, zoom.crop_y);
 			}
 		}
 
@@ -2780,6 +2871,7 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		return;
 
 	venc_api_clear_active_precrop();
+	maruko_pipeline_clear_zoom_status();
 	/* Stop dual VENC FIRST — its thread reads from chn 1's fd and
 	 * the binding shares the VPE port with chn 0.  Tearing down chn 0
 	 * before unbinding chn 1 wedges the SDK on the next reinit. */

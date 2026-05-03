@@ -23,9 +23,9 @@ Implementation:
   with the encoded frame (RGN attaches at the post-SCL VPE port output,
   not at VPE input — no per-zoom offset needed).
 - **Maruko**: `MI_SCL_SetPortConfig(0,0,0)` carrying both crop and
-  output dim atomically.  Aspect-ratio floor enforces 16-px W / 8-px X
-  alignment; the smaller dimension drives the crop to keep the encoded
-  AR matching the sensor.
+  output dim atomically.  Output dimensions stay 16-px aligned and crop
+  offsets stay 2-px aligned; the smaller dimension drives the crop to
+  keep the encoded AR matching the sensor.
 
 Verification:
 - Live sweep on both devices: pct ∈ {1.0, 0.7, 0.5, 0.3, 0.25} × pan ∈

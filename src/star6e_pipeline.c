@@ -526,7 +526,7 @@ static void star6e_pipeline_stop_vpe(void)
  * dim == crop dim → 1:1 read/write, no upscale, no SCL bandwidth pressure.
  * The receiver sees the smaller frame in SPS/PPS and renders accordingly.
  *
- * Alignment 16 matches VENC and SCL.  Floor at 64 keeps the smallest
+ * Alignment 16 matches VENC and SCL.  Floor at 256 keeps the smallest
  * crop sane.  pct outside (0, 1) returns image dim unchanged. */
 static void star6e_compute_zoom_dim(uint32_t image_w, uint32_t image_h,
 	double pct, uint32_t *out_w, uint32_t *out_h)
@@ -581,8 +581,14 @@ static i6_common_rect star6e_compute_zoom_rect(uint32_t vpe_w, uint32_t vpe_h,
 
 	if (!isfinite(x)) x = 0.5;
 	if (!isfinite(y)) y = 0.5;
-	if (x < 0.0) x = 0.0; if (x > 1.0) x = 1.0;
-	if (y < 0.0) y = 0.0; if (y > 1.0) y = 1.0;
+	if (x < 0.0)
+		x = 0.0;
+	if (x > 1.0)
+		x = 1.0;
+	if (y < 0.0)
+		y = 0.0;
+	if (y > 1.0)
+		y = 1.0;
 	if (rect_w > vpe_w) rect_w = vpe_w & ~(XY_ALIGN - 1);
 	if (rect_h > vpe_h) rect_h = vpe_h & ~(XY_ALIGN - 1);
 
@@ -605,6 +611,55 @@ static i6_common_rect star6e_compute_zoom_rect(uint32_t vpe_w, uint32_t vpe_h,
 	return r;
 }
 
+static Star6eZoomStatus g_zoom_status;
+static pthread_mutex_t g_zoom_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t star6e_zoom_level_x100(double pct)
+{
+	if (!isfinite(pct) || pct <= 0.0)
+		return 0;
+	return (uint32_t)(100.0 / pct + 0.5);
+}
+
+static void star6e_pipeline_set_zoom_status(double pct,
+	uint32_t output_w, uint32_t output_h, const Star6ePrecropRect *base,
+	const i6_common_rect *rect)
+{
+	Star6eZoomStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	if (base && rect) {
+		snap.active = 1;
+		snap.level_x100 = star6e_zoom_level_x100(pct);
+		snap.output_w = output_w;
+		snap.output_h = output_h;
+		snap.crop_x = (uint32_t)base->x + rect->x;
+		snap.crop_y = (uint32_t)base->y + rect->y;
+		snap.crop_w = rect->width;
+		snap.crop_h = rect->height;
+	}
+
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	g_zoom_status = snap;
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
+static void star6e_pipeline_clear_zoom_status(void)
+{
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	memset(&g_zoom_status, 0, sizeof(g_zoom_status));
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
+void star6e_pipeline_zoom_status(Star6eZoomStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_zoom_status_mutex);
+	*out = g_zoom_status;
+	pthread_mutex_unlock(&g_zoom_status_mutex);
+}
+
 /* Live pan: zoom_pct is MUT_RESTART (changing crop dim resizes VPE port and
  * VENC, which needs reinit), so the live path only handles x/y.  pct is
  * accepted just to short-circuit when zoom is off (rect dim == image dim). */
@@ -618,8 +673,10 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	if (!state) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
-	if (pct <= 0.0 || pct >= 1.0)
+	if (pct <= 0.0 || pct >= 1.0) {
+		star6e_pipeline_clear_zoom_status();
 		return 0;  /* zoom off — nothing to pan */
+	}
 
 	in_w = state->active_precrop.w;
 	in_h = state->active_precrop.h;
@@ -636,6 +693,8 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 		return -1;
 	}
 
+	star6e_pipeline_set_zoom_status(pct, state->image_width,
+		state->image_height, &state->active_precrop, &rect);
 	return 0;
 }
 
@@ -1430,6 +1489,7 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	g_last_isp_bin_path[0] = '\0';
 	g_cus3a_handoff_done = 0;
 	venc_api_clear_active_precrop();
+	star6e_pipeline_clear_zoom_status();
 
 	/* Clear IntraRefresh status snapshot — the channel it described is
 	 * about to be destroyed, so /api/v1/intra/status should not keep
@@ -1544,6 +1604,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		return -1;
 
 	star6e_pipeline_reset(state);
+	star6e_pipeline_clear_zoom_status();
 
 	if (prepare_pipeline_config(state, vcfg, &pconf) != 0)
 		return -1;

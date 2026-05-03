@@ -15,6 +15,7 @@
 #include "venc_webui.h"
 #include "cJSON.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -645,6 +646,23 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
+	if (strcmp(key, "video0.zoom_pct") == 0) {
+		double v = cfg->video0.zoom_pct;
+		if (!isfinite(v))
+			return "zoom_pct must be finite";
+		if (v != 0.0 && (v < 0.25 || v > 1.0))
+			return "zoom_pct must be 0.0 or in range [0.25, 1.0]";
+	}
+	if (strcmp(key, "video0.zoom_x") == 0) {
+		double v = cfg->video0.zoom_x;
+		if (!isfinite(v) || v < 0.0 || v > 1.0)
+			return "zoom_x must be in range [0.0, 1.0]";
+	}
+	if (strcmp(key, "video0.zoom_y") == 0) {
+		double v = cfg->video0.zoom_y;
+		if (!isfinite(v) || v < 0.0 || v > 1.0)
+			return "zoom_y must be in range [0.0, 1.0]";
+	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
@@ -710,6 +728,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.size",
 		"video0.scene_holdoff",
+		"video0.zoom_pct",
+		"video0.zoom_x",
+		"video0.zoom_y",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -1838,7 +1859,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.9.0\","
+		"\"contract_version\":\"0.10.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
