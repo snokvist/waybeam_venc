@@ -519,6 +519,91 @@ static void star6e_pipeline_stop_vpe(void)
 	MI_VPE_DestroyChannel(0);
 }
 
+/* Build a VPE port-crop rect from fractional zoom params.
+ *
+ * vpe_w/h = VPE input dims (= active VIF precrop), out_w/h = port output
+ * dims.  pct ≤ 0 returns the full-frame rect (passthrough).  Alignment:
+ * 16-px W/H, 8-px X/Y.  Empirical Star6E SCL upscale cap is 2× — ratios
+ * at 2.22× and higher silently produce zero output even though SetPortCrop
+ * returns success.  When pct would exceed the cap, the crop is grown to
+ * the smallest legal size so the user gets the tightest legal zoom rather
+ * than a black frame.  See memory/venc_zoom_max_upscale.md. */
+static i6_common_rect star6e_compute_zoom_rect(uint32_t vpe_w, uint32_t vpe_h,
+	uint32_t out_w, uint32_t out_h, double pct, double x, double y)
+{
+	const uint32_t WH_ALIGN = 16;
+	const uint32_t XY_ALIGN = 8;
+	const uint32_t MAX_UPSCALE = 2;
+	i6_common_rect r;
+	double cw, ch, cx, cy;
+	uint32_t rw, rh, rx, ry;
+	uint32_t min_w, min_h;
+
+	if (pct <= 0.0) pct = 1.0;
+	if (pct > 1.0) pct = 1.0;
+	if (x < 0.0) x = 0.0; if (x > 1.0) x = 1.0;
+	if (y < 0.0) y = 0.0; if (y > 1.0) y = 1.0;
+
+	cw = (double)vpe_w * pct;
+	ch = (double)vpe_h * pct;
+
+	min_w = (out_w + MAX_UPSCALE - 1) / MAX_UPSCALE;
+	min_h = (out_h + MAX_UPSCALE - 1) / MAX_UPSCALE;
+	min_w = (min_w + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
+	min_h = (min_h + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
+	if (cw < (double)min_w) cw = (double)min_w;
+	if (ch < (double)min_h) ch = (double)min_h;
+	if (cw > (double)vpe_w) cw = (double)vpe_w;
+	if (ch > (double)vpe_h) ch = (double)vpe_h;
+
+	cx = (double)vpe_w * x - cw * 0.5;
+	cy = (double)vpe_h * y - ch * 0.5;
+	if (cx < 0.0) cx = 0.0;
+	if (cy < 0.0) cy = 0.0;
+	if (cx + cw > (double)vpe_w) cx = (double)vpe_w - cw;
+	if (cy + ch > (double)vpe_h) cy = (double)vpe_h - ch;
+
+	rw = (uint32_t)(cw + 0.5) & ~(WH_ALIGN - 1);
+	rh = (uint32_t)(ch + 0.5) & ~(WH_ALIGN - 1);
+	rx = (uint32_t)(cx + 0.5) & ~(XY_ALIGN - 1);
+	ry = (uint32_t)(cy + 0.5) & ~(XY_ALIGN - 1);
+	if (rw < WH_ALIGN) rw = WH_ALIGN;
+	if (rh < WH_ALIGN) rh = WH_ALIGN;
+	if (rx + rw > vpe_w) rx = (vpe_w - rw) & ~(XY_ALIGN - 1);
+	if (ry + rh > vpe_h) ry = (vpe_h - rh) & ~(XY_ALIGN - 1);
+
+	r.x = (unsigned short)rx;
+	r.y = (unsigned short)ry;
+	r.width = (unsigned short)rw;
+	r.height = (unsigned short)rh;
+	return r;
+}
+
+int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
+	double pct, double x, double y)
+{
+	i6_common_rect rect;
+	MI_S32 ret;
+	uint32_t in_w, in_h;
+
+	if (!state) return -1;
+	in_w = state->active_precrop.w;
+	in_h = state->active_precrop.h;
+	if (in_w == 0 || in_h == 0)
+		return -1;  /* VPE not started yet */
+
+	rect = star6e_compute_zoom_rect(in_w, in_h,
+		state->image_width, state->image_height, pct, x, y);
+	ret = MI_VPE_SetPortCrop(0, 0, &rect);
+	if (ret != 0) {
+		fprintf(stderr,
+			"WARNING: MI_VPE_SetPortCrop(0,0) pct=%.3f failed %d\n",
+			pct, (int)ret);
+		return -1;
+	}
+	return 0;
+}
+
 static void star6e_pipeline_fill_h26x_attr(i6_venc_attr_h26x *attr,
 	uint32_t width, uint32_t height)
 {
@@ -1420,6 +1505,16 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		pconf.vpe_level_3dnr, sdk_quiet);
 	if (ret != 0)
 		goto fail_vif;
+
+	/* image_width/height aren't stored on state until bind; pre-populate so
+	 * the initial zoom apply (and subsequent live updates before first
+	 * frame) sees correct port-output dims. */
+	state->image_width = pconf.image_width;
+	state->image_height = pconf.image_height;
+
+	if (vcfg->video0.zoom_pct > 0.0)
+		(void)star6e_pipeline_apply_zoom(state, vcfg->video0.zoom_pct,
+			vcfg->video0.zoom_x, vcfg->video0.zoom_y);
 
 	state->venc_channel = 0;
 	venc_fps = vcfg->video0.fps;

@@ -97,6 +97,12 @@ void star6e_pipeline_stop(Star6ePipelineState *state);
 /** Disable VPE prescaler (cleanup during shutdown). */
 void star6e_pipeline_vpe_scl_preset_shutdown(void);
 
+/** Apply digital zoom on VPE port 0.  pct=0 disables (full-frame).
+ *  Returns 0 on success, -1 if VPE not yet started or SDK rejected the
+ *  rect.  Safe to call before pipeline start (no-op returns -1). */
+int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
+	double pct, double x, double y);
+
 /** Service custom 3A (AWB/AE) at regular intervals. */
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	struct timespec *ts_last);
