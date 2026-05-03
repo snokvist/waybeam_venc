@@ -532,7 +532,7 @@ static void star6e_compute_zoom_dim(uint32_t image_w, uint32_t image_h,
 	double pct, uint32_t *out_w, uint32_t *out_h)
 {
 	const uint32_t ALIGN = 16;
-	const uint32_t MIN_DIM = 64;
+	const uint32_t MIN_DIM = 256;
 	double dw, dh;
 	uint32_t w, h;
 
@@ -541,6 +541,15 @@ static void star6e_compute_zoom_dim(uint32_t image_w, uint32_t image_h,
 		if (out_h) *out_h = image_h;
 		return;
 	}
+
+	/* Promote pct so neither dim drops under MIN_DIM — keeps the zoom
+	 * AR-preserving instead of squishing the shorter axis when the
+	 * floor kicks in. */
+	if ((double)image_w * pct < (double)MIN_DIM)
+		pct = (double)MIN_DIM / (double)image_w;
+	if ((double)image_h * pct < (double)MIN_DIM)
+		pct = (double)MIN_DIM / (double)image_h;
+	if (pct > 1.0) pct = 1.0;
 
 	dw = (double)image_w * pct;
 	dh = (double)image_h * pct;

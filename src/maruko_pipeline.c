@@ -639,13 +639,6 @@ static void maruko_stop_vpe_channels(void)
 		g_mi_scl_chn_created = 0;
 	}
 	if (g_mi_isp_chn_created) {
-		/* Stop port-zoom before disabling the port — zoom is a
-		 * feature of the running channel, so unwind in reverse of
-		 * setup order.  Leaving it active across StopChannel produces
-		 * a stale internal state that the next start_pipeline can't
-		 * recover from. */
-		if (g_mi_isp.fnStopPortZoom)
-			(void)g_mi_isp.fnStopPortZoom(0, 0);
 		(void)g_mi_isp.fnDisablePort(0, 0, 0);
 		(void)g_mi_isp.fnStopChannel(0, 0);
 		/* Skip DestroyChannel — kernel ISP retains CUS3A mutex
@@ -771,173 +764,152 @@ static void fill_maruko_rc_attr(i6c_venc_chn *attr,
 	}
 }
 
-/* ── ISP digital zoom (MI_ISP_LoadPortZoomTable + StartPortZoom) ──── */
+/* ── Digital zoom (Approach C: SCL crop, no upscale) ──────────────── */
 /*
- * Maruko has no MI_VPE module.  The SCL fan-out from chn 0 → chn 1 sits
- * downstream of ISP/SCL processing, so any per-VENC crop is hardware-
- * infeasible (HWSCL1 lacks Ring_H26x).  The supported path is the ISP's
- * own port-zoom API, which crops + scales at the ISP→SCL boundary and
- * lets the SCL fan-out distribute the result to every VENC channel.
+ * Same model as Star6E: zoom_pct shrinks BOTH the SCL output dim AND the
+ * crop window — SCL reads the rect at 1:1 and emits it verbatim, no
+ * upscale, no SCL bandwidth pressure.  The encoded resolution drops with
+ * zoom (receiver sees the smaller dim in SPS/PPS).  Maruko's SCL has a
+ * single SetPortConfig API that programs crop + output dim atomically;
+ * live pan re-issues SetPortConfig with new crop offsets while keeping
+ * the same output dim (ISP / VENC channels never resize).
  *
- * Per SDK spec, MI_ISP and MI_SCL cooperate: ISP adapts 3A to the cropped
- * region (so AE/AWB follow zoom — better than Star6E's VPE crop), SCL
- * does the actual cropping/upscale.  Single-entry table = static zoom;
- * multi-entry = smooth pan animation (deferred — v1 uses N=1 with
- * from==to).
- */
-
-/* SDK struct mirrors — verified against
- * Maruko_work_dir/SourceCode/project/release/include/{mi_sys_datatype.h,
- * isp/mi_isp_datatype.h}.  ZoomEntry total size is 20 bytes on ARM
- * (8 + 1 + 3 pad + 4 enum + 4 size). */
+ * MaruWindowRect_t mirrors MI_SYS_WindowRect_t.  Compute helpers live
+ * here so they're reusable by both initial setup and live pan. */
 typedef struct {
 	uint16_t u16X, u16Y, u16Width, u16Height;
 } MaruWindowRect_t;
-typedef struct {
-	MaruWindowRect_t stCropWin;
-	uint8_t  u8ZoomSensorId;
-	uint32_t eSensorPixFormat;          /* MI_SYS_PixelFormat_e (enum, int) */
-	struct { uint16_t u16Width, u16Height; } stSensorRes;
-} MaruIspZoomEntry_t;
-typedef struct { uint32_t u32EntryNum; MaruIspZoomEntry_t *pVirTableAddr; }
-	MaruIspZoomTable_t;
-typedef struct { uint32_t u32From, u32To, u32Cur; } MaruIspZoomAttr_t;
 
-/* Catches enum-size drift (e.g. -fshort-enums) that would silently break
- * the byte layout libmi_isp.so expects. */
-_Static_assert(sizeof(MaruIspZoomEntry_t) == 20,
-	"MaruIspZoomEntry_t must match SDK layout");
-
-/* Build the crop rect for a static zoom, in sensor coordinates.
- * Alignment per ISP spec: x/y/w/h all 2-px aligned.  No upscale cap on
- * Maruko — let MI_ISP_LoadPortZoomTable / SCL surface their own limits.
- * (Out_w/h are unused for now; kept in the signature to mirror the
- * Star6E helper and to leave room for a cap if validation shows we need
- * one.) */
-static MaruWindowRect_t maruko_compute_zoom_rect(
-	uint32_t sensor_w, uint32_t sensor_h,
-	uint32_t out_w, uint32_t out_h, double pct, double x, double y)
+/* Effective output dim for a given zoom_pct.  16-px alignment matches
+ * SCL output and VENC create requirements; floor at 256 keeps the
+ * encoded dim above VENC_CreateChn's minimum. */
+static void maruko_compute_zoom_dim(uint32_t image_w, uint32_t image_h,
+	double pct, uint32_t *out_w, uint32_t *out_h)
 {
-	const uint32_t ALIGN = 2;
-	MaruWindowRect_t r;
-	double cw, ch, cx, cy;
-	uint32_t rw, rh, rx, ry;
+	const uint32_t ALIGN = 16;
+	const uint32_t MIN_DIM = 256;
+	double dw, dh;
+	uint32_t w, h;
 
-	(void)out_w; (void)out_h;
+	if (!isfinite(pct) || pct <= 0.0 || pct >= 1.0) {
+		if (out_w) *out_w = image_w;
+		if (out_h) *out_h = image_h;
+		return;
+	}
 
-	if (pct <= 0.0) pct = 1.0;
+	/* Promote pct so neither dim drops under MIN_DIM — keeps the zoom
+	 * AR-preserving instead of squishing the shorter axis when the
+	 * floor kicks in. */
+	if ((double)image_w * pct < (double)MIN_DIM)
+		pct = (double)MIN_DIM / (double)image_w;
+	if ((double)image_h * pct < (double)MIN_DIM)
+		pct = (double)MIN_DIM / (double)image_h;
 	if (pct > 1.0) pct = 1.0;
+
+	dw = (double)image_w * pct;
+	dh = (double)image_h * pct;
+	w = (uint32_t)(dw + 0.5);
+	h = (uint32_t)(dh + 0.5);
+	w &= ~(ALIGN - 1);
+	h &= ~(ALIGN - 1);
+	if (w < MIN_DIM) w = MIN_DIM;
+	if (h < MIN_DIM) h = MIN_DIM;
+	if (w > image_w) w = image_w & ~(ALIGN - 1);
+	if (h > image_h) h = image_h & ~(ALIGN - 1);
+	if (out_w) *out_w = w;
+	if (out_h) *out_h = h;
+}
+
+/* Place a (rect_w × rect_h) 1:1 window inside (in_w × in_h) at fractional
+ * (x, y) — typically the SCL input dim (post-precrop).  2-px aligned per
+ * Maruko ISP/SCL spec.  Caller guarantees rect_w/h are 16-px-aligned via
+ * compute_zoom_dim. */
+static MaruWindowRect_t maruko_compute_zoom_rect(
+	uint32_t in_w, uint32_t in_h, uint32_t rect_w, uint32_t rect_h,
+	double x, double y)
+{
+	const uint32_t XY_ALIGN = 2;
+	MaruWindowRect_t r;
+	double cx, cy;
+	uint32_t rx, ry;
+
+	if (!isfinite(x)) x = 0.5;
+	if (!isfinite(y)) y = 0.5;
 	if (x < 0.0) x = 0.0; if (x > 1.0) x = 1.0;
 	if (y < 0.0) y = 0.0; if (y > 1.0) y = 1.0;
+	if (rect_w > in_w) rect_w = in_w & ~(XY_ALIGN - 1);
+	if (rect_h > in_h) rect_h = in_h & ~(XY_ALIGN - 1);
 
-	cw = (double)sensor_w * pct;
-	ch = (double)sensor_h * pct;
-	if (cw > (double)sensor_w) cw = (double)sensor_w;
-	if (ch > (double)sensor_h) ch = (double)sensor_h;
-
-	cx = (double)sensor_w * x - cw * 0.5;
-	cy = (double)sensor_h * y - ch * 0.5;
+	cx = (double)in_w * x - (double)rect_w * 0.5;
+	cy = (double)in_h * y - (double)rect_h * 0.5;
 	if (cx < 0.0) cx = 0.0;
 	if (cy < 0.0) cy = 0.0;
-	if (cx + cw > (double)sensor_w) cx = (double)sensor_w - cw;
-	if (cy + ch > (double)sensor_h) cy = (double)sensor_h - ch;
+	if (cx + (double)rect_w > (double)in_w) cx = (double)(in_w - rect_w);
+	if (cy + (double)rect_h > (double)in_h) cy = (double)(in_h - rect_h);
 
-	rw = (uint32_t)(cw + 0.5) & ~(ALIGN - 1);
-	rh = (uint32_t)(ch + 0.5) & ~(ALIGN - 1);
-	rx = (uint32_t)(cx + 0.5) & ~(ALIGN - 1);
-	ry = (uint32_t)(cy + 0.5) & ~(ALIGN - 1);
-	if (rw < ALIGN) rw = ALIGN;
-	if (rh < ALIGN) rh = ALIGN;
-	if (rx + rw > sensor_w) rx = (sensor_w - rw) & ~(ALIGN - 1);
-	if (ry + rh > sensor_h) ry = (sensor_h - rh) & ~(ALIGN - 1);
+	rx = (uint32_t)(cx + 0.5) & ~(XY_ALIGN - 1);
+	ry = (uint32_t)(cy + 0.5) & ~(XY_ALIGN - 1);
+	if (rx + rect_w > in_w) rx = (in_w - rect_w) & ~(XY_ALIGN - 1);
+	if (ry + rect_h > in_h) ry = (in_h - rect_h) & ~(XY_ALIGN - 1);
 
 	r.u16X = (uint16_t)rx;
 	r.u16Y = (uint16_t)ry;
-	r.u16Width  = (uint16_t)rw;
-	r.u16Height = (uint16_t)rh;
+	r.u16Width  = (uint16_t)rect_w;
+	r.u16Height = (uint16_t)rect_h;
 	return r;
 }
 
+/* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
+ * only updates x/y.  Re-issues SCL SetPortConfig with the same output dim
+ * but new crop offsets.  pct is accepted to short-circuit when zoom is
+ * off (no rect to pan). */
 int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	double pct, double x, double y)
 {
-	MaruIspZoomEntry_t entry;
-	MaruIspZoomTable_t table;
-	MaruIspZoomAttr_t attr;
+	MaruWindowRect_t rect;
+	i6c_scl_port scl_port;
+	uint32_t scl_in_w, scl_in_h;
 	MI_S32 ret;
-	int want_zoom;
 
 	if (!ctx) return -1;
-	/* Reject non-finite values up front — the cast (uint32_t)(NaN+0.5)
-	 * inside compute_zoom_rect is undefined behavior in C. */
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
-	want_zoom = (pct > 0.0);
+	if (pct <= 0.0 || pct >= 1.0)
+		return 0;  /* zoom off — nothing to pan */
 
-	/* ISP channel must be running for the zoom API to take effect. */
-	if (!g_mi_isp_chn_created)
+	/* SCL channel must be created; otherwise SetPortConfig has nothing
+	 * to update. */
+	if (!g_mi_scl_chn_created)
 		return -1;
 
-	if (!g_mi_isp.fnLoadPortZoomTable || !g_mi_isp.fnStartPortZoom ||
-	    !g_mi_isp.fnStopPortZoom) {
-		static int warned;
-		if (!warned) {
-			fprintf(stderr, "[maruko] zoom unavailable — libmi_isp.so "
-				"lacks MI_ISP_*PortZoom* symbols on this firmware\n");
-			warned = 1;
-		}
+	scl_in_w = ctx->scl_in_w;
+	scl_in_h = ctx->scl_in_h;
+	if (scl_in_w == 0 || scl_in_h == 0)
 		return -1;
-	}
 
-	if (ctx->isp_zoom_active) {
-		ret = g_mi_isp.fnStopPortZoom(0, 0);
-		if (ret != 0)
-			fprintf(stderr,
-				"[maruko] WARNING: MI_ISP_StopPortZoom returned %d\n",
-				(int)ret);
-		ctx->isp_zoom_active = 0;
-	}
-	if (!want_zoom)
-		return 0;
+	rect = maruko_compute_zoom_rect(scl_in_w, scl_in_h,
+		ctx->cfg.image_width, ctx->cfg.image_height, x, y);
 
-	memset(&entry, 0, sizeof(entry));
-	entry.stCropWin = maruko_compute_zoom_rect(
-		ctx->cfg.sensor_width, ctx->cfg.sensor_height,
-		ctx->cfg.image_width, ctx->cfg.image_height, pct, x, y);
-	entry.u8ZoomSensorId = 0;
-	entry.eSensorPixFormat = (uint32_t)ctx->sensor.plane.pixFmt;
-	entry.stSensorRes.u16Width  = (uint16_t)ctx->cfg.sensor_width;
-	entry.stSensorRes.u16Height = (uint16_t)ctx->cfg.sensor_height;
+	memset(&scl_port, 0, sizeof(scl_port));
+	scl_port.crop.x = rect.u16X;
+	scl_port.crop.y = rect.u16Y;
+	scl_port.crop.width = rect.u16Width;
+	scl_port.crop.height = rect.u16Height;
+	scl_port.output.width = (unsigned short)ctx->cfg.image_width;
+	scl_port.output.height = (unsigned short)ctx->cfg.image_height;
+	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
+	scl_port.compress = (i6_common_compr)6;  /* IFC */
 
-	table.u32EntryNum = 1;
-	table.pVirTableAddr = &entry;
-
-	ret = g_mi_isp.fnLoadPortZoomTable(0, 0, &table);
+	ret = g_mi_scl.fnSetPortConfig(0, 0, 0, &scl_port);
 	if (ret != 0) {
 		fprintf(stderr,
-			"[maruko] WARNING: MI_ISP_LoadPortZoomTable failed %d "
-			"(rect %ux%u+%u+%u, sensor %ux%u)\n",
-			(int)ret, entry.stCropWin.u16Width,
-			entry.stCropWin.u16Height,
-			entry.stCropWin.u16X, entry.stCropWin.u16Y,
-			ctx->cfg.sensor_width, ctx->cfg.sensor_height);
+			"[maruko] WARNING: SCL pan SetPortConfig failed %d "
+			"(rect %ux%u+%u+%u out %ux%u)\n",
+			(int)ret, rect.u16Width, rect.u16Height,
+			rect.u16X, rect.u16Y,
+			ctx->cfg.image_width, ctx->cfg.image_height);
 		return -1;
 	}
-
-	memset(&attr, 0, sizeof(attr));
-	attr.u32From = 0;
-	attr.u32To   = 0;
-	ret = g_mi_isp.fnStartPortZoom(0, 0, &attr);
-	if (ret != 0) {
-		fprintf(stderr,
-			"[maruko] WARNING: MI_ISP_StartPortZoom failed %d\n",
-			(int)ret);
-		/* Discard the loaded-but-not-started table to keep SDK state
-		 * consistent.  Errors here are best-effort. */
-		(void)g_mi_isp.fnStopPortZoom(0, 0);
-		return -1;
-	}
-	ctx->isp_zoom_active = 1;
 	return 0;
 }
 
@@ -2164,6 +2136,42 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		}
 	}
 
+	/* Approach C zoom: when zoom_pct ∈ (0, 1), shrink BOTH the SCL
+	 * output dim AND the SCL crop window — SCL reads exactly the rect
+	 * and emits it 1:1, no upscale, no bandwidth pressure.  The encoded
+	 * resolution drops to the crop dim; SPS/PPS carries it to the
+	 * receiver.  zoom_pct is MUT_RESTART so this only runs at start;
+	 * live x/y pan is handled by maruko_pipeline_apply_zoom which
+	 * re-issues SetPortConfig with new offsets at the same dim. */
+	if (ctx->cfg.zoom_pct > 0.0 && ctx->cfg.zoom_pct < 1.0) {
+		uint32_t zw = out_w;
+		uint32_t zh = out_h;
+		MaruWindowRect_t zrect;
+		maruko_compute_zoom_dim(out_w, out_h, ctx->cfg.zoom_pct, &zw, &zh);
+		zrect = maruko_compute_zoom_rect(precrop.w, precrop.h, zw, zh,
+			ctx->cfg.zoom_x, ctx->cfg.zoom_y);
+		if (ctx->cfg.verbose)
+			printf("> [maruko] Zoom: pct=%.3f → %ux%u "
+				"(rect %ux%u@%u,%u within precrop %ux%u)\n",
+				ctx->cfg.zoom_pct, zw, zh,
+				zrect.u16Width, zrect.u16Height,
+				zrect.u16X, zrect.u16Y, precrop.w, precrop.h);
+		ctx->cfg.image_width = zw;
+		ctx->cfg.image_height = zh;
+		out_w = zw;
+		out_h = zh;
+		/* Replace the AR-precrop with the zoom rect (offset within
+		 * precrop area).  Position in scl_in coordinates so the SCL
+		 * crop is absolute. */
+		precrop.x = (uint16_t)(precrop.x + zrect.u16X);
+		precrop.y = (uint16_t)(precrop.y + zrect.u16Y);
+		precrop.w = zrect.u16Width;
+		precrop.h = zrect.u16Height;
+	}
+	/* Stash SCL input dim for live pan to reposition the rect. */
+	ctx->scl_in_w = scl_in_w;
+	ctx->scl_in_h = scl_in_h;
+
 	if (maruko_start_vif(&ctx->sensor) != 0)
 		return -1;
 	ctx->vif_started = 1;
@@ -2226,13 +2234,9 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 
 	if (bind_maruko_pipeline(ctx) != 0)
 		return -1;
-
-	/* Initial digital zoom (chn 0).  Failures are non-fatal — the
-	 * pipeline streams full-FOV when the SDK rejects the rect or lacks
-	 * the zoom symbols. */
-	if (ctx->cfg.zoom_pct > 0.0)
-		(void)maruko_pipeline_apply_zoom(ctx, ctx->cfg.zoom_pct,
-			ctx->cfg.zoom_x, ctx->cfg.zoom_y);
+	/* Initial zoom is built into SCL setup above (zoom rect = precrop,
+	 * encoded dim = crop dim).  Live x/y pan goes through
+	 * maruko_pipeline_apply_zoom; pct change triggers MUT_RESTART. */
 
 	/* Phase 5: audio capture + RTP/UDP output.  Init AFTER bind_maruko
 	 * so ctx->output socket is up; init returns 0 even on failure (warns
@@ -2774,11 +2778,6 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 {
 	if (!ctx)
 		return;
-
-	/* StopPortZoom runs from maruko_stop_vpe_channels — no need to issue
-	 * it again here.  Just clear the tracking flag so the next reinit's
-	 * apply_zoom doesn't think a stale zoom is still loaded. */
-	ctx->isp_zoom_active = 0;
 
 	venc_api_clear_active_precrop();
 	/* Stop dual VENC FIRST — its thread reads from chn 1's fd and

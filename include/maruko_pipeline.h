@@ -47,9 +47,12 @@ typedef struct {
    * mirror mode the chn 0 frame loop drives it; in dual mode the chn 1
    * drain thread does. */
   Star6eTsRecorderState ts_recorder;
-  /* ISP digital zoom state — set by maruko_pipeline_apply_zoom so
-   * StopPortZoom is only called when something is actually running. */
-  int isp_zoom_active;
+  /* SCL input dim after precrop (sensor capt → optional binning →
+   * AR-matched precrop).  Stored here so maruko_pipeline_apply_zoom can
+   * reposition the zoom rect on live x/y pan without recomputing the
+   * pipeline geometry. */
+  uint32_t scl_in_w;
+  uint32_t scl_in_h;
   /* Audio capture + RTP/UDP output (Phase 5).  Inactive when
    * audio.enabled=false or libmi_ai.so is missing. */
   MarukoAudioState audio;
