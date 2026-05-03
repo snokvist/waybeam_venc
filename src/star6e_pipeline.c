@@ -1327,7 +1327,8 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	/* Unbind VPE→VENC.  Safe now — no concurrent consumers calling
 	 * GetStream, so the kernel unbind won't deadlock. */
 	if (state->dual && state->dual->bound) {
-		MI_SYS_UnBindChnPort(&state->vpe_port, &state->dual->port);
+		MI_SYS_UnBindChnPort(&state->dual->vpe_src_port,
+			&state->dual->port);
 		state->dual->bound = 0;
 	}
 	if (state->bound_vpe_venc) {
@@ -1353,6 +1354,10 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	/* Destroy channels */
 	if (state->dual) {
 		venc_api_dual_unregister();
+		if (state->dual->port1_active) {
+			MI_VPE_DisablePort(0, 1);
+			state->dual->port1_active = 0;
+		}
 		MI_VENC_DestroyChn(state->dual->channel);
 		free(state->dual->stream_packs);
 		free(state->dual);
@@ -1442,15 +1447,142 @@ fail_sensor:
 	return ret ? ret : -1;
 }
 
+/* Compute a VPE-friendly crop rect inside a (vpe_w × vpe_h) source frame.
+ *
+ * SigmaStar VPE alignment: width/height must be 16-px aligned, x/y must be
+ * 8-px aligned.  Looser alignment (e.g. 2-px) silently produces frames the
+ * scaler can't process — ch1 stops emitting until the next valid crop is
+ * programmed.
+ *
+ * Max upscale ratio: capped at out_w / crop_w ≤ 2.  Empirical Star6E SCL
+ * limit on this SoC — ratios at 1.91× still produced output, 2.22× and
+ * higher died silently (SetPortCrop returns OK but no frames emerge).
+ * A pct that would exceed this cap is grown to the smallest legal crop
+ * so the user gets the tightest legal zoom rather than a black frame.
+ *
+ * pct ≤ 0 is treated as 1.0 (full FOV passthrough). */
+static i6_common_rect compute_zoom_rect(uint32_t vpe_w, uint32_t vpe_h,
+	uint32_t out_w, uint32_t out_h, double pct, double x, double y)
+{
+	const uint32_t WH_ALIGN = 16;
+	const uint32_t XY_ALIGN = 8;
+	const uint32_t MAX_UPSCALE = 2;
+	i6_common_rect r;
+	double cw, ch, cx, cy;
+	uint32_t rw, rh, rx, ry;
+	uint32_t min_w, min_h;
+
+	if (pct <= 0.0) pct = 1.0;
+	if (pct > 1.0) pct = 1.0;
+	if (x < 0.0) x = 0.0;
+	if (x > 1.0) x = 1.0;
+	if (y < 0.0) y = 0.0;
+	if (y > 1.0) y = 1.0;
+
+	cw = (double)vpe_w * pct;
+	ch = (double)vpe_h * pct;
+
+	/* Enforce max upscale ratio.  ceil(out / MAX_UPSCALE), 16-aligned up. */
+	min_w = (out_w + MAX_UPSCALE - 1) / MAX_UPSCALE;
+	min_h = (out_h + MAX_UPSCALE - 1) / MAX_UPSCALE;
+	min_w = (min_w + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
+	min_h = (min_h + WH_ALIGN - 1) & ~(WH_ALIGN - 1);
+	if (cw < (double)min_w) cw = (double)min_w;
+	if (ch < (double)min_h) ch = (double)min_h;
+	if (cw > (double)vpe_w) cw = (double)vpe_w;
+	if (ch > (double)vpe_h) ch = (double)vpe_h;
+
+	cx = (double)vpe_w * x - cw * 0.5;
+	cy = (double)vpe_h * y - ch * 0.5;
+	if (cx < 0.0) cx = 0.0;
+	if (cy < 0.0) cy = 0.0;
+	if (cx + cw > (double)vpe_w) cx = (double)vpe_w - cw;
+	if (cy + ch > (double)vpe_h) cy = (double)vpe_h - ch;
+
+	/* Round dims down to alignment so we never overflow the source frame
+	 * after alignment.  x/y rounded down to their alignment. */
+	rw = (uint32_t)(cw + 0.5) & ~(WH_ALIGN - 1);
+	rh = (uint32_t)(ch + 0.5) & ~(WH_ALIGN - 1);
+	rx = (uint32_t)(cx + 0.5) & ~(XY_ALIGN - 1);
+	ry = (uint32_t)(cy + 0.5) & ~(XY_ALIGN - 1);
+
+	if (rw < WH_ALIGN) rw = WH_ALIGN;
+	if (rh < WH_ALIGN) rh = WH_ALIGN;
+	if (rx + rw > vpe_w) rx = (vpe_w - rw) & ~(XY_ALIGN - 1);
+	if (ry + rh > vpe_h) ry = (vpe_h - rh) & ~(XY_ALIGN - 1);
+
+	r.x = (unsigned short)rx;
+	r.y = (unsigned short)ry;
+	r.width = (unsigned short)rw;
+	r.height = (unsigned short)rh;
+	return r;
+}
+
+/* Bring up VPE port 1 with a sub-rect crop scaled to (out_w × out_h).
+ * Returns 0 and fills *out_port on success.  The port is started disabled
+ * → SetPortMode → SetPortCrop → EnablePort.  On any error, leaves port 1
+ * disabled and returns the failing rc. */
+static int zoom_enable_port1(uint32_t vpe_in_w, uint32_t vpe_in_h,
+	uint32_t out_w, uint32_t out_h, double pct, double x, double y,
+	MI_SYS_ChnPort_t *out_port)
+{
+	MI_VPE_PortAttr_t port = {0};
+	i6_common_rect rect;
+	MI_S32 ret;
+
+	port.output.width = out_w;
+	port.output.height = out_h;
+	port.pixFmt = I6_PIXFMT_YUV420SP;
+	port.compress = I6_COMPR_NONE;
+
+	ret = MI_VPE_SetPortMode(0, 1, &port);
+	if (ret != 0) {
+		fprintf(stderr, "WARNING: zoom MI_VPE_SetPortMode(1) failed %d\n",
+			(int)ret);
+		return (int)ret;
+	}
+
+	rect = compute_zoom_rect(vpe_in_w, vpe_in_h, out_w, out_h, pct, x, y);
+	ret = MI_VPE_SetPortCrop(0, 1, &rect);
+	if (ret != 0) {
+		fprintf(stderr, "WARNING: zoom MI_VPE_SetPortCrop(1) failed %d\n",
+			(int)ret);
+		return (int)ret;
+	}
+
+	ret = MI_VPE_EnablePort(0, 1);
+	if (ret != 0) {
+		fprintf(stderr, "WARNING: zoom MI_VPE_EnablePort(1) failed %d\n",
+			(int)ret);
+		return (int)ret;
+	}
+
+	if (out_port) {
+		out_port->module = I6_SYS_MOD_VPE;
+		out_port->device = 0;
+		out_port->channel = 0;
+		out_port->port = 1;
+	}
+	printf("> ch1 zoom: VPE port 1 enabled, crop=%ux%u@(%u,%u) → %ux%u "
+		"(pct=%.3f x=%.3f y=%.3f)\n",
+		rect.width, rect.height, rect.x, rect.y, out_w, out_h,
+		pct, x, y);
+	return 0;
+}
+
 int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	uint32_t bitrate, uint32_t fps, double gop_sec,
-	const char *mode, const char *server, bool frame_lost)
+	const char *mode, const char *server, bool frame_lost,
+	double zoom_pct, double zoom_x, double zoom_y,
+	uint32_t zoom_out_w, uint32_t zoom_out_h)
 {
 	Star6eDualVenc *d;
 	MI_U32 dev = 0;
 	MI_VENC_CHN ch1 = 1;
 	uint32_t sensor_fps;
 	uint32_t gop;
+	uint32_t ch1_w, ch1_h;
+	int use_port1;
 	int ret;
 
 	if (!state || !mode)
@@ -1464,6 +1596,20 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	gop = (uint32_t)(gop_sec * fps + 0.5);
 	if (gop < 1) gop = fps;  /* default 1-second GOP */
 
+	use_port1 = (zoom_pct > 0.0);
+	/* ch1 output dims:
+	 *   - zoom active + override set : honor override (e.g. 1280×720
+	 *     to fit VPE bandwidth at high ch0 resolutions);
+	 *   - zoom active, no override   : match ch0 (legacy / matched-res);
+	 *   - zoom inactive (mirror)     : always match ch0. */
+	if (use_port1 && zoom_out_w >= 16 && zoom_out_h >= 16) {
+		ch1_w = zoom_out_w & ~1u;
+		ch1_h = zoom_out_h & ~1u;
+	} else {
+		ch1_w = state->image_width;
+		ch1_h = state->image_height;
+	}
+
 	d = calloc(1, sizeof(*d));
 	if (!d)
 		return -1;
@@ -1475,9 +1621,17 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	snprintf(d->mode, sizeof(d->mode), "%s", mode);
 	if (server)
 		snprintf(d->server, sizeof(d->server), "%s", server);
+	d->zoom_pct = zoom_pct;
+	d->zoom_x = zoom_x;
+	d->zoom_y = zoom_y;
+	d->vpe_in_w = state->active_precrop.w ? state->active_precrop.w
+	                                      : state->image_width;
+	d->vpe_in_h = state->active_precrop.h ? state->active_precrop.h
+	                                      : state->image_height;
+	d->out_w = ch1_w;
+	d->out_h = ch1_h;
 
-	ret = star6e_pipeline_start_venc(state->image_width,
-		state->image_height, bitrate, fps, gop,
+	ret = star6e_pipeline_start_venc(ch1_w, ch1_h, bitrate, fps, gop,
 		PT_H265, 3 /* CBR */, frame_lost, &d->channel);
 	if (ret != 0) {
 		fprintf(stderr, "WARNING: dual VENC ch1 create failed (%d), "
@@ -1491,11 +1645,33 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 		.module = I6_SYS_MOD_VENC, .device = dev,
 		.channel = d->channel, .port = 0 };
 
-	ret = MI_SYS_BindChnPort2(&state->vpe_port, &d->port,
+	/* Default source = VPE port 0 (mirror).  If zoom is requested,
+	 * try port 1 with a sub-rect crop; on any failure, fall back to
+	 * port 0 so the dual stream still comes up.  Port-0 fallback only
+	 * works when ch1 VENC dims match ch0 — caller's responsibility. */
+	d->vpe_src_port = state->vpe_port;
+	if (use_port1) {
+		MI_SYS_ChnPort_t p1;
+		if (zoom_enable_port1(d->vpe_in_w, d->vpe_in_h,
+		    ch1_w, ch1_h, zoom_pct, zoom_x, zoom_y,
+		    &p1) == 0) {
+			d->vpe_src_port = p1;
+			d->port1_active = 1;
+		} else {
+			fprintf(stderr, "WARNING: ch1 zoom setup failed; "
+				"falling back to mirror (port 0)\n");
+		}
+	}
+
+	ret = MI_SYS_BindChnPort2(&d->vpe_src_port, &d->port,
 		sensor_fps, fps, I6_SYS_LINK_FRAMEBASE, 0);
 	if (ret != 0) {
 		fprintf(stderr, "WARNING: dual VENC bind failed (%d), "
 			"falling back to mirror mode\n", ret);
+		if (d->port1_active) {
+			MI_VPE_DisablePort(0, 1);
+			d->port1_active = 0;
+		}
 		star6e_pipeline_stop_venc(d->channel);
 		free(d);
 		return -1;
@@ -1507,8 +1683,45 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	MI_SYS_SetChnOutputPortDepth(&d->port, 8, 56);
 
 	state->dual = d;
-	printf("> Dual VENC: ch1 = %u kbps %u fps (mode: %s)\n",
-		bitrate, fps, mode);
+	printf("> Dual VENC: ch1 = %u kbps %u fps (mode: %s)%s\n",
+		bitrate, fps, mode,
+		d->port1_active ? " [zoom]" : "");
+	return 0;
+}
+
+int star6e_pipeline_update_zoom(Star6ePipelineState *state,
+	double zoom_pct, double zoom_x, double zoom_y)
+{
+	Star6eDualVenc *d;
+	i6_common_rect rect;
+	MI_S32 ret;
+
+	if (!state || !state->dual)
+		return -1;
+	d = state->dual;
+
+	/* Topology change?  Switching ch1 between VPE port 0 and port 1
+	 * needs unbind/rebind; punt to restart. */
+	if ((zoom_pct > 0.0) != (d->port1_active != 0))
+		return -1;
+	if (!d->port1_active)
+		return -1;  /* nothing to update; rect is irrelevant */
+
+	rect = compute_zoom_rect(d->vpe_in_w, d->vpe_in_h,
+		d->out_w, d->out_h, zoom_pct, zoom_x, zoom_y);
+	ret = MI_VPE_SetPortCrop(0, 1, &rect);
+	if (ret != 0) {
+		fprintf(stderr, "WARNING: live MI_VPE_SetPortCrop(1) failed %d\n",
+			(int)ret);
+		return -1;
+	}
+	d->zoom_pct = zoom_pct;
+	d->zoom_x = zoom_x;
+	d->zoom_y = zoom_y;
+	printf("> ch1 zoom updated: crop=%ux%u@(%u,%u) "
+		"(pct=%.3f x=%.3f y=%.3f)\n",
+		rect.width, rect.height, rect.x, rect.y,
+		zoom_pct, zoom_x, zoom_y);
 	return 0;
 }
 
@@ -1526,8 +1739,12 @@ void star6e_pipeline_stop_dual(Star6ePipelineState *state)
 	 * is still feeding frames to VENC. */
 	MI_VENC_StopRecvPic(d->channel);
 	if (d->bound) {
-		MI_SYS_UnBindChnPort(&state->vpe_port, &d->port);
+		MI_SYS_UnBindChnPort(&d->vpe_src_port, &d->port);
 		d->bound = 0;
+	}
+	if (d->port1_active) {
+		MI_VPE_DisablePort(0, 1);
+		d->port1_active = 0;
 	}
 	MI_VENC_DestroyChn(d->channel);
 	free(d->stream_packs);

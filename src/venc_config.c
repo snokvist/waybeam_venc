@@ -150,6 +150,11 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->record.fps = 0;
 	cfg->record.gop_size = 0;
 	cfg->record.server[0] = '\0';
+	cfg->record.zoom_pct = 0.0;
+	cfg->record.zoom_x = 0.5;
+	cfg->record.zoom_y = 0.5;
+	cfg->record.zoom_out_w = 0;
+	cfg->record.zoom_out_h = 0;
 
 	/* scene detection (video0) */
 	cfg->video0.scene_threshold = 0;   /* 0 = off */
@@ -396,6 +401,20 @@ static void load_record(const cJSON *root, VencConfigRecord *s)
 	s->gop_size = json_get_double(obj, "gopSize", s->gop_size);
 	safe_strcpy(s->server, sizeof(s->server),
 		json_get_string(obj, "server", s->server));
+	s->zoom_pct = json_get_double(obj, "zoomPct", s->zoom_pct);
+	if (s->zoom_pct < 0.0) s->zoom_pct = 0.0;
+	if (s->zoom_pct > 0.0 && s->zoom_pct < 0.05) s->zoom_pct = 0.05;
+	if (s->zoom_pct > 1.0) s->zoom_pct = 1.0;
+	s->zoom_x = json_get_double(obj, "zoomX", s->zoom_x);
+	if (s->zoom_x < 0.0) s->zoom_x = 0.0;
+	if (s->zoom_x > 1.0) s->zoom_x = 1.0;
+	s->zoom_y = json_get_double(obj, "zoomY", s->zoom_y);
+	if (s->zoom_y < 0.0) s->zoom_y = 0.0;
+	if (s->zoom_y > 1.0) s->zoom_y = 1.0;
+	s->zoom_out_w = (uint32_t)json_get_int(obj, "zoomOutW",
+		(int)s->zoom_out_w);
+	s->zoom_out_h = (uint32_t)json_get_int(obj, "zoomOutH",
+		(int)s->zoom_out_h);
 }
 
 static void load_fpv(const cJSON *root, VencConfigFpv *s)
@@ -926,7 +945,12 @@ static void render_record(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "bitrate",    cfg->record.bitrate,     0);
 	pp_field_uint(p,   2, "fps",        cfg->record.fps,         0);
 	pp_field_double(p, 2, "gopSize",    cfg->record.gop_size,    0);
-	pp_field_string(p, 2, "server",     cfg->record.server,      1);
+	pp_field_string(p, 2, "server",     cfg->record.server,      0);
+	pp_field_double(p, 2, "zoomPct",    cfg->record.zoom_pct,    0);
+	pp_field_double(p, 2, "zoomX",      cfg->record.zoom_x,      0);
+	pp_field_double(p, 2, "zoomY",      cfg->record.zoom_y,      0);
+	pp_field_uint(p,   2, "zoomOutW",   cfg->record.zoom_out_w,  0);
+	pp_field_uint(p,   2, "zoomOutH",   cfg->record.zoom_out_h,  1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1101,6 +1125,11 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(rec, "fps", cfg->record.fps);
 		cJSON_AddNumberToObject(rec, "gopSize", cfg->record.gop_size);
 		cJSON_AddStringToObject(rec, "server", cfg->record.server);
+		cJSON_AddNumberToObject(rec, "zoomPct", cfg->record.zoom_pct);
+		cJSON_AddNumberToObject(rec, "zoomX", cfg->record.zoom_x);
+		cJSON_AddNumberToObject(rec, "zoomY", cfg->record.zoom_y);
+		cJSON_AddNumberToObject(rec, "zoomOutW", cfg->record.zoom_out_w);
+		cJSON_AddNumberToObject(rec, "zoomOutH", cfg->record.zoom_out_h);
 	}
 
 	/* debug */

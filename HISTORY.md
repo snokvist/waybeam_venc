@@ -1,5 +1,51 @@
 # History
 
+## [0.9.16] - 2026-05-03
+
+ch1 zoom (Star6E) — optional sub-rect crop for the dual / dual-stream
+record channel.  ch0 is untouched; ch1 binds to VPE port 1 with a
+configurable crop rect that the VPE scaler upscales back to ch1's image
+size, giving a separate zoomed-in stream / recording on top of the
+wide-FOV pilot view.
+
+Config: three new `record` fields.
+
+- `zoomPct` (double, 0 disabled, else 0.05..1.0): fraction of the VPE
+  input dimensions used as the crop rect.  Smaller = more zoom.
+- `zoomX`, `zoomY` (double, 0..1, defaults 0.5/0.5): fractional center
+  of the crop within the VPE input frame.
+
+When `zoomPct` is 0, ch1 mirrors ch0 (today's behavior — byte-identical
+behavior to 0.9.15).  When > 0, `start_dual` enables VPE port 1
+(`MI_VPE_SetPortMode` + `MI_VPE_SetPortCrop` + `MI_VPE_EnablePort`)
+and rebinds ch1 there.  Any failure during port-1 setup logs a warning
+and falls back to the existing port-0 mirror, so dual mode still comes
+up if the SDK rejects the rect.
+
+Live updates: `record.zoom_pct/x/y` are MUT_LIVE.  Pan/scale of an
+already-active zoom rect goes through `MI_VPE_SetPortCrop` without
+restart.  Toggling zoom on or off (pct 0 ↔ >0) flips ch1's port binding
+and is rejected at the live-apply layer — the field stages and the user
+restarts.
+
+Crop math: VPE alignment is enforced (16-px width/height, 8-px x/y) and
+upscale is capped at 2× (out_w / crop_w ≤ 2).  The 2× cap is empirical:
+on Star6E I6E with 1080p VPE input and 1280×720 ch1 output, ratios up to
+1.91× emitted frames, while 2.22× and higher silently produced zero
+output despite `MI_VPE_SetPortCrop` returning success.  pct values that
+would exceed the cap are grown to the smallest legal crop instead of
+producing a black stream.
+
+Maruko: not feasible with the current dual-VENC topology.  Maruko's ch1
+is sourced from VENC chn 0's encoded-output HW_RING fan-out (see
+`src/maruko_pipeline.c:1763-1776`); the SCL output port is held by chn 0
+in RING mode and cannot multi-consume.  ch1 therefore sees the exact same
+image as ch0 — there is no VPE/SCL stage in ch1's path where a crop could
+be inserted.  Per-channel zoom on Maruko would need either an MI_DIVP
+module between VPE and ch1, or a different dual-VENC topology that gives
+each channel an independent VPE port.  Both are bigger investigations and
+out of scope for this PR.
+
 ## [0.9.15] - 2026-05-02
 
 Maruko parity Phase 5 — audio capture (Opus / G.711 / raw PCM).

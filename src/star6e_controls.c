@@ -1027,6 +1027,14 @@ static int apply_mute(bool on)
 	return 0;
 }
 
+static int apply_zoom_rect(double pct, double x, double y)
+{
+	if (!g_star6e_control_ctx.pipeline)
+		return -1;
+	return star6e_pipeline_update_zoom(g_star6e_control_ctx.pipeline,
+		pct, x, y);
+}
+
 static const char *output_transport_name(const Star6eOutput *o)
 {
 	if (!o)
@@ -1156,6 +1164,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_max_payload_size = apply_max_payload_size,
 	.query_transport_status = query_transport_status,
 	.query_audio_status = query_audio_status,
+	.apply_zoom_rect = apply_zoom_rect,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

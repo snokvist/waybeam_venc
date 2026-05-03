@@ -56,6 +56,14 @@ typedef struct {
 	 * and Opus encoder availability.  Returns NULL when audio is
 	 * compiled out or the backend has no observability hook. */
 	char *(*query_audio_status)(void);
+	/* Apply ch1 zoom rect (record dual / dual-stream modes).  Args are the
+	 * staged record.zoom_pct / zoom_x / zoom_y values.  Returns 0 when the
+	 * change was applied via MI_VPE_SetPortCrop on the active ch1 binding,
+	 * -1 when the requested change would require a topology switch (port
+	 * binding flip between VPE port 0 ↔ port 1) and the caller should
+	 * instead persist + restart.  NULL on backends without dual VPE port
+	 * support. */
+	int (*apply_zoom_rect)(double pct, double x, double y);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

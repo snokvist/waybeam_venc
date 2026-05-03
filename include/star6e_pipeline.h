@@ -74,6 +74,23 @@ typedef struct Star6eDualVenc {
 	int is_dual_stream;
 	MI_VENC_Pack_t *stream_packs;     /* pre-allocated for rec thread */
 	uint32_t stream_packs_cap;
+	/* Zoom: when non-zero, ch1 is bound to VPE port 1 with a sub-rect crop
+	 * instead of mirroring port 0.  port1_active stays sticky for the
+	 * lifetime of the dual session — toggling zoom on/off needs restart. */
+	int port1_active;
+	MI_SYS_ChnPort_t vpe_src_port;  /* the VPE port ch1 is bound to: 0
+	                                 * (mirror) or 1 (zoom) */
+	double zoom_pct;
+	double zoom_x;
+	double zoom_y;
+	/* VPE input dimensions in the SetPortCrop coordinate system.  Filled
+	 * during start_dual; used by update_zoom to recompute the rect. */
+	uint32_t vpe_in_w;
+	uint32_t vpe_in_h;
+	/* ch1 output dims (port-1 SetPortMode target); needed if rect changes
+	 * so we can re-validate the upscale factor. */
+	uint32_t out_w;
+	uint32_t out_h;
 } Star6eDualVenc;
 
 /** Create secondary VENC channel and bind to VPE output.
@@ -81,7 +98,17 @@ typedef struct Star6eDualVenc {
  *  On failure, state->dual is NULL and pipeline operates in mirror mode. */
 int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	uint32_t bitrate, uint32_t fps, double gop_sec,
-	const char *mode, const char *server, bool frame_lost);
+	const char *mode, const char *server, bool frame_lost,
+	double zoom_pct, double zoom_x, double zoom_y,
+	uint32_t zoom_out_w, uint32_t zoom_out_h);
+
+/** Update the active ch1 zoom rect via MI_VPE_SetPortCrop.  Only succeeds
+ *  when ch1 is already bound to VPE port 1 (port1_active) AND the new
+ *  pct stays > 0.  Returns 0 on success, -1 when a topology switch is
+ *  required (caller must persist + restart) or when no dual session is
+ *  active. */
+int star6e_pipeline_update_zoom(Star6ePipelineState *state,
+	double zoom_pct, double zoom_x, double zoom_y);
 
 /** Tear down secondary VENC channel if active. */
 void star6e_pipeline_stop_dual(Star6ePipelineState *state);

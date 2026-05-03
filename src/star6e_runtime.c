@@ -532,7 +532,10 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			vcfg->record.bitrate, vcfg->record.fps,
 			vcfg->record.gop_size, vcfg->record.mode,
 			vcfg->record.server[0] ? vcfg->record.server : "",
-			vcfg->video0.frame_lost);
+			vcfg->video0.frame_lost,
+			vcfg->record.zoom_pct, vcfg->record.zoom_x,
+			vcfg->record.zoom_y,
+			vcfg->record.zoom_out_w, vcfg->record.zoom_out_h);
 
 		/* For dual-stream: init second RTP output */
 		if (ps->dual && strcmp(vcfg->record.mode, "dual-stream") == 0 &&

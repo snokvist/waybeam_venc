@@ -133,6 +133,20 @@ typedef struct {
 	uint32_t fps;             /* ch1 fps, 0=match sensor */
 	double gop_size;          /* ch1 GOP in seconds, 0=match ch0 */
 	char server[VENC_CONFIG_STRING_MAX]; /* dual-stream destination URI */
+	/* ch1 zoom (dual / dual-stream record modes only).  zoom_pct = 0 disables;
+	 * 0.05..1.0 = fraction of VPE input dimensions used as the crop rect.
+	 * zoom_x / zoom_y (0.0..1.0) place the crop rect's center within the
+	 * VPE input frame.  Activating or deactivating zoom (pct 0 ↔ >0) needs
+	 * a restart; panning/scaling an already-active rect is live. */
+	double zoom_pct;
+	double zoom_x;
+	double zoom_y;
+	/* ch1 zoom output resolution (port-1 SetPortMode target).  0 = match
+	 * ch0 image dims.  Lower than ch0 (e.g. 1280×720) reduces VPE scaler
+	 * bandwidth so the ISP→VPE FIFO doesn't overflow at high ch0
+	 * resolutions / fps. */
+	uint32_t zoom_out_w;
+	uint32_t zoom_out_h;
 } VencConfigRecord;
 
 typedef struct {
