@@ -29,6 +29,13 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
                                 const void *vpe_port);
 void debug_osd_destroy(DebugOsdState *osd);
 
+/** Move the canvas overlay to a new (x, y) within the channel.  Used by
+ *  the Star6E zoom path to keep the OSD canvas aligned with the SCL crop
+ *  rect — without this, MI_RGN renders the canvas at (0,0) of the VPE
+ *  channel and the SCL crop slices the OSD in half (or misses it).  No-op
+ *  on Maruko (canvas attaches to SCL output, already 1:1 with frame). */
+void debug_osd_set_offset(DebugOsdState *osd, uint16_t x, uint16_t y);
+
 /** Frame lifecycle — bracket all draw calls between begin/end. */
 void debug_osd_begin_frame(DebugOsdState *osd);
 void debug_osd_end_frame(DebugOsdState *osd);
