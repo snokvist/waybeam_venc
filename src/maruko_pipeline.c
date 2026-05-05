@@ -2793,6 +2793,47 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	(void)maruko_mi_venc_release_stream(ctx->venc_device,
 		ctx->venc_channel, &stream);
 
+	/* HTTP record control: drain the start/stop request flags so they
+	 * never accumulate across reinit, then act only when this runtime
+	 * actually owns the recorder.  Maruko's chn 1 drain thread (dual
+	 * mode) writes the TS file directly — same race rationale as the
+	 * `if (!ctx->dual)` guard on the chn 0 write above.  Format check
+	 * mirrors the config-driven start path: only TS is implemented on
+	 * Maruko, HEVC raw recording is Star6E-only. */
+	if (!ctx->dual) {
+		char rec_dir[256];
+		int start_pending = venc_api_get_record_start(rec_dir,
+			sizeof(rec_dir));
+		int stop_pending = venc_api_get_record_stop();
+
+		if ((start_pending || stop_pending) &&
+		    strcmp(ctx->cfg.record.format, "ts") != 0) {
+			fprintf(stderr,
+				"WARNING: [maruko] HTTP record control "
+				"ignored: format='%s' not supported "
+				"(TS only)\n", ctx->cfg.record.format);
+		} else {
+			if (start_pending) {
+				star6e_ts_recorder_stop(&ctx->ts_recorder);
+				ctx->audio.rec_ring = ctx->audio.started
+					? &ctx->audio_recorder_ring : NULL;
+				if (star6e_ts_recorder_start(&ctx->ts_recorder,
+				    rec_dir,
+				    ctx->audio.started
+					? &ctx->audio_recorder_ring
+					: NULL) == 0) {
+					(void)maruko_mi_venc_request_idr(
+						ctx->venc_device,
+						ctx->venc_channel, 1);
+				}
+			}
+			if (stop_pending) {
+				star6e_ts_recorder_stop(&ctx->ts_recorder);
+				ctx->audio.rec_ring = NULL;
+			}
+		}
+	}
+
 	if (sidecar_subscribed) {
 		RtpSidecarTransportInfo tinfo;
 		const RtpSidecarTransportInfo *tinfo_ptr = NULL;

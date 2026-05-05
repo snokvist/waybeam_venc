@@ -1,5 +1,27 @@
 # History
 
+## [0.10.2] - 2026-05-05
+
+Maruko: HTTP record control (`/api/v1/record/start` and `/stop`).
+
+The Maruko backend previously returned 501 "HTTP record control not
+available on this backend" for both endpoints — the WebUI dashboard
+record buttons were dead.  The HTTP request flags are now drained in
+the chn 0 drain loop, gated by the same `!ctx->dual` guard that
+protects the chn 0 TS write (the dual chn 1 drain thread owns the
+recorder when active).  Behaviour matches Star6E:
+
+- `/record/start` rotates an existing segment cleanly (back-to-back
+  starts open a new file each time) and requests an IDR so the new
+  segment begins on a keyframe.
+- `/record/stop` closes the segment and clears the audio recorder
+  ring pointer.
+- `record.format != "ts"` (i.e. `"hevc"`) drains the flags but logs
+  a warning — Maruko has no raw HEVC recorder.
+
+Verified on 192.168.2.12: HEVC + Opus TS files written via WebUI
+controls.
+
 ## [0.10.1] - 2026-05-05
 
 TS recorder: universally-decodable audio in `.ts` files.

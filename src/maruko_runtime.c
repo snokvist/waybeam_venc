@@ -89,6 +89,7 @@ static int maruko_runner_init(void *opaque)
 	venc_api_set_config_path(VENC_CONFIG_DEFAULT_PATH);
 	g_maruko_runner_ctx = ctx;
 	venc_api_set_record_status_fn(maruko_record_status_callback);
+	venc_api_set_record_http_control_supported(true);
 	if (ctx->vcfg.video0.qp_delta != 0 &&
 	    maruko_controls_callbacks()->apply_qp_delta) {
 		maruko_controls_callbacks()->apply_qp_delta(
