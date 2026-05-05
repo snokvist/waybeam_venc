@@ -78,7 +78,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.1.7",
-    "contract_version": "0.10.0",
+    "contract_version": "0.10.1",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1246,7 +1246,7 @@ Behavior:
 ### Backend Support Matrix
 
 Endpoints that behave the same on both backends are omitted.  Only feature
-divergence is listed.  As of `contract_version: 0.10.0`:
+divergence is listed.  As of `contract_version: 0.10.1`:
 
 | Feature / Endpoint | Star6E | Maruko | Notes |
 |---|---|---|---|

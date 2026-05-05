@@ -33,9 +33,14 @@ Two related issues fixed:
   `/dual/set` always short-circuited to 404 on Maruko before the
   bad call.  `/dual/idr` is single-arg and works on both.
 
-Verified on 192.168.1.13 (Star6E) with `record.mode = "off"`,
-`"mirror"`, `"dual"`, and `"dual-stream"`, and on 192.168.2.12
-(Maruko) with the same matrix.
+Verified on 192.168.1.13 (Star6E) with `record.mode` in `{off, dual}`
+— `/dual/status` returns `active:false` and `active:true` respectively;
+`/dual/set?bitrate=8000` and `/dual/idr` both return 200 in dual mode.
+Verified on 192.168.2.12 (Maruko) with `record.mode` in `{off,
+dual-stream}` — same status shape, `/dual/idr` returns 200, `/dual/set`
+returns 501.  `dual` mode (TS file write) was not exercised on Maruko
+because `record.dir=/tmp` is tmpfs there and fills RAM under load;
+`dual-stream` exercises the same `venc_api_dual_register` path.
 
 ## [0.10.3] - 2026-05-05
 
