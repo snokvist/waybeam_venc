@@ -238,6 +238,34 @@ Star6E ssc338q + imx335, 1920x1080 CBR, audio enabled:
 
 Recording overhead is 0-4% CPU across all tested configurations.
 
+## Synthetic Benchmark (POC)
+
+`tools/record_bench.c` is a self-contained POC that mimics the production
+recorder's I/O pattern (per-frame TS-aligned `write()`, `sync_file_range`
+cadence, `fdatasync` at rotation, `statvfs` polling) without needing the
+encoder pipeline. Point it at a directory and it reports per-frame write
+latency, throughput, CPU usage, and a guesstimated max bitrate for mirror
+recording.
+
+```bash
+# Build for Star6E and copy to device
+make record-bench-star6e
+scp -O record_bench.star6e root@<host>:/tmp/record_bench
+
+# Single-shot at a fixed bitrate
+ssh root@<host> '/tmp/record_bench --dir /mnt/mmcblk0p1 \
+    --bitrate 20000 --fps 60 --duration 20'
+
+# Sweep to find the highest sustainable bitrate
+ssh root@<host> '/tmp/record_bench --dir /mnt/mmcblk0p1 \
+    --fps 60 --sweep --sweep-max 80000'
+```
+
+Sustainability bar: throughput ≥ 95 % of target, p99 frame write < 50 % of
+the frame budget (`1/fps`), and stalls < 1 % of frames. The recommended
+max is 90 % of the highest passing step to leave headroom for the encoder,
+RTP send, and audio mux that share the same wall clock.
+
 ## Limitations
 
 - **Audio codec**: only raw PCM (16-bit signed, mono/stereo) is muxed into the

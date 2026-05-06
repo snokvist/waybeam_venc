@@ -115,6 +115,19 @@ $(TARGET): $(SRC) include/backend.h include/codec_config.h include/codec_types.h
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
 
+# Synthetic recording I/O benchmark (single-file, no SDK deps).
+# Host build for self-test:
+record-bench: tools/record_bench.c
+	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE tools/record_bench.c -o record_bench
+
+# Star6E target build (drop-on-device).
+record-bench-star6e: tools/record_bench.c $(TOOLCHAIN_TARGET)
+	$(STAR6E_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE tools/record_bench.c -o record_bench.star6e
+
+# Maruko target build.
+record-bench-maruko: tools/record_bench.c toolchain-maruko
+	$(MARUKO_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE tools/record_bench.c -o record_bench.maruko
+
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
 	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi
