@@ -7,6 +7,11 @@ out/
 
 tools/ioctl_trace_preload.so
 
+# record_bench output binaries
+record_bench
+record_bench.star6e
+record_bench.maruko
+
 tests/test_runner
 tests/test_imu_ring
 

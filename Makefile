@@ -262,4 +262,5 @@ clean:
 	rm -rf out/star6e out/maruko
 	rm -f $(TIMING_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
+	rm -f record_bench record_bench.star6e record_bench.maruko
 	rm -f .build_soc

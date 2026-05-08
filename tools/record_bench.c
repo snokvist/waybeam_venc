@@ -8,24 +8,8 @@
  * bitrate/fps, then report write latency, throughput, CPU usage, and a
  * guesstimated max sustainable bitrate for mirror recording.
  *
- * Build (host, for unit-testing the tool itself):
- *   cc -O2 -std=c99 -D_GNU_SOURCE -o record_bench tools/record_bench.c
- *
- * Build (Star6E target):
- *   toolchain/toolchain.sigmastar-infinity6e/bin/arm-openipc-linux-gnueabihf-gcc \
- *       -O2 -std=c99 -D_GNU_SOURCE -o record_bench tools/record_bench.c
- *
- * Build (Maruko target):
- *   toolchain/toolchain.sigmastar-infinity6c/bin/arm-openipc-linux-musleabihf-gcc \
- *       -O2 -std=c99 -D_GNU_SOURCE -o record_bench tools/record_bench.c
- *
- * Run on device:
- *   scp -O record_bench root@<host>:/tmp/
- *   ssh root@<host> '/tmp/record_bench --dir /mnt/mmcblk0p1 \
- *       --bitrate 20000 --fps 60 --duration 20'
- *
- * Sweep mode (find max sustainable bitrate):
- *   /tmp/record_bench --dir /mnt/mmcblk0p1 --fps 60 --sweep
+ * Build via Makefile targets: `record-bench` (host), `record-bench-star6e`,
+ * `record-bench-maruko`.  See documentation/SD_CARD_RECORDING.md for usage.
  *
  * The benchmark generates pseudo-random frame payloads (incompressible, so
  * the SD card's controller cannot cheat with internal compression) and
@@ -40,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -58,10 +43,22 @@
 #define DEFAULT_SYNC_INTERVAL_FRAMES  900
 #define DEFAULT_SPACE_CHECK_FRAMES    300
 #define MIN_FREE_BYTES                (50ULL * 1024 * 1024)
-#define MAX_FRAME_BYTES               (512 * 1024)   /* recorder NAL cap */
+/* Match production TS_BUF_SIZE in src/star6e_ts_recorder.c (3000 × 188).
+ * The real recorder can emit a single drained-audio + IDR write of this
+ * size; the bench should be able to simulate the same shape. */
+#define MAX_FRAME_BYTES               (3000 * TS_PACKET_SIZE)   /* 564000 */
 
 /* Bench-only tuning. */
 #define MAX_LATENCY_SAMPLES           (1u << 18)     /* 262 144 frames */
+#define SEGMENT_PATH_MAX              512
+
+static volatile sig_atomic_t g_interrupted;
+
+static void on_sigint(int sig)
+{
+	(void)sig;
+	g_interrupted = 1;
+}
 
 typedef struct {
 	const char *dir;
@@ -74,6 +71,7 @@ typedef struct {
 	uint32_t    sync_interval;
 	bool        keep_files;
 	bool        json;
+	bool        no_audio;
 	/* Sweep mode */
 	bool        sweep;
 	uint32_t    sweep_start_kbps;
@@ -101,9 +99,13 @@ typedef struct {
 	uint64_t stalls;          /* frames whose write exceeded budget */
 	double   frame_budget_us;
 	double   final_fsync_us;
+	double   rotation_fsync_mean_us;
+	double   rotation_fsync_max_us;
+	uint32_t rotation_fsync_count;
 	uint64_t free_before;
 	uint64_t free_after;
 	int      errno_at_failure;
+	bool     interrupted;
 	bool     ok;
 } BenchResult;
 
@@ -211,21 +213,71 @@ static size_t frame_bytes_for(uint32_t bitrate_kbps, uint32_t audio_kbps,
 
 /* ── Single benchmark run ────────────────────────────────────────────── */
 
+/* Segment-path tracker.  Every segment opened goes here; cleanup walks the
+ * full list so multi-rotation runs don't leak files on the SD card.
+ * Capacity grows geometrically. */
+typedef struct {
+	char   **paths;
+	size_t   count;
+	size_t   cap;
+} PathList;
+
+static int path_list_push(PathList *pl, const char *p)
+{
+	if (pl->count == pl->cap) {
+		size_t ncap = pl->cap ? pl->cap * 2 : 8;
+		char **np = realloc(pl->paths, ncap * sizeof(*np));
+		if (!np)
+			return -1;
+		pl->paths = np;
+		pl->cap = ncap;
+	}
+	pl->paths[pl->count] = strdup(p);
+	if (!pl->paths[pl->count])
+		return -1;
+	pl->count++;
+	return 0;
+}
+
+static void path_list_unlink_all(PathList *pl)
+{
+	for (size_t i = 0; i < pl->count; i++)
+		(void)unlink(pl->paths[i]);
+}
+
+static void path_list_free(PathList *pl)
+{
+	for (size_t i = 0; i < pl->count; i++)
+		free(pl->paths[i]);
+	free(pl->paths);
+	pl->paths = NULL;
+	pl->count = pl->cap = 0;
+}
+
 static int open_segment(const char *dir, uint32_t segment_idx,
-	char *path_out, size_t path_cap)
+	char *path_out, size_t path_cap, PathList *pl)
 {
 	const char *sep = (dir[strlen(dir) - 1] == '/') ? "" : "/";
+	/* Mix monotonic nanoseconds with PID so two parallel ssh sessions
+	 * (or repeated runs that hit the same µs window) don't collide. */
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	unsigned int rand_suffix = (unsigned int)(ts.tv_nsec / 1000) & 0xFFFF;
+	unsigned int rand_suffix =
+		(unsigned int)((ts.tv_nsec ^ (long)getpid()) & 0xFFFF);
 
 	snprintf(path_out, path_cap, "%s%srecbench_%03u_%04x.ts",
 		dir, sep, segment_idx, rand_suffix);
 
 	int fd = open(path_out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (fd < 0)
+	if (fd < 0) {
 		fprintf(stderr, "[bench] open %s failed: %s\n", path_out,
 			strerror(errno));
+		return fd;
+	}
+	if (pl && path_list_push(pl, path_out) != 0) {
+		fprintf(stderr, "[bench] path tracker oom; "
+			"file may not be cleaned: %s\n", path_out);
+	}
 	return fd;
 }
 
@@ -237,7 +289,8 @@ static int run_bench(const BenchOpts *opts, uint32_t bitrate_kbps,
 	out->fps = opts->fps;
 	out->frame_budget_us = 1e6 / (double)opts->fps;
 
-	size_t frame_bytes = frame_bytes_for(bitrate_kbps, opts->audio_kbps,
+	uint32_t audio_kbps = opts->no_audio ? 0 : opts->audio_kbps;
+	size_t frame_bytes = frame_bytes_for(bitrate_kbps, audio_kbps,
 		opts->fps);
 	uint64_t target_frames = (uint64_t)opts->fps * duration_s;
 	if (target_frames == 0)
@@ -278,13 +331,19 @@ static int run_bench(const BenchOpts *opts, uint32_t bitrate_kbps,
 		return -1;
 	}
 
-	char path[512];
+	PathList segs = { 0 };
+	uint32_t rotation_count = 0;
+	double rotation_sum_us = 0.0;
+	double rotation_max_us = 0.0;
+
+	char path[SEGMENT_PATH_MAX];
 	uint32_t segment_idx = 0;
 	int fd = open_segment(opts->dir, segment_idx, path,
-		sizeof(path));
+		sizeof(path), &segs);
 	if (fd < 0) {
 		free(buf);
 		free(samples);
+		path_list_free(&segs);
 		return -1;
 	}
 
@@ -308,6 +367,11 @@ static int run_bench(const BenchOpts *opts, uint32_t bitrate_kbps,
 	out->ok = true;
 	uint64_t f;
 	for (f = 0; f < target_frames; f++) {
+		if (g_interrupted) {
+			out->interrupted = true;
+			out->ok = false;
+			break;
+		}
 		/* Pace to fps so the SD card sees bursts the way the encoder
 		 * would actually deliver them.  Don't sleep the slack away
 		 * if we're already late — that mimics encoder backpressure. */
@@ -344,6 +408,10 @@ static int run_bench(const BenchOpts *opts, uint32_t bitrate_kbps,
 			max_us = dt_us;
 		if (dt_us > out->frame_budget_us)
 			stalls++;
+		/* Mean/max/stalls use every frame.  Percentiles use a strided
+		 * subset when the run exceeds MAX_LATENCY_SAMPLES (≈ 73 min @
+		 * 60 fps); the stride keeps memory bounded without skewing the
+		 * distribution. */
 		if (samples && (f % stride) == 0 && sample_n < sample_cap)
 			samples[sample_n++] = (uint32_t)
 				(dt_us > (double)UINT32_MAX
@@ -380,11 +448,21 @@ static int run_bench(const BenchOpts *opts, uint32_t bitrate_kbps,
 		    && (f - segment_start_frame) >= rotate_frames)
 			rotate = true;
 		if (rotate) {
+			/* Time the rotation fdatasync — the production recorder
+			 * pays this cost too and it's invisible in per-frame
+			 * latency (the write clock has already stopped). */
+			double rfs_start = monotonic_now_s();
 			fdatasync(fd);
+			double rfs_us =
+				(monotonic_now_s() - rfs_start) * 1e6;
 			close(fd);
+			rotation_count++;
+			rotation_sum_us += rfs_us;
+			if (rfs_us > rotation_max_us)
+				rotation_max_us = rfs_us;
 			segment_idx++;
 			fd = open_segment(opts->dir, segment_idx, path,
-				sizeof(path));
+				sizeof(path), &segs);
 			if (fd < 0) {
 				out->ok = false;
 				break;
@@ -436,25 +514,16 @@ static int run_bench(const BenchOpts *opts, uint32_t bitrate_kbps,
 		out->p99_us = percentile_us(samples, sample_n, 0.99);
 	}
 
+	out->rotation_fsync_count = rotation_count;
+	out->rotation_fsync_max_us = rotation_max_us;
+	out->rotation_fsync_mean_us = rotation_count
+		? (rotation_sum_us / (double)rotation_count) : 0.0;
+
 	out->free_after = free_bytes(opts->dir);
 
-	if (!opts->keep_files) {
-		for (uint32_t i = 0; i <= segment_idx; i++) {
-			char p[512];
-			const char *sep = (opts->dir[strlen(opts->dir) - 1] == '/')
-				? "" : "/";
-			/* We don't know the rand suffix any more; glob-delete
-			 * by prefix.  Simpler: track the last path only and
-			 * remove all bench files in dir. */
-			(void)p; (void)sep; (void)i;
-		}
-		/* Cheap cleanup: remove any recbench_*.ts in dir via shell
-		 * is overkill; instead remember segment paths. We only know
-		 * the most recent path here.  For simplicity, remove the
-		 * most recent file; a longer run will leak prior segments,
-		 * which is acceptable for a POC. */
-		(void)unlink(path);
-	}
+	if (!opts->keep_files)
+		path_list_unlink_all(&segs);
+	path_list_free(&segs);
 
 	free(buf);
 	free(samples);
@@ -463,12 +532,17 @@ static int run_bench(const BenchOpts *opts, uint32_t bitrate_kbps,
 
 /* ── Reporting ───────────────────────────────────────────────────────── */
 
+static uint32_t effective_audio_kbps(const BenchOpts *opts)
+{
+	return opts->no_audio ? 0u : opts->audio_kbps;
+}
+
 static void print_human(const BenchResult *r, const BenchOpts *opts)
 {
 	printf("\n=== record_bench result ===\n");
 	printf("  dir              : %s\n", opts->dir);
 	printf("  bitrate target   : %u kbps (+%u kbps audio)\n",
-		r->bitrate_kbps, opts->audio_kbps);
+		r->bitrate_kbps, effective_audio_kbps(opts));
 	printf("  fps              : %u (frame budget %.0f us)\n",
 		r->fps, r->frame_budget_us);
 	printf("  frames written   : %" PRIu64 " in %u segments\n",
@@ -486,13 +560,21 @@ static void print_human(const BenchResult *r, const BenchOpts *opts)
 	printf("  stalls (>budget) : %" PRIu64 " (%.2f%% of frames)\n",
 		r->stalls,
 		r->frames ? 100.0 * (double)r->stalls / (double)r->frames : 0.0);
+	if (r->rotation_fsync_count > 0)
+		printf("  rotation fdatasync : %u events  mean %.1f ms  "
+			"max %.1f ms\n",
+			r->rotation_fsync_count,
+			r->rotation_fsync_mean_us / 1000.0,
+			r->rotation_fsync_max_us / 1000.0);
 	printf("  final fdatasync  : %.1f ms\n", r->final_fsync_us / 1000.0);
 	printf("  free space delta : %.1f MiB used (%.1f -> %.1f MiB free)\n",
 		(double)((int64_t)r->free_before - (int64_t)r->free_after)
 			/ 1048576.0,
 		(double)r->free_before / 1048576.0,
 		(double)r->free_after / 1048576.0);
-	if (!r->ok)
+	if (r->interrupted)
+		printf("  status           : INTERRUPTED (SIGINT)\n");
+	else if (!r->ok)
 		printf("  status           : FAILED (errno=%d %s)\n",
 			r->errno_at_failure,
 			r->errno_at_failure ? strerror(r->errno_at_failure)
@@ -502,9 +584,10 @@ static void print_human(const BenchResult *r, const BenchOpts *opts)
 static void print_json(const BenchResult *r, const BenchOpts *opts)
 {
 	printf("{");
+	printf("\"type\":\"step\",");
 	printf("\"dir\":\"%s\",", opts->dir);
 	printf("\"bitrate_kbps\":%u,", r->bitrate_kbps);
-	printf("\"audio_kbps\":%u,", opts->audio_kbps);
+	printf("\"audio_kbps\":%u,", effective_audio_kbps(opts));
 	printf("\"fps\":%u,", r->fps);
 	printf("\"frames\":%" PRIu64 ",", r->frames);
 	printf("\"segments\":%u,", r->segments);
@@ -521,9 +604,16 @@ static void print_json(const BenchResult *r, const BenchOpts *opts)
 	printf("\"latency_max_us\":%.0f,", r->max_us);
 	printf("\"frame_budget_us\":%.0f,", r->frame_budget_us);
 	printf("\"stalls\":%" PRIu64 ",", r->stalls);
+	printf("\"rotation_fsync_count\":%u,", r->rotation_fsync_count);
+	printf("\"rotation_fsync_mean_ms\":%.2f,",
+		r->rotation_fsync_mean_us / 1000.0);
+	printf("\"rotation_fsync_max_ms\":%.2f,",
+		r->rotation_fsync_max_us / 1000.0);
 	printf("\"final_fdatasync_ms\":%.2f,", r->final_fsync_us / 1000.0);
 	printf("\"free_before\":%" PRIu64 ",", r->free_before);
 	printf("\"free_after\":%" PRIu64 ",", r->free_after);
+	printf("\"errno\":%d,", r->errno_at_failure);
+	printf("\"interrupted\":%s,", r->interrupted ? "true" : "false");
 	printf("\"ok\":%s", r->ok ? "true" : "false");
 	printf("}\n");
 }
@@ -557,12 +647,17 @@ static int run_sweep(const BenchOpts *opts)
 {
 	uint32_t last_ok = 0;
 	uint32_t first_fail = 0;
+	bool interrupted = false;
 	BenchResult last_ok_result;
 	memset(&last_ok_result, 0, sizeof(last_ok_result));
 
 	for (uint32_t kbps = opts->sweep_start_kbps;
 	     kbps <= opts->sweep_max_kbps;
 	     kbps += opts->sweep_step_kbps) {
+		if (g_interrupted) {
+			interrupted = true;
+			break;
+		}
 		fprintf(stderr, "[bench] sweep step: %u kbps for %u s\n",
 			kbps, opts->sweep_duration_s);
 		BenchResult r;
@@ -572,7 +667,11 @@ static int run_sweep(const BenchOpts *opts)
 		else
 			print_human(&r, opts);
 
-		if (rc == 0 && sustainable(&r, opts->audio_kbps)) {
+		if (r.interrupted) {
+			interrupted = true;
+			break;
+		}
+		if (rc == 0 && sustainable(&r, effective_audio_kbps(opts))) {
 			last_ok = kbps;
 			last_ok_result = r;
 		} else {
@@ -581,11 +680,38 @@ static int run_sweep(const BenchOpts *opts)
 		}
 	}
 
+	uint32_t recommended = last_ok
+		? (uint32_t)((double)last_ok * 0.9) : 0u;
+	bool reached_max = (last_ok > 0) && (first_fail == 0) && !interrupted;
+
+	if (opts->json) {
+		printf("{");
+		printf("\"type\":\"summary\",");
+		printf("\"highest_sustainable_kbps\":%u,", last_ok);
+		printf("\"first_failing_kbps\":%u,", first_fail);
+		printf("\"recommended_max_kbps\":%u,", recommended);
+		printf("\"reached_sweep_max\":%s,",
+			reached_max ? "true" : "false");
+		printf("\"interrupted\":%s,",
+			interrupted ? "true" : "false");
+		printf("\"last_ok_p99_us\":%.0f,", last_ok_result.p99_us);
+		printf("\"last_ok_cpu_pct\":%.2f,", last_ok_result.cpu_pct);
+		printf("\"last_ok_throughput_mb_s\":%.3f",
+			last_ok_result.throughput_mb_s);
+		printf("}\n");
+		return last_ok ? 0 : 1;
+	}
+
 	printf("\n=== sweep summary ===\n");
 	if (last_ok == 0) {
-		printf("  No bitrate met the sustainability bar (start=%u kbps).\n"
-			"  Try lowering --sweep-start or increasing --sweep-step.\n",
-			opts->sweep_start_kbps);
+		if (interrupted)
+			printf("  Interrupted before any step completed.\n");
+		else
+			printf("  No bitrate met the sustainability bar "
+				"(start=%u kbps).\n"
+				"  Try lowering --sweep-start or increasing "
+				"--sweep-step.\n",
+				opts->sweep_start_kbps);
 		return 1;
 	}
 	printf("  Highest sustainable : %u kbps  (%.2f Mbps)\n",
@@ -595,11 +721,12 @@ static int run_sweep(const BenchOpts *opts)
 	printf("    cpu               : %.1f%%\n", last_ok_result.cpu_pct);
 	printf("    throughput        : %.2f MB/s\n",
 		last_ok_result.throughput_mb_s);
-	if (first_fail) {
+	if (interrupted) {
+		printf("  Interrupted (SIGINT) before sweep finished.\n");
+	} else if (first_fail) {
 		printf("  First failing step : %u kbps\n", first_fail);
 		printf("  Recommended max    : %u kbps  (90%% of last good "
-			"for safety margin)\n",
-			(uint32_t)((double)last_ok * 0.9));
+			"for safety margin)\n", recommended);
 	} else {
 		printf("  Reached --sweep-max without failing; the SD/storage\n"
 			"  has more headroom — raise --sweep-max to keep going.\n");
@@ -617,14 +744,20 @@ static void usage(const char *argv0)
 "Single-shot options:\n"
 "  --dir <path>            Output directory (must exist, writable)\n"
 "  --bitrate <kbps>        Video bitrate to simulate (default 20000)\n"
-"  --audio-kbps <kbps>     Audio bitrate overhead (default 1500 ~= 48k stereo s16)\n"
+"  --audio-kbps <kbps>     Audio bitrate overhead (default 1536 = 48k stereo s16)\n"
+"  --no-audio              Disable audio overhead (overrides --audio-kbps)\n"
 "  --fps <n>               Frame rate (default 60)\n"
 "  --duration <s>          Run length in seconds (default 20)\n"
 "  --rotate-mb <n>         Segment size MiB, 0=disabled (default 500)\n"
 "  --rotate-secs <n>       Segment time seconds, 0=disabled (default 0)\n"
 "  --sync-interval <n>     sync_file_range every N frames (default 900)\n"
 "  --keep-files            Don't unlink the .ts file at the end\n"
-"  --json                  Emit a JSON line per result\n"
+"  --json                  Emit a JSON line per result + summary\n"
+"\n"
+"Frame size cap:\n"
+"  The simulated per-frame write is capped at 564000 bytes (3000 × 188),\n"
+"  matching production TS_BUF_SIZE. At 60 fps that limits the simulated\n"
+"  bitrate to ~270 Mbps; raise --fps to probe higher card throughputs.\n"
 "\n"
 "Sweep mode (find max sustainable bitrate):\n"
 "  --sweep                 Enable sweep\n"
@@ -654,7 +787,7 @@ int main(int argc, char **argv)
 	BenchOpts opts;
 	memset(&opts, 0, sizeof(opts));
 	opts.bitrate_kbps      = 20000;
-	opts.audio_kbps        = 1500;
+	opts.audio_kbps        = 1536;        /* 48k stereo s16 */
 	opts.fps               = 60;
 	opts.duration_s        = 20;
 	opts.rotate_mb         = 500;
@@ -680,6 +813,7 @@ int main(int argc, char **argv)
 		if (!strcmp(a, "--dir"))             { NEEDARG(); opts.dir = next; i++; }
 		else if (!strcmp(a, "--bitrate"))    U32(bitrate_kbps);
 		else if (!strcmp(a, "--audio-kbps")) U32(audio_kbps);
+		else if (!strcmp(a, "--no-audio"))   opts.no_audio = true;
 		else if (!strcmp(a, "--fps"))        U32(fps);
 		else if (!strcmp(a, "--duration"))   U32(duration_s);
 		else if (!strcmp(a, "--rotate-mb"))  U32(rotate_mb);
@@ -723,10 +857,20 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/* Catch Ctrl-C so the in-flight segment(s) get cleaned up instead
+	 * of leaking on the SD card.  SA_RESETHAND so a second Ctrl-C kills
+	 * us hard if the first didn't make it out of a stuck syscall. */
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_sigint;
+	sa.sa_flags = SA_RESETHAND;
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+
 	fprintf(stderr,
-		"[bench] dir=%s fps=%u sync_interval=%u rotate=%uMB/%us\n",
+		"[bench] dir=%s fps=%u sync_interval=%u rotate=%uMB/%us%s\n",
 		opts.dir, opts.fps, opts.sync_interval, opts.rotate_mb,
-		opts.rotate_secs);
+		opts.rotate_secs, opts.no_audio ? " no-audio" : "");
 
 	if (opts.sweep)
 		return run_sweep(&opts);
@@ -738,9 +882,9 @@ int main(int argc, char **argv)
 	else
 		print_human(&r, &opts);
 
-	if (rc == 0) {
+	if (rc == 0 && !opts.json) {
 		printf("\nGuesstimate for mirror recording:\n");
-		if (sustainable(&r, opts.audio_kbps)) {
+		if (sustainable(&r, effective_audio_kbps(&opts))) {
 			printf("  %u kbps appears SUSTAINABLE on this medium.\n"
 				"  Conservative max ~%u kbps (90%% of target).\n"
 				"  Run --sweep to probe the true ceiling.\n",
@@ -755,5 +899,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (r.interrupted)
+		return 130;
 	return rc == 0 ? 0 : 1;
 }
