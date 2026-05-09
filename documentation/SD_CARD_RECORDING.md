@@ -114,6 +114,12 @@ at different bitrates/fps/GOP settings. The primary channel (ch0) uses
 This enables streaming at 30fps 4 Mbps over a constrained WiFi link while
 simultaneously recording at 120fps 20 Mbps to SD card.
 
+When `debug.showOsd` is enabled, the debug OSD renders only on ch0 in
+`dual` and `dual-stream` modes — ch1 receives clean frames.  This is
+because the MI_RGN region attaches at VENC ch0, not at the VPE port.
+In `mirror` mode the OSD continues to appear in the recording (ch0 is
+the recorded channel).
+
 In **dual-stream** mode, both channels stream via RTP to different
 destinations. Ch0 uses `outgoing.server`, ch1 uses `record.server`.
 No recording to SD card.

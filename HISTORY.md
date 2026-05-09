@@ -1,5 +1,28 @@
 # History
 
+## [0.10.7] - 2026-05-09
+
+Star6E debug OSD now attaches to VENC ch0 (not VPE port 0).  In
+`record.mode = "dual"` and `"dual-stream"`, this keeps the debug
+overlay off the recording / second-stream channel while the live ch0
+stream still shows it.  `mirror` mode is unaffected because ch0 is
+the recorded channel.
+
+- `src/debug_osd.c` (Star6E branch): bind module changed from RGN
+  module ID 0 (VPE) to 6 (VENC), channel 0.  On `MI_RGN_AttachToChn`
+  failure the code falls back to the legacy VPE port 0 attach and
+  logs a warning, so a wrong module-ID assumption degrades to
+  current behaviour rather than killing the OSD.  Renamed the bind
+  field `vpe_bind` → `rgn_bind`.
+- The `[debug_osd] overlay …` startup line now reports the active
+  attach point (`attach=VENC.ch0` or `attach=VPE.port0`) so a
+  fallback is visible in `/tmp/venc.log` without grep gymnastics.
+- `documentation/DEBUG_OSD_PLAN.md`, `documentation/SD_CARD_RECORDING.md`
+  updated.  New `documentation/OSD_VENC_ATTACH_TEST_PLAN.md` carries
+  the on-device test plan for the next session.
+- Maruko backend untouched (already attaches at SCL; no recording
+  feature to isolate yet).
+
 ## [0.10.6] - 2026-05-07
 
 `isp.sensor_bin` is now a live mutable field on both backends.

@@ -1,8 +1,17 @@
 # Debug OSD
 
-Debug-only on-screen overlay for waybeam_venc. Renders directly into the
-video stream via SigmaStar MI_RGN canvas on VPE channel 0. Disabled by
-default, zero runtime cost when off.
+Debug-only on-screen overlay for waybeam_venc. Renders directly into
+the video stream via SigmaStar MI_RGN canvas attached to VENC ch0
+(Star6E) or SCL ch0 (Maruko). Disabled by default, zero runtime cost
+when off.
+
+In `record.mode = "dual"` and `"dual-stream"` on Star6E, the OSD is
+intentionally absent from ch1 (the recording / second-stream channel)
+because the region attaches at VENC ch0, downstream of the VPE port
+that fans out to both channels.  This keeps recordings and secondary
+streams clean while the live ch0 stream still carries debug overlays.
+In `mirror` mode the recorded stream IS ch0, so the OSD is present in
+the recording — same as before.
 
 ## Enabling
 
@@ -180,9 +189,21 @@ if (ps->debug_osd) {
 
 - **dlopen**: `libmi_rgn.so` loaded at runtime, 8 symbols resolved. If the
   library is absent, `debug_osd_create` returns NULL and all consumers no-op.
-- **RGN module ID**: MI_RGN uses its own enum (`E_MI_RGN_MODID_VPE = 0`),
-  not the system module enum (`I6_SYS_MOD_VPE = 11`). The ChnPort is built
-  manually, not copied from the pipeline's `vpe_port`.
+- **RGN module ID**: MI_RGN uses its own enum, independent of the
+  system module enum (`I6_SYS_MOD_VPE = 11`).  The Star6E build attaches
+  at `E_MI_RGN_MODID_VENC = 6`, channel 0; on attach failure it falls
+  back to `E_MI_RGN_MODID_VPE = 0`, port 0 (legacy behaviour) and logs
+  a warning.  The fallback exists because the numeric IDs are not
+  exposed by `sdk/ssc338q/include/i6_rgn.h`; the values come from the
+  documented SigmaStar i6e enum order (`VPE=0, GFX=1, DIVP=2, DISP=3,
+  HVP=4, LDC=5, VENC=6`).  The ChnPort is built manually, not copied
+  from the pipeline's `vpe_port`.
+- **VENC attach ordering**: `MI_RGN_AttachToChn` requires the VENC
+  channel to exist.  `debug_osd_create` is called from
+  `bind_and_finalize_pipeline`, which runs after
+  `star6e_pipeline_start_venc`, so ch0 already exists.  Likewise,
+  `debug_osd_destroy` must run before `MI_VENC_DestroyChn`;
+  `star6e_pipeline_stop` already calls them in that order.
 - **Double buffering**: `MI_RGN_GetCanvasInfo` must be called every frame
   because `MI_RGN_UpdateCanvas` swaps buffers and the `virtAddr` changes.
 - **Font**: 8×8 bitmap, 5px effective width, 95 printable ASCII glyphs

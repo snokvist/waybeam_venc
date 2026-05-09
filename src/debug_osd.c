@@ -101,11 +101,20 @@ typedef struct {
 
 /* ── State ─────────────────────────────────────────────────────────── */
 
+/* MI_RGN module IDs.  Not exposed by sdk/ssc338q/include/i6_rgn.h, but
+ * the SigmaStar i6e public enum is well-known: VPE=0, GFX=1, DIVP=2,
+ * DISP=3, HVP=4, LDC=5, VENC=6.  Attaching at VENC ch0 (rather than
+ * VPE port 0) keeps the OSD off ch1 in dual / dual-stream record modes,
+ * so recordings stay clean while the live stream still shows debug
+ * overlays. */
+#define RGN_MODID_VPE  0
+#define RGN_MODID_VENC 6
+
 struct DebugOsdState {
 	void *lib;
 	uint32_t width, height;
 	DebugOsdCanvasInfo canvas;
-	i6_sys_bind vpe_bind;
+	i6_sys_bind rgn_bind;
 	OsdDirty dirty;           /* previous frame's drawn area */
 	int font_scale;           /* pixel scaling factor for text */
 
@@ -231,12 +240,14 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 	ctx->width = frame_w;
 	ctx->height = frame_h;
 	ctx->font_scale = 3;
-	/* MI_RGN uses its own module ID enum (VPE=0), not the system
-	 * i6_sys_mod enum (where VPE=11).  Build the RGN ChnPort manually. */
-	ctx->vpe_bind.module = 0;  /* E_MI_RGN_MODID_VPE */
-	ctx->vpe_bind.device = 0;
-	ctx->vpe_bind.channel = 0;
-	ctx->vpe_bind.port = 0;
+	/* Attach OSD to VENC ch0 so dual-mode ch1 records clean frames.
+	 * The MI_RGN module ID enum is independent of i6_sys_mod (where
+	 * VPE=11, VENC=6 — coincidentally matching here for VENC, but
+	 * not in general).  Build the RGN ChnPort manually. */
+	ctx->rgn_bind.module = RGN_MODID_VENC;
+	ctx->rgn_bind.device = 0;
+	ctx->rgn_bind.channel = 0;  /* ch0 — primary stream channel */
+	ctx->rgn_bind.port = 0;
 
 	if (rgn_load(ctx) != 0) {
 		free(ctx);
@@ -275,7 +286,11 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 		return NULL;
 	}
 
-	/* Attach to VPE channel — pixel-alpha, layer 0 */
+	/* Attach to VENC ch0 — pixel-alpha, layer 0.  If the kernel rejects
+	 * the VENC attach (e.g. the RGN module-ID enum diverges from the
+	 * documented SigmaStar i6e order), fall back to the legacy VPE
+	 * port 0 attach so debug OSD still works.  In dual / dual-stream
+	 * record modes the fallback means ch1 will show the OSD again. */
 	i6_rgn_chn chn;
 	memset(&chn, 0, sizeof(chn));
 	chn.show = 1;
@@ -284,8 +299,19 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 	chn.osd.layer = 0;
 	chn.osd.constAlphaOn = 0;
 
-	if (ctx->fnAttachChannel(RGN_HANDLE, &ctx->vpe_bind, &chn) != 0) {
-		fprintf(stderr, "[debug_osd] MI_RGN_AttachToChn failed\n");
+	int attach_ret = ctx->fnAttachChannel(RGN_HANDLE, &ctx->rgn_bind, &chn);
+	if (attach_ret != 0) {
+		fprintf(stderr, "[debug_osd] VENC ch0 attach failed (%d), "
+			"falling back to VPE port 0\n", attach_ret);
+		ctx->rgn_bind.module = RGN_MODID_VPE;
+		ctx->rgn_bind.device = 0;
+		ctx->rgn_bind.channel = 0;
+		ctx->rgn_bind.port = 0;
+		attach_ret = ctx->fnAttachChannel(RGN_HANDLE, &ctx->rgn_bind, &chn);
+	}
+	if (attach_ret != 0) {
+		fprintf(stderr, "[debug_osd] MI_RGN_AttachToChn failed (%d)\n",
+			attach_ret);
 		ctx->fnDestroyRegion(RGN_HANDLE);
 		ctx->fnDeinit();
 		dlclose(ctx->lib);
@@ -296,7 +322,7 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 	/* Get canvas memory mapping */
 	if (ctx->fnGetCanvasInfo(RGN_HANDLE, &ctx->canvas) != 0) {
 		fprintf(stderr, "[debug_osd] MI_RGN_GetCanvasInfo failed\n");
-		ctx->fnDetachChannel(RGN_HANDLE, &ctx->vpe_bind);
+		ctx->fnDetachChannel(RGN_HANDLE, &ctx->rgn_bind);
 		ctx->fnDestroyRegion(RGN_HANDLE);
 		ctx->fnDeinit();
 		dlclose(ctx->lib);
@@ -317,16 +343,21 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 
 	osd_dirty_reset(&ctx->dirty, frame_w, frame_h);
 
-	fprintf(stderr, "[debug_osd] overlay %ux%u stride=%u virtAddr=%p\n",
+	fprintf(stderr, "[debug_osd] overlay %ux%u stride=%u virtAddr=%p "
+		"attach=%s\n",
 		ctx->canvas.stSize.u32Width, ctx->canvas.stSize.u32Height,
-		ctx->canvas.u32Stride, (void *)(uintptr_t)ctx->canvas.virtAddr);
+		ctx->canvas.u32Stride, (void *)(uintptr_t)ctx->canvas.virtAddr,
+		ctx->rgn_bind.module == RGN_MODID_VENC ? "VENC.ch0" : "VPE.port0");
 	return ctx;
 }
 
 void debug_osd_destroy(DebugOsdState *osd)
 {
 	if (!osd) return;
-	osd->fnDetachChannel(RGN_HANDLE, &osd->vpe_bind);
+	/* Detach must happen before MI_VENC_DestroyChn(state->venc_channel).
+	 * star6e_pipeline_stop calls debug_osd_destroy at line ~1577, well
+	 * before the VENC channel is destroyed; preserve that ordering. */
+	osd->fnDetachChannel(RGN_HANDLE, &osd->rgn_bind);
 	osd->fnDestroyRegion(RGN_HANDLE);
 	osd->fnDeinit();
 	if (osd->lib)
