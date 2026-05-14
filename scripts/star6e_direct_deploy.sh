@@ -171,6 +171,22 @@ restore_backup() {
 	log "Restored ${CONFIG_PATH} from ${source}"
 }
 
+# Provision /etc/waybeam.json from the bundled Star6E default only when
+# the target has no config (fresh firstboot device). Never overwrites an
+# existing config — users with customized configs are preserved.
+provision_default_config_if_missing() {
+	local default_cfg="${ROOT_DIR}/config/waybeam.default.json"
+	if [[ ! -f "${default_cfg}" ]]; then
+		log "WARN: default config ${default_cfg} not found — skipping fresh-device provisioning"
+		return 0
+	fi
+	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
+		return 0
+	fi
+	log "No ${CONFIG_PATH} on device — provisioning default from $(basename "${default_cfg}")"
+	ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "cat > $(printf '%q' "${CONFIG_PATH}")" < "${default_cfg}"
+}
+
 stop_venc() {
 	log "Stopping waybeam..."
 	remote_capture "killall waybeam 2>/dev/null; sleep 2; ps w | grep -E '(^|/)waybeam( |\$)' | grep -v grep || true" >/dev/null
@@ -285,6 +301,8 @@ run_cycle() {
 	fi
 
 	stop_venc
+
+	provision_default_config_if_missing
 
 	if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
 		create_backup

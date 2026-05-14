@@ -187,6 +187,22 @@ create_backup() {
 	log "Backed up ${CONFIG_PATH} -> ${target}"
 }
 
+# Provision /etc/waybeam.json from the bundled Maruko default only when
+# the target has no config (fresh firstboot device). Never overwrites an
+# existing config — users with customized configs are preserved.
+provision_default_config_if_missing() {
+	local default_cfg="${ROOT_DIR}/config/waybeam.default.maruko.json"
+	if [[ ! -f "${default_cfg}" ]]; then
+		warn "default config ${default_cfg} not found — skipping fresh-device provisioning"
+		return 0
+	fi
+	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
+		return 0
+	fi
+	log "No ${CONFIG_PATH} on device — provisioning default from $(basename "${default_cfg}")"
+	push_stream "${default_cfg}" "${CONFIG_PATH}"
+}
+
 restore_backup() {
 	local source="${1:-${BACKUP_PATH:-${LATEST_BACKUP_PATH}}}"
 	remote_sh "cp $(printf '%q' "${source}") $(printf '%q' "${CONFIG_PATH}")"
@@ -418,6 +434,8 @@ run_cycle() {
 
 	stop_venc
 
+	provision_default_config_if_missing
+
 	if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
 		create_backup
 	else
@@ -456,6 +474,8 @@ run_full() {
 		[[ -f "${PUSH_CONFIG_FILE}" ]] || die "config file not found: ${PUSH_CONFIG_FILE}"
 		log "Pushing ${PUSH_CONFIG_FILE} -> ${HOST}:${CONFIG_PATH}"
 		push_stream "${PUSH_CONFIG_FILE}" "${CONFIG_PATH}"
+	else
+		provision_default_config_if_missing
 	fi
 	log "Rebooting target to load new kernel modules..."
 	remote_sh "reboot" || true
