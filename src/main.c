@@ -95,11 +95,12 @@ int main(int argc, char* argv[])
   (void)argv;
 
   /* Pin /proc/self/comm to "waybeam" before is_another_waybeam_running().
-   * The SIGHUP-respawn path execv's /proc/self/exe, which makes the
-   * kernel derive comm from the symlink basename ("exe") instead of
-   * argv[0].  Without this rename, the comm-based duplicate check
-   * silently fails to detect a respawned instance, and an externally-
-   * launched second copy could start a duplicate. */
+   * The kernel derives comm from basename(argv[0]) on execve, so the
+   * normal init-script start (/usr/bin/waybeam) and the SIGHUP-respawn
+   * execv (argv[0]="waybeam" — see star6e_runtime_respawn_after_exit)
+   * already produce comm="waybeam".  This prctl is defensive belt-and-
+   * suspenders: it guarantees the scanner key regardless of what argv[0]
+   * an external caller decides to pass. */
   (void)prctl(PR_SET_NAME, "waybeam", 0, 0, 0);
 
   if (is_another_waybeam_running()) {
