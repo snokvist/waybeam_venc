@@ -22,7 +22,7 @@ MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
 OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
-TARGET := $(OUT_DIR)/venc
+TARGET := $(OUT_DIR)/waybeam
 JSON_CLI_TARGET := $(OUT_DIR)/json_cli
 REGSCAN_TARGET := $(OUT_DIR)/regscan
 TIMING_PROBE_TARGET := rtp_timing_probe
@@ -326,8 +326,8 @@ remote-test:
 
 # ── Verification targets ──────────────────────────────────────────────
 
-STAR6E_BINS := out/star6e/venc
-MARUKO_BINS := out/maruko/venc
+STAR6E_BINS := out/star6e/waybeam
+MARUKO_BINS := out/maruko/waybeam
 
 webui:
 	python3 tools/build_webui.py

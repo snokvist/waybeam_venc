@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch Star6E toolchain
         run: make toolchain
-      - name: Build Star6E venc
+      - name: Build Star6E waybeam
         run: make build SOC_BUILD=star6e
       - name: Build Star6E json_cli
         run: make json_cli SOC_BUILD=star6e
@@ -34,13 +34,13 @@ jobs:
         run: make stage SOC_BUILD=star6e
       - name: Verify output
         run: |
-          test -x out/star6e/venc
+          test -x out/star6e/waybeam
           test -x out/star6e/json_cli
           test -x out/star6e/regscan
       - name: Upload Star6E staged output
         uses: actions/upload-artifact@v4
         with:
-          name: venc-star6e
+          name: waybeam-star6e
           # Exclude obj/ — incremental build dirs are not release content
           path: |
             out/star6e/
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch Maruko toolchain
         run: make toolchain-maruko
-      - name: Build Maruko venc
+      - name: Build Maruko waybeam
         run: make build SOC_BUILD=maruko
       - name: Build Maruko json_cli
         run: make json_cli SOC_BUILD=maruko
@@ -63,7 +63,7 @@ jobs:
         run: make stage SOC_BUILD=maruko
       - name: Verify output
         run: |
-          test -x out/maruko/venc
+          test -x out/maruko/waybeam
           test -x out/maruko/json_cli
           test -x out/maruko/regscan
           # Vendored sensor .ko (renamed _maruko.ko → _mipi.ko by stage)
@@ -75,7 +75,7 @@ jobs:
       - name: Upload Maruko staged output
         uses: actions/upload-artifact@v4
         with:
-          name: venc-maruko
+          name: waybeam-maruko
           path: |
             out/maruko/
             !out/maruko/obj/
@@ -93,43 +93,46 @@ jobs:
       - name: Download Star6E artifact
         uses: actions/download-artifact@v4
         with:
-          name: venc-star6e
+          name: waybeam-star6e
           path: release/star6e
 
       - name: Download Maruko artifact
         uses: actions/download-artifact@v4
         with:
-          name: venc-maruko
+          name: waybeam-maruko
           path: release/maruko
 
       - name: Prepare release archives
         run: |
           for backend in star6e maruko; do
-            mkdir -p "release/venc-${backend}"
-            mv "release/${backend}/venc"     "release/venc-${backend}/venc"
-            mv "release/${backend}/json_cli" "release/venc-${backend}/json_cli"
-            mv "release/${backend}/regscan"  "release/venc-${backend}/regscan"
+            mkdir -p "release/waybeam-${backend}"
+            mv "release/${backend}/waybeam"  "release/waybeam-${backend}/waybeam"
+            mv "release/${backend}/json_cli" "release/waybeam-${backend}/json_cli"
+            mv "release/${backend}/regscan"  "release/waybeam-${backend}/regscan"
             # Maruko-only payloads: MI vendor libs, sensor .ko, ISP .bin.
             if [ -d "release/${backend}/lib" ]; then
-              mv "release/${backend}/lib"      "release/venc-${backend}/lib"
+              mv "release/${backend}/lib"      "release/waybeam-${backend}/lib"
             fi
             if [ -d "release/${backend}/drivers" ]; then
-              mv "release/${backend}/drivers"  "release/venc-${backend}/drivers"
+              mv "release/${backend}/drivers"  "release/waybeam-${backend}/drivers"
             fi
             if [ -d "release/${backend}/isp-bins" ]; then
-              mv "release/${backend}/isp-bins" "release/venc-${backend}/isp-bins"
+              mv "release/${backend}/isp-bins" "release/waybeam-${backend}/isp-bins"
             fi
             # Backend-specific default config; Maruko has its own template
             # (sensor.unlockEnabled defaults differ between SoCs).
-            if [ "${backend}" = "maruko" ] && [ -f config/venc.default.maruko.json ]; then
-              cp config/venc.default.maruko.json "release/venc-${backend}/venc.json"
+            if [ "${backend}" = "maruko" ] && [ -f config/waybeam.default.maruko.json ]; then
+              cp config/waybeam.default.maruko.json "release/waybeam-${backend}/waybeam.json"
             else
-              cp config/venc.default.json "release/venc-${backend}/venc.json"
+              cp config/waybeam.default.json "release/waybeam-${backend}/waybeam.json"
             fi
-            chmod +x "release/venc-${backend}/venc"
-            chmod +x "release/venc-${backend}/json_cli"
-            chmod +x "release/venc-${backend}/regscan"
-            tar -czf "release/venc-${backend}.tar.gz" -C release "venc-${backend}"
+            # BusyBox init.d wrapper.
+            cp init.d/S95waybeam "release/waybeam-${backend}/S95waybeam"
+            chmod +x "release/waybeam-${backend}/waybeam"
+            chmod +x "release/waybeam-${backend}/json_cli"
+            chmod +x "release/waybeam-${backend}/regscan"
+            chmod +x "release/waybeam-${backend}/S95waybeam"
+            tar -czf "release/waybeam-${backend}.tar.gz" -C release "waybeam-${backend}"
           done
 
       - name: Read version
@@ -151,19 +154,19 @@ jobs:
 
             | File | Backend | SoC | Contents |
             |------|---------|-----|----------|
-            | `venc-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `venc` + `json_cli` + `regscan` + `venc.json` |
-            | `venc-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C)         | `venc` + `json_cli` + `regscan` + `venc.json` + `lib/` (MI libs) + `drivers/` (sensor .ko) + `isp-bins/` (IQ tuning) |
+            | `waybeam-star6e.tar.gz` | Star6E | SSC30KQ / SSC338Q (Infinity6E) | `waybeam` + `json_cli` + `regscan` + `waybeam.json` |
+            | `waybeam-maruko.tar.gz` | Maruko | SSC378QE (Infinity6C)         | `waybeam` + `json_cli` + `regscan` + `waybeam.json` + `lib/` (MI libs) + `drivers/` (sensor .ko) + `isp-bins/` (IQ tuning) |
 
             **Bundled tools:**
 
             - `json_cli` — style-preserving JSON config get/set/del tool
               (vendored from `waybeam-hub/tools/`) used by deploy scripts and
-              on-device automation to read and patch `/etc/venc.json`.
+              on-device automation to read and patch `/etc/waybeam.json`.
             - `regscan` — IMX335/IMX415 i2c register dumper for sensor-init
               diagnostics (vendored from `tipoman9/star6c_sensor`).  Read-only,
               safe to leave in `/usr/bin/`.
 
-            **Maruko bundle additions (v0.10.8+):**
+            **Maruko bundle additions:**
 
             - `drivers/sensor_imx{335,415}_mipi.ko` — source-built modified
               sensor drivers from `drivers/sensor_imx*_maruko.c`.  Drop-in
@@ -175,22 +178,22 @@ jobs:
             ## Install
 
             ```bash
-            # Both backends: binaries + default config
-            tar -xzf venc-<backend>.tar.gz -C /tmp
-            cp /tmp/venc-<backend>/venc      /usr/bin/venc
-            cp /tmp/venc-<backend>/json_cli  /usr/bin/json_cli
-            cp /tmp/venc-<backend>/regscan   /usr/bin/regscan
-            cp /tmp/venc-<backend>/venc.json /etc/venc.json
+            tar -xzf waybeam-<backend>.tar.gz -C /tmp
+            cp /tmp/waybeam-<backend>/waybeam      /usr/bin/waybeam
+            cp /tmp/waybeam-<backend>/json_cli     /usr/bin/json_cli
+            cp /tmp/waybeam-<backend>/regscan      /usr/bin/regscan
+            cp /tmp/waybeam-<backend>/waybeam.json /etc/waybeam.json
+            cp /tmp/waybeam-<backend>/S95waybeam   /etc/init.d/S95waybeam
 
             # Maruko only — stock OpenIPC Infinity6C firmware does not ship MI libs:
-            cp /tmp/venc-maruko/lib/*.so     /usr/lib/
+            cp /tmp/waybeam-maruko/lib/*.so     /usr/lib/
 
             # Maruko only — drop in the modified sensor drivers (replaces stock):
-            cp /tmp/venc-maruko/drivers/*.ko /lib/modules/$(uname -r)/sigmastar/
+            cp /tmp/waybeam-maruko/drivers/*.ko /lib/modules/$(uname -r)/sigmastar/
             depmod -a
 
             # Maruko only — ISP tuning blobs:
-            cp /tmp/venc-maruko/isp-bins/*.bin /etc/sensors/
+            cp /tmp/waybeam-maruko/isp-bins/*.bin /etc/sensors/
 
             # Maruko only — vendor lib libcam_os_wrapper.so has hardcoded
             # NEEDED tags for these two uClibc loader names; create them so
@@ -225,8 +228,8 @@ jobs:
 
             See [README](https://github.com/${{ github.repository }}/blob/master/README.md) for usage.
           files: |
-            release/venc-star6e.tar.gz
-            release/venc-maruko.tar.gz
+            release/waybeam-star6e.tar.gz
+            release/waybeam-maruko.tar.gz
           prerelease: false
           make_latest: true
 
@@ -245,4 +248,4 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             -d chat_id="${TG_CHAT}" \
             -d parse_mode=Markdown \
-            -d text="✅ *waybeam_venc* release updated%0AVersion: $(cat VERSION)%0ACommit: ${GITHUB_SHA:0:7}"
+            -d text="✅ *waybeam* release updated%0AVersion: $(cat VERSION)%0ACommit: ${GITHUB_SHA:0:7}"

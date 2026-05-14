@@ -9,7 +9,10 @@
 extern "C" {
 #endif
 
-#define VENC_CONFIG_DEFAULT_PATH "/etc/venc.json"
+/* Single fixed config path.  No CLI override, no legacy fallback —
+ * deploy tooling is responsible for placing the file at
+ * /etc/waybeam.json before launch. */
+#define VENC_CONFIG_DEFAULT_PATH "/etc/waybeam.json"
 #define VENC_CONFIG_STRING_MAX 256
 
 /* Upper bound on outgoing.max_payload_size in bytes. Validation enforces

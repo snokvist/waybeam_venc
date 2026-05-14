@@ -484,10 +484,10 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	char *data = read_file(path, &len);
 	if (!data) {
 		if (errno == ENOENT) {
-			fprintf(stderr, "[venc_config] %s not found, using defaults\n", path);
+			fprintf(stderr, "[config] %s not found, using defaults\n", path);
 			return 0;
 		}
-		fprintf(stderr, "[venc_config] ERROR: cannot read %s: %s\n",
+		fprintf(stderr, "[config] ERROR: cannot read %s: %s\n",
 			path, strerror(errno));
 		return -1;
 	}

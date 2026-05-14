@@ -14,14 +14,16 @@ set -euo pipefail
 # bench, then this script pushes the same set back to any Maruko device.
 
 HOST="${HOST:-root@192.168.2.12}"
-LOCAL_BIN="out/maruko/venc"
-REMOTE_BIN="/usr/bin/venc"
+LOCAL_BIN="out/maruko/waybeam"
+REMOTE_BIN="/usr/bin/waybeam"
 REMOTE_LIB_DIR="/usr/lib"
 REMOTE_KO_DIR="/lib/modules/5.10.61/sigmastar"
 REMOTE_ISP_BIN_DIR="/etc/sensors"
-CONFIG_PATH="/etc/venc.json"
-LOG_PATH="/tmp/venc.log"
-LATEST_BACKUP_PATH="/tmp/venc.json.bak.latest"
+CONFIG_PATH="/etc/waybeam.json"
+LOG_PATH="/tmp/waybeam.log"
+LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
+INIT_SCRIPT_LOCAL="init.d/S95waybeam"
+INIT_SCRIPT_REMOTE="/etc/init.d/S95waybeam"
 WAIT_SECS=20
 TAIL_LINES=120
 HTTP_PORT="${HTTP_PORT:-}"
@@ -48,19 +50,19 @@ usage() {
 	cat <<'EOF'
 Usage: scripts/maruko_direct_deploy.sh [options] [command] [args]
 
-Direct Maruko deploy-and-test helper for the /etc/venc.json workflow.
+Direct Maruko deploy-and-test helper for the /etc/waybeam.json workflow.
 Defaults to host root@192.168.2.12.
 
 Commands:
-  cycle                 Build, backup config, stop venc, deploy binary
+  cycle                 Build, backup config, stop waybeam, deploy binary
                         (+ libs/drivers/isp-bins/json_cli if requested),
                         start, wait, status
   full                  cycle + push libs, drivers, isp-bins, json_cli
                         (fresh device)
   build                 Build local Maruko binary only
-  backup-config         Copy /etc/venc.json to a timestamped backup on target
-  restore-config [SRC]  Restore /etc/venc.json from SRC or latest backup
-  deploy                Copy local binary to /usr/bin/venc on target
+  backup-config         Copy /etc/waybeam.json to a timestamped backup on target
+  restore-config [SRC]  Restore /etc/waybeam.json from SRC or latest backup
+  deploy                Copy local binary to /usr/bin/waybeam on target
   push-libs             Push vendor-libs/maruko/*.so → /usr/lib/
                         (also creates uClibc compat symlinks)
   push-drivers          Push sensors/maruko/*.ko → kernel modules dir
@@ -69,9 +71,9 @@ Commands:
                         → /etc/sensors/
   push-json-cli         Build (if needed) and push out/maruko/json_cli
                         → /usr/bin/json_cli
-  stop                  Stop running venc
-  start                 Start venc as a daemon and log to /tmp/venc.log
-  reload                Send SIGHUP to running venc
+  stop                  Stop running waybeam
+  start                 Start waybeam as a daemon and log to /tmp/waybeam.log
+  reload                Send SIGHUP to running waybeam
   reboot                Reboot the target device
   wait-http             Poll /api/v1/version until HTTP is ready
   status                Show process/config summary, version, AE, recent log
@@ -80,10 +82,10 @@ Commands:
 
 Options:
   --host HOST           SSH target (default: root@192.168.2.12)
-  --local-bin PATH      Local binary path (default: out/maruko/venc)
-  --remote-bin PATH     Remote install path (default: /usr/bin/venc)
-  --config-path PATH    Remote config path (default: /etc/venc.json)
-  --log-path PATH       Remote log path (default: /tmp/venc.log)
+  --local-bin PATH      Local binary path (default: out/maruko/waybeam)
+  --remote-bin PATH     Remote install path (default: /usr/bin/waybeam)
+  --config-path PATH    Remote config path (default: /etc/waybeam.json)
+  --log-path PATH       Remote log path (default: /tmp/waybeam.log)
   --backup-path PATH    Explicit remote backup path for backup/restore
   --http-port PORT      Override HTTP port; otherwise read from config
   --wait-secs SECS      HTTP wait timeout in seconds (default: 20)
@@ -95,7 +97,7 @@ Options:
   --with-isp-bins       cycle: also push ISP .bin blobs
   --with-json-cli       cycle: also push out/maruko/json_cli (built if missing)
   --reboot-after        push-drivers: reboot after install
-  --push-config FILE    full: also push FILE to remote /etc/venc.json
+  --push-config FILE    full: also push FILE to remote /etc/waybeam.json
   --help                Show this help
 
 Examples:
@@ -179,10 +181,26 @@ create_backup() {
 		target="${BACKUP_PATH}"
 	else
 		stamp="$(date +%Y%m%d-%H%M%S)"
-		target="/tmp/venc.json.bak.${stamp}"
+		target="/tmp/waybeam.json.bak.${stamp}"
 	fi
 	remote_sh "cp $(printf '%q' "${CONFIG_PATH}") $(printf '%q' "${target}") && cp $(printf '%q' "${CONFIG_PATH}") $(printf '%q' "${LATEST_BACKUP_PATH}")"
 	log "Backed up ${CONFIG_PATH} -> ${target}"
+}
+
+# Provision /etc/waybeam.json from the bundled Maruko default only when
+# the target has no config (fresh firstboot device). Never overwrites an
+# existing config — users with customized configs are preserved.
+provision_default_config_if_missing() {
+	local default_cfg="${ROOT_DIR}/config/waybeam.default.maruko.json"
+	if [[ ! -f "${default_cfg}" ]]; then
+		warn "default config ${default_cfg} not found — skipping fresh-device provisioning"
+		return 0
+	fi
+	if remote_capture "[ -f $(printf '%q' "${CONFIG_PATH}") ] && echo PRESENT || echo ABSENT" | grep -q PRESENT; then
+		return 0
+	fi
+	log "No ${CONFIG_PATH} on device — provisioning default from $(basename "${default_cfg}")"
+	push_stream "${default_cfg}" "${CONFIG_PATH}"
 }
 
 restore_backup() {
@@ -192,8 +210,17 @@ restore_backup() {
 }
 
 stop_venc() {
-	log "Stopping venc..."
-	remote_capture "killall venc 2>/dev/null || true; sleep 2; ps w | grep -E '(^|/)venc( |$)' | grep -v grep || true" >/dev/null
+	log "Stopping waybeam..."
+	remote_capture "killall waybeam 2>/dev/null; sleep 2; ps w | grep -E '(^|/)waybeam( |\$)' | grep -v grep || true" >/dev/null
+}
+
+deploy_init_script() {
+	local local_path="${INIT_SCRIPT_LOCAL}"
+	if [[ "${local_path}" != /* ]]; then local_path="${ROOT_DIR}/${local_path}"; fi
+	[[ -f "${local_path}" ]] || die "init script missing: ${local_path}"
+	log "Deploying ${local_path} -> ${HOST}:${INIT_SCRIPT_REMOTE}"
+	ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "cat > $(printf '%q' "${INIT_SCRIPT_REMOTE}")" < "${local_path}"
+	remote_sh "chmod 0755 $(printf '%q' "${INIT_SCRIPT_REMOTE}")"
 }
 
 deploy_binary() {
@@ -316,7 +343,7 @@ push_isp_bin() {
 }
 
 start_venc() {
-	log "Starting venc with log ${LOG_PATH}"
+	log "Starting waybeam with log ${LOG_PATH}"
 	remote_sh "
 		if command -v setsid >/dev/null 2>&1; then
 			setsid $(printf '%q' "${REMOTE_BIN}") >$(printf '%q' "${LOG_PATH}") 2>&1 </dev/null &
@@ -327,8 +354,8 @@ start_venc() {
 }
 
 reload_venc() {
-	log "Sending SIGHUP to venc..."
-	remote_sh "killall -HUP venc"
+	log "Sending SIGHUP to waybeam..."
+	remote_sh "killall -HUP waybeam"
 }
 
 reboot_device() {
@@ -358,7 +385,7 @@ show_status() {
 	port="$(detect_http_port)"
 
 	log "Process"
-	remote_capture "ps w | grep -E '(^|/)venc( |$)' | grep -v grep || true"
+	remote_capture "ps w | grep -E '(^|/)waybeam( |\$)' | grep -v grep || true"
 
 	log "Config summary"
 	printf 'webPort=%s\n'        "$(config_value .system.webPort 80)"
@@ -405,14 +432,18 @@ run_cycle() {
 		log "Skipping build"
 	fi
 
+	stop_venc
+
+	provision_default_config_if_missing
+
 	if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
 		create_backup
 	else
 		log "Skipping config backup"
 	fi
 
-	stop_venc
 	deploy_binary
+	deploy_init_script
 	[[ "${WITH_LIBS}" -eq 1 ]]     && push_libs
 	[[ "${WITH_JSON_CLI}" -eq 1 ]] && push_json_cli
 	[[ "${WITH_DRIVERS}" -eq 1 ]]  && push_drivers
@@ -427,7 +458,7 @@ run_full() {
 	WITH_DRIVERS=1
 	WITH_ISP_BINS=1
 	WITH_JSON_CLI=1
-	# Drivers need a reboot before the next venc start can pick them up.
+	# Drivers need a reboot before the next waybeam start can pick them up.
 	REBOOT_AFTER_DRIVERS=1
 	if [[ "${SKIP_BUILD}" -eq 0 ]]; then
 		build_maruko
@@ -443,13 +474,15 @@ run_full() {
 		[[ -f "${PUSH_CONFIG_FILE}" ]] || die "config file not found: ${PUSH_CONFIG_FILE}"
 		log "Pushing ${PUSH_CONFIG_FILE} -> ${HOST}:${CONFIG_PATH}"
 		push_stream "${PUSH_CONFIG_FILE}" "${CONFIG_PATH}"
+	else
+		provision_default_config_if_missing
 	fi
 	log "Rebooting target to load new kernel modules..."
 	remote_sh "reboot" || true
 	log "Device rebooting; not waiting for HTTP. Re-run 'cycle' or 'status' once it returns."
 }
 
-# Bulk push: venc binary + json_cli + MI vendor libs + sensor .ko + ISP .bin
+# Bulk push: waybeam binary + json_cli + MI vendor libs + sensor .ko + ISP .bin
 # in a single tar | ssh pipe.  Single SSH handshake → ~10× faster than the
 # per-file scp loop (verified 2026-05-14: 14 libs + 10 .ko + 3 bins + 2
 # binaries dropped from ~60s to ~7s on the bench at 192.168.2.12).
@@ -471,14 +504,23 @@ bulk_push_all() {
 	mkdir -p \
 		"${stage}/usr/bin" \
 		"${stage}/usr/lib" \
+		"${stage}/etc/init.d" \
 		"${stage}${REMOTE_KO_DIR}" \
 		"${stage}${REMOTE_ISP_BIN_DIR}"
 
-	# venc binary + json_cli
-	cp "${LOCAL_BIN}" "${stage}/usr/bin/venc"
-	chmod 0755 "${stage}/usr/bin/venc"
+	# waybeam binary + json_cli + init script
+	cp "${LOCAL_BIN}" "${stage}/usr/bin/waybeam"
+	chmod 0755 "${stage}/usr/bin/waybeam"
 	cp "${JSON_CLI_LOCAL}" "${stage}/usr/bin/json_cli"
 	chmod 0755 "${stage}/usr/bin/json_cli"
+	local init_src="${INIT_SCRIPT_LOCAL}"
+	if [[ "${init_src}" != /* ]]; then init_src="${ROOT_DIR}/${init_src}"; fi
+	if [[ -f "${init_src}" ]]; then
+		cp "${init_src}" "${stage}${INIT_SCRIPT_REMOTE}"
+		chmod 0755 "${stage}${INIT_SCRIPT_REMOTE}"
+	else
+		warn "init script ${init_src} missing — skipping"
+	fi
 
 	# MI vendor libs
 	local libcount=0 f base
@@ -523,7 +565,7 @@ bulk_push_all() {
 	done
 	shopt -u nullglob
 
-	log "Bulk pushing: venc + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins (single ssh)"
+	log "Bulk pushing: waybeam + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins (single ssh)"
 	(cd "${stage}" && tar -cf - .) | \
 		ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "tar -xf - -C /"
 
@@ -535,9 +577,9 @@ bulk_push_all() {
 		ldconfig 2>/dev/null || true
 	"
 	if [[ "${skipped}" -gt 0 ]]; then
-		log "Pushed: venc + json_cli + ${libcount} libs + ${kocount} .ko (${skipped} pulled _mipi.ko skipped for source-built sibling) + ${bincount} ISP bins"
+		log "Pushed: waybeam + json_cli + ${libcount} libs + ${kocount} .ko (${skipped} pulled _mipi.ko skipped for source-built sibling) + ${bincount} ISP bins"
 	else
-		log "Pushed: venc + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins"
+		log "Pushed: waybeam + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins"
 	fi
 }
 
@@ -586,7 +628,7 @@ case "${COMMAND}" in
 	build)          build_maruko ;;
 	backup-config)  create_backup ;;
 	restore-config) restore_backup "${COMMAND_ARGS[0]:-}" ;;
-	deploy)         deploy_binary ;;
+	deploy)         deploy_binary; deploy_init_script ;;
 	push-libs)      push_libs ;;
 	push-drivers)   push_drivers ;;
 	push-isp-bin)   push_isp_bin "${COMMAND_ARGS[0]:-}" ;;
