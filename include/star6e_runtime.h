@@ -26,8 +26,8 @@ int star6e_runtime_respawn_pending(void);
 
 /** Fork a child that execv's a fresh /proc/self/exe and return.  Caller
  *  exits the process; the child sleeps briefly to let the kernel reap
- *  the parent and release per-pid SDK state, then becomes the new venc
- *  with a brand-new PID and zero residual MI state. */
+ *  the parent and release per-pid SDK state, then becomes the new
+ *  waybeam with a brand-new PID and zero residual MI state. */
 void star6e_runtime_respawn_after_exit(void);
 
 #endif /* STAR6E_RUNTIME_H */

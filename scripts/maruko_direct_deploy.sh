@@ -24,11 +24,6 @@ LOG_PATH="/tmp/waybeam.log"
 LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
 INIT_SCRIPT_LOCAL="init.d/S95waybeam"
 INIT_SCRIPT_REMOTE="/etc/init.d/S95waybeam"
-# One-time-rename targets cleaned up on every cycle/deploy.
-LEGACY_REMOTE_BIN="/usr/bin/venc"
-LEGACY_CONFIG_PATH="/etc/venc.json"
-LEGACY_LOG_PATH="/tmp/venc.log"
-LEGACY_INIT_SCRIPT="/etc/init.d/S95venc"
 WAIT_SECS=20
 TAIL_LINES=120
 HTTP_PORT="${HTTP_PORT:-}"
@@ -200,28 +195,7 @@ restore_backup() {
 
 stop_venc() {
 	log "Stopping waybeam..."
-	# killall waybeam handles the post-rename case.  killall venc covers
-	# devices that still run a pre-rename binary at the moment of the
-	# first cycle; after migrate_legacy_paths() it is a no-op.
-	remote_capture "killall waybeam 2>/dev/null; killall venc 2>/dev/null; sleep 2; ps w | grep -E '(^|/)(waybeam|venc)( |\$)' | grep -v grep || true" >/dev/null
-}
-
-migrate_legacy_paths() {
-	# One-time cleanup so the device only ever has waybeam-named files.
-	# Idempotent — silent no-op once the rename has been applied.
-	log "Sweeping legacy venc paths (one-time migration)..."
-	remote_capture "
-		if [ -f $(printf '%q' "${LEGACY_CONFIG_PATH}") ] && [ ! -f $(printf '%q' "${CONFIG_PATH}") ]; then
-			mv $(printf '%q' "${LEGACY_CONFIG_PATH}") $(printf '%q' "${CONFIG_PATH}")
-			echo migrated_config
-		fi
-		rm -f \
-			$(printf '%q' "${LEGACY_CONFIG_PATH}") \
-			$(printf '%q' "${LEGACY_REMOTE_BIN}") \
-			$(printf '%q' "${LEGACY_LOG_PATH}") \
-			$(printf '%q' "${LEGACY_INIT_SCRIPT}")
-		true
-	" || true
+	remote_capture "killall waybeam 2>/dev/null; sleep 2; ps w | grep -E '(^|/)waybeam( |\$)' | grep -v grep || true" >/dev/null
 }
 
 deploy_init_script() {
@@ -353,7 +327,7 @@ push_isp_bin() {
 }
 
 start_venc() {
-	log "Starting venc with log ${LOG_PATH}"
+	log "Starting waybeam with log ${LOG_PATH}"
 	remote_sh "
 		if command -v setsid >/dev/null 2>&1; then
 			setsid $(printf '%q' "${REMOTE_BIN}") >$(printf '%q' "${LOG_PATH}") 2>&1 </dev/null &
@@ -443,8 +417,6 @@ run_cycle() {
 	fi
 
 	stop_venc
-	# Migrate before backup so the backup reads the renamed file.
-	migrate_legacy_paths
 
 	if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
 		create_backup
@@ -468,7 +440,7 @@ run_full() {
 	WITH_DRIVERS=1
 	WITH_ISP_BINS=1
 	WITH_JSON_CLI=1
-	# Drivers need a reboot before the next venc start can pick them up.
+	# Drivers need a reboot before the next waybeam start can pick them up.
 	REBOOT_AFTER_DRIVERS=1
 	if [[ "${SKIP_BUILD}" -eq 0 ]]; then
 		build_maruko
@@ -479,7 +451,6 @@ run_full() {
 	[[ -f "${JSON_CLI_LOCAL}" ]] || make -C "${ROOT_DIR}" json_cli SOC_BUILD=maruko >/dev/null
 	create_backup || true
 	stop_venc
-	migrate_legacy_paths
 	bulk_push_all
 	if [[ -n "${PUSH_CONFIG_FILE}" ]]; then
 		[[ -f "${PUSH_CONFIG_FILE}" ]] || die "config file not found: ${PUSH_CONFIG_FILE}"
@@ -491,7 +462,7 @@ run_full() {
 	log "Device rebooting; not waiting for HTTP. Re-run 'cycle' or 'status' once it returns."
 }
 
-# Bulk push: venc binary + json_cli + MI vendor libs + sensor .ko + ISP .bin
+# Bulk push: waybeam binary + json_cli + MI vendor libs + sensor .ko + ISP .bin
 # in a single tar | ssh pipe.  Single SSH handshake → ~10× faster than the
 # per-file scp loop (verified 2026-05-14: 14 libs + 10 .ko + 3 bins + 2
 # binaries dropped from ~60s to ~7s on the bench at 192.168.2.12).
@@ -574,7 +545,7 @@ bulk_push_all() {
 	done
 	shopt -u nullglob
 
-	log "Bulk pushing: venc + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins (single ssh)"
+	log "Bulk pushing: waybeam + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins (single ssh)"
 	(cd "${stage}" && tar -cf - .) | \
 		ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "tar -xf - -C /"
 
@@ -586,9 +557,9 @@ bulk_push_all() {
 		ldconfig 2>/dev/null || true
 	"
 	if [[ "${skipped}" -gt 0 ]]; then
-		log "Pushed: venc + json_cli + ${libcount} libs + ${kocount} .ko (${skipped} pulled _mipi.ko skipped for source-built sibling) + ${bincount} ISP bins"
+		log "Pushed: waybeam + json_cli + ${libcount} libs + ${kocount} .ko (${skipped} pulled _mipi.ko skipped for source-built sibling) + ${bincount} ISP bins"
 	else
-		log "Pushed: venc + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins"
+		log "Pushed: waybeam + json_cli + ${libcount} libs + ${kocount} .ko + ${bincount} ISP bins"
 	fi
 }
 
@@ -637,7 +608,7 @@ case "${COMMAND}" in
 	build)          build_maruko ;;
 	backup-config)  create_backup ;;
 	restore-config) restore_backup "${COMMAND_ARGS[0]:-}" ;;
-	deploy)         migrate_legacy_paths; deploy_binary; deploy_init_script ;;
+	deploy)         deploy_binary; deploy_init_script ;;
 	push-libs)      push_libs ;;
 	push-drivers)   push_drivers ;;
 	push-isp-bin)   push_isp_bin "${COMMAND_ARGS[0]:-}" ;;

@@ -26,12 +26,10 @@ different `SOC_BUILD=` flags. All MI vendor libraries are loaded via
 `dlopen` so the binary stays small and the Maruko bundle can ship its
 own copies of libs that stock OpenIPC Infinity6C firmware does not.
 
-> **Note on naming.** The product, binary, and config file are
-> `waybeam`. The GitHub repository is still named `waybeam_venc` for
-> historical URL stability, but that is a cosmetic detail — the repo
-> contents have no other reference to the old `venc` name. Deploy
-> tooling cleans up any legacy `/usr/bin/venc` and `/etc/venc.json`
-> on the device the first time it runs.
+> **Note on naming.** The product, binary, config file, init script,
+> and release tarball are all named `waybeam`. The GitHub repository
+> is still `waybeam_venc` for historical URL stability — that is the
+> only place the old name survives.
 
 ## Features
 
@@ -101,10 +99,10 @@ Copy the binary to the target device:
 scp out/star6e/waybeam root@<device-ip>:/usr/bin/waybeam
 ```
 
-For the current Star6E bench workflow, prefer the helper — it stops any
-running daemon, sweeps the legacy `/usr/bin/venc` and `/etc/venc.json`
-paths off the device (one-time migration; idempotent thereafter), then
-deploys + starts the new binary:
+For the current Star6E bench workflow, prefer the helper — it stops
+any running daemon, deploys `/usr/bin/waybeam` and
+`/etc/init.d/S95waybeam`, backs up `/etc/waybeam.json`, then starts
+the daemon:
 
 ```sh
 scripts/star6e_direct_deploy.sh cycle

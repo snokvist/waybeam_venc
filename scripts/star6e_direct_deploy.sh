@@ -9,11 +9,6 @@ LOG_PATH="/tmp/waybeam.log"
 LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
 INIT_SCRIPT_LOCAL="init.d/S95waybeam"
 INIT_SCRIPT_REMOTE="/etc/init.d/S95waybeam"
-# One-time-rename targets cleaned up on every cycle/deploy.
-LEGACY_REMOTE_BIN="/usr/bin/venc"
-LEGACY_CONFIG_PATH="/etc/venc.json"
-LEGACY_LOG_PATH="/tmp/venc.log"
-LEGACY_INIT_SCRIPT="/etc/init.d/S95venc"
 WAIT_SECS=20
 TAIL_LINES=120
 HTTP_PORT="${HTTP_PORT:-}"
@@ -178,28 +173,7 @@ restore_backup() {
 
 stop_venc() {
 	log "Stopping waybeam..."
-	# killall waybeam handles the post-rename case.  killall venc covers
-	# devices that still run a pre-rename binary at the moment of the
-	# first cycle; after migrate_legacy_paths() it is a no-op.
-	remote_capture "killall waybeam 2>/dev/null; killall venc 2>/dev/null; sleep 2; ps w | grep -E '(^|/)(waybeam|venc)( |\$)' | grep -v grep || true" >/dev/null
-}
-
-migrate_legacy_paths() {
-	# One-time cleanup so the device only ever has waybeam-named files.
-	# Idempotent — silent no-op once the rename has been applied.
-	log "Sweeping legacy venc paths (one-time migration)..."
-	remote_capture "
-		if [ -f $(printf '%q' "${LEGACY_CONFIG_PATH}") ] && [ ! -f $(printf '%q' "${CONFIG_PATH}") ]; then
-			mv $(printf '%q' "${LEGACY_CONFIG_PATH}") $(printf '%q' "${CONFIG_PATH}")
-			echo migrated_config
-		fi
-		rm -f \
-			$(printf '%q' "${LEGACY_CONFIG_PATH}") \
-			$(printf '%q' "${LEGACY_REMOTE_BIN}") \
-			$(printf '%q' "${LEGACY_LOG_PATH}") \
-			$(printf '%q' "${LEGACY_INIT_SCRIPT}")
-		true
-	" || true
+	remote_capture "killall waybeam 2>/dev/null; sleep 2; ps w | grep -E '(^|/)waybeam( |\$)' | grep -v grep || true" >/dev/null
 }
 
 deploy_init_script() {
@@ -222,7 +196,7 @@ deploy_binary() {
 }
 
 start_venc() {
-	log "Starting venc with log ${LOG_PATH}"
+	log "Starting waybeam with log ${LOG_PATH}"
 	remote_sh "
 		if command -v setsid >/dev/null 2>&1; then
 			setsid $(printf '%q' "${REMOTE_BIN}") >$(printf '%q' "${LOG_PATH}") 2>&1 </dev/null &
@@ -311,8 +285,6 @@ run_cycle() {
 	fi
 
 	stop_venc
-	# Migrate before backup so the backup reads the renamed file.
-	migrate_legacy_paths
 
 	if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
 		create_backup
@@ -403,7 +375,6 @@ case "${COMMAND}" in
 		restore_backup "${COMMAND_ARGS[0]:-}"
 		;;
 	deploy)
-		migrate_legacy_paths
 		deploy_binary
 		deploy_init_script
 		;;

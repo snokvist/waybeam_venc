@@ -184,8 +184,6 @@ jobs:
             cp /tmp/waybeam-<backend>/regscan      /usr/bin/regscan
             cp /tmp/waybeam-<backend>/waybeam.json /etc/waybeam.json
             cp /tmp/waybeam-<backend>/S95waybeam   /etc/init.d/S95waybeam
-            # Legacy cleanup (safe if absent):
-            rm -f /etc/init.d/S95venc /usr/bin/venc /etc/venc.json /tmp/venc.log
 
             # Maruko only — stock OpenIPC Infinity6C firmware does not ship MI libs:
             cp /tmp/waybeam-maruko/lib/*.so     /usr/lib/
