@@ -170,8 +170,10 @@ restore_backup() {
 }
 
 stop_venc() {
-	log "Stopping venc..."
-	remote_capture "killall venc 2>/dev/null || true; sleep 2; ps w | grep -E '(^|/)venc( |$)' | grep -v grep || true" >/dev/null
+	log "Stopping waybeam (legacy: venc)..."
+	# Match both new ("waybeam") and legacy ("venc") comm/cmdline so the
+	# helper keeps working through the rename rollout.
+	remote_capture "killall waybeam 2>/dev/null; killall venc 2>/dev/null; sleep 2; ps w | grep -E '(^|/)(waybeam|venc)( |\$)' | grep -v grep || true" >/dev/null
 }
 
 deploy_binary() {
@@ -196,8 +198,9 @@ start_venc() {
 }
 
 reload_venc() {
-	log "Sending SIGHUP to venc..."
-	remote_sh "killall -HUP venc"
+	log "Sending SIGHUP to waybeam (legacy: venc)..."
+	# Send to both names — only the running comm matches; the other is a no-op.
+	remote_sh "killall -HUP waybeam 2>/dev/null; killall -HUP venc 2>/dev/null; true"
 }
 
 wait_http() {
@@ -224,7 +227,7 @@ show_status() {
 	port="$(detect_http_port)"
 
 	log "Process"
-	remote_capture "ps w | grep -E '(^|/)venc( |$)' | grep -v grep || true"
+	remote_capture "ps w | grep -E '(^|/)(waybeam|venc)( |\$)' | grep -v grep || true"
 
 	log "Config summary"
 	printf 'webPort=%s\n' "$(config_value .system.webPort 80)"
