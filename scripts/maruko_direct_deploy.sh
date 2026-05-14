@@ -22,10 +22,13 @@ REMOTE_ISP_BIN_DIR="/etc/sensors"
 CONFIG_PATH="/etc/waybeam.json"
 LOG_PATH="/tmp/waybeam.log"
 LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
+INIT_SCRIPT_LOCAL="init.d/S95waybeam"
+INIT_SCRIPT_REMOTE="/etc/init.d/S95waybeam"
 # One-time-rename targets cleaned up on every cycle/deploy.
 LEGACY_REMOTE_BIN="/usr/bin/venc"
 LEGACY_CONFIG_PATH="/etc/venc.json"
 LEGACY_LOG_PATH="/tmp/venc.log"
+LEGACY_INIT_SCRIPT="/etc/init.d/S95venc"
 WAIT_SECS=20
 TAIL_LINES=120
 HTTP_PORT="${HTTP_PORT:-}"
@@ -212,9 +215,22 @@ migrate_legacy_paths() {
 			mv $(printf '%q' "${LEGACY_CONFIG_PATH}") $(printf '%q' "${CONFIG_PATH}")
 			echo migrated_config
 		fi
-		rm -f $(printf '%q' "${LEGACY_CONFIG_PATH}") $(printf '%q' "${LEGACY_REMOTE_BIN}") $(printf '%q' "${LEGACY_LOG_PATH}")
+		rm -f \
+			$(printf '%q' "${LEGACY_CONFIG_PATH}") \
+			$(printf '%q' "${LEGACY_REMOTE_BIN}") \
+			$(printf '%q' "${LEGACY_LOG_PATH}") \
+			$(printf '%q' "${LEGACY_INIT_SCRIPT}")
 		true
 	" || true
+}
+
+deploy_init_script() {
+	local local_path="${INIT_SCRIPT_LOCAL}"
+	if [[ "${local_path}" != /* ]]; then local_path="${ROOT_DIR}/${local_path}"; fi
+	[[ -f "${local_path}" ]] || die "init script missing: ${local_path}"
+	log "Deploying ${local_path} -> ${HOST}:${INIT_SCRIPT_REMOTE}"
+	ssh -o BatchMode=yes -o ConnectTimeout=10 "${HOST}" "cat > $(printf '%q' "${INIT_SCRIPT_REMOTE}")" < "${local_path}"
+	remote_sh "chmod 0755 $(printf '%q' "${INIT_SCRIPT_REMOTE}")"
 }
 
 deploy_binary() {
@@ -437,6 +453,7 @@ run_cycle() {
 	fi
 
 	deploy_binary
+	deploy_init_script
 	[[ "${WITH_LIBS}" -eq 1 ]]     && push_libs
 	[[ "${WITH_JSON_CLI}" -eq 1 ]] && push_json_cli
 	[[ "${WITH_DRIVERS}" -eq 1 ]]  && push_drivers
@@ -496,14 +513,23 @@ bulk_push_all() {
 	mkdir -p \
 		"${stage}/usr/bin" \
 		"${stage}/usr/lib" \
+		"${stage}/etc/init.d" \
 		"${stage}${REMOTE_KO_DIR}" \
 		"${stage}${REMOTE_ISP_BIN_DIR}"
 
-	# waybeam binary + json_cli
+	# waybeam binary + json_cli + init script
 	cp "${LOCAL_BIN}" "${stage}/usr/bin/waybeam"
 	chmod 0755 "${stage}/usr/bin/waybeam"
 	cp "${JSON_CLI_LOCAL}" "${stage}/usr/bin/json_cli"
 	chmod 0755 "${stage}/usr/bin/json_cli"
+	local init_src="${INIT_SCRIPT_LOCAL}"
+	if [[ "${init_src}" != /* ]]; then init_src="${ROOT_DIR}/${init_src}"; fi
+	if [[ -f "${init_src}" ]]; then
+		cp "${init_src}" "${stage}${INIT_SCRIPT_REMOTE}"
+		chmod 0755 "${stage}${INIT_SCRIPT_REMOTE}"
+	else
+		warn "init script ${init_src} missing — skipping"
+	fi
 
 	# MI vendor libs
 	local libcount=0 f base
@@ -611,7 +637,7 @@ case "${COMMAND}" in
 	build)          build_maruko ;;
 	backup-config)  create_backup ;;
 	restore-config) restore_backup "${COMMAND_ARGS[0]:-}" ;;
-	deploy)         migrate_legacy_paths; deploy_binary ;;
+	deploy)         migrate_legacy_paths; deploy_binary; deploy_init_script ;;
 	push-libs)      push_libs ;;
 	push-drivers)   push_drivers ;;
 	push-isp-bin)   push_isp_bin "${COMMAND_ARGS[0]:-}" ;;

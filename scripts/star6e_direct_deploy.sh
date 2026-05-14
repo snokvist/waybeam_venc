@@ -7,10 +7,13 @@ REMOTE_BIN="/usr/bin/waybeam"
 CONFIG_PATH="/etc/waybeam.json"
 LOG_PATH="/tmp/waybeam.log"
 LATEST_BACKUP_PATH="/tmp/waybeam.json.bak.latest"
+INIT_SCRIPT_LOCAL="init.d/S95waybeam"
+INIT_SCRIPT_REMOTE="/etc/init.d/S95waybeam"
 # One-time-rename targets cleaned up on every cycle/deploy.
 LEGACY_REMOTE_BIN="/usr/bin/venc"
 LEGACY_CONFIG_PATH="/etc/venc.json"
 LEGACY_LOG_PATH="/tmp/venc.log"
+LEGACY_INIT_SCRIPT="/etc/init.d/S95venc"
 WAIT_SECS=20
 TAIL_LINES=120
 HTTP_PORT="${HTTP_PORT:-}"
@@ -190,9 +193,22 @@ migrate_legacy_paths() {
 			mv $(printf '%q' "${LEGACY_CONFIG_PATH}") $(printf '%q' "${CONFIG_PATH}")
 			echo migrated_config
 		fi
-		rm -f $(printf '%q' "${LEGACY_CONFIG_PATH}") $(printf '%q' "${LEGACY_REMOTE_BIN}") $(printf '%q' "${LEGACY_LOG_PATH}")
+		rm -f \
+			$(printf '%q' "${LEGACY_CONFIG_PATH}") \
+			$(printf '%q' "${LEGACY_REMOTE_BIN}") \
+			$(printf '%q' "${LEGACY_LOG_PATH}") \
+			$(printf '%q' "${LEGACY_INIT_SCRIPT}")
 		true
 	" || true
+}
+
+deploy_init_script() {
+	local local_path="${INIT_SCRIPT_LOCAL}"
+	if [[ "${local_path}" != /* ]]; then local_path="${ROOT_DIR}/${local_path}"; fi
+	[[ -f "${local_path}" ]] || die "init script missing: ${local_path}"
+	log "Deploying ${local_path} -> ${HOST}:${INIT_SCRIPT_REMOTE}"
+	ssh -o BatchMode=yes -o ConnectTimeout=5 "${HOST}" "cat > $(printf '%q' "${INIT_SCRIPT_REMOTE}")" < "${local_path}"
+	remote_sh "chmod 0755 $(printf '%q' "${INIT_SCRIPT_REMOTE}")"
 }
 
 deploy_binary() {
@@ -305,6 +321,7 @@ run_cycle() {
 	fi
 
 	deploy_binary
+	deploy_init_script
 	start_venc
 	wait_http
 	show_status
@@ -388,6 +405,7 @@ case "${COMMAND}" in
 	deploy)
 		migrate_legacy_paths
 		deploy_binary
+		deploy_init_script
 		;;
 	stop)
 		stop_venc
