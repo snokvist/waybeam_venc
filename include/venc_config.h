@@ -82,6 +82,14 @@ typedef struct {
 	char intra_refresh_mode[16]; /* "off" | "fast" | "balanced" | "robust" */
 	uint16_t intra_refresh_lines; /* MB/LCU rows refreshed per P-frame; 0 = mode auto */
 	uint8_t intra_refresh_qp;  /* I-MB QP override for stripe; 0 = codec default (48 H.265 / 45 H.264) */
+	/* SVC-T / temporal hierarchical reference (LTR-style error resilience).
+	 * Driven by MI_VENC_SetRefParam. ref_base=0 disables the whole feature;
+	 * ref_base>=1 enables a base/enhance reference pyramid where lost
+	 * enhance-layer P-frames recover at the next base anchor without
+	 * waiting for an IDR. Demo defaults: base=1, enhance=4, pred=1. */
+	uint8_t ref_base;          /* base-layer period; 0 = off */
+	uint8_t ref_enhance;       /* enhance-layer ratio; ignored when ref_base=0 */
+	bool ref_pred;             /* enable enhance→base prediction (recommended) */
 	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
 	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth
 	 * pressure.  The receiver sees the smaller resolution in SPS/PPS.

@@ -162,6 +162,11 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.intra_refresh_lines = 0;
 	cfg->video0.intra_refresh_qp = 0;
 
+	/* SVC-T reference (video0) — disabled by default; opt-in via refBase>0 */
+	cfg->video0.ref_base = 0;
+	cfg->video0.ref_enhance = 0;
+	cfg->video0.ref_pred = true;
+
 	/* digital zoom (video0) — disabled by default */
 	cfg->video0.zoom_pct = 0.0;
 	cfg->video0.zoom_x = 0.5;
@@ -338,6 +343,12 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->intra_refresh_qp = (uint8_t)json_get_int(obj, "intraRefreshQp",
 		(int)v->intra_refresh_qp);
 	if (v->intra_refresh_qp > 51) v->intra_refresh_qp = 51;
+
+	v->ref_base = (uint8_t)json_get_int(obj, "refBase", (int)v->ref_base);
+	v->ref_enhance = (uint8_t)json_get_int(obj, "refEnhance",
+		(int)v->ref_enhance);
+	v->ref_pred = json_get_bool(obj, "refPred", v->ref_pred);
+	if (v->ref_base > 0 && v->ref_enhance < 1) v->ref_enhance = 1;
 
 	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
 	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
@@ -918,6 +929,9 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "intraRefreshMode", cfg->video0.intra_refresh_mode, 0);
 	pp_field_uint(p,   2, "intraRefreshLines", cfg->video0.intra_refresh_lines, 0);
 	pp_field_uint(p,   2, "intraRefreshQp",    cfg->video0.intra_refresh_qp,    0);
+	pp_field_uint(p,   2, "refBase",           cfg->video0.ref_base,            0);
+	pp_field_uint(p,   2, "refEnhance",        cfg->video0.ref_enhance,         0);
+	pp_field_bool(p,   2, "refPred",           cfg->video0.ref_pred,            0);
 	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
@@ -1114,6 +1128,9 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->video0.intra_refresh_lines);
 		cJSON_AddNumberToObject(vid, "intraRefreshQp",
 			cfg->video0.intra_refresh_qp);
+		cJSON_AddNumberToObject(vid, "refBase", cfg->video0.ref_base);
+		cJSON_AddNumberToObject(vid, "refEnhance", cfg->video0.ref_enhance);
+		cJSON_AddBoolToObject(vid, "refPred", cfg->video0.ref_pred);
 		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);

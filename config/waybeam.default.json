@@ -42,6 +42,9 @@
     "intraRefreshMode": "off",
     "intraRefreshLines": 0,
     "intraRefreshQp": 0,
+    "refBase": 0,
+    "refEnhance": 0,
+    "refPred": true,
     "zoomPct": 0.0,
     "zoomX": 0.5,
     "zoomY": 0.5

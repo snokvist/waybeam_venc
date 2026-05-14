@@ -1197,6 +1197,73 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	return 0;
 }
 
+static MarukoRefPredStatus g_ref_pred_status;
+static pthread_mutex_t g_ref_pred_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	*out = g_ref_pred_status;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+}
+
+static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
+	const MarukoBackendConfig *cfg)
+{
+	MI_VENC_ParamRef_t ref;
+	MarukoRefPredStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	snap.mi_supported = g_mi_venc.fnSetRefParam ? 1 : 0;
+	if (cfg) {
+		snap.base    = cfg->ref_base;
+		snap.enhance = cfg->ref_enhance;
+		snap.pred    = cfg->ref_pred ? 1 : 0;
+	}
+
+	if (!cfg || cfg->ref_base == 0) {
+		pthread_mutex_lock(&g_ref_pred_status_mutex);
+		g_ref_pred_status = snap;
+		pthread_mutex_unlock(&g_ref_pred_status_mutex);
+		return 0;
+	}
+	if (!g_mi_venc.fnSetRefParam) {
+		fprintf(stderr, "[waybeam] WARNING: refBase=%u requested but "
+			"libmi_venc.so does not export MI_VENC_SetRefParam\n",
+			cfg->ref_base);
+		pthread_mutex_lock(&g_ref_pred_status_mutex);
+		g_ref_pred_status = snap;
+		pthread_mutex_unlock(&g_ref_pred_status_mutex);
+		return -1;
+	}
+
+	memset(&ref, 0, sizeof(ref));
+	ref.u32Base     = cfg->ref_base;
+	ref.u32Enhance  = cfg->ref_enhance ? cfg->ref_enhance : 1;
+	ref.bEnablePred = cfg->ref_pred ? 1 : 0;
+
+	if (maruko_mi_venc_set_ref_param(dev, chn, &ref) != 0) {
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetRefParam(dev=%d, "
+			"chn=%d, base=%u, enhance=%u, pred=%u) failed\n", dev, chn,
+			ref.u32Base, ref.u32Enhance, ref.bEnablePred);
+		pthread_mutex_lock(&g_ref_pred_status_mutex);
+		g_ref_pred_status = snap;
+		pthread_mutex_unlock(&g_ref_pred_status_mutex);
+		return -1;
+	}
+	snap.apply_ok = 1;
+	snap.active   = 1;
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	g_ref_pred_status = snap;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+	fprintf(stderr, "[waybeam] refPred: dev=%d chn=%d base=%u enhance=%u "
+		"pred=%u (applied)\n", dev, chn, ref.u32Base, ref.u32Enhance,
+		ref.bEnablePred);
+	return 0;
+}
+
 static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	uint32_t width, uint32_t height, uint32_t framerate,
 	MI_VENC_DEV venc_dev, MI_VENC_CHN *chn, int *dev_created)
@@ -1264,6 +1331,11 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 			" failed %d\n", ret);
 	}
 
+	/* SVC-T reference pyramid (refPred) — Star6E SDK testing showed the
+	 * call silently no-ops if invoked after StartRecvPic.  Apply here
+	 * between CreateChn and StartRecvPic for both backends. */
+	(void)maruko_apply_ref_pred(venc_dev, *chn, cfg);
+
 	ret = maruko_mi_venc_start_recv(venc_dev, *chn);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -1304,6 +1376,7 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	 * pipeline (matches Star6E behavior). */
 	(void)maruko_apply_intra_refresh(venc_dev, *chn, cfg, height,
 		framerate, cfg->rc_codec);
+	/* refPred is applied earlier (pre-StartRecvPic); see comment above. */
 
 	/* Phase 7 dual-VENC SDK probe (debug-only, env-gated).
 	 *

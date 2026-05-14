@@ -43,6 +43,9 @@ void maruko_config_defaults(MarukoBackendConfig *cfg)
 	snprintf(cfg->ae_mode, sizeof(cfg->ae_mode), "%s", "native");
 	snprintf(cfg->intra_refresh_mode, sizeof(cfg->intra_refresh_mode),
 		"%s", "off");
+	cfg->ref_base = 0;
+	cfg->ref_enhance = 0;
+	cfg->ref_pred = 1;
 	memset(&cfg->imu, 0, sizeof(cfg->imu));
 	memset(&cfg->audio, 0, sizeof(cfg->audio));
 	cfg->audio_port = 5601;
@@ -119,6 +122,9 @@ int maruko_config_from_venc(const VencConfig *vcfg, MarukoBackendConfig *cfg)
 		vcfg->video0.intra_refresh_mode);
 	cfg->intra_refresh_lines = vcfg->video0.intra_refresh_lines;
 	cfg->intra_refresh_qp = vcfg->video0.intra_refresh_qp;
+	cfg->ref_base = vcfg->video0.ref_base;
+	cfg->ref_enhance = vcfg->video0.ref_enhance;
+	cfg->ref_pred = vcfg->video0.ref_pred ? 1 : 0;
 	cfg->gop_size_sec = vcfg->video0.gop_size;
 	cfg->zoom_pct = vcfg->video0.zoom_pct;
 	cfg->zoom_x   = vcfg->video0.zoom_x;

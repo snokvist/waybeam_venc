@@ -394,6 +394,9 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
 	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
+	FIELD(video0, ref_base,             FT_UINT8,  MUT_RESTART),
+	FIELD(video0, ref_enhance,          FT_UINT8,  MUT_RESTART),
+	FIELD(video0, ref_pred,             FT_BOOL,   MUT_RESTART),
 	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
 	 * upscale, no bandwidth pressure) — that requires resizing the VPE
 	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
@@ -462,6 +465,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.intraRefreshMode", "video0.intra_refresh_mode" },
 	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
+	{ "video0.refBase", "video0.ref_base" },
+	{ "video0.refEnhance", "video0.ref_enhance" },
+	{ "video0.refPred", "video0.ref_pred" },
 	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },

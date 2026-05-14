@@ -714,9 +714,13 @@ static void star6e_pipeline_fill_h26x_attr(i6_venc_attr_h26x *attr,
 	attr->refNum = 1;
 }
 
+static int star6e_pipeline_pre_start_apply_ref_pred(MI_VENC_CHN chn,
+	const VencConfig *vcfg);
+
 static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	uint32_t bitrate, uint32_t framerate, uint32_t gop, PAYLOAD_TYPE_E codec,
-	int rc_mode, bool frame_lost_enabled, MI_VENC_CHN *chn)
+	int rc_mode, bool frame_lost_enabled, const VencConfig *vcfg,
+	MI_VENC_CHN *chn)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bit_rate_bits;
@@ -825,6 +829,11 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 			*chn, ret);
 		return ret;
 	}
+
+	/* SDK convention: SetRefParam must be called between CreateChn and
+	 * StartRecvPic.  Star6E silently no-ops the call if invoked after
+	 * StartRecvPic, producing a flat single-layer stream. */
+	(void)star6e_pipeline_pre_start_apply_ref_pred(*chn, vcfg);
 
 	ret = MI_VENC_StartRecvPic(*chn);
 	if (ret != 0) {
@@ -954,6 +963,81 @@ static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 	fprintf(stderr, "[venc] intraRefresh: mode=%s lines/P=%u qp=%u "
 		"gop=%.2fs (%s)\n", name, cfg.u32RefreshLineNum, cfg.u32ReqIQp,
 		snap.effective_gop_sec, snap.gop_auto ? "auto" : "explicit");
+	return 0;
+}
+
+static Star6eRefPredStatus g_ref_pred_status;
+static pthread_mutex_t g_ref_pred_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void star6e_pipeline_ref_pred_status(Star6eRefPredStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	*out = g_ref_pred_status;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+}
+
+/* SVC-T reference structure — opt-in via video0.refBase.  Disabled means
+ * SDK default single-layer reference (one P references previous P).
+ *
+ * Star6E SDK requires SetRefParam to land between CreateChn and
+ * StartRecvPic — calling it later silently no-ops (verified with the
+ * test_ref_pred harness: bitstream identical at any post-Start value).
+ * Therefore this helper is invoked from star6e_pipeline_start_venc()
+ * immediately after CreateChn. */
+static int star6e_pipeline_pre_start_apply_ref_pred(MI_VENC_CHN chn,
+	const VencConfig *vcfg)
+{
+	MI_VENC_ParamRef_t ref;
+	Star6eRefPredStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	snap.mi_supported = g_mi_venc.fnSetRefParam ? 1 : 0;
+	if (vcfg) {
+		snap.base    = vcfg->video0.ref_base;
+		snap.enhance = vcfg->video0.ref_enhance;
+		snap.pred    = vcfg->video0.ref_pred ? 1 : 0;
+	}
+
+	if (!vcfg || vcfg->video0.ref_base == 0) {
+		pthread_mutex_lock(&g_ref_pred_status_mutex);
+		g_ref_pred_status = snap;
+		pthread_mutex_unlock(&g_ref_pred_status_mutex);
+		return 0;
+	}
+	if (!g_mi_venc.fnSetRefParam) {
+		fprintf(stderr, "[waybeam] WARNING: refBase=%u requested but "
+			"libmi_venc.so does not export MI_VENC_SetRefParam\n",
+			vcfg->video0.ref_base);
+		pthread_mutex_lock(&g_ref_pred_status_mutex);
+		g_ref_pred_status = snap;
+		pthread_mutex_unlock(&g_ref_pred_status_mutex);
+		return -1;
+	}
+
+	memset(&ref, 0, sizeof(ref));
+	ref.u32Base     = vcfg->video0.ref_base;
+	ref.u32Enhance  = vcfg->video0.ref_enhance ? vcfg->video0.ref_enhance : 1;
+	ref.bEnablePred = vcfg->video0.ref_pred ? 1 : 0;
+
+	if (MI_VENC_SetRefParam(chn, &ref) != 0) {
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetRefParam(chn=%d, "
+			"base=%u, enhance=%u, pred=%u) failed\n", chn,
+			ref.u32Base, ref.u32Enhance, ref.bEnablePred);
+		pthread_mutex_lock(&g_ref_pred_status_mutex);
+		g_ref_pred_status = snap;
+		pthread_mutex_unlock(&g_ref_pred_status_mutex);
+		return -1;
+	}
+	snap.apply_ok = 1;
+	snap.active   = 1;
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	g_ref_pred_status = snap;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+	fprintf(stderr, "[waybeam] refPred: chn=%d base=%u enhance=%u pred=%u "
+		"(applied pre-Start)\n", chn, ref.u32Base, ref.u32Enhance,
+		ref.bEnablePred);
 	return 0;
 }
 
@@ -1744,7 +1828,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	ret = star6e_pipeline_start_venc(pconf.image_width, pconf.image_height,
 		pconf.venc_max_rate, venc_fps, pconf.venc_gop_size,
 		pconf.rc_codec, pconf.rc_mode,
-		vcfg->video0.frame_lost, &state->venc_channel);
+		vcfg->video0.frame_lost, vcfg, &state->venc_channel);
 	if (ret != 0)
 		goto fail_vpe;
 
@@ -1752,6 +1836,10 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * but not fatal: stream still works without rolling refresh. */
 	(void)star6e_pipeline_apply_intra_refresh(state->venc_channel, vcfg,
 		pconf.image_height, venc_fps, pconf.rc_codec);
+
+	/* SVC-T reference pyramid (refPred) is applied inside
+	 * star6e_pipeline_start_venc() before StartRecvPic — the SDK
+	 * requires that ordering or the call silently no-ops. */
 
 	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
 	if (ret != 0)
@@ -1804,9 +1892,12 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	if (server)
 		snprintf(d->server, sizeof(d->server), "%s", server);
 
+	/* Dual ch1 does not see vcfg here — refPred not applied to ch1.  The
+	 * secondary stream is typically a low-bandwidth recorder feed where
+	 * SVC-T is less impactful; revisit if needed. */
 	ret = star6e_pipeline_start_venc(state->image_width,
 		state->image_height, bitrate, fps, gop,
-		PT_H265, 3 /* CBR */, frame_lost, &d->channel);
+		PT_H265, 3 /* CBR */, frame_lost, NULL, &d->channel);
 	if (ret != 0) {
 		fprintf(stderr, "WARNING: dual VENC ch1 create failed (%d), "
 			"falling back to mirror mode\n", ret);

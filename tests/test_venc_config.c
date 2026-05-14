@@ -80,6 +80,42 @@ static int test_defaults(void)
 	CHECK("defaults_scene_threshold_off", cfg.video0.scene_threshold == 0);
 	CHECK("defaults_scene_holdoff", cfg.video0.scene_holdoff == 2);
 
+	CHECK("defaults_ref_base_off", cfg.video0.ref_base == 0);
+	CHECK("defaults_ref_enhance", cfg.video0.ref_enhance == 0);
+	CHECK("defaults_ref_pred_on", cfg.video0.ref_pred == true);
+
+	return failures;
+}
+
+/* refBase>0 with refEnhance=0 in JSON must auto-clamp enhance to 1 (1+0
+ * pyramid would mean every frame is a base anchor — pointless). */
+static int test_ref_pred_enhance_clamp(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+
+	const char *json =
+		"{\"video0\":{\"refBase\":1,\"refEnhance\":0,\"refPred\":false}}";
+	char *path = NULL;
+	FILE *f = NULL;
+	char buf[] = "/tmp/venc_refpred_test_XXXXXX";
+	int fd = mkstemp(buf);
+	CHECK("ref_pred_mkstemp_ok", fd >= 0);
+	if (fd < 0) return failures;
+	f = fdopen(fd, "w");
+	if (!f) { close(fd); unlink(buf); return failures; }
+	fputs(json, f);
+	fclose(f);
+	path = buf;
+
+	int rc = venc_config_load(path, &cfg);
+	CHECK("ref_pred_load_ok", rc == 0);
+	CHECK("ref_pred_base", cfg.video0.ref_base == 1);
+	CHECK("ref_pred_enhance_clamped", cfg.video0.ref_enhance == 1);
+	CHECK("ref_pred_pred_false", cfg.video0.ref_pred == false);
+
+	unlink(path);
 	return failures;
 }
 
@@ -785,5 +821,6 @@ int test_venc_config(void)
 	failures += test_audio_roundtrip();
 	failures += test_save_layout_byte_equal();
 	failures += test_save_layout_populated_round_trip();
+	failures += test_ref_pred_enhance_clamp();
 	return failures;
 }
