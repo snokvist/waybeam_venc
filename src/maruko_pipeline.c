@@ -2893,6 +2893,67 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
  * → optional sidecar trailer + verbose log.  Mirrors
  * star6e_runtime_process_stream().  Returns: -1 fatal, 0 ok, 1 retry
  * outer loop. */
+/* HEVC NAL type / SDK eRefType constants — mirror star6e_runtime.c.
+ * SigmaStar i6c VENC firmware has the same gap as i6e: it computes the
+ * SVC-T pyramid and labels each frame's eRefType correctly, but writes
+ * every NAL as TRAIL_R (type 1).  Generic HEVC decoders need TRAIL_N
+ * (type 0) to know which frames are non-reference. */
+#define HEVC_NAL_TRAIL_N 0
+#define HEVC_NAL_TRAIL_R 1
+#define MARUKO_REFTYPE_ENHANCE_P_NOTFORREF 4
+
+static size_t maruko_nal_header_idx(const uint8_t *buf, size_t len)
+{
+	size_t i = 0;
+	while (i < len && buf[i] == 0) i++;
+	if (i < len && buf[i] == 0x01) i++;
+	return i < len ? i : len;
+}
+
+static void maruko_patch_pack_to_trail_n(i6c_venc_pack *pack)
+{
+	if (!pack || !pack->data || pack->length == 0)
+		return;
+	if (pack->packNum > 0) {
+		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
+			sizeof(pack->packetInfo[0]));
+		unsigned int n = pack->packNum > info_cap ? info_cap : pack->packNum;
+		unsigned int k;
+		for (k = 0; k < n; ++k) {
+			unsigned int off = pack->packetInfo[k].offset;
+			unsigned int nlen = pack->packetInfo[k].length;
+			if (off >= pack->length || nlen == 0 ||
+			    off + nlen > pack->length)
+				continue;
+			size_t hdr = maruko_nal_header_idx(pack->data + off, nlen);
+			if (hdr >= nlen) continue;
+			if (pack->data[off + hdr] == 0x02) {
+				pack->data[off + hdr] = 0x00;
+			}
+		}
+		return;
+	}
+	if (pack->offset >= pack->length)
+		return;
+	{
+		unsigned int off = pack->offset;
+		unsigned int nlen = pack->length - off;
+		size_t hdr = maruko_nal_header_idx(pack->data + off, nlen);
+		if (hdr >= nlen) return;
+		if (pack->data[off + hdr] == 0x02) {
+			pack->data[off + hdr] = 0x00;
+		}
+	}
+}
+
+static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
+{
+	unsigned int i;
+	if (!s || !s->packet) return;
+	for (i = 0; i < s->count; i++)
+		maruko_patch_pack_to_trail_n(&s->packet[i]);
+}
+
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, const i6c_venc_stat *stat)
 {
@@ -2929,6 +2990,17 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		fprintf(stderr,
 			"ERROR: [maruko] MI_VENC_GetStream failed %d\n", ret);
 		return -1;
+	}
+
+	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
+	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  i6c shares this
+	 * encoder-firmware gap with i6e (Star6E): the pyramid logic is
+	 * correct internally but every NAL is emitted as TRAIL_R, leaving
+	 * generic decoders unable to identify non-reference frames.  See
+	 * star6e_runtime.c for the matching helper. */
+	if (ctx->cfg.ref_base > 0 &&
+	    stream.h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) {
+		maruko_patch_stream_to_trail_n(&stream);
 	}
 
 	++rt->frame_counter;

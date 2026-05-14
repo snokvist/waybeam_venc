@@ -79,6 +79,78 @@ static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 	return t;
 }
 
+/* HEVC NAL types relevant for non-reference rewriting */
+#define HEVC_NAL_TRAIL_N 0
+#define HEVC_NAL_TRAIL_R 1
+#define SS_REFTYPE_ENHANCE_P_NOTFORREF 4
+
+/* Locate the NAL header byte 0 inside a payload buffer that may or may not
+ * begin with a start-code prefix (00 00 01 / 00 00 00 01).  Returns the
+ * index of NAL byte 0, or len on failure. */
+static size_t star6e_nal_header_idx(const uint8_t *buf, size_t len)
+{
+	size_t i = 0;
+	while (i < len && buf[i] == 0) i++;
+	if (i < len && buf[i] == 0x01) i++;
+	return i < len ? i : len;
+}
+
+/* If a NAL is TRAIL_R (type 1) and the SDK marked this frame as
+ * ENHANCE_P_NOTFORREF, rewrite the NAL header to TRAIL_N (type 0).
+ *
+ * Byte 0 bit layout: forbidden_zero(1) | nal_unit_type(6) | layer_id_msb(1)
+ *   TRAIL_R = 0x02   (type=1, layer_msb=0)
+ *   TRAIL_N = 0x00   (type=0, layer_msb=0)
+ *
+ * No-op if NAL layer_id_msb != 0 (we only touch single-layer streams), if
+ * the NAL is anything other than TRAIL_R, or if no slice NALs are present
+ * in the pack (we never touch VPS/SPS/PPS — those are nal_type >= 32 and
+ * fail the TRAIL_R check). */
+static void star6e_patch_pack_to_trail_n(MI_VENC_Pack_t *pack)
+{
+	if (!pack || !pack->data || pack->length == 0)
+		return;
+	if (pack->packNum > 0) {
+		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
+			sizeof(pack->packetInfo[0]));
+		unsigned int n = pack->packNum > info_cap ? info_cap : pack->packNum;
+		unsigned int k;
+		for (k = 0; k < n; ++k) {
+			MI_U32 off = pack->packetInfo[k].offset;
+			MI_U32 nlen = pack->packetInfo[k].length;
+			if (off >= pack->length || nlen == 0 ||
+			    off + nlen > pack->length)
+				continue;
+			size_t hdr = star6e_nal_header_idx(pack->data + off, nlen);
+			if (hdr >= nlen) continue;
+			if (pack->data[off + hdr] == 0x02) {
+				pack->data[off + hdr] = 0x00;
+			}
+		}
+		return;
+	}
+	/* packNum == 0: single NAL */
+	if (pack->offset >= pack->length)
+		return;
+	{
+		MI_U32 off = pack->offset;
+		MI_U32 nlen = pack->length - off;
+		size_t hdr = star6e_nal_header_idx(pack->data + off, nlen);
+		if (hdr >= nlen) return;
+		if (pack->data[off + hdr] == 0x02) {
+			pack->data[off + hdr] = 0x00;
+		}
+	}
+}
+
+static void star6e_patch_stream_to_trail_n(MI_VENC_Stream_t *s)
+{
+	unsigned int i;
+	if (!s || !s->packet) return;
+	for (i = 0; i < s->count; i++)
+		star6e_patch_pack_to_trail_n(&s->packet[i]);
+}
+
 static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
 {
 	unsigned int i;
@@ -837,6 +909,44 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		}
 		fprintf(stderr, "ERROR: MI_VENC_GetStream failed %d\n", ret);
 		return ret;
+	}
+
+	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
+	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  The encoder's own
+	 * SVC-T pyramid logic determines which frames are non-reference; we
+	 * just propagate that designation into the bitstream so generic
+	 * receivers can safely drop those NALs without cascade.
+	 *
+	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
+	 * encoder produces a flat single-ref stream and every frame matters. */
+	if (vcfg->video0.ref_base > 0 &&
+	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+		star6e_patch_stream_to_trail_n(&stream);
+	}
+
+	/* refPred diagnostic — print eRefType histogram every 150 frames when
+	 * WAYBEAM_DEBUG_REFTYPE is set in the environment.  Reveals whether
+	 * the SDK is producing ENHANCE_P_NOTFORREF frames (which would make
+	 * the pyramid actually useful for error resilience). */
+	if (getenv("WAYBEAM_DEBUG_REFTYPE")) {
+		static unsigned int reftype_hist[8] = {0};
+		static unsigned int total = 0;
+		unsigned int rt = stream.h265Info.refType;
+		if (rt < 8)
+			reftype_hist[rt]++;
+		total++;
+		if (total % 150 == 0) {
+			fprintf(stderr,
+				"[refPred] eRefType histogram (n=%u): "
+				"BASE_P_REFTOIDR=%u BASE_P_REFBYBASE=%u "
+				"BASE_P_REFBYENHANCE=%u "
+				"ENHANCE_P_REFBYENHANCE=%u "
+				"ENHANCE_P_NOTFORREF=%u other=%u\n",
+				total, reftype_hist[0], reftype_hist[1],
+				reftype_hist[2], reftype_hist[3],
+				reftype_hist[4],
+				reftype_hist[5] + reftype_hist[6] + reftype_hist[7]);
+		}
 	}
 
 	{
