@@ -27,11 +27,11 @@ different `SOC_BUILD=` flags. All MI vendor libraries are loaded via
 own copies of libs that stock OpenIPC Infinity6C firmware does not.
 
 > **Note on naming.** The product, binary, and config file are
-> `waybeam`. The legacy name `venc` is preserved as a binary symlink
-> and a config-path fallback so deploy scripts, init wrappers, and old
-> installs keep working. Source files and the GitHub repo are still
-> named `waybeam_venc` for backward compatibility — that is a cosmetic
-> historical detail, not a different project.
+> `waybeam`. The GitHub repository is still named `waybeam_venc` for
+> historical URL stability, but that is a cosmetic detail — the repo
+> contents have no other reference to the old `venc` name. Deploy
+> tooling cleans up any legacy `/usr/bin/venc` and `/etc/venc.json`
+> on the device the first time it runs.
 
 ## Features
 
@@ -73,9 +73,7 @@ its own output directory:
 
 ```
 out/star6e/waybeam   # Star6E binary
-out/star6e/venc      # → waybeam (compat symlink)
 out/maruko/waybeam   # Maruko binary
-out/maruko/venc      # → waybeam (compat symlink)
 ```
 
 Both backends can coexist; no clean is needed when switching.
@@ -97,16 +95,16 @@ make test-ci
 
 ### Star6E (Infinity6E)
 
-Copy the primary binary to the target device, and (optionally) preserve
-the `venc` symlink for legacy deploy automation:
+Copy the binary to the target device:
 
 ```sh
 scp out/star6e/waybeam root@<device-ip>:/usr/bin/waybeam
-scp -O out/star6e/venc root@<device-ip>:/usr/bin/venc   # preserves the symlink
 ```
 
-For the current Star6E bench workflow, prefer the helper (still wired to
-the legacy `/usr/bin/venc` install path, which is now the compat symlink):
+For the current Star6E bench workflow, prefer the helper — it stops any
+running daemon, sweeps the legacy `/usr/bin/venc` and `/etc/venc.json`
+paths off the device (one-time migration; idempotent thereafter), then
+deploys + starts the new binary:
 
 ```sh
 scripts/star6e_direct_deploy.sh cycle
@@ -129,7 +127,7 @@ modules and ISP `.bin` blobs are vendored under `sensors/maruko/` and
 | `vendor-libs/maruko/*.so`     | `/usr/lib/`                           | pulled from device, vendored |
 | `sensors/maruko/sensor_imx*_maruko.ko` | `/lib/modules/5.10.61/sigmastar/sensor_imx*_mipi.ko` | source-built via `make drivers-maruko`, vendored (staged → `_mipi.ko`) |
 | `iq-profiles/maruko-bin/*.bin`| `/etc/sensors/`                       | pulled from device |
-| `out/maruko/waybeam`          | `/usr/bin/waybeam` (+ `/usr/bin/venc` symlink) | `make build SOC_BUILD=maruko` |
+| `out/maruko/waybeam`          | `/usr/bin/waybeam`                    | `make build SOC_BUILD=maruko` |
 | `out/maruko/json_cli`         | `/usr/bin/json_cli`                   | `make json_cli SOC_BUILD=maruko` (vendored from `waybeam-hub/tools/`) |
 
 `push-libs` also creates two uClibc compat symlinks on the target —
@@ -203,35 +201,42 @@ known-good device.
 
 ## Configuration
 
-`waybeam` loads configuration from a fixed path on startup. There is no
-`-c` flag and no command-line override.
+`waybeam` loads its configuration from a single fixed path on startup:
 
-1. Primary path: **`/etc/waybeam.json`** — preferred on all new installs.
-2. Fallback: **`/etc/venc.json`** — legacy path, automatically picked up
-   if `/etc/waybeam.json` is absent. A one-line stderr notice is printed
-   so the operator knows to rename when convenient.
-
-A default template is provided at `config/venc.default.json` (Star6E)
-and `config/venc.default.maruko.json` (Maruko). The release tarball
-ships a `venc.json` you can drop into either location:
-
-```sh
-# Preferred — new installs:
-cp /tmp/venc-<backend>/venc.json /etc/waybeam.json
-
-# Legacy — existing installs keep working unchanged:
-cp /tmp/venc-<backend>/venc.json /etc/venc.json
 ```
+/etc/waybeam.json
+```
+
+There is no `-c` flag and no command-line override. If the file is
+absent the binary boots with compiled-in defaults and prints a notice
+to stderr; the HTTP API is still available and `/api/v1/restart`
+re-reads the file once it has been written.
+
+Default templates live in the repo:
+
+| Backend | Template path |
+|---|---|
+| Star6E (Infinity6E) | `config/waybeam.default.json` |
+| Maruko (Infinity6C) | `config/waybeam.default.maruko.json` |
+
+The release tarballs ship the matching template as `waybeam.json`
+inside `waybeam-<backend>.tar.gz`; copy it to `/etc/waybeam.json` on
+first install.
+
+### Schema
+
+Every section in the template is shown below. All fields are optional —
+omitted fields keep their compiled-in defaults.
 
 ```json
 {
-  "system": { "webPort": 80, "overclockLevel": 0, "verbose": false },
-  "sensor": {
+  "system":   { "webPort": 80, "overclockLevel": 0, "verbose": false },
+  "sensor":   {
     "index": -1, "mode": -1,
     "unlockEnabled": true, "unlockCmd": 35,
     "unlockReg": 12298, "unlockValue": 128, "unlockDir": 0
   },
-  "isp": {
+  "isp":      {
     "sensorBin": "",
     "legacyAe": true, "aeFps": 15,
     "aeMode": "native",
@@ -239,44 +244,82 @@ cp /tmp/venc-<backend>/venc.json /etc/venc.json
     "awbMode": "auto", "awbCt": 5500,
     "keepAspect": true
   },
-  "image": { "mirror": false, "flip": false, "rotate": 0 },
-  "video0": {
+  "image":    { "mirror": false, "flip": false, "rotate": 0 },
+  "video0":   {
     "codec": "h265", "rcMode": "cbr", "fps": 30,
     "bitrate": 8192, "gopSize": 1.0,
-    "qpDelta": -4
+    "qpDelta": -4,
+    "sceneThreshold": 0, "sceneHoldoff": 2,
+    "intraRefreshMode": "off",
+    "intraRefreshLines": 0, "intraRefreshQp": 0,
+    "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5
   },
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400,
     "connectedUdp": true, "audioPort": 5601, "sidecarPort": 5602
   },
-  "fpv": {
+  "fpv":      {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
     "roiCenter": 0.25, "noiseLevel": 0
   },
-  "audio": {
+  "audio":    {
     "enabled": false, "sampleRate": 16000, "channels": 1,
     "codec": "g711a", "volume": 80, "mute": false
   },
-  "imu": {
+  "imu":      {
     "enabled": false, "i2cDevice": "/dev/i2c-1", "i2cAddr": "0x68",
     "sampleRateHz": 200, "gyroRangeDps": 1000,
     "calFile": "/etc/imu.cal", "calSamples": 400
   },
-  "record": {
+  "record":   {
     "enabled": false, "mode": "mirror", "dir": "/mnt/mmcblk0p1",
     "format": "ts", "maxSeconds": 300, "maxMB": 500,
     "bitrate": 0, "fps": 0, "gopSize": 0, "server": ""
   },
   "snapshot": {
-    "enabled": true, "quality": 80, "channel": 7, "width": 0, "height": 0
-  }
+    "enabled": true, "quality": 80, "channel": 7,
+    "width": 0, "height": 0
+  },
+  "debug":    { "showOsd": false }
 }
 ```
 
+### Section reference
+
+- **`system`** — HTTP API port, CPU overclock level, verbose logging
+  toggle.
+- **`sensor`** — pad/mode selection (-1 = auto) plus the high-FPS
+  unlock register sequence (IMX415 defaults shown).
+- **`isp`** — ISP tuning bin path, AE source (legacy/custom 3A), gain
+  ceiling, AWB mode, aspect-preserving crop. `aeMode` is Maruko-only.
+- **`image`** — mirror / flip / rotate.
+- **`video0`** — codec, rate control, fps, resolution, bitrate, GOP,
+  per-section QP delta. Scene-change-triggered IDR (`sceneThreshold`,
+  `sceneHoldoff`) is Star6E-only. Intra-refresh and digital zoom are
+  both backends.
+- **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
+  stream mode (`rtp` / `compact`), payload sizing, optional dedicated
+  audio + sidecar UDP ports.
+- **`fpv`** — center-priority ROI bands + 3DNR level.
+- **`audio`** — `enabled`, sample rate, channels, codec, software
+  volume, live-mutable mute. Supports `pcm`, `g711a`, `g711u`, `opus`.
+- **`imu`** — BMI270 driver (disabled by default).
+- **`record`** — SD card recorder. `mode` is `off` / `mirror` /
+  `dual` / `dual-stream`; format is `ts` or `hevc` (Star6E only).
+- **`snapshot`** — JPEG snapshot channel served at
+  `/api/v1/snapshot.jpg`. `quality` is live-mutable; `channel`,
+  `width`, `height` are restart-required because they are baked at
+  `MI_VENC_CreateChn` time. `width=0` and `height=0` mean "match the
+  active main stream".
+- **`debug`** — overlay extra OSD rows (zoom, intra-refresh state,
+  recording status) on the encoded video.
+
+### Starting a stream
+
 Set `outgoing.enabled` to `true` and `outgoing.server` to
 `udp://<receiver_ip>:5600`, `unix://<abstract_name>`, or
-`shm://<ring_name>` to start streaming.
+`shm://<ring_name>`.
 
 ## HTTP API
 
@@ -389,9 +432,8 @@ Returns HTTP 409 on validation failure (e.g., invalid AWB mode).
 
 #### GET /api/v1/restart
 
-Trigger a full pipeline reinit. Reloads the on-disk config (`/etc/waybeam.json`,
-or the legacy `/etc/venc.json` fallback) and restarts the camera pipeline
-without exiting the process.
+Trigger a full pipeline reinit. Reloads `/etc/waybeam.json` and
+restarts the camera pipeline without exiting the process.
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/restart
@@ -724,8 +766,7 @@ uses a dedicated local UDP audio destination.
 | `audio.mute` | bool | live | Mute/unmute audio output |
 
 Audio configuration (enabled, sample rate, channels, codec, volume) is
-set in `/etc/waybeam.json` (or legacy `/etc/venc.json`) only and
-requires a process restart to change.
+set in `/etc/waybeam.json` only and requires a process restart to change.
 
 Supported codecs: `"pcm"` (raw 16-bit, big-endian L16 per RFC 3551),
 `"g711a"` (A-law), `"g711u"` (µ-law), `"opus"` (requires `libopus.so`

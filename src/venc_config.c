@@ -482,22 +482,6 @@ int venc_config_load(const char *path, VencConfig *cfg)
 
 	size_t len = 0;
 	char *data = read_file(path, &len);
-	/* Compat shim: if the primary path is missing and we were asked for
-	 * the new default, retry the legacy /etc/venc.json path so devices
-	 * provisioned before the rename keep booting unchanged. */
-	if (!data && errno == ENOENT && path &&
-	    strcmp(path, WAYBEAM_CONFIG_DEFAULT_PATH) == 0) {
-		char *legacy = read_file(VENC_CONFIG_LEGACY_PATH, &len);
-		if (legacy) {
-			fprintf(stderr,
-				"[config] %s not found, loaded legacy %s "
-				"(rename to %s when convenient)\n",
-				path, VENC_CONFIG_LEGACY_PATH,
-				WAYBEAM_CONFIG_DEFAULT_PATH);
-			data = legacy;
-			path = VENC_CONFIG_LEGACY_PATH;
-		}
-	}
 	if (!data) {
 		if (errno == ENOENT) {
 			fprintf(stderr, "[config] %s not found, using defaults\n", path);

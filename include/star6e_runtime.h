@@ -3,8 +3,8 @@
 
 #include "backend.h"
 
-/* Comm names for child forks created by the Star6E runtime.  Both must
- * differ from "waybeam" and "venc" — those are what
+/* Comm names for child forks created by the Star6E runtime.  Both
+ * must differ from "waybeam" — that is what
  * is_another_waybeam_running() in main.c matches against, and a
  * duplicate match would abort SIGHUP-respawn with the "already
  * running" banner. */

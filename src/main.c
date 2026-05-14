@@ -10,23 +10,19 @@
 #include "star6e_runtime.h"
 #endif
 
-/* Single-instance gate.  We walk /proc and reject startup if any other
- * userspace process has comm "waybeam" or the legacy "venc".  An
- * earlier flock-based pidfile lock was tried as belt-and-suspenders
- * against the TOCTOU window here, but on Star6E the SIGHUP-respawn
- * handoff hit a kernel race where the new image's flock() saw the OFD
- * as still locked past 600 ms after parent reap, with no
- * /proc/PID/fd entry referencing the file.  The /proc walk on its own
- * is sufficient: the only path to a second instance is an external
- * `/usr/bin/waybeam &` (or a legacy `/usr/bin/venc &`) racing the
+/* Single-instance gate.  We walk /proc and reject startup if any
+ * other userspace process has comm "waybeam".  An earlier flock-based
+ * pidfile lock was tried as belt-and-suspenders against the TOCTOU
+ * window here, but on Star6E the SIGHUP-respawn handoff hit a kernel
+ * race where the new image's flock() saw the OFD as still locked past
+ * 600 ms after parent reap, with no /proc/PID/fd entry referencing
+ * the file.  The /proc walk on its own is sufficient: the only path
+ * to a second instance is an external `/usr/bin/waybeam &` racing the
  * init script, and the TOCTOU window between scan and process-exit
  * is irrelevant because both processes would notice each other on
  * the walk anyway.  Comm is pinned via prctl(PR_SET_NAME) early in
  * main so the SIGHUP-respawn child (whose comm is "waybeam-resp"
- * until execv) is correctly distinguished from a fully-running peer.
- * The legacy "venc" comm remains in the match set so an older binary
- * deployed alongside this one through the compat symlink is also
- * detected. */
+ * until execv) is correctly distinguished from a fully-running peer. */
 
 static int is_another_waybeam_running(void)
 {
@@ -49,10 +45,9 @@ static int is_another_waybeam_running(void)
     }
 
     /* Skip kernel threads (empty /proc/PID/cmdline).  Prevents a stale
-     * "[venc]" or "[waybeam]" MI_VENC kernel worker — left behind when
-     * MI_SYS_Exit is bypassed by SIGKILL/OOM/panic — from blocking
-     * restart until reboot.  Userspace processes always have argv[0]\0
-     * in cmdline. */
+     * "[waybeam]" MI_VENC kernel worker — left behind when MI_SYS_Exit
+     * is bypassed by SIGKILL/OOM/panic — from blocking restart until
+     * reboot.  Userspace processes always have argv[0]\0 in cmdline. */
     char cmdline_path[64];
     snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%ld/cmdline", pid);
     FILE* cf = fopen(cmdline_path, "r");
@@ -79,7 +74,7 @@ static int is_another_waybeam_running(void)
       if (len > 0 && comm[len - 1] == '\n') {
         comm[len - 1] = '\0';
       }
-      if (strcmp(comm, "waybeam") == 0 || strcmp(comm, "venc") == 0) {
+      if (strcmp(comm, "waybeam") == 0) {
         fclose(f);
         closedir(proc);
         return 1;
