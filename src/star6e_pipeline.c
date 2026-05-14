@@ -1000,20 +1000,13 @@ static int star6e_pipeline_pre_start_apply_ref_pred(MI_VENC_CHN chn,
 		snap.pred    = vcfg->video0.ref_pred ? 1 : 0;
 	}
 
-	if (!vcfg || vcfg->video0.ref_base == 0) {
-		pthread_mutex_lock(&g_ref_pred_status_mutex);
-		g_ref_pred_status = snap;
-		pthread_mutex_unlock(&g_ref_pred_status_mutex);
-		return 0;
-	}
+	if (!vcfg || vcfg->video0.ref_base == 0)
+		goto publish;
 	if (!g_mi_venc.fnSetRefParam) {
 		fprintf(stderr, "[waybeam] WARNING: refBase=%u requested but "
 			"libmi_venc.so does not export MI_VENC_SetRefParam\n",
 			vcfg->video0.ref_base);
-		pthread_mutex_lock(&g_ref_pred_status_mutex);
-		g_ref_pred_status = snap;
-		pthread_mutex_unlock(&g_ref_pred_status_mutex);
-		return -1;
+		goto publish;
 	}
 
 	memset(&ref, 0, sizeof(ref));
@@ -1025,20 +1018,18 @@ static int star6e_pipeline_pre_start_apply_ref_pred(MI_VENC_CHN chn,
 		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetRefParam(chn=%d, "
 			"base=%u, enhance=%u, pred=%u) failed\n", chn,
 			ref.u32Base, ref.u32Enhance, ref.bEnablePred);
-		pthread_mutex_lock(&g_ref_pred_status_mutex);
-		g_ref_pred_status = snap;
-		pthread_mutex_unlock(&g_ref_pred_status_mutex);
-		return -1;
+		goto publish;
 	}
 	snap.apply_ok = 1;
 	snap.active   = 1;
-	pthread_mutex_lock(&g_ref_pred_status_mutex);
-	g_ref_pred_status = snap;
-	pthread_mutex_unlock(&g_ref_pred_status_mutex);
 	fprintf(stderr, "[waybeam] refPred: chn=%d base=%u enhance=%u pred=%u "
 		"(applied pre-Start)\n", chn, ref.u32Base, ref.u32Enhance,
 		ref.bEnablePred);
-	return 0;
+publish:
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	g_ref_pred_status = snap;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+	return snap.active ? 0 : (vcfg && vcfg->video0.ref_base > 0 ? -1 : 0);
 }
 
 static void star6e_pipeline_sysfs_write(const char *path, const char *value)

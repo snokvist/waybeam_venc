@@ -162,8 +162,8 @@ typedef struct {
 
 void maruko_pipeline_intra_refresh_status(MarukoIntraRefreshStatus *out);
 
-/** Snapshot of the SVC-T reference parameter applied to ch0 at the most
- *  recent pipeline start.  Mirror of Star6eRefPredStatus. */
+/* Mirror of Star6eRefPredStatus — refPred state at most recent pipeline
+ * apply.  Populated by maruko_apply_ref_pred(). */
 typedef struct {
 	int      active;
 	int      mi_supported;

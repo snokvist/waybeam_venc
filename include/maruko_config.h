@@ -70,6 +70,10 @@ typedef struct {
 	uint8_t ref_base;
 	uint8_t ref_enhance;
 	uint8_t ref_pred;
+	/* Resilience preset name — mirror of video0.resilience.  Used by
+	 * the debug OSD; pipeline behaviour is fully determined by the
+	 * already-expanded intra_refresh_* / ref_* fields above. */
+	char resilience[16];
 	double gop_size_sec;            /* mirrors video0.gop_size; 0.0 = mode auto */
 	int verbose;
 	int connected_udp;

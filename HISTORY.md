@@ -1,5 +1,62 @@
 # History
 
+## [0.10.12] - 2026-05-14
+
+refPred (SVC-T temporal hierarchical reference) lands as a real feature
+behind a single user-facing knob: `video0.resilience`.
+
+- **`video0.resilience` is the sole knob for intra-refresh + SVC-T +
+  GOP.**  Five values pick a 2x2 matrix of trade-offs:
+
+  |                          | Low resilience (best image) | High resilience (more overhead) |
+  |--------------------------|-----------------------------|---------------------------------|
+  | **Fast recovery needed** | `racing` (intra=fast)       | `fpv` (intra=robust + refPred)  |
+  | **Slow recovery OK**     | `quality` (no extras)       | `range` (intra=balanced + refPred) |
+
+  `off` (default) disables both intra-refresh and refPred and honours
+  the user's `gopSize`.  Named presets always set `gopSize` (4.0s for
+  `quality`, 2.0s for the rest) — the previous "gop=0 means
+  intra-refresh picks" auto-mode is gone.  Removed from the user
+  surface: `intraRefreshMode`, `intraRefreshLines`, `intraRefreshQp`,
+  `refBase`, `refEnhance`, `refPred` (granular fields are still
+  populated internally by the preset).
+
+- **refPred (SVC-T) TRAIL_N rewrite.**  The encoder produces a real
+  base/enhance pyramid (`MI_VENC_SetRefParam(base=1, enhance=4)` for
+  `range`/`fpv`) and the runtime patches NAL byte 0 from `TRAIL_R`
+  (type 1) to `TRAIL_N` (type 0) for frames the SDK marked
+  `ENHANCE_P_NOTFORREF`.  Without the rewrite the firmware emits every
+  NAL as TRAIL_R regardless of its actual eRefType — generic HEVC
+  decoders DPB-thrash and visibly warp.  H.265 only.  Mirrored on both
+  Star6E (`src/star6e_runtime.c:79-150`) and Maruko
+  (`src/maruko_pipeline.c:2904-2965`).
+
+- **`GET /api/v1/resilience/status`** — combined view.  Returns
+  `preset`, `intra.{mode,active,mi_supported,apply_ok,effective_lines,
+  effective_qp}`, `refPred.{active,mi_supported,apply_ok,base,enhance,
+  pred}`, `gop.{effective_sec,auto}`.  GOP value comes from
+  `g_cfg->video0.gop_size` (post-preset expansion), so it stays
+  accurate even when intra-refresh is off and the existing
+  `/api/v1/intra/status` reports zero.
+
+- **Debug OSD: resilience banner.**  When `resilience != "off"`, an
+  extra row renders above the existing `intra`/`gop` lines —
+  `res fpv rp=1/4` when refPred is active, `res quality` otherwise.
+
+- **Migration:** existing `/etc/waybeam.json` files containing the old
+  `intraRefreshMode` / `refBase` / `refEnhance` / `refPred` keys load
+  cleanly — the parser ignores them and `resilience` (defaulting to
+  `off`) drives behaviour.  Devices upgrading from 0.10.11 keep their
+  `gopSize`, `outgoing.server`, and all operational state intact.
+
+- **Bench validation:** Star6E 192.168.1.13 cycled through all five
+  presets via REST + restart + log inspection.  Maruko 192.168.2.12
+  surgically patched (old granular keys removed, `resilience: "off"`
+  added, every other field preserved) and exercised through `quality`,
+  `racing`, `range`, `fpv`.  Decoder picture clean at 192.168.2.20 with
+  refPred on; OSD garbling on first apply resolves on next IDR (not a
+  refPred corruption bug — documented in agent memory).
+
 ## Investigation - 2026-05-14 — **SOLVED**: IMX415 driver regression is a single missing register write
 
 **Root cause**: `drivers/sensor_imx415_maruko.c` does not write

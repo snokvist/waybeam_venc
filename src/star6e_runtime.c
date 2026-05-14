@@ -1094,7 +1094,25 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		{
 			int osd_row = 2;
 			Star6eIntraRefreshStatus ir;
+			Star6eRefPredStatus      rp;
 			star6e_pipeline_intra_refresh_status(&ir);
+			star6e_pipeline_ref_pred_status(&rp);
+			/* Resilience banner: only render when the preset is set
+			 * to something other than "off" — keeps the OSD compact
+			 * when no resilience features are active. */
+			if (vcfg->video0.resilience[0] &&
+			    strcmp(vcfg->video0.resilience, "off") != 0) {
+				if (rp.active) {
+					debug_osd_text(ps->debug_osd, osd_row++,
+						"res", "%s rp=%u/%u",
+						vcfg->video0.resilience,
+						rp.base, rp.enhance);
+				} else {
+					debug_osd_text(ps->debug_osd, osd_row++,
+						"res", "%s",
+						vcfg->video0.resilience);
+				}
+			}
 			if (ir.active) {
 				debug_osd_text(ps->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",

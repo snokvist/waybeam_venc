@@ -167,6 +167,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.ref_enhance = 0;
 	cfg->video0.ref_pred = true;
 
+	/* Resilience preset (video0) — off = granular fields drive */
+	safe_strcpy(cfg->video0.resilience,
+		sizeof(cfg->video0.resilience), "off");
+
 	/* digital zoom (video0) — disabled by default */
 	cfg->video0.zoom_pct = 0.0;
 	cfg->video0.zoom_x = 0.5;
@@ -293,6 +297,56 @@ static int parse_resolution(const char *str, uint32_t *w, uint32_t *h)
 	return -1;
 }
 
+/* Resilience preset → field expansion.
+ *
+ * The 2x2 matrix is:                                              .
+ *                  | Best efficiency      | Most resilient        .
+ *   ---------------+----------------------+------------------     .
+ *   Fast recovery  | racing               | fpv (drone FPV)       .
+ *   Slow recovery  | quality              | range                 .
+ *
+ * Named presets set intra_refresh_*, ref_*, AND gop_size, so picking a
+ * preset fully determines all recovery / GOP behaviour.  Only `off`
+ * leaves gop_size untouched — that mode is the escape hatch where the
+ * user's `gopSize` field drives.
+ *
+ * Returns 0 on success ("off" or recognised preset), or -1 if `name`
+ * is unrecognised (caller should warn and fall back to "off"). */
+static int apply_resilience_preset(const char *name, VencConfigVideo *v)
+{
+	struct preset {
+		const char *name;
+		const char *intra;
+		uint8_t ref_base;
+		uint8_t ref_enhance;
+		double gop_sec;           /* 0 = preserve caller's gop_size */
+	};
+	static const struct preset table[] = {
+		{ "off",     "off",      0, 0, 0.0 },  /* gopSize honoured */
+		{ "quality", "off",      0, 0, 4.0 },
+		{ "racing",  "fast",     0, 0, 2.0 },
+		{ "range",   "balanced", 1, 4, 2.0 },
+		{ "fpv",     "robust",   1, 4, 2.0 },
+	};
+
+	const char *want = (!name || !*name) ? "off" : name;
+	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); ++i) {
+		if (strcmp(want, table[i].name) != 0)
+			continue;
+		safe_strcpy(v->intra_refresh_mode,
+			sizeof(v->intra_refresh_mode), table[i].intra);
+		v->intra_refresh_lines = 0;
+		v->intra_refresh_qp = 0;
+		v->ref_base = table[i].ref_base;
+		v->ref_enhance = table[i].ref_enhance;
+		v->ref_pred = true;
+		if (table[i].gop_sec > 0.0)
+			v->gop_size = table[i].gop_sec;
+		return 0;
+	}
+	return -1;
+}
+
 static void load_video0(const cJSON *root, VencConfigVideo *v)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "video0");
@@ -331,24 +385,22 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		(int)v->scene_holdoff);
 	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
 
+	/* Resilience preset is the sole driver of intra-refresh + SVC-T
+	 * (refPred).  For named presets it also overrides gop_size; only
+	 * "off" preserves the user's gopSize value above.  Unknown values
+	 * fall back to "off". */
 	{
-		const char *m = json_get_string(obj, "intraRefreshMode",
-			v->intra_refresh_mode);
-		IntraRefreshMode parsed = intra_refresh_parse_mode(m);
-		safe_strcpy(v->intra_refresh_mode, sizeof(v->intra_refresh_mode),
-			intra_refresh_mode_name(parsed));
+		const char *rname = json_get_string(obj, "resilience",
+			v->resilience);
+		safe_strcpy(v->resilience, sizeof(v->resilience), rname);
+		if (apply_resilience_preset(v->resilience, v) != 0) {
+			fprintf(stderr, "[config] WARNING: unknown video0.resilience "
+				"'%s' (use off|quality|racing|range|fpv) — falling "
+				"back to off\n", v->resilience);
+			safe_strcpy(v->resilience, sizeof(v->resilience), "off");
+			(void)apply_resilience_preset("off", v);
+		}
 	}
-	v->intra_refresh_lines = (uint16_t)json_get_int(obj, "intraRefreshLines",
-		(int)v->intra_refresh_lines);
-	v->intra_refresh_qp = (uint8_t)json_get_int(obj, "intraRefreshQp",
-		(int)v->intra_refresh_qp);
-	if (v->intra_refresh_qp > 51) v->intra_refresh_qp = 51;
-
-	v->ref_base = (uint8_t)json_get_int(obj, "refBase", (int)v->ref_base);
-	v->ref_enhance = (uint8_t)json_get_int(obj, "refEnhance",
-		(int)v->ref_enhance);
-	v->ref_pred = json_get_bool(obj, "refPred", v->ref_pred);
-	if (v->ref_base > 0 && v->ref_enhance < 1) v->ref_enhance = 1;
 
 	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
 	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
@@ -926,12 +978,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_bool(p,   2, "frameLost",      cfg->video0.frame_lost,      0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
-	pp_field_string(p, 2, "intraRefreshMode", cfg->video0.intra_refresh_mode, 0);
-	pp_field_uint(p,   2, "intraRefreshLines", cfg->video0.intra_refresh_lines, 0);
-	pp_field_uint(p,   2, "intraRefreshQp",    cfg->video0.intra_refresh_qp,    0);
-	pp_field_uint(p,   2, "refBase",           cfg->video0.ref_base,            0);
-	pp_field_uint(p,   2, "refEnhance",        cfg->video0.ref_enhance,         0);
-	pp_field_bool(p,   2, "refPred",           cfg->video0.ref_pred,            0);
+	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
@@ -1122,15 +1169,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(vid, "frameLost", cfg->video0.frame_lost);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
-		cJSON_AddStringToObject(vid, "intraRefreshMode",
-			cfg->video0.intra_refresh_mode);
-		cJSON_AddNumberToObject(vid, "intraRefreshLines",
-			cfg->video0.intra_refresh_lines);
-		cJSON_AddNumberToObject(vid, "intraRefreshQp",
-			cfg->video0.intra_refresh_qp);
-		cJSON_AddNumberToObject(vid, "refBase", cfg->video0.ref_base);
-		cJSON_AddNumberToObject(vid, "refEnhance", cfg->video0.ref_enhance);
-		cJSON_AddBoolToObject(vid, "refPred", cfg->video0.ref_pred);
+		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
 		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);

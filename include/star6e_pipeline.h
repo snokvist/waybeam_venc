@@ -172,15 +172,17 @@ typedef struct {
 
 void star6e_pipeline_intra_refresh_status(Star6eIntraRefreshStatus *out);
 
-/* SVC-T reference parameter status — populated by
- * star6e_pipeline_apply_ref_pred() at pipeline_start. */
+/* Snapshot of refPred (SVC-T) state at the most recent pipeline_start.
+ * Populated by star6e_pipeline_pre_start_apply_ref_pred() — `active` is
+ * true only when the resilience preset requested refBase>0 AND the
+ * SDK SetRefParam call succeeded. */
 typedef struct {
-	int      active;          /* refBase>0 and apply_ok */
-	int      mi_supported;    /* libmi_venc.so exports SetRefParam */
-	int      apply_ok;        /* SetRefParam succeeded */
-	uint32_t base;             /* config value */
-	uint32_t enhance;          /* config value */
-	int      pred;             /* config value */
+	int      active;
+	int      mi_supported;
+	int      apply_ok;
+	uint32_t base;
+	uint32_t enhance;
+	int      pred;
 } Star6eRefPredStatus;
 
 void star6e_pipeline_ref_pred_status(Star6eRefPredStatus *out);

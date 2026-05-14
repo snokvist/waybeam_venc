@@ -86,10 +86,17 @@ typedef struct {
 	 * Driven by MI_VENC_SetRefParam. ref_base=0 disables the whole feature;
 	 * ref_base>=1 enables a base/enhance reference pyramid where lost
 	 * enhance-layer P-frames recover at the next base anchor without
-	 * waiting for an IDR. Demo defaults: base=1, enhance=4, pred=1. */
+	 * waiting for an IDR. */
 	uint8_t ref_base;          /* base-layer period; 0 = off */
 	uint8_t ref_enhance;       /* enhance-layer ratio; ignored when ref_base=0 */
 	bool ref_pred;             /* enable enhance→base prediction (recommended) */
+	/* Resilience preset — combines intra-refresh + SVC-T into one knob.
+	 * Recognised values: "off" (granular fields drive), "quality",
+	 * "racing", "range", "fpv".  When set to a recognised preset, the
+	 * granular intra_refresh_* and ref_* fields are overwritten by the
+	 * preset's expansion (see venc_config_apply_resilience()).  Use
+	 * "off" to drive features manually via the granular fields. */
+	char resilience[16];
 	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
 	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth
 	 * pressure.  The receiver sees the smaller resolution in SPS/PPS.

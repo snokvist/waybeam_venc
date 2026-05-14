@@ -248,8 +248,7 @@ omitted fields keep their compiled-in defaults.
     "bitrate": 8192, "gopSize": 1.0,
     "qpDelta": -4,
     "sceneThreshold": 0, "sceneHoldoff": 2,
-    "intraRefreshMode": "off",
-    "intraRefreshLines": 0, "intraRefreshQp": 0,
+    "resilience": "off",
     "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5
   },
   "outgoing": {
@@ -682,52 +681,59 @@ Codec note:
 - Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
 - Maruko accepts both `h264` and `h265`.
 
-#### Intra Refresh (Star6E + Maruko)
+#### Resilience preset (Star6E + Maruko)
 
-GDR-style rolling stripe: a configurable number of MB/LCU rows in each
-P-frame are intra-coded so a decoder that joins mid-stream — or recovers
-from a packet loss burst — can resync without waiting for the next IDR.
-Layered over normal GOP-based IDRs.
+A single field picks an error-resilience profile.  Intra-refresh
+(rolling GDR stripe), the SVC-T reference pyramid (refPred), and the GOP
+length are all derived from the preset — no per-feature knobs.
 
-Single mode knob picks intent (self-heal target window); GOP, lines, and
-QP all derive from the mode. Per-field overrides remain available for
-power users — non-zero overrides win.
+The 2x2 matrix:
+
+|                          | **Low resilience (best image)** | **High resilience (more overhead)** |
+|--------------------------|-------------------------------|------------------------------------|
+| **Fast recovery needed** | `racing` — close-range LOS    | `fpv` — drone FPV                  |
+| **Slow recovery OK**     | `quality` — plane / cruiser   | `range` — long-range FPV           |
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.intra_refresh_mode` | string | restart | `off` \| `fast` \| `balanced` \| `robust` (default `off`) |
-| `video0.intra_refresh_lines` | uint16 | restart | LCU/MB rows refreshed per P-frame (`0` = mode auto) |
-| `video0.intra_refresh_qp` | uint8 | restart | QP for the intra-refreshed rows (`0` = codec default: 48 H.265 / 45 H.264) |
+| `video0.resilience` | string | restart | `off` \| `quality` \| `racing` \| `range` \| `fpv` (default `off`) |
+| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it. |
 
-CamelCase aliases: `video0.intraRefreshMode`, `video0.intraRefreshLines`,
-`video0.intraRefreshQp`.
+Expansion table:
 
-Mode targets (self-heal window from packet loss to fully-refreshed picture):
+| Preset    | intra-refresh | refPred (base/enhance) | gopSize override |
+|-----------|---------------|------------------------|-----------------|
+| `off`     | off           | off                    | user-set (`gopSize` honoured) |
+| `quality` | off           | off                    | 4.0 s           |
+| `racing`  | fast          | off                    | 2.0 s           |
+| `range`   | balanced      | base=1, enhance=4      | 2.0 s           |
+| `fpv`     | robust        | base=1, enhance=4      | 2.0 s           |
 
-| Mode | target | Use case |
-|------|--------|----------|
-| `off` | — | feature disabled |
-| `fast` | 150 ms | FPV racing, low-latency, clean link |
-| `balanced` | 500 ms | general FPV (recommended starting point) |
-| `robust` | 1000 ms | lossy long-range, high packet loss |
-
-Quick start — one HTTP call:
+Quick start:
 
 ```bash
-curl "http://<device>/api/v1/set?video0.intraRefreshMode=balanced"
+curl "http://<device>/api/v1/set?video0.resilience=fpv"
 ```
 
 Notes:
-- Budget +20–30 % bitrate when enabling refresh; intra-coded rows compress
-  worse than inter-coded ones.
-- Refresh is applied to ch0 only. The dual-VENC recorder (ch1) is
-  intentionally skipped — TS containers expect IDRs at GOP boundaries.
-- Both backends use the identical `MI_VENC_IntraRefresh_t` layout
-  (`bEnable`, `u32RefreshLineNum`, `u32ReqIQp`); the Maruko symbol takes
-  `(MI_VENC_DEV, MI_VENC_CHN, *cfg)` while Star6E takes `(MI_VENC_CHN, *cfg)`.
-- Maruko: `MI_VENC_SetIntraRefresh` is treated as an optional symbol — the
-  loader logs a warning if `dlsym` misses on older firmware drops, and the
-  pipeline falls back to plain GOP-based IDRs (`mi_supported=false`).
+- H.265 only.  The runtime rewrites the NAL header of frames the SDK
+  marks `ENHANCE_P_NOTFORREF` from `TRAIL_R` (type 1) to `TRAIL_N`
+  (type 0) so a generic HEVC decoder can identify non-reference frames
+  and drop them cleanly under loss.
+- Applied to ch0 only.  The dual-VENC recorder (ch1) is intentionally
+  skipped — TS containers expect IDRs at GOP boundaries.
+- Budget +20–30 % bitrate when picking a preset that enables
+  intra-refresh; intra-coded rows compress worse than inter-coded ones.
+- Set `WAYBEAM_DEBUG_REFTYPE=1` in the environment to dump an eRefType
+  histogram every 150 frames — useful for verifying the encoder is
+  actually labelling frames as `ENHANCE_P_NOTFORREF`.
+- Real-world refPred benefit on a lossy link depends on the sender
+  applying per-NAL-type FEC priority (protecting `TRAIL_R` more
+  aggressively than `TRAIL_N`).  Without that integration the pyramid
+  is roughly neutral on uniform random loss but keeps the bitstream
+  spec-correct (no decoder warping).
+- Unknown `resilience` values fall back to `off` with a warning at
+  load time.
 
 #### Outgoing (Streaming)
 

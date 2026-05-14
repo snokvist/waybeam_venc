@@ -83,38 +83,102 @@ static int test_defaults(void)
 	CHECK("defaults_ref_base_off", cfg.video0.ref_base == 0);
 	CHECK("defaults_ref_enhance", cfg.video0.ref_enhance == 0);
 	CHECK("defaults_ref_pred_on", cfg.video0.ref_pred == true);
+	CHECK("defaults_resilience_off", strcmp(cfg.video0.resilience, "off") == 0);
 
 	return failures;
 }
 
-/* refBase>0 with refEnhance=0 in JSON must auto-clamp enhance to 1 (1+0
- * pyramid would mean every frame is a base anchor — pointless). */
-static int test_ref_pred_enhance_clamp(void)
+/* Resilience preset is the sole driver of intra-refresh, SVC-T, and
+ * (for named presets) gop_size.  "off" preserves the user's gopSize. */
+static int test_resilience_preset_expansion(void)
 {
 	int failures = 0;
 	VencConfig cfg;
-	venc_config_defaults(&cfg);
-
-	const char *json =
-		"{\"video0\":{\"refBase\":1,\"refEnhance\":0,\"refPred\":false}}";
-	char *path = NULL;
-	FILE *f = NULL;
-	char buf[] = "/tmp/venc_refpred_test_XXXXXX";
-	int fd = mkstemp(buf);
-	CHECK("ref_pred_mkstemp_ok", fd >= 0);
+	char path[] = "/tmp/venc_resilience_test_XXXXXX";
+	int fd = mkstemp(path);
+	CHECK("resilience_mkstemp_ok", fd >= 0);
 	if (fd < 0) return failures;
-	f = fdopen(fd, "w");
-	if (!f) { close(fd); unlink(buf); return failures; }
-	fputs(json, f);
-	fclose(f);
-	path = buf;
 
-	int rc = venc_config_load(path, &cfg);
-	CHECK("ref_pred_load_ok", rc == 0);
-	CHECK("ref_pred_base", cfg.video0.ref_base == 1);
-	CHECK("ref_pred_enhance_clamped", cfg.video0.ref_enhance == 1);
-	CHECK("ref_pred_pred_false", cfg.video0.ref_pred == false);
+	struct {
+		const char *name;
+		const char *ir;
+		uint8_t    b;
+		uint8_t    e;
+		double     gop;
+	} cases[] = {
+		{ "quality", "off",      0, 0, 4.0 },
+		{ "racing",  "fast",     0, 0, 2.0 },
+		{ "range",   "balanced", 1, 4, 2.0 },
+		{ "fpv",     "robust",   1, 4, 2.0 },
+	};
+	for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
+		/* User's gopSize=7.5 must be discarded by any named preset. */
+		char json[160];
+		snprintf(json, sizeof(json),
+			"{\"video0\":{\"resilience\":\"%s\",\"gopSize\":7.5}}",
+			cases[i].name);
+		FILE *f = fopen(path, "w");
+		if (!f) { close(fd); unlink(path); return failures; }
+		fputs(json, f);
+		fclose(f);
 
+		venc_config_defaults(&cfg);
+		int rc = venc_config_load(path, &cfg);
+		CHECK("resilience_load_ok", rc == 0);
+		CHECK("resilience_preset_stored",
+			strcmp(cfg.video0.resilience, cases[i].name) == 0);
+		CHECK("resilience_preset_intra_refresh",
+			strcmp(cfg.video0.intra_refresh_mode, cases[i].ir) == 0);
+		CHECK("resilience_preset_ref_base",
+			cfg.video0.ref_base == cases[i].b);
+		CHECK("resilience_preset_ref_enhance",
+			cfg.video0.ref_enhance == cases[i].e);
+		CHECK("resilience_preset_overrides_gop",
+			cfg.video0.gop_size == cases[i].gop);
+	}
+
+	/* off mode preserves the user's gopSize. */
+	{
+		const char *json =
+			"{\"video0\":{\"resilience\":\"off\",\"gopSize\":3.25}}";
+		FILE *f = fopen(path, "w");
+		if (!f) { close(fd); unlink(path); return failures; }
+		fputs(json, f);
+		fclose(f);
+
+		venc_config_defaults(&cfg);
+		int rc = venc_config_load(path, &cfg);
+		CHECK("resilience_off_load_ok", rc == 0);
+		CHECK("resilience_off_stored",
+			strcmp(cfg.video0.resilience, "off") == 0);
+		CHECK("resilience_off_keeps_user_gop",
+			cfg.video0.gop_size == 3.25);
+		CHECK("resilience_off_intra_off",
+			strcmp(cfg.video0.intra_refresh_mode, "off") == 0);
+		CHECK("resilience_off_ref_base_zero", cfg.video0.ref_base == 0);
+	}
+
+	/* Unknown preset falls back to off with the user's gopSize honoured. */
+	{
+		const char *json =
+			"{\"video0\":{\"resilience\":\"bogus\",\"gopSize\":2.0}}";
+		FILE *f = fopen(path, "w");
+		if (!f) { close(fd); unlink(path); return failures; }
+		fputs(json, f);
+		fclose(f);
+
+		venc_config_defaults(&cfg);
+		int rc = venc_config_load(path, &cfg);
+		CHECK("resilience_unknown_load_ok", rc == 0);
+		CHECK("resilience_unknown_falls_back_to_off",
+			strcmp(cfg.video0.resilience, "off") == 0);
+		CHECK("resilience_unknown_intra_off",
+			strcmp(cfg.video0.intra_refresh_mode, "off") == 0);
+		CHECK("resilience_unknown_keeps_user_gop",
+			cfg.video0.gop_size == 2.0);
+	}
+
+	close(fd);
 	unlink(path);
 	return failures;
 }
@@ -821,6 +885,6 @@ int test_venc_config(void)
 	failures += test_audio_roundtrip();
 	failures += test_save_layout_byte_equal();
 	failures += test_save_layout_populated_round_trip();
-	failures += test_ref_pred_enhance_clamp();
+	failures += test_resilience_preset_expansion();
 	return failures;
 }

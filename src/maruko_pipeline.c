@@ -1223,20 +1223,13 @@ static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
 		snap.pred    = cfg->ref_pred ? 1 : 0;
 	}
 
-	if (!cfg || cfg->ref_base == 0) {
-		pthread_mutex_lock(&g_ref_pred_status_mutex);
-		g_ref_pred_status = snap;
-		pthread_mutex_unlock(&g_ref_pred_status_mutex);
-		return 0;
-	}
+	if (!cfg || cfg->ref_base == 0)
+		goto publish;
 	if (!g_mi_venc.fnSetRefParam) {
 		fprintf(stderr, "[waybeam] WARNING: refBase=%u requested but "
 			"libmi_venc.so does not export MI_VENC_SetRefParam\n",
 			cfg->ref_base);
-		pthread_mutex_lock(&g_ref_pred_status_mutex);
-		g_ref_pred_status = snap;
-		pthread_mutex_unlock(&g_ref_pred_status_mutex);
-		return -1;
+		goto publish;
 	}
 
 	memset(&ref, 0, sizeof(ref));
@@ -1248,20 +1241,18 @@ static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
 		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetRefParam(dev=%d, "
 			"chn=%d, base=%u, enhance=%u, pred=%u) failed\n", dev, chn,
 			ref.u32Base, ref.u32Enhance, ref.bEnablePred);
-		pthread_mutex_lock(&g_ref_pred_status_mutex);
-		g_ref_pred_status = snap;
-		pthread_mutex_unlock(&g_ref_pred_status_mutex);
-		return -1;
+		goto publish;
 	}
 	snap.apply_ok = 1;
 	snap.active   = 1;
-	pthread_mutex_lock(&g_ref_pred_status_mutex);
-	g_ref_pred_status = snap;
-	pthread_mutex_unlock(&g_ref_pred_status_mutex);
 	fprintf(stderr, "[waybeam] refPred: dev=%d chn=%d base=%u enhance=%u "
 		"pred=%u (applied)\n", dev, chn, ref.u32Base, ref.u32Enhance,
 		ref.bEnablePred);
-	return 0;
+publish:
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	g_ref_pred_status = snap;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+	return snap.active ? 0 : (cfg && cfg->ref_base > 0 ? -1 : 0);
 }
 
 static int maruko_start_venc(const MarukoBackendConfig *cfg,
@@ -3003,6 +2994,30 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		maruko_patch_stream_to_trail_n(&stream);
 	}
 
+	/* refPred diagnostic — eRefType histogram every 150 frames when
+	 * WAYBEAM_DEBUG_REFTYPE is set.  Mirrors star6e_runtime.c so the same
+	 * tooling works on both backends. */
+	if (getenv("WAYBEAM_DEBUG_REFTYPE")) {
+		static unsigned int reftype_hist[8] = {0};
+		static unsigned int total = 0;
+		unsigned int rt = stream.h265Info.refType;
+		if (rt < 8)
+			reftype_hist[rt]++;
+		total++;
+		if (total % 150 == 0) {
+			fprintf(stderr,
+				"[refPred] eRefType histogram (n=%u): "
+				"BASE_P_REFTOIDR=%u BASE_P_REFBYBASE=%u "
+				"BASE_P_REFBYENHANCE=%u "
+				"ENHANCE_P_REFBYENHANCE=%u "
+				"ENHANCE_P_NOTFORREF=%u other=%u\n",
+				total, reftype_hist[0], reftype_hist[1],
+				reftype_hist[2], reftype_hist[3],
+				reftype_hist[4],
+				reftype_hist[5] + reftype_hist[6] + reftype_hist[7]);
+		}
+	}
+
 	++rt->frame_counter;
 
 	/* Cold-boot FPS kick: the ISP bin's AE overrides sensor timing on
@@ -3044,7 +3059,22 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		{
 			int osd_row = 2;
 			MarukoIntraRefreshStatus ir;
+			MarukoRefPredStatus      rp;
 			maruko_pipeline_intra_refresh_status(&ir);
+			maruko_pipeline_ref_pred_status(&rp);
+			if (ctx->cfg.resilience[0] &&
+			    strcmp(ctx->cfg.resilience, "off") != 0) {
+				if (rp.active) {
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"res", "%s rp=%u/%u",
+						ctx->cfg.resilience,
+						rp.base, rp.enhance);
+				} else {
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"res", "%s",
+						ctx->cfg.resilience);
+				}
+			}
 			if (ir.active) {
 				debug_osd_text(ctx->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",

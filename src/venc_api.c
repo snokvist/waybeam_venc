@@ -391,12 +391,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(snapshot, height,    FT_UINT,   MUT_RESTART),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
-	FIELD(video0, intra_refresh_mode,   FT_STRING, MUT_RESTART),
-	FIELD(video0, intra_refresh_lines,  FT_UINT16, MUT_RESTART),
-	FIELD(video0, intra_refresh_qp,     FT_UINT8,  MUT_RESTART),
-	FIELD(video0, ref_base,             FT_UINT8,  MUT_RESTART),
-	FIELD(video0, ref_enhance,          FT_UINT8,  MUT_RESTART),
-	FIELD(video0, ref_pred,             FT_BOOL,   MUT_RESTART),
+	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	/* zoom_pct shrinks the encoded resolution to the crop dim (no SCL
 	 * upscale, no bandwidth pressure) — that requires resizing the VPE
 	 * port and VENC channel, hence MUT_RESTART.  zoom_x/y stay live for
@@ -462,12 +457,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
-	{ "video0.intraRefreshMode", "video0.intra_refresh_mode" },
-	{ "video0.intraRefreshLines", "video0.intra_refresh_lines" },
-	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
-	{ "video0.refBase", "video0.ref_base" },
-	{ "video0.refEnhance", "video0.ref_enhance" },
-	{ "video0.refPred", "video0.ref_pred" },
 	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
@@ -2752,6 +2741,101 @@ static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
+/* Combined view of the resilience preset and its applied feature state.
+ * Returns: preset name, intra-refresh runtime state, refPred runtime
+ * state, effective GOP — everything needed to verify a preset took. */
+static int handle_resilience_status(int fd, const HttpRequest *req, void *ctx)
+{
+	char preset[16] = "off";
+	char intra_mode[16] = "off";
+	int  intra_active = 0, intra_supported = 0, intra_apply_ok = 0;
+	uint32_t intra_lines = 0, intra_qp = 0;
+	int  rp_active = 0, rp_supported = 0, rp_apply_ok = 0;
+	uint32_t rp_base = 0, rp_enhance = 0;
+	int  rp_pred = 0;
+	double gop_sec = 0.0;
+	int    gop_auto = 0;
+	char buf[640];
+
+	(void)req; (void)ctx;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	if (g_cfg) {
+		snprintf(preset, sizeof(preset), "%s",
+			g_cfg->video0.resilience);
+		gop_sec = g_cfg->video0.gop_size;
+	}
+	pthread_mutex_unlock(&g_cfg_mutex);
+
+#if HAVE_BACKEND_STAR6E
+	{
+		Star6eIntraRefreshStatus st;
+		Star6eRefPredStatus      rp;
+		star6e_pipeline_intra_refresh_status(&st);
+		star6e_pipeline_ref_pred_status(&rp);
+		snprintf(intra_mode, sizeof(intra_mode), "%s",
+			st.mode_name[0] ? st.mode_name : "off");
+		intra_active    = st.active;
+		intra_supported = st.mi_supported;
+		intra_apply_ok  = st.apply_ok;
+		intra_lines     = st.effective_lines_per_p;
+		intra_qp        = st.effective_qp;
+		gop_auto        = st.gop_auto;
+		rp_active       = rp.active;
+		rp_supported    = rp.mi_supported;
+		rp_apply_ok     = rp.apply_ok;
+		rp_base         = rp.base;
+		rp_enhance      = rp.enhance;
+		rp_pred         = rp.pred;
+	}
+#elif HAVE_BACKEND_MARUKO
+	{
+		MarukoIntraRefreshStatus st;
+		MarukoRefPredStatus      rp;
+		maruko_pipeline_intra_refresh_status(&st);
+		maruko_pipeline_ref_pred_status(&rp);
+		snprintf(intra_mode, sizeof(intra_mode), "%s",
+			st.mode_name[0] ? st.mode_name : "off");
+		intra_active    = st.active;
+		intra_supported = st.mi_supported;
+		intra_apply_ok  = st.apply_ok;
+		intra_lines     = st.effective_lines_per_p;
+		intra_qp        = st.effective_qp;
+		gop_auto        = st.gop_auto;
+		rp_active       = rp.active;
+		rp_supported    = rp.mi_supported;
+		rp_apply_ok     = rp.apply_ok;
+		rp_base         = rp.base;
+		rp_enhance      = rp.enhance;
+		rp_pred         = rp.pred;
+	}
+#endif
+
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{"
+		"\"preset\":\"%s\","
+		"\"intra\":{\"mode\":\"%s\",\"active\":%s,"
+			"\"mi_supported\":%s,\"apply_ok\":%s,"
+			"\"effective_lines\":%u,\"effective_qp\":%u},"
+		"\"refPred\":{\"active\":%s,\"mi_supported\":%s,"
+			"\"apply_ok\":%s,\"base\":%u,\"enhance\":%u,\"pred\":%s},"
+		"\"gop\":{\"effective_sec\":%.3f,\"auto\":%s}"
+		"}}",
+		preset, intra_mode,
+		intra_active ? "true" : "false",
+		intra_supported ? "true" : "false",
+		intra_apply_ok ? "true" : "false",
+		intra_lines, intra_qp,
+		rp_active ? "true" : "false",
+		rp_supported ? "true" : "false",
+		rp_apply_ok ? "true" : "false",
+		rp_base, rp_enhance,
+		rp_pred ? "true" : "false",
+		gop_sec,
+		gop_auto ? "true" : "false");
+	return httpd_send_json(fd, 200, buf);
+}
+
 static int handle_intra_mode(int fd, const HttpRequest *req, void *ctx)
 {
 	char mode_arg[16];
@@ -2893,6 +2977,8 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
 	r |= venc_httpd_route("POST", "/api/v1/intra/mode",  handle_intra_mode, NULL);
 	r |= venc_httpd_route("GET",  "/api/v1/intra/mode",  handle_intra_mode, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/resilience/status",
+		handle_resilience_status, NULL);
 #endif
 	r |= venc_webui_register();
 	if (r != 0) {
