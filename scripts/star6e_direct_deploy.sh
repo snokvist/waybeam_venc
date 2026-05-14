@@ -294,14 +294,16 @@ run_cycle() {
 		log "Skipping build"
 	fi
 
+	stop_venc
+	# Migrate before backup so the backup reads the renamed file.
+	migrate_legacy_paths
+
 	if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
 		create_backup
 	else
 		log "Skipping config backup"
 	fi
 
-	stop_venc
-	migrate_legacy_paths
 	deploy_binary
 	start_venc
 	wait_http
