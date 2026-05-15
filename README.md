@@ -47,7 +47,7 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
   alongside video), power-loss safe; raw `.hevc` available on Star6E
 - Gemini / dual-VENC: concurrent stream + high-quality record (both backends)
 - Adaptive recording bitrate: auto-reduces if SD card can't keep up
-- Maruko-specific opt-in 3A throttle (`isp.aeMode="throttle"`) — saves
+- Maruko-specific opt-in 3A throttle (`isp.aeEngine="custom"`) — saves
   ~24 % sys CPU at 120 fps with no visible AE quality loss
 - BMI270 IMU driver with frame-synced FIFO (both backends) — compiled in,
   disabled by default, ready for telemetry/sidecar consumers
@@ -232,8 +232,7 @@ omitted fields keep their compiled-in defaults.
   "sensor":   { "index": -1, "mode": -1 },
   "isp":      {
     "sensorBin": "",
-    "legacyAe": true, "aeFps": 15,
-    "aeMode": "native",
+    "aeEngine": "sdk", "aeFps": 15,
     "gainMax": 0,
     "awbMode": "auto", "awbCt": 5500,
     "keepAspect": true
@@ -283,8 +282,11 @@ omitted fields keep their compiled-in defaults.
 - **`system`** — HTTP API port, CPU overclock level, verbose logging
   toggle.
 - **`sensor`** — pad/mode selection (-1 = auto).
-- **`isp`** — ISP tuning bin path, AE source (legacy/custom 3A), gain
-  ceiling, AWB mode, aspect-preserving crop. `aeMode` is Maruko-only.
+- **`isp`** — ISP tuning bin path, AE engine selector
+  (`aeEngine="sdk"` lets the SDK firmware run AE, `"custom"` runs
+  userspace cus3a; on Maruko `custom` additionally installs the no-op
+  adaptor + supervisory thread for the CPU win), AE rate, gain
+  ceiling, AWB mode, aspect-preserving crop.
 - **`image`** — mirror / flip / rotate.
 - **`video0`** — rate control, fps, resolution, bitrate, GOP,
   per-section QP delta. Video codec is hardcoded H.265 (HEVC).
@@ -584,9 +586,8 @@ load cleanly; the keys are silently ignored.
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `isp.sensor_bin` | string | live | ISP tuning binary path (empty = auto-detect /etc/sensors/&lt;sensor&gt;.bin) |
-| `isp.legacy_ae` | bool | restart | Use ISP internal AE instead of custom 3A (Star6E) |
+| `isp.ae_engine` | string | restart | `"sdk"` (default) lets the SDK firmware run AE on both backends.  `"custom"` runs userspace cus3a — on Star6E it spins the supervisory AE thread; on Maruko it installs the no-op adaptor + 15 Hz `SetAeParam` thread (~24% sys CPU saving at 120 fps).  Alias: `isp.aeEngine`. |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
-| `isp.ae_mode` | string | restart | Maruko-only: `"native"` (default, SDK runs AE/AWB at sensor rate) or `"throttle"` (no-op AE adaptor + 15 Hz manual AE; saves ~24% sys CPU at 120 fps). Alias: `isp.aeMode`. |
 | `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |
 | `isp.awb_mode` | string | live | `"auto"` or `"ct_manual"` |
 | `isp.awb_ct` | uint | live | Color temperature in K (for ct_manual) |

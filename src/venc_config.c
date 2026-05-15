@@ -86,8 +86,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->sensor.unlock_value = 0x80;
 	cfg->sensor.unlock_dir = 0;
 
-	/* isp */
+	/* isp.  ae_engine drives both per-backend struct fields; defaults
+	 * to "sdk" (Star6E legacy_ae=true / Maruko ae_mode="native"). */
 	cfg->isp.sensor_bin[0] = '\0';
+	safe_strcpy(cfg->isp.ae_engine, sizeof(cfg->isp.ae_engine), "sdk");
 	cfg->isp.legacy_ae = true;
 	safe_strcpy(cfg->isp.ae_mode, sizeof(cfg->isp.ae_mode), "native");
 	cfg->isp.ae_fps = 15;
@@ -243,15 +245,56 @@ static void load_sensor(const cJSON *root, VencConfigSensor *s)
 	 * silently ignored on read so existing configs migrate cleanly. */
 }
 
+/* ae_engine → per-backend struct field expansion.
+ *
+ * Star6E:
+ *   "sdk"    → legacy_ae=true   (ISP firmware AE; skip start_custom_ae)
+ *   "custom" → legacy_ae=false  (start_custom_ae spins cus3a)
+ *
+ * Maruko:
+ *   "sdk"    → ae_mode="native"   (SDK runs AE at sensor rate)
+ *   "custom" → ae_mode="throttle" (no-op adaptor + supervisory thread)
+ *
+ * Unknown values fall back to "sdk".  Returns 0 on recognised value,
+ * -1 if `name` is unrecognised (caller warns and falls back). */
+static int apply_ae_engine(const char *name, VencConfigIsp *s)
+{
+	const char *want = (!name || !*name) ? "sdk" : name;
+	if (strcmp(want, "sdk") == 0) {
+		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "sdk");
+		s->legacy_ae = true;
+		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "native");
+		return 0;
+	}
+	if (strcmp(want, "custom") == 0) {
+		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "custom");
+		s->legacy_ae = false;
+		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "throttle");
+		return 0;
+	}
+	return -1;
+}
+
 static void load_isp(const cJSON *root, VencConfigIsp *s)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "isp");
 	if (!obj) return;
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
-	s->legacy_ae = json_get_bool(obj, "legacyAe", s->legacy_ae);
-	safe_strcpy(s->ae_mode, sizeof(s->ae_mode),
-		json_get_string(obj, "aeMode", s->ae_mode));
+	/* ae_engine is the sole AE selector.  Legacy `legacyAe` /
+	 * `aeMode` keys are silently dropped on load — existing configs
+	 * migrate to the ae_engine default ("sdk") which matches the
+	 * historical legacyAe=true / aeMode="native" defaults. */
+	{
+		const char *engine = json_get_string(obj, "aeEngine",
+			s->ae_engine);
+		if (apply_ae_engine(engine, s) != 0) {
+			fprintf(stderr, "[config] WARNING: unknown isp.aeEngine "
+				"'%s' (use sdk|custom) — falling back to sdk\n",
+				engine);
+			(void)apply_ae_engine("sdk", s);
+		}
+	}
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
@@ -933,8 +976,7 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "isp");
 	pp_field_string(p, 2, "sensorBin",  cfg->isp.sensor_bin,  0);
-	pp_field_bool(p,   2, "legacyAe",   cfg->isp.legacy_ae,   0);
-	pp_field_string(p, 2, "aeMode",     cfg->isp.ae_mode,     0);
+	pp_field_string(p, 2, "aeEngine",   cfg->isp.ae_engine,   0);
 	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
 	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
 	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
@@ -1120,8 +1162,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *isp = cJSON_AddObjectToObject(root, "isp");
 	if (isp) {
 		cJSON_AddStringToObject(isp, "sensorBin", cfg->isp.sensor_bin);
-		cJSON_AddBoolToObject(isp, "legacyAe", cfg->isp.legacy_ae);
-		cJSON_AddStringToObject(isp, "aeMode", cfg->isp.ae_mode);
+		cJSON_AddStringToObject(isp, "aeEngine", cfg->isp.ae_engine);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);

@@ -3,7 +3,30 @@
 ## [0.10.13] - 2026-05-15
 
 Config-surface simplification: drop dormant `sensor.unlock_*` fields
-from the user-facing schema.
+and merge per-backend AE selectors into one knob.
+
+- **`isp.aeEngine` replaces `isp.legacyAe` (Star6E) + `isp.aeMode`
+  (Maruko).**  Two values: `"sdk"` (default) — SDK firmware runs AE —
+  and `"custom"` — userspace cus3a takes over.  Mapping on load:
+
+  | `aeEngine` | Star6E | Maruko |
+  |---|---|---|
+  | `"sdk"` (default) | `legacy_ae=true`  | `ae_mode="native"`   |
+  | `"custom"`        | `legacy_ae=false` | `ae_mode="throttle"` |
+
+  Parser keeps the per-backend struct fields populated from the
+  unified field, so existing call sites in `star6e_runtime.c`,
+  `star6e_pipeline.c`, and `maruko_pipeline.c` need no change.
+  Unknown values fall back to `"sdk"`.  Migration: existing
+  `/etc/waybeam.json` files containing `legacyAe` and/or `aeMode`
+  load cleanly — the parser silently drops both keys and the
+  `aeEngine` default (`"sdk"`) drives behaviour, which is the same
+  as the historical defaults (`legacyAe=true` + `aeMode="native"`).
+  Bench-confirmed on 192.168.1.13: setting `legacyAe=false` cycled
+  in custom-AE mode (`[cus3a]` supervisory thread + 15 Hz limits
+  enforcement) before the unification commit.
+
+
 
 - **`sensor.unlockEnabled` / `unlockCmd` / `unlockReg` / `unlockValue` /
   `unlockDir` retired from the user surface.**  The IMX415 high-FPS

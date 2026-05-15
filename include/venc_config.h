@@ -46,10 +46,24 @@ typedef struct {
 
 typedef struct {
 	char sensor_bin[VENC_CONFIG_STRING_MAX];
-	bool legacy_ae;        /* true = use legacy ISP AE + handoff instead of custom AE */
-	char ae_mode[16];      /* Maruko only: "native" (SDK runs AE/AWB at sensor
-	                        * rate, default) or "throttle" (no-op AE adaptor +
-	                        * 15 Hz manual SetAeParam, ~24% lower CPU). */
+	/* Unified AE engine selector — replaces the per-backend
+	 * `legacy_ae` (Star6E) + `ae_mode` (Maruko) pair.  Two values:
+	 *   "sdk"    — SDK firmware runs AE.  Star6E: skip start_custom_ae
+	 *              and let the ISP bin's AE drive (legacy_ae=true).
+	 *              Maruko: NATIVE AE algo runs inside 3A_Proc_0 at
+	 *              sensor rate (ae_mode="native").
+	 *   "custom" — userspace cus3a takes over.  Star6E: start_custom_ae
+	 *              spins the supervisory thread (legacy_ae=false).
+	 *              Maruko: no-op AE adaptor + supervisory SetAeParam
+	 *              thread at ae_fps Hz (ae_mode="throttle").
+	 *
+	 * The parser keeps the per-backend `legacy_ae` + `ae_mode` struct
+	 * fields populated from this selector so existing call sites in
+	 * star6e_runtime.c, star6e_pipeline.c, and maruko_pipeline.c need
+	 * no change.  Unknown values fall back to "sdk". */
+	char ae_engine[8];     /* "sdk" (default) | "custom" */
+	bool legacy_ae;        /* derived from ae_engine (Star6E call sites) */
+	char ae_mode[16];      /* derived from ae_engine (Maruko call sites) */
 	uint32_t ae_fps;       /* custom AE rate in Hz (default 15) */
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */
 	char awb_mode[16];     /* "auto" or "ct_manual" */
