@@ -73,14 +73,16 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->system.overclock_level = 1;
 	cfg->system.verbose = false;
 
-	/* sensor.  The unlock_* fields drive the legacy IMX415 high-FPS
+	/* sensor.  The unlock_* fields drive the IMX415/IMX335 high-FPS
 	 * register hook (`MI_SNR_CustFunction(pad, cmd_id=0x23, reg=0x300a,
-	 * value=0x80, dir=0)`) and are no longer wired to the user-facing
-	 * config.  Defaults left in place so re-enabling means restoring
-	 * the schema entries — not chasing magic values. */
+	 * value=0x80, dir=0)`) — required on cold boot for both sensors,
+	 * otherwise `MI_SNR_SetFps(pad, 120)` returns -1608835041 and the
+	 * sensor falls back to 30 fps.  Retired from the user-facing JSON
+	 * schema in 0.10.13; the call now fires unconditionally at every
+	 * pipeline start. */
 	cfg->sensor.index = -1;
 	cfg->sensor.mode = -1;
-	cfg->sensor.unlock_enabled = false;
+	cfg->sensor.unlock_enabled = true;
 	cfg->sensor.unlock_cmd = 0x23;
 	cfg->sensor.unlock_reg = 0x300a;
 	cfg->sensor.unlock_value = 0x80;

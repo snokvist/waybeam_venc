@@ -39,27 +39,32 @@ and merge per-backend AE selectors into one knob.
 
 
 - **`sensor.unlockEnabled` / `unlockCmd` / `unlockReg` / `unlockValue` /
-  `unlockDir` retired from the user surface.**  The IMX415 high-FPS
-  register-hook these fields drove (a single
+  `unlockDir` retired from the user surface; unlock now fires
+  unconditionally on every cold boot.**  The
   `MI_SNR_CustFunction(pad, cmd=0x23, reg=0x300a, value=0x80, dir=0)`
-  call before `MI_SNR_SetRes`) is now a no-op on both supported
-  platforms — the OpenIPC kernel sensor drivers and the per-mode ISP
-  binaries write the unlock registers themselves.  Bench-confirmed on
-  192.168.1.13 (IMX335 + Star6E) at 1920x1080@120 fps that
-  `unlockEnabled=false` produces an identical sensor mode selection
-  and stream as `unlockEnabled=true`.
+  hook is required on IMX415 and IMX335 before `MI_SNR_SetRes`/
+  `MI_SNR_SetFps(120)` will accept the high-FPS modes — without it
+  the SDK returns -1608835041 and the sensor clamps to 30 fps.
+  Initial hot-state bench testing on 192.168.1.13 suggested the hook
+  was redundant, but a cold reboot proved that was kernel-driver
+  sticky state from earlier unlocked frames; the hook is genuinely
+  needed.
+
+  Removing the user-facing knob (rather than reverting the
+  simplification) keeps the rule out of the config surface where
+  flipping it off accidentally would brick high-FPS sensors.
 
 - **Migration:** existing `/etc/waybeam.json` files containing any of
   the five legacy `unlock*` keys load cleanly — the parser silently
-  drops them.  Default JSON ships without the keys.
+  drops them.  Default JSON ships without the keys.  A user config
+  with `"unlockEnabled": false` (which used to be valid) is silently
+  ignored; the always-on default takes over.
 
 - **Code path preserved.**  `VencConfigSensor::unlock_{enabled,cmd,
-  reg,value,dir}` remain in the struct (with the historical IMX415
-  values baked in as dormant defaults), and `sensor_unlock_strategy()`
+  reg,value,dir}` remain in the struct (defaults: enabled=true plus
+  the IMX415/IMX335 register values), and `sensor_unlock_strategy()`
   + `MI_SNR_CustFunction` call sites in `star6e_pipeline.c` and
-  `maruko_config.c` stay intact.  Re-enabling means restoring the
-  five schema entries + aliases + parser reads — the apply path
-  needs no work.
+  `maruko_config.c` stay intact.
 
 
 

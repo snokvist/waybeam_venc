@@ -40,9 +40,9 @@ static int test_defaults(void)
 
 	CHECK("defaults_sensor_index", cfg.sensor.index == -1);
 	CHECK("defaults_sensor_mode", cfg.sensor.mode == -1);
-	/* unlock_* retired from user surface; struct fields keep the
-	 * IMX415 legacy values as dormant defaults. */
-	CHECK("defaults_unlock_enabled_off", cfg.sensor.unlock_enabled == false);
+	/* unlock_* retired from user surface but still drives the
+	 * IMX415/IMX335 cold-boot register hook unconditionally. */
+	CHECK("defaults_unlock_enabled_on", cfg.sensor.unlock_enabled == true);
 	CHECK("defaults_unlock_cmd", cfg.sensor.unlock_cmd == 0x23);
 	CHECK("defaults_unlock_reg", cfg.sensor.unlock_reg == 0x300a);
 	CHECK("defaults_unlock_value", cfg.sensor.unlock_value == 0x80);
@@ -191,10 +191,10 @@ static int test_load_full_json(void)
 		"{"
 		"  \"system\": { \"webPort\": 8080, \"overclockLevel\": 1, \"verbose\": true },"
 		/* unlockEnabled/Cmd/Reg/Value/Dir are retired in 0.10.13 —
-		 * parser must silently drop them.  Setting unlockEnabled=true
-		 * here proves migration: loaded value must stay at the
-		 * struct default (false), not what's in the JSON. */
-		"  \"sensor\": { \"index\": 2, \"mode\": 3, \"unlockEnabled\": true },"
+		 * parser must silently drop them.  Setting unlockEnabled=false
+		 * here proves migration: the JSON value is ignored and the
+		 * always-on default (true) drives the cold-boot register hook. */
+		"  \"sensor\": { \"index\": 2, \"mode\": 3, \"unlockEnabled\": false },"
 		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\" },"
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
@@ -222,7 +222,7 @@ static int test_load_full_json(void)
 	CHECK("load_sensor_index", cfg.sensor.index == 2);
 	CHECK("load_sensor_mode", cfg.sensor.mode == 3);
 	CHECK("load_unlock_legacy_ignored",
-		cfg.sensor.unlock_enabled == false);  /* JSON had true */
+		cfg.sensor.unlock_enabled == true);   /* JSON had false; default wins */
 	CHECK("load_isp_bin", strcmp(cfg.isp.sensor_bin, "/etc/sensors/imx415.bin") == 0);
 	CHECK("load_mirror", cfg.image.mirror == true);
 	CHECK("load_flip", cfg.image.flip == true);
