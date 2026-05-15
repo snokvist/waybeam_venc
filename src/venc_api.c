@@ -218,27 +218,6 @@ void venc_api_clear_reinit(void)
 	g_reinit = 0;
 }
 
-static volatile sig_atomic_t g_respawn = 0;
-
-void venc_api_request_respawn(void)
-{
-	/* Setting reinit too forces the runtime to drop out of its
-	 * stream loop; the runner observes the respawn flag after
-	 * teardown and skips the in-process reconfigure step. */
-	g_respawn = 1;
-	g_reinit = 1;
-}
-
-bool venc_api_get_respawn(void)
-{
-	return g_respawn != 0;
-}
-
-void venc_api_clear_respawn(void)
-{
-	g_respawn = 0;
-}
-
 void venc_api_request_record_start(const char *dir)
 {
 	pthread_mutex_lock(&g_record_mutex);
@@ -1891,10 +1870,16 @@ static int process_restart_set_query(const SetQueryParam *param,
 	pthread_mutex_unlock(&g_cfg_mutex);
 	(void)venc_api_save_config_to_disk(&new_cfg);
 
-	if (needs_respawn)
-		venc_api_request_respawn();
-	else
-		venc_api_request_reinit();
+	/* Both classifications enqueue the same in-process signal: drop
+	 * out of the stream loop.  Each backend's runner then decides
+	 * what to do (Star6E and Maruko both currently always respawn on
+	 * reinit; the `path=` label above is forward-looking — it tells
+	 * an operator *why* this transition needs the slower path).  Do
+	 * not branch routing on needs_respawn yet — if a future change
+	 * re-enables in-process reconfigure for intra-only deltas, that
+	 * lives in the runner, not the HTTP path. */
+	(void)needs_respawn;
+	venc_api_request_reinit();
 
 	if (!jval) {
 		*status_code = 500;

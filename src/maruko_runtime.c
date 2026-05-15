@@ -118,48 +118,41 @@ static int maruko_runner_init(void *opaque)
 static int maruko_runner_run(void *opaque)
 {
 	MarukoRunnerContext *ctx = opaque;
-	int result;
+	int result = maruko_pipeline_run(&ctx->backend);
 
-	for (;;) {
-		result = maruko_pipeline_run(&ctx->backend);
-		if (result != 1)
-			break;
+	if (result != 1)
+		return result;
 
-		/* Pause HTTP dispatch for the entire teardown + respawn
-		 * window.  pause() drains any handler already in flight
-		 * before returning; subsequent requests get 503 until the
-		 * fresh respawn child accepts again. */
-		venc_httpd_pause();
+	/* Pause HTTP dispatch for the entire teardown + respawn
+	 * window.  pause() drains any handler already in flight
+	 * before returning; subsequent requests get 503 until the
+	 * fresh respawn child accepts again. */
+	venc_httpd_pause();
 
-		/* Maruko always respawns on reinit.  Empirical evidence
-		 * (2026-05-15 bench, S1 sweep): in-process reinit can
-		 * page-fault inside MI_SYS_IMPL_FlushInputPortTasks during
-		 * teardown of ANY MUT_RESTART transition — observed on
-		 * patrol→quality (ref_*=0 throughout, only intra mode
-		 * changed).  The page fault zombies the process and
-		 * requires a physical reboot to clear.
-		 *
-		 * Trading ~2 s of additional latency (fork+exec respawn vs
-		 * in-process reconfigure) for elimination of the zombie
-		 * regime is unambiguously the right call.  Star6E's
-		 * star6e_runtime_handle_reinit() already does this; Maruko
-		 * now matches.
-		 *
-		 * teardown_graph() is deliberately NOT called here — the
-		 * backend->teardown callback (maruko_runner_teardown ->
-		 * maruko_pipeline_teardown) will run it once, cleanly, from
-		 * main() after the run loop exits.  Tearing down twice
-		 * (once here, once from backend->teardown) is what
-		 * zombied the process on the first attempt at this fix. */
-		venc_api_clear_respawn();
-		venc_respawn_request();
-		printf("> [maruko] respawn requested, "
-			"exiting run loop for fork+exec\n");
-		result = 0;
-		break;
-	}
-
-	return result;
+	/* Maruko always respawns on reinit.  Empirical evidence
+	 * (2026-05-15 bench, S1 sweep): in-process reinit can
+	 * page-fault inside MI_SYS_IMPL_FlushInputPortTasks during
+	 * teardown of ANY MUT_RESTART transition — observed on
+	 * patrol→quality (ref_*=0 throughout, only intra mode
+	 * changed).  The page fault zombies the process and
+	 * requires a physical reboot to clear.
+	 *
+	 * Trading ~2 s of additional latency (fork+exec respawn vs
+	 * in-process reconfigure) for elimination of the zombie
+	 * regime is unambiguously the right call.  Star6E's
+	 * star6e_runtime_handle_reinit() already does this; Maruko
+	 * now matches.
+	 *
+	 * teardown_graph() is deliberately NOT called here — the
+	 * backend->teardown callback (maruko_runner_teardown ->
+	 * maruko_pipeline_teardown) will run it once, cleanly, from
+	 * main() after the run loop exits.  Tearing down twice
+	 * (once here, once from backend->teardown) is what
+	 * zombied the process on the first attempt at this fix. */
+	venc_respawn_request();
+	printf("> [maruko] respawn requested, "
+		"exiting run loop for fork+exec\n");
+	return 0;
 }
 
 static void maruko_runner_teardown(void *opaque)
