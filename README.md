@@ -709,8 +709,19 @@ length are all derived from the preset — no per-feature knobs.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.resilience` | string | restart | `off` \| `quality` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
-| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it. |
+| `video0.resilience` | string | **reboot** | `off` \| `quality` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
+| `video0.gopSize`    | double | **reboot** | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it. |
+
+> ⚠️  **Resilience changes require a reboot.**  Setting
+> `video0.resilience` (or any of the derived fields `intra_refresh_*`,
+> `ref_*`, `gop_size`) persists the new value to `/etc/venc.json` and
+> returns `{"reboot_required": true}` to the caller.  The new preset
+> takes effect after the next daemon start.  The SigmaStar VENC SDK
+> does not cleanly release kernel encoder driver state across live
+> reinit cycles when intra-refresh or refPred toggles, even with
+> fork+exec respawn — within one to three live transitions the SoC
+> panics and only a power-cycle recovers.  Cold-boot into any preset
+> is 100 % reliable, so the reboot model is what we ship.
 
 Expansion table:
 

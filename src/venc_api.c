@@ -960,9 +960,9 @@ static int make_single_set_reboot_required_json(const char *field_key,
 	len = snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
 		"\"reboot_required\":true,"
-		"\"note\":\"refPred or intra-refresh activation change "
-		"persisted to disk; reboot the device to apply (live respawn "
-		"is unsafe for this SDK)\"}}",
+		"\"note\":\"resilience-related field persisted to disk; "
+		"reboot the device to apply (live reinit is unsafe for this "
+		"SDK — see HISTORY 0.10.15)\"}}",
 		field_key, json_value);
 	if (len >= (int)sizeof(buf))
 		len = (int)sizeof(buf) - 1;
@@ -1802,7 +1802,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 	VencConfig new_cfg;
 	char *jval;
 	int rc;
-	int refpred_change = 0;
+	int resilience_change = 0;
 
 	if (!param || !status_code || !response_json)
 		return -1;
@@ -1816,52 +1816,59 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
-	/* Detect SDK-fragile state changes — these crash the SoC if
-	 * applied live via fork+exec respawn (the kernel encoder driver
-	 * state from the previous config does not cleanly release in time
-	 * for the new MI_VENC_* configuration calls, even with a 500ms
+	/* Detect resilience-related state changes — any of these crash
+	 * the SoC if applied live via fork+exec respawn (the kernel encoder
+	 * driver state from the previous config does not cleanly release in
+	 * time for the new MI_VENC_* configuration calls, even with a 500ms
 	 * post-exit settle).
 	 *
-	 * Two fragile axes empirically confirmed crash-prone on Star6E:
+	 * Empirical findings on Star6E (2026-05-15 bench testing):
 	 *
-	 *   (a) refPred state — any change in ref_base / ref_enhance /
-	 *       ref_pred between transitions.  Crashes both directions
-	 *       (active→inactive and inactive→active).
-	 *   (b) intra-refresh activation toggle — transitions between
-	 *       intra_refresh_mode="off" and any active mode
-	 *       (fast/balanced/robust).  Within-active changes (e.g.
-	 *       fast↔balanced) are safe.
+	 *   - Cross-group transitions (refPred on↔off, intra-refresh on↔off)
+	 *     reliably crash within the first transition.
+	 *   - In-group transitions (e.g. endurance→patrol, both ref_base=0,
+	 *     intra-refresh active) appear OK once but accumulate kernel
+	 *     state corruption — second or third such transition crashes.
+	 *   - Cold-boot into any preset works fine, no exceptions.
 	 *
-	 * Cold-boot into any preset works fine — no prior kernel state
-	 * exists.  The crash takes the whole SoC offline (ICMP dies),
-	 * requires a power cycle.
-	 *
-	 * Workaround: persist config to disk, refuse to trigger live
-	 * reinit, return reboot_required to the caller.  User reboots and
-	 * the new daemon cold-boots into the new preset cleanly. */
+	 * Decision: refuse ANY live resilience-related change.  Persist new
+	 * config to disk and return reboot_required to the caller.  The
+	 * cost is ~30s for a reboot; the gain is 100% reliability.  This
+	 * applies to direct SETs of the preset name (`video0.resilience`)
+	 * AND to direct SETs of any of the underlying derived fields
+	 * (intra_refresh_*, ref_*, gop_size) — touching any of those puts
+	 * the encoder into the same fragile reinit path. */
 	{
-		const char *old_ir = g_cfg->video0.intra_refresh_mode;
-		const char *new_ir = new_cfg.video0.intra_refresh_mode;
-		int old_ir_active = (old_ir[0] && strcmp(old_ir, "off") != 0);
-		int new_ir_active = (new_ir[0] && strcmp(new_ir, "off") != 0);
+		const VencConfigVideo *o = &g_cfg->video0;
+		const VencConfigVideo *n = &new_cfg.video0;
 
-		if (g_cfg->video0.ref_base    != new_cfg.video0.ref_base ||
-		    g_cfg->video0.ref_enhance != new_cfg.video0.ref_enhance ||
-		    g_cfg->video0.ref_pred    != new_cfg.video0.ref_pred ||
-		    old_ir_active != new_ir_active)
-			refpred_change = 1;
+		if (strcmp(o->resilience, n->resilience) != 0 ||
+		    strcmp(o->intra_refresh_mode, n->intra_refresh_mode) != 0 ||
+		    o->intra_refresh_lines != n->intra_refresh_lines ||
+		    o->intra_refresh_qp    != n->intra_refresh_qp ||
+		    o->ref_base    != n->ref_base ||
+		    o->ref_enhance != n->ref_enhance ||
+		    o->ref_pred    != n->ref_pred ||
+		    o->gop_size    != n->gop_size)
+			resilience_change = 1;
 	}
 
-	*g_cfg = new_cfg;
-	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
-	pthread_mutex_unlock(&g_cfg_mutex);
-	/* Persist to disk so the change survives restart/crash.  The reinit
-	 * uses the in-memory snapshot we just committed; the on-disk copy now
-	 * matches.  Failure is logged by the helper — leave as void since the
-	 * reinit is still the right next step even if persistence stalled. */
-	(void)venc_api_save_config_to_disk(&new_cfg);
-	if (!refpred_change)
+	/* For reboot-required changes, only persist to disk — leave the
+	 * live g_cfg untouched so `/status` and `/resilience/status`
+	 * continue to reflect the actually-running pipeline until the
+	 * reboot.  For all other changes, commit g_cfg in memory and
+	 * trigger the live reinit. */
+	if (resilience_change) {
+		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+		pthread_mutex_unlock(&g_cfg_mutex);
+		(void)venc_api_save_config_to_disk(&new_cfg);
+	} else {
+		*g_cfg = new_cfg;
+		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+		pthread_mutex_unlock(&g_cfg_mutex);
+		(void)venc_api_save_config_to_disk(&new_cfg);
 		venc_api_request_reinit();
+	}
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -1869,7 +1876,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 	}
 
 	*status_code = 200;
-	if (refpred_change)
+	if (resilience_change)
 		rc = make_single_set_reboot_required_json(param->key, jval,
 			response_json);
 	else

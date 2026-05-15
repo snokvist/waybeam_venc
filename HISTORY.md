@@ -1,5 +1,45 @@
 # History
 
+## [0.10.15] - 2026-05-15
+
+Resilience SETs now require a reboot — `video0.resilience`,
+`video0.gopSize`, and the derived intra-refresh / refPred fields all
+persist their new value to `/etc/venc.json` and return
+`{"reboot_required": true}` to the caller rather than reinitialising
+the encoder in-place.
+
+**Why.**  The SigmaStar VENC SDK does not cleanly release kernel
+encoder driver state across live reinit cycles when intra-refresh or
+refPred toggles, even with fork+exec respawn and a 500 ms post-exit
+settle.  Bench testing (Star6E, 192.168.1.13) reproduced two failure
+modes:
+
+- **Cross-group transitions** (refPred on↔off, intra-refresh on↔off)
+  crash on the first transition.  The original gate in 0.10.14b
+  caught these.
+- **In-group transitions** (e.g. `endurance` → `patrol`, both
+  `ref_base = 0`, intra-refresh active) succeed once or twice then
+  crash.  The second sweep wedged the device after racing → endurance
+  (success) → patrol (SoC panic, ICMP dies, power cycle required).
+  No combination of settle delay or partial state reset prevented the
+  cumulative kernel state corruption.
+
+Cold-boot into any preset is 100 % reliable.  Shipping the reboot
+model is the conservative, no-surprises choice — users edit config or
+issue a SET, the daemon writes the change, the user reboots, and the
+new preset takes effect.
+
+**Implementation.**
+
+- `src/venc_api.c`: extended the `refpred_change` detector in
+  `process_restart_set_query()` to fire on changes to *any* of
+  `resilience`, `intra_refresh_mode/lines/qp`, `ref_base/enhance/pred`,
+  `gop_size`.  When a change matches, the new config is persisted to
+  disk, `venc_api_request_reinit()` is **not** called, and the
+  response carries `reboot_required: true`.
+- README documents the reboot-required behaviour next to the field
+  table.
+
 ## [0.10.14] - 2026-05-15
 
 Three new resilience presets — `endurance`, `patrol`, `rally` — and a
