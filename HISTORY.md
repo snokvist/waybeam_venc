@@ -2,11 +2,24 @@
 
 ## [0.10.15] - 2026-05-15
 
-Resilience SETs now require a reboot — `video0.resilience`,
-`video0.gopSize`, and the derived intra-refresh / refPred fields all
-persist their new value to `/etc/venc.json` and return
-`{"reboot_required": true}` to the caller rather than reinitialising
-the encoder in-place.
+Both backends: resilience SETs now persist their new value to
+`/etc/waybeam.json` and return `{"reboot_required": true}` rather than
+reinitialising the encoder in-place.
+
+Empirically confirmed on Maruko (192.168.2.12) that in-process pipeline
+reinit also crashes the SDK kernel module — not always, but reliably
+within a small number of transitions.  A controlled 7-transition sweep
+on the Feb 22 (pre-gate) binary worked for 6 transitions, then on the
+7th (range→fpv) the daemon zombied with a kernel page fault inside
+`MI_SYS_IMPL_FlushInputPortTasks` in the `mi` module:
+
+    do_task_dead ← do_exit ← die ← __do_kernel_fault ← do_page_fault
+        ← do_DataAbort ← __dabt_svc ← CamOsTimerModify
+        ← MI_SYS_IMPL_FlushInputPortTasks [mi]
+
+System stayed alive (ICMP OK) but waybeam process became State=Z and
+did not respawn (no init supervisor).  SIGHUP did not recover; reboot
+was required.
 
 **Why.**  The SigmaStar VENC SDK does not cleanly release kernel
 encoder driver state across live reinit cycles when intra-refresh or

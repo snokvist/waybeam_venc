@@ -712,16 +712,29 @@ length are all derived from the preset — no per-feature knobs.
 | `video0.resilience` | string | **reboot** | `off` \| `quality` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
 | `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it.  Live-reinit applies (no reboot). |
 
-> ⚠️  **Resilience preset changes require a reboot.**  Setting
-> `video0.resilience` (or any of the derived fields `intra_refresh_*`
-> or `ref_*`) persists the new value to `/etc/waybeam.json` and
-> returns `{"reboot_required": true}` to the caller.  The new preset
-> takes effect after the next daemon start.  The SigmaStar VENC SDK
-> does not cleanly release kernel encoder driver state across live
-> reinit cycles when intra-refresh or refPred toggles, even with
-> fork+exec respawn — within one to three live transitions the SoC
-> panics and only a power-cycle recovers.  Cold-boot into any preset
-> is 100 % reliable, so the reboot model is what we ship.
+> ⚠️  **Resilience changes require a reboot on both Star6E and Maruko.**
+> Setting `video0.resilience` (or any of the derived fields
+> `intra_refresh_*` or `ref_*`) persists the new value to
+> `/etc/waybeam.json` and returns `{"reboot_required": true}`.  The
+> live encoder pipeline keeps running the previous preset until the
+> next daemon start.
+>
+> The SigmaStar MI SDK kernel module does not survive a live
+> re-configure of these fields.  Empirically confirmed on both
+> backends (2026-05-15 bench testing):
+>
+> - **Star6E (Infinity6E)** — fork+exec respawn for the new config
+>   triggers an SoC kernel panic within 1–2 transitions; ICMP dies,
+>   requires a power-cycle.
+> - **Maruko (Infinity6C)** — in-process pipeline reinit completes
+>   cleanly for most transitions, but one in a sweep of 7 zombied
+>   the daemon via a page fault in `MI_SYS_IMPL_FlushInputPortTasks`
+>   inside the `mi` kernel module.  System stays up but waybeam dies
+>   and does not respawn — reboot is required to restart it.
+>
+> Different failure modes, same root cause.  Cold-boot into any
+> preset is 100 % reliable on both backends, so the reboot model is
+> what we ship.
 
 Expansion table:
 

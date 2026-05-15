@@ -1816,28 +1816,43 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
-	/* Detect resilience-related state changes — any of these crash
-	 * the SoC if applied live via fork+exec respawn (the kernel encoder
-	 * driver state from the previous config does not cleanly release in
-	 * time for the new MI_VENC_* configuration calls, even with a 500ms
-	 * post-exit settle).
+	/* Detect resilience-related state changes that the MI SDK kernel
+	 * driver cannot survive when applied live.  Empirically confirmed
+	 * on BOTH backends (2026-05-15 bench testing on 192.168.1.13 +
+	 * 192.168.2.12):
 	 *
-	 * Empirical findings on Star6E (2026-05-15 bench testing):
+	 *   Star6E (fork+exec respawn)
+	 *     - First or second transition crashes the SoC entirely
+	 *       (kernel panic, ICMP dies, requires power cycle).  The
+	 *       previous-config kernel encoder state does not release in
+	 *       time for the new MI_VENC_* calls in the respawned process.
 	 *
-	 *   - Cross-group transitions (refPred on↔off, intra-refresh on↔off)
-	 *     reliably crash within the first transition.
-	 *   - In-group transitions (e.g. endurance→patrol, both ref_base=0,
-	 *     intra-refresh active) appear OK once but accumulate kernel
-	 *     state corruption — second or third such transition crashes.
-	 *   - Cold-boot into any preset works fine, no exceptions.
+	 *   Maruko (in-process pipeline reinit)
+	 *     - 6 of 7 consecutive transitions completed cleanly in <2 s.
+	 *     - 7th transition (range→fpv in that sweep) zombied the
+	 *       daemon: `MI_SYS_IMPL_FlushInputPortTasks` in the `mi`
+	 *       kernel module took a data-abort page fault during
+	 *       teardown.  Process State=Z, kernel stack:
+	 *           do_task_dead ← do_exit ← die ← __do_kernel_fault
+	 *           ← do_page_fault ← do_DataAbort ← __dabt_svc
+	 *           ← CamOsTimerModify
+	 *           ← MI_SYS_IMPL_FlushInputPortTasks [mi]
+	 *       System stays alive (ping OK), but waybeam has no init
+	 *       supervisor and does not respawn — a reboot is required to
+	 *       restart the daemon.
 	 *
-	 * Decision: refuse ANY live resilience-related change.  Persist new
-	 * config to disk and return reboot_required to the caller.  The
-	 * cost is ~30s for a reboot; the gain is 100% reliability.  This
-	 * applies to direct SETs of the preset name (`video0.resilience`)
-	 * AND to direct SETs of any of the underlying derived fields
-	 * (intra_refresh_*, ref_*) — touching any of those puts the
-	 * encoder into the same fragile reinit path.  `gop_size` is NOT
+	 * Different exact failure modes, same root cause: the SDK kernel
+	 * module isn't designed for live re-configure of intra-refresh /
+	 * refPred / preset changes.  Cold-boot into any preset is 100 %
+	 * reliable on both backends.
+	 *
+	 * Decision: refuse live resilience changes on either backend.
+	 * Persist new config to disk and return reboot_required to the
+	 * caller.  The cost is ~30 s for a reboot; the gain is 100 %
+	 * reliability and predictable UX (no spurious zombie processes,
+	 * no power-cycles).  Applies to direct SETs of the preset name
+	 * (`video0.resilience`) AND to direct SETs of any of the underlying
+	 * derived fields (intra_refresh_*, ref_*).  `gop_size` is NOT
 	 * gated: it has always been live-changeable as a plain MUT_RESTART
 	 * field and a preset switch is already covered by the resilience
 	 * name comparison above. */
