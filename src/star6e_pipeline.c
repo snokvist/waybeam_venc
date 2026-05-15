@@ -69,7 +69,7 @@ void star6e_pipeline_vpe_scl_preset_shutdown(void)
 
 	(void)write(fd, "384000000\n", 10);
 	close(fd);
-	(void)write(STDERR_FILENO, "[venc] VPE SCL preset stored for next run\n",
+	(void)write(STDERR_FILENO, "[waybeam] VPE SCL preset stored for next run\n",
 		42);
 }
 
@@ -845,7 +845,7 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	/* Frame lost strategy — see star6e_controls_apply_frame_lost_threshold. */
 	if (star6e_controls_apply_frame_lost_threshold(*chn,
 	    frame_lost_enabled, bitrate) != 0)
-		fprintf(stderr, "[venc] WARNING: SetFrameLostStrategy"
+		fprintf(stderr, "[waybeam] WARNING: SetFrameLostStrategy"
 			" failed\n");
 
 	return 0;
@@ -880,7 +880,8 @@ static IntraRefreshMode star6e_pipeline_intra_refresh_derive(
 	memset(out_ir, 0, sizeof(*out_ir));
 	if (vcfg) {
 		mode = intra_refresh_parse_mode(vcfg->video0.intra_refresh_mode);
-		intra_refresh_compute(mode, height, fps, codec == PT_H265,
+		(void)codec; /* H.265 only */
+		intra_refresh_compute(mode, height, fps,
 			vcfg->video0.intra_refresh_lines,
 			vcfg->video0.intra_refresh_qp,
 			vcfg->video0.gop_size, out_ir);
@@ -924,7 +925,7 @@ static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 		return 0;
 	}
 	if (!g_mi_venc.fnSetIntraRefresh) {
-		fprintf(stderr, "[venc] WARNING: intraRefreshMode=%s requested "
+		fprintf(stderr, "[waybeam] WARNING: intraRefreshMode=%s requested "
 			"but libmi_venc.so does not export MI_VENC_SetIntraRefresh\n",
 			name);
 		pthread_mutex_lock(&g_intra_status_mutex);
@@ -933,11 +934,11 @@ static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 		return -1;
 	}
 	if (ir.lines_clamped) {
-		fprintf(stderr, "[venc] WARNING: intraRefreshLines exceeds picture "
+		fprintf(stderr, "[waybeam] WARNING: intraRefreshLines exceeds picture "
 			"LCU rows=%u, clamped\n", ir.total_rows);
 	}
 	if (ir.gop_overridden) {
-		fprintf(stderr, "[venc] intra auto-GOP suppressed: explicit "
+		fprintf(stderr, "[waybeam] intra auto-GOP suppressed: explicit "
 			"gopSize=%.2fs\n", snap.explicit_gop_sec);
 	}
 
@@ -947,7 +948,7 @@ static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 	cfg.u32ReqIQp = ir.req_iqp;
 
 	if (MI_VENC_SetIntraRefresh(chn, &cfg) != 0) {
-		fprintf(stderr, "[venc] ERROR: MI_VENC_SetIntraRefresh(chn=%d, "
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetIntraRefresh(chn=%d, "
 			"lines=%u, qp=%u) failed\n", chn,
 			cfg.u32RefreshLineNum, cfg.u32ReqIQp);
 		pthread_mutex_lock(&g_intra_status_mutex);
@@ -960,7 +961,7 @@ static int star6e_pipeline_apply_intra_refresh(MI_VENC_CHN chn,
 	pthread_mutex_lock(&g_intra_status_mutex);
 	g_intra_status = snap;
 	pthread_mutex_unlock(&g_intra_status_mutex);
-	fprintf(stderr, "[venc] intraRefresh: mode=%s lines/P=%u qp=%u "
+	fprintf(stderr, "[waybeam] intraRefresh: mode=%s lines/P=%u qp=%u "
 		"gop=%.2fs (%s)\n", name, cfg.u32RefreshLineNum, cfg.u32ReqIQp,
 		snap.effective_gop_sec, snap.gop_auto ? "auto" : "explicit");
 	return 0;

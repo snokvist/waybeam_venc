@@ -1,5 +1,39 @@
 # History
 
+## Unreleased — review-pass cleanups
+
+Post-review cleanups on top of 0.10.13:
+
+- **Retire `/api/v1/intra/mode` HTTP route.**  Endpoint round-tripped
+  `video0.intra_refresh_mode` through disk, but `apply_resilience_preset()`
+  on reload always overwrote the granular field from the preset table,
+  so every write came back as `off`.  Pick a preset via
+  `video0.resilience` instead.
+- **`video0.resilience` is the sole user-facing knob** for
+  intra-refresh and refPred.  The granular schema fields
+  (`intra_refresh_*`, `ref_base/enhance/pred`) are not part of the
+  JSON schema or HTTP API — they are derived from the preset at load
+  time.  This is intentional; the granular knobs were never validated
+  in cross-product against the preset table and the SDK has fragile
+  state transitions on direct toggles.  File an issue if no existing
+  preset fits your use case.
+- **No legacy `/etc/venc.json` migration.**  The rebrand-era helper
+  in `scripts/maruko_direct_deploy.sh` that copied `/etc/venc.json` to
+  `/etc/waybeam.json` is dropped.  All bench devices are already
+  migrated; fresh installs land directly on `/etc/waybeam.json`.
+- **Log prefix unification.**  All `[venc] ...` runtime log strings
+  in `src/star6e_pipeline.c`, `src/star6e_runtime.c`, and
+  `src/maruko_pipeline.c` are now `[waybeam] ...`.
+- **H.264 dead-code removal in `intra_refresh.c`.**  Codec is HEVC-only
+  since 0.10.12; the dormant H.264 LCU-size (16) and QP column (33/29/25)
+  in `mode_default_qp()` and `intra_refresh_compute()` are deleted.
+  `intra_refresh_compute()` lost its `is_h265` argument; callers in
+  `star6e_pipeline.c`, `maruko_pipeline.c`, and `test_intra_refresh.c`
+  adjusted.  The 5 H.264-specific unit tests are removed.
+- **Struct comment for `intra_refresh_*` + `ref_*`** in
+  `include/venc_config.h` marks the fields as derived-from-preset only,
+  not user-writable.
+
 ## [0.10.13] - 2026-05-15
 
 Config-surface simplification: drop dormant `sensor.unlock_*` fields

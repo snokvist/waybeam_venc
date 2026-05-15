@@ -718,6 +718,12 @@ Notes:
   marks `ENHANCE_P_NOTFORREF` from `TRAIL_R` (type 1) to `TRAIL_N`
   (type 0) so a generic HEVC decoder can identify non-reference frames
   and drop them cleanly under loss.
+- `video0.resilience` is the **only** user-facing knob for
+  intra-refresh and refPred.  The underlying granular fields
+  (`intra_refresh_*`, `ref_base`, `ref_enhance`, `ref_pred`) are
+  intentionally not part of the JSON schema or HTTP API — the preset
+  table fully drives them.  Use a named preset; if none fits, file an
+  issue and we'll add one.
 - Applied to ch0 only.  The dual-VENC recorder (ch1) is intentionally
   skipped — TS containers expect IDRs at GOP boundaries.
 - Budget +20–30 % bitrate when picking a preset that enables

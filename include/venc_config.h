@@ -95,17 +95,17 @@ typedef struct {
 	bool frame_lost;           /* enable frame-lost safety net */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
+	/* Derived from `resilience` preset only.  Not part of the JSON
+	 * schema or HTTP API — written exclusively by
+	 * apply_resilience_preset() at load time.  Do not parse from JSON,
+	 * do not register in g_fields[].  Pipeline code reads these to
+	 * drive MI_VENC_SetIntraRefresh / MI_VENC_SetRefParam. */
 	char intra_refresh_mode[16]; /* "off" | "fast" | "balanced" | "robust" */
-	uint16_t intra_refresh_lines; /* MB/LCU rows refreshed per P-frame; 0 = mode auto */
-	uint8_t intra_refresh_qp;  /* I-MB QP override for stripe; 0 = codec default (48 H.265 / 45 H.264) */
-	/* SVC-T / temporal hierarchical reference (LTR-style error resilience).
-	 * Driven by MI_VENC_SetRefParam. ref_base=0 disables the whole feature;
-	 * ref_base>=1 enables a base/enhance reference pyramid where lost
-	 * enhance-layer P-frames recover at the next base anchor without
-	 * waiting for an IDR. */
-	uint8_t ref_base;          /* base-layer period; 0 = off */
-	uint8_t ref_enhance;       /* enhance-layer ratio; ignored when ref_base=0 */
-	bool ref_pred;             /* enable enhance→base prediction (recommended) */
+	uint16_t intra_refresh_lines; /* CTU rows refreshed per P-frame */
+	uint8_t intra_refresh_qp;  /* I-CTU QP override for stripe */
+	uint8_t ref_base;          /* SVC-T base-layer period; 0 = off */
+	uint8_t ref_enhance;       /* SVC-T enhance-layer ratio */
+	bool ref_pred;             /* SVC-T enhance→base prediction */
 	/* Resilience preset — sole user-facing knob for intra-refresh +
 	 * SVC-T refPred + GOP.  Recognised values: "off", "quality",
 	 * "racing", "range", "fpv".  Every recognised value (including

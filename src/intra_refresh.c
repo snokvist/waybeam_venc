@@ -14,16 +14,13 @@ static uint32_t mode_target_ms(IntraRefreshMode m)
 	}
 }
 
-/* Per-mode stripe QP.  Encoder is H.265-only since 0.10.12, so the
- * is_h265 argument is always 1 at runtime; the dormant H.264 column
- * (PSNR/SSIM-equivalent values ~3 lower than HEVC) is kept to avoid
- * churn in the function shape. */
-static uint32_t mode_default_qp(IntraRefreshMode m, int is_h265)
+/* Per-mode stripe QP for H.265. */
+static uint32_t mode_default_qp(IntraRefreshMode m)
 {
 	switch (m) {
-	case INTRA_MODE_FAST:     return is_h265 ? 36u : 33u;
-	case INTRA_MODE_BALANCED: return is_h265 ? 32u : 29u;
-	case INTRA_MODE_ROBUST:   return is_h265 ? 28u : 25u;
+	case INTRA_MODE_FAST:     return 36u;
+	case INTRA_MODE_BALANCED: return 32u;
+	case INTRA_MODE_ROBUST:   return 28u;
 	case INTRA_MODE_OFF:
 	default:                  return 0;
 	}
@@ -52,7 +49,7 @@ const char *intra_refresh_mode_name(IntraRefreshMode m)
 
 void intra_refresh_compute(
 	IntraRefreshMode mode,
-	uint32_t height, uint32_t fps, int is_h265,
+	uint32_t height, uint32_t fps,
 	uint32_t override_lines,
 	uint32_t override_qp,
 	double   explicit_gop_sec,
@@ -67,8 +64,8 @@ void intra_refresh_compute(
 		return;
 	}
 
-	uint32_t lcu_h        = is_h265 ? 32u : 16u;
-	uint32_t total_rows   = (height + lcu_h - 1u) / lcu_h;
+	/* H.265 CTU is 32×32. */
+	uint32_t total_rows   = (height + 31u) / 32u;
 	if (total_rows == 0) total_rows = 1;
 	uint32_t target_ms    = mode_target_ms(mode);
 
@@ -106,7 +103,7 @@ void intra_refresh_compute(
 
 	uint32_t req_iqp = override_qp > 0
 		? override_qp
-		: mode_default_qp(mode, is_h265);
+		: mode_default_qp(mode);
 
 	out->target_ms  = target_ms;
 	out->total_rows = total_rows;
