@@ -685,31 +685,56 @@ A single field picks an error-resilience profile.  Intra-refresh
 (rolling GDR stripe), the SVC-T reference pyramid (refPred), and the GOP
 length are all derived from the preset — no per-feature knobs.
 
-The 2x2 matrix:
+**The two axes that matter:**
 
-|                          | **Low resilience (best image)** | **High resilience (more overhead)** |
-|--------------------------|-------------------------------|------------------------------------|
-| **Fast recovery needed** | `racing` — close-range LOS    | `fpv` — drone FPV                  |
-| **Slow recovery OK**     | `quality` — plane / cruiser   | `range` — long-range FPV           |
+1. **Stripe-only recovery** — can a damaged frame buffer be cleaned up
+   by intra-refresh stripes alone, without waiting for an IDR?
+2. **OSD-safe** — does the preset leave persistent chroma artefacts
+   ("green smear") over static high-contrast overlays like an OSD
+   panel?  The two are linked: any preset with `ref_enhance > 0`
+   (SVC-T temporal hierarchy) marks enhancement frames as TRAIL_N, so
+   their intra-refresh stripes are display-only and never propagate
+   into the decoder's reference state.  For motion-rich pixels this
+   doesn't matter — opportunistic intra coding scrubs the DPB
+   anyway.  For static OSD content the chroma plane stays in
+   skip-mode-from-stale-reference and you get the green smear until
+   the next IDR.
+
+|                            | **OSD-safe** (no SVC-T)                      | **OSD-unsafe** (uses SVC-T → refPred)         |
+|----------------------------|----------------------------------------------|-----------------------------------------------|
+| **Fast recovery needed**   | `racing` — close-range LOS                   | `rally` — light refPred, motion-heavy scenes  |
+| **Recovery time tradable** | `endurance` — balanced wavefront, less bitrate | `range` — long-range FPV (heavy refPred)    |
+| **Long stable flight**     | `patrol` — balanced + 4 s GOP                | `fpv` — drone FPV (heaviest refPred)          |
+| **Slow recovery OK**       | `quality` — plane / cruiser (IDR-based)      | —                                             |
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.resilience` | string | restart | `off` \| `quality` \| `racing` \| `range` \| `fpv` (default `off`) |
+| `video0.resilience` | string | restart | `off` \| `quality` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
 | `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it. |
 
 Expansion table:
 
-| Preset    | intra-refresh | refPred (base/enhance) | gopSize override |
-|-----------|---------------|------------------------|-----------------|
-| `off`     | off           | off                    | user-set (`gopSize` honoured) |
-| `quality` | off           | off                    | 4.0 s           |
-| `racing`  | fast          | off                    | 2.0 s           |
-| `range`   | balanced      | base=1, enhance=4      | 2.0 s           |
-| `fpv`     | robust        | base=1, enhance=4      | 2.0 s           |
+| Preset      | intra-refresh    | refPred (base/enhance) | gopSize override | OSD-safe?         |
+|-------------|------------------|------------------------|------------------|-------------------|
+| `off`       | off              | off                    | user-set         | yes (no refresh)  |
+| `quality`   | off              | off                    | 4.0 s            | yes (IDR-based)   |
+| `racing`    | fast (150 ms)    | off                    | 2.0 s            | yes               |
+| `endurance` | balanced (500 ms)| off                    | 2.0 s            | yes               |
+| `patrol`    | balanced (500 ms)| off                    | 4.0 s            | yes               |
+| `rally`     | fast (150 ms)    | base=1, enhance=1      | 2.0 s            | no — green smear  |
+| `range`     | balanced (500 ms)| base=1, enhance=4      | 2.0 s            | no — green smear  |
+| `fpv`       | robust (1000 ms) | base=1, enhance=4      | 2.0 s            | no — green smear  |
 
 Quick start:
 
 ```bash
+# Default for FPV with OSD overlay — fast stripe recovery, no SVC-T
+curl "http://<device>/api/v1/set?video0.resilience=racing"
+
+# Long stable flight with OSD — balanced wavefront + 4 s GOP for bitrate
+curl "http://<device>/api/v1/set?video0.resilience=patrol"
+
+# OSD off, heavy refPred for long-range lossy link
 curl "http://<device>/api/v1/set?video0.resilience=fpv"
 ```
 
@@ -728,9 +753,18 @@ Notes:
   skipped — TS containers expect IDRs at GOP boundaries.
 - Budget +20–30 % bitrate when picking a preset that enables
   intra-refresh; intra-coded rows compress worse than inter-coded ones.
-- Set `WAYBEAM_DEBUG_REFTYPE=1` in the environment to dump an eRefType
-  histogram every 150 frames — useful for verifying the encoder is
-  actually labelling frames as `ENHANCE_P_NOTFORREF`.
+- **OSD-unsafe explained.**  SVC-T TRAIL_N frames are dropped from the
+  decoder's DPB after display, so their intra-refresh stripes don't
+  persist as reference data.  For static high-contrast content (OSD
+  text) the chroma plane stays in skip-mode prediction from the
+  pre-refresh reference frame.  Once chroma drifts it can only be
+  corrected by an IDR — stripe-only recovery doesn't work for those
+  MBs.  The SigmaStar VENC SDK exposes no force-intra-MB knob to
+  override this (ROI is delta-QP only, and skip-mode bypasses QP for
+  zero-residual blocks).  Bench-confirmed: `racing`/`endurance`/`patrol`
+  fully clean up the OSD area within ~10 wavefront cycles; `rally`
+  and stronger refPred presets leave persistent green smear that only
+  an IDR can clear.
 - Real-world refPred benefit on a lossy link depends on the sender
   applying per-NAL-type FEC priority (protecting `TRAIL_R` more
   aggressively than `TRAIL_N`).  Without that integration the pyramid

@@ -2,46 +2,67 @@
 
 ## [0.10.14] - 2026-05-15
 
-Three new resilience presets that recover the picture via intra-refresh
-alone — no IDR required — while keeping partial refPred benefits.
-Empirically motivated by bench observation that `range` and `fpv` modes
-never finish stripe-based recovery (greenish artefacts persist between
-IDRs).
+Three new resilience presets — `endurance`, `patrol`, `rally` — and a
+revised classification along an OSD-safe / OSD-unsafe axis after
+bench-isolating why `range`/`fpv` leave persistent green smear on the
+OSD panel.
 
-**Root cause:** the SVC-T temporal-layering rewrite marks `ref_enhance`
-of every `(ref_enhance + 1)` frames as TRAIL_N (display-only, dropped
-from the decoder's DPB).  Intra-refresh stripes in those frames are
-decoded once for display and then discarded — they never propagate into
-the reference state.  So the effective wavefront cycle in the DPB is
+**Root cause (two layers):**
 
-    effective_wavefront_ms = nominal_wavefront_ms × (ref_enhance + 1)
+1. **SVC-T TRAIL_N effective wavefront math.**  The temporal-layering
+   rewrite marks `ref_enhance` of every `(ref_enhance + 1)` frames as
+   TRAIL_N (display-only, dropped from the decoder's DPB), so the
+   effective wavefront in the DPB is
+       effective_wavefront_ms = nominal_wavefront_ms × (ref_enhance + 1)
+   `range` = 2500 ms and `fpv` = 5000 ms both exceed the 2.0 s GOP,
+   so the picture never reaches stripe-only recovery — only an IDR
+   completes it.
 
-`range` (500ms × 5 = 2500ms) and `fpv` (1000ms × 5 = 5000ms) both
-exceed the 2.0s IDR cycle, so the picture never reaches a fully
-refreshed state via stripes alone.  Setting GOP shorter doesn't help
-recovery — it just makes IDRs more frequent.
+2. **OSD-specific chroma artefact.**  For static high-contrast overlay
+   content (OSD text, near-neutral chroma everywhere), the R-D loop
+   picks chroma skip-mode in every MB because chroma residual is
+   essentially zero.  Once chroma drifts in a TRAIL_N frame, no
+   amount of intra-refresh recovers it — the stripe MBs land in
+   display-only frames and never reach the DPB.  Bench-confirmed via
+   JPEG snapshot from the same VPE port: the encoder *input* is
+   clean (sharp OSD, correct chroma), the H.265 bitstream is what
+   produces the green smear.  ROI delta-QP doesn't help because
+   skip-mode bypasses QP for zero-residual blocks, and the SigmaStar
+   i6c VENC API exposes no force-intra-MB knob.
 
-**New presets (all stripe-recoverable inside the GOP):**
+**Conclusion baked into the preset table:**
 
-| preset      | nominal wavefront | ref_enhance | GOP   | effective wavefront | refPred ratio |
-|-------------|-------------------|-------------|-------|---------------------|---------------|
-| `rally`     | fast (150ms)      | 1           | 2.0s  | 300ms               | 1:1 (50%)     |
-| `endurance` | balanced (500ms)  | 2           | 2.0s  | 1500ms              | 1:2 (67%)     |
-| `patrol`    | balanced (500ms)  | 1           | 4.0s  | 1000ms              | 1:1 (50%)     |
+Any preset with `ref_enhance > 0` is OSD-unsafe.  The fix is to
+classify presets along this axis and let users pick:
 
-- **`rally`** is the recommended FPV-link default: behaves like
-  `racing` for recovery (300ms vs racing's 150ms — both inside any
-  realistic loss recovery window) while keeping ~50% of refPred's
-  bitrate / error-tolerance benefit.
-- **`endurance`** keeps more refPred compression efficiency (2/3 of
-  frames are TRAIL_N) at the cost of 1.5s recovery — for links with
-  rare packet loss where bitrate matters more.
-- **`patrol`** doubles the GOP to 4.0s for long stable flights, halving
-  the IDR-overhead bitrate share while still recovering in 1s.
+| preset      | intra-refresh   | ref_enhance | GOP   | OSD-safe?         | role                                       |
+|-------------|-----------------|-------------|-------|-------------------|--------------------------------------------|
+| `off`       | off             | 0           | user  | yes (no refresh)  | manual control                              |
+| `quality`   | off             | 0           | 4.0 s | yes (IDR-based)   | best image, slow recovery                   |
+| `racing`    | fast (150 ms)   | 0           | 2.0 s | yes               | close-range LOS, fast stripe recovery       |
+| `endurance` | balanced (500ms)| **0** (was 2) | 2.0 s | yes               | less bitrate on stripes, slower wavefront   |
+| `patrol`    | balanced (500ms)| **0** (was 1) | 4.0 s | yes               | long stable flight, 4 s GOP for bandwidth   |
+| `rally`     | fast (150 ms)   | 1           | 2.0 s | no                | light refPred, motion-heavy scenes (no OSD) |
+| `range`     | balanced (500ms)| 4           | 2.0 s | no                | long-range FPV, heavy refPred (no OSD)      |
+| `fpv`       | robust (1000ms) | 4           | 2.0 s | no                | drone FPV, heaviest refPred (no OSD)        |
 
-Existing `racing`, `range`, `fpv` presets unchanged for backward
-compatibility.  WebUI dashboard enum, API test suite, and preset
-expansion unit tests all updated.
+`endurance` and `patrol` lose their original 1:2 / 1:1 SVC-T pyramid —
+they're now racing-class OSD-safe presets distinguished by slower
+wavefront (less stripe bitrate) and longer GOP respectively.  `rally`
+keeps its 1:1 SVC-T as the lightest refPred option for OSD-off
+scenarios.  `range` and `fpv` remain the heavy-refPred presets,
+unchanged.
+
+Existing config files that set `resilience=racing`, `range`, or `fpv`
+load with identical behaviour.  Users explicitly on `endurance` or
+`patrol` from intermediate 0.10.14 dev binaries lose SVC-T but gain
+OSD-safe recovery — a behavioural change documented in README.md.
+
+WebUI dashboard enum, API test suite (1588 unit tests), and preset
+expansion test cases all updated.  Bench-validated on Star6E
+192.168.1.13: racing/endurance/patrol clean up the OSD area within
+~10 wavefront cycles; rally/range/fpv leave persistent green smear
+that only an IDR can clear.
 
 ## [0.10.13] - 2026-05-15
 

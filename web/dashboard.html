@@ -607,7 +607,7 @@ const TOOLTIPS = {
 
 'video0.sceneHoldoff':'Consecutive scene-spike frames required before requesting IDR. Default: 2. Requires restart',
 
-'video0.resilience':'Error-resilience preset. Sole knob for intra-refresh + SVC-T refPred + GOP. off/quality (no refresh); racing (fast, no refPred); rally/endurance/patrol (refresh recovers without IDR + partial refPred); range/fpv (heavy refPred, needs IDR to recover). Requires restart',
+'video0.resilience':'Error-resilience preset (intra-refresh + SVC-T refPred + GOP). OSD-safe: off/quality/racing/endurance/patrol. OSD-unsafe (persistent green smear over OSD area): rally/range/fpv use SVC-T refPred. See README for the full table. Requires restart',
 
 'video0.zoomPct':'Digital zoom crop fraction. 0 = off, 0.25-1.0 = crop fraction; smaller is deeper zoom. Requires restart',
 
