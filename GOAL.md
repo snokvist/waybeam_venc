@@ -190,12 +190,12 @@ and 192.168.2.12 (where applicable) and the result is captured below.
 - [x] S2 / Star6E: HTTP gap ~700-800ms (`off → sprint`); ICMP 30/30, 0% loss
 - [x] S3 / Star6E: respawn ~2s (`racing → fpv`); PID 691→735; ICMP 50/50, 0% loss
 - [x] S4 / Maruko: respawn complete; PID 1805→1858; preset/refPred correctly applied; dmesg clean; HTTP gap timing inconclusive due to test-rig SSH overload
-- [ ] S5 / Maruko:
-- [ ] S6 / Star6E:
+- [x] S5 / Maruko: 10/10 racing↔fpv cycles clean.  PIDs 2678→2792→2906→3020→3134→3248→3356→3464→3578→3686 (all distinct — every cycle respawned via fork+exec).  State=S throughout.  dmesg fault count = 0.  (Scope reduced from 50→10 cycles per `feedback_short_bench_runs_when_fragile` after the patrol→quality crash earlier in the session.  10 cycles establishes the teardown-reorder fix is reliable.  Future regression bar can return to 50.)
+- [x] S6 / Star6E: 10/10 racing↔fpv cycles clean.  PIDs 2142→2243→2340→2447→2538→2641→2742→2839→2942→3043 (all distinct — every cycle respawned).  State=S (or R for cycle 2, mid-init).  dmesg fault count = 0 throughout.  (Scope reduced from 50→10 per `feedback_short_bench_runs_when_fragile` — 10 cycles establish path reliability; 50 is a future regression-test bar once architecture stabilises.)
 - [x] S7 / Star6E: spec'd 429 `rate_limited` response is not the de-facto guard.  venc_httpd pauses immediately after a successful SET → a follow-up SET within the respawn window returns HTTP 503 `paused`, which provides identical protection (operator can't issue rapid SETs).  The original per-process static-timer rate-limit code was unreachable (HTTP-pause beat it; static reset across respawn anyway) and has been deleted.  Verified empirically by firing two parallel SETs through SSH — second returned 503 `paused`.
 - [x] S7 / Maruko: same protection mechanism (HTTP 503 `paused` during pipeline reinit window).  Same code paths.
-- [ ] S8 / Star6E:
-- [ ] S8 / Maruko:
+- [x] S8 / Star6E: 10/10 presets — off, rescue, quality, sprint, racing, endurance, patrol, rally, range, fpv — all returned correct preset in /api/v1/resilience/status and fps=120 in /api/v1/fps/live.  No FAILs.
+- [x] S8 / Maruko: 10/10 presets — same set as Star6E — all OK at fps=60.  No FAILs.  Confirms every preset survives the fork+exec respawn path on Maruko after the teardown-reorder fix.
 
 ## Recovery procedures
 
