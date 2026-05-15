@@ -2816,50 +2816,6 @@ static int handle_resilience_status(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
-static int handle_intra_mode(int fd, const HttpRequest *req, void *ctx)
-{
-	char mode_arg[16];
-	IntraRefreshMode mode;
-	const char *name;
-	VencConfig snapshot;
-	int save_rc;
-	char buf[256];
-
-	(void)ctx;
-	if (httpd_query_param(req, "mode", mode_arg, sizeof(mode_arg)) != 0
-		|| mode_arg[0] == '\0')
-		return httpd_send_error(fd, 400, "missing_mode",
-			"Query param 'mode' is required");
-
-	mode = intra_refresh_parse_mode(mode_arg);
-	name = intra_refresh_mode_name(mode);
-	if (mode == INTRA_MODE_OFF && strcasecmp(mode_arg, "off") != 0)
-		return httpd_send_error(fd, 400, "invalid_mode",
-			"mode must be one of: off, fast, balanced, robust");
-
-	pthread_mutex_lock(&g_cfg_mutex);
-	if (!g_cfg) {
-		pthread_mutex_unlock(&g_cfg_mutex);
-		return httpd_send_error(fd, 500, "internal_error",
-			"config not registered");
-	}
-	snprintf(g_cfg->video0.intra_refresh_mode,
-		sizeof(g_cfg->video0.intra_refresh_mode), "%s", name);
-	/* Clear per-field overrides so the mode's defaults take effect. */
-	g_cfg->video0.intra_refresh_lines = 0;
-	g_cfg->video0.intra_refresh_qp = 0;
-	snapshot = *g_cfg;
-	pthread_mutex_unlock(&g_cfg_mutex);
-
-	save_rc = venc_api_save_config_to_disk(&snapshot);
-	venc_api_request_reinit();
-
-	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"mode\":\"%s\",\"saved\":%s,"
-		"\"reinit\":true}}",
-		name, save_rc == 0 ? "true" : "false");
-	return httpd_send_json(fd, 200, buf);
-}
 #endif
 
 static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
@@ -2955,8 +2911,6 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
 #if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
-	r |= venc_httpd_route("POST", "/api/v1/intra/mode",  handle_intra_mode, NULL);
-	r |= venc_httpd_route("GET",  "/api/v1/intra/mode",  handle_intra_mode, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/resilience/status",
 		handle_resilience_status, NULL);
 #endif
