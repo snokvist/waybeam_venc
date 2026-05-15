@@ -393,7 +393,7 @@ show_status() {
 	printf 'sensor.index=%s\n'   "$(config_value .sensor.index unknown)"
 	printf 'sensor.mode=%s\n'    "$(config_value .sensor.mode unknown)"
 	printf 'isp.sensorBin=%s\n'  "$(config_value .isp.sensorBin unknown)"
-	printf 'isp.aeMode=%s\n'     "$(config_value .isp.aeMode unknown)"
+	printf 'isp.aeEngine=%s\n'   "$(config_value .isp.aeEngine unknown)"
 	printf 'video0.size=%s\n'    "$(config_value .video0.size unknown)"
 	printf 'video0.fps=%s\n'     "$(config_value .video0.fps unknown)"
 	printf 'video0.bitrate=%s\n' "$(config_value .video0.bitrate unknown)"

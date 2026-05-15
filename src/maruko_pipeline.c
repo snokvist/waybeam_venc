@@ -1111,7 +1111,8 @@ static IntraRefreshMode maruko_intra_refresh_derive(
 	memset(out_ir, 0, sizeof(*out_ir));
 	if (cfg) {
 		mode = intra_refresh_parse_mode(cfg->intra_refresh_mode);
-		intra_refresh_compute(mode, height, fps, codec == PT_H265,
+		(void)codec; /* H.265 only */
+		intra_refresh_compute(mode, height, fps,
 			cfg->intra_refresh_lines, cfg->intra_refresh_qp,
 			cfg->gop_size_sec, out_ir);
 	}
@@ -1154,7 +1155,7 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 		return 0;
 	}
 	if (!g_mi_venc.fnSetIntraRefresh) {
-		fprintf(stderr, "[venc] WARNING: intraRefreshMode=%s requested "
+		fprintf(stderr, "[waybeam] WARNING: intraRefreshMode=%s requested "
 			"but libmi_venc.so does not export "
 			"MI_VENC_SetIntraRefresh\n", name);
 		pthread_mutex_lock(&g_intra_status_mutex);
@@ -1163,11 +1164,11 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 		return -1;
 	}
 	if (ir.lines_clamped) {
-		fprintf(stderr, "[venc] WARNING: intraRefreshLines exceeds picture "
+		fprintf(stderr, "[waybeam] WARNING: intraRefreshLines exceeds picture "
 			"LCU rows=%u, clamped\n", ir.total_rows);
 	}
 	if (ir.gop_overridden) {
-		fprintf(stderr, "[venc] intra auto-GOP suppressed: explicit "
+		fprintf(stderr, "[waybeam] intra auto-GOP suppressed: explicit "
 			"gopSize=%.2fs\n", snap.explicit_gop_sec);
 	}
 
@@ -1177,7 +1178,7 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	ir_sdk.u32ReqIQp = ir.req_iqp;
 
 	if (maruko_mi_venc_set_intra_refresh(dev, chn, &ir_sdk) != 0) {
-		fprintf(stderr, "[venc] ERROR: MI_VENC_SetIntraRefresh(dev=%d, "
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetIntraRefresh(dev=%d, "
 			"chn=%d, lines=%u, qp=%u) failed\n", dev, chn,
 			ir_sdk.u32RefreshLineNum, ir_sdk.u32ReqIQp);
 		pthread_mutex_lock(&g_intra_status_mutex);
@@ -1190,11 +1191,69 @@ static int maruko_apply_intra_refresh(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	pthread_mutex_lock(&g_intra_status_mutex);
 	g_intra_status = snap;
 	pthread_mutex_unlock(&g_intra_status_mutex);
-	fprintf(stderr, "[venc] intraRefresh: mode=%s dev=%d chn=%d lines/P=%u "
+	fprintf(stderr, "[waybeam] intraRefresh: mode=%s dev=%d chn=%d lines/P=%u "
 		"qp=%u gop=%.2fs (%s)\n", name, dev, chn, ir_sdk.u32RefreshLineNum,
 		ir_sdk.u32ReqIQp, snap.effective_gop_sec,
 		snap.gop_auto ? "auto" : "explicit");
 	return 0;
+}
+
+static MarukoRefPredStatus g_ref_pred_status;
+static pthread_mutex_t g_ref_pred_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void maruko_pipeline_ref_pred_status(MarukoRefPredStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	*out = g_ref_pred_status;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+}
+
+static int maruko_apply_ref_pred(MI_VENC_DEV dev, MI_VENC_CHN chn,
+	const MarukoBackendConfig *cfg)
+{
+	MI_VENC_ParamRef_t ref;
+	MarukoRefPredStatus snap;
+
+	memset(&snap, 0, sizeof(snap));
+	snap.mi_supported = g_mi_venc.fnSetRefParam ? 1 : 0;
+	if (cfg) {
+		snap.base    = cfg->ref_base;
+		snap.enhance = cfg->ref_enhance;
+		snap.pred    = cfg->ref_pred ? 1 : 0;
+	}
+
+	if (!cfg || cfg->ref_base == 0)
+		goto publish;
+	if (!g_mi_venc.fnSetRefParam) {
+		fprintf(stderr, "[waybeam] WARNING: refBase=%u requested but "
+			"libmi_venc.so does not export MI_VENC_SetRefParam\n",
+			cfg->ref_base);
+		goto publish;
+	}
+
+	memset(&ref, 0, sizeof(ref));
+	ref.u32Base     = cfg->ref_base;
+	ref.u32Enhance  = cfg->ref_enhance ? cfg->ref_enhance : 1;
+	ref.bEnablePred = cfg->ref_pred ? 1 : 0;
+
+	if (maruko_mi_venc_set_ref_param(dev, chn, &ref) != 0) {
+		fprintf(stderr, "[waybeam] ERROR: MI_VENC_SetRefParam(dev=%d, "
+			"chn=%d, base=%u, enhance=%u, pred=%u) failed\n", dev, chn,
+			ref.u32Base, ref.u32Enhance, ref.bEnablePred);
+		goto publish;
+	}
+	snap.apply_ok = 1;
+	snap.active   = 1;
+	fprintf(stderr, "[waybeam] refPred: dev=%d chn=%d base=%u enhance=%u "
+		"pred=%u (applied)\n", dev, chn, ref.u32Base, ref.u32Enhance,
+		ref.bEnablePred);
+publish:
+	pthread_mutex_lock(&g_ref_pred_status_mutex);
+	g_ref_pred_status = snap;
+	pthread_mutex_unlock(&g_ref_pred_status_mutex);
+	return snap.active ? 0 : (cfg && cfg->ref_base > 0 ? -1 : 0);
 }
 
 static int maruko_start_venc(const MarukoBackendConfig *cfg,
@@ -1264,6 +1323,11 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 			" failed %d\n", ret);
 	}
 
+	/* SVC-T reference pyramid (refPred) — Star6E SDK testing showed the
+	 * call silently no-ops if invoked after StartRecvPic.  Apply here
+	 * between CreateChn and StartRecvPic for both backends. */
+	(void)maruko_apply_ref_pred(venc_dev, *chn, cfg);
+
 	ret = maruko_mi_venc_start_recv(venc_dev, *chn);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -1304,6 +1368,7 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	 * pipeline (matches Star6E behavior). */
 	(void)maruko_apply_intra_refresh(venc_dev, *chn, cfg, height,
 		framerate, cfg->rc_codec);
+	/* refPred is applied earlier (pre-StartRecvPic); see comment above. */
 
 	/* Phase 7 dual-VENC SDK probe (debug-only, env-gated).
 	 *
@@ -2820,6 +2885,67 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
  * → optional sidecar trailer + verbose log.  Mirrors
  * star6e_runtime_process_stream().  Returns: -1 fatal, 0 ok, 1 retry
  * outer loop. */
+/* HEVC NAL type / SDK eRefType constants — mirror star6e_runtime.c.
+ * SigmaStar i6c VENC firmware has the same gap as i6e: it computes the
+ * SVC-T pyramid and labels each frame's eRefType correctly, but writes
+ * every NAL as TRAIL_R (type 1).  Generic HEVC decoders need TRAIL_N
+ * (type 0) to know which frames are non-reference. */
+#define HEVC_NAL_TRAIL_N 0
+#define HEVC_NAL_TRAIL_R 1
+#define MARUKO_REFTYPE_ENHANCE_P_NOTFORREF 4
+
+static size_t maruko_nal_header_idx(const uint8_t *buf, size_t len)
+{
+	size_t i = 0;
+	while (i < len && buf[i] == 0) i++;
+	if (i < len && buf[i] == 0x01) i++;
+	return i < len ? i : len;
+}
+
+static void maruko_patch_pack_to_trail_n(i6c_venc_pack *pack)
+{
+	if (!pack || !pack->data || pack->length == 0)
+		return;
+	if (pack->packNum > 0) {
+		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
+			sizeof(pack->packetInfo[0]));
+		unsigned int n = pack->packNum > info_cap ? info_cap : pack->packNum;
+		unsigned int k;
+		for (k = 0; k < n; ++k) {
+			unsigned int off = pack->packetInfo[k].offset;
+			unsigned int nlen = pack->packetInfo[k].length;
+			if (off >= pack->length || nlen == 0 ||
+			    off + nlen > pack->length)
+				continue;
+			size_t hdr = maruko_nal_header_idx(pack->data + off, nlen);
+			if (hdr >= nlen) continue;
+			if (pack->data[off + hdr] == 0x02) {
+				pack->data[off + hdr] = 0x00;
+			}
+		}
+		return;
+	}
+	if (pack->offset >= pack->length)
+		return;
+	{
+		unsigned int off = pack->offset;
+		unsigned int nlen = pack->length - off;
+		size_t hdr = maruko_nal_header_idx(pack->data + off, nlen);
+		if (hdr >= nlen) return;
+		if (pack->data[off + hdr] == 0x02) {
+			pack->data[off + hdr] = 0x00;
+		}
+	}
+}
+
+static void maruko_patch_stream_to_trail_n(i6c_venc_strm *s)
+{
+	unsigned int i;
+	if (!s || !s->packet) return;
+	for (i = 0; i < s->count; i++)
+		maruko_patch_pack_to_trail_n(&s->packet[i]);
+}
+
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, const i6c_venc_stat *stat)
 {
@@ -2856,6 +2982,17 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		fprintf(stderr,
 			"ERROR: [maruko] MI_VENC_GetStream failed %d\n", ret);
 		return -1;
+	}
+
+	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
+	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  i6c shares this
+	 * encoder-firmware gap with i6e (Star6E): the pyramid logic is
+	 * correct internally but every NAL is emitted as TRAIL_R, leaving
+	 * generic decoders unable to identify non-reference frames.  See
+	 * star6e_runtime.c for the matching helper. */
+	if (ctx->cfg.ref_base > 0 &&
+	    stream.h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF) {
+		maruko_patch_stream_to_trail_n(&stream);
 	}
 
 	++rt->frame_counter;
@@ -2899,7 +3036,22 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		{
 			int osd_row = 2;
 			MarukoIntraRefreshStatus ir;
+			MarukoRefPredStatus      rp;
 			maruko_pipeline_intra_refresh_status(&ir);
+			maruko_pipeline_ref_pred_status(&rp);
+			if (ctx->cfg.resilience[0] &&
+			    strcmp(ctx->cfg.resilience, "off") != 0) {
+				if (rp.active) {
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"res", "%s rp=%u/%u",
+						ctx->cfg.resilience,
+						rp.base, rp.enhance);
+				} else {
+					debug_osd_text(ctx->debug_osd, osd_row++,
+						"res", "%s",
+						ctx->cfg.resilience);
+				}
+			}
 			if (ir.active) {
 				debug_osd_text(ctx->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",

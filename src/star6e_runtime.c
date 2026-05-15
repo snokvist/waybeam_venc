@@ -79,7 +79,80 @@ static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 	return t;
 }
 
-static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
+/* HEVC NAL types relevant for non-reference rewriting */
+#define HEVC_NAL_TRAIL_N 0
+#define HEVC_NAL_TRAIL_R 1
+#define SS_REFTYPE_ENHANCE_P_NOTFORREF 4
+
+/* Locate the NAL header byte 0 inside a payload buffer that may or may not
+ * begin with a start-code prefix (00 00 01 / 00 00 00 01).  Returns the
+ * index of NAL byte 0, or len on failure. */
+static size_t star6e_nal_header_idx(const uint8_t *buf, size_t len)
+{
+	size_t i = 0;
+	while (i < len && buf[i] == 0) i++;
+	if (i < len && buf[i] == 0x01) i++;
+	return i < len ? i : len;
+}
+
+/* If a NAL is TRAIL_R (type 1) and the SDK marked this frame as
+ * ENHANCE_P_NOTFORREF, rewrite the NAL header to TRAIL_N (type 0).
+ *
+ * Byte 0 bit layout: forbidden_zero(1) | nal_unit_type(6) | layer_id_msb(1)
+ *   TRAIL_R = 0x02   (type=1, layer_msb=0)
+ *   TRAIL_N = 0x00   (type=0, layer_msb=0)
+ *
+ * No-op if NAL layer_id_msb != 0 (we only touch single-layer streams), if
+ * the NAL is anything other than TRAIL_R, or if no slice NALs are present
+ * in the pack (we never touch VPS/SPS/PPS — those are nal_type >= 32 and
+ * fail the TRAIL_R check). */
+static void star6e_patch_pack_to_trail_n(MI_VENC_Pack_t *pack)
+{
+	if (!pack || !pack->data || pack->length == 0)
+		return;
+	if (pack->packNum > 0) {
+		const unsigned int info_cap = (unsigned int)(sizeof(pack->packetInfo) /
+			sizeof(pack->packetInfo[0]));
+		unsigned int n = pack->packNum > info_cap ? info_cap : pack->packNum;
+		unsigned int k;
+		for (k = 0; k < n; ++k) {
+			MI_U32 off = pack->packetInfo[k].offset;
+			MI_U32 nlen = pack->packetInfo[k].length;
+			if (off >= pack->length || nlen == 0 ||
+			    off + nlen > pack->length)
+				continue;
+			size_t hdr = star6e_nal_header_idx(pack->data + off, nlen);
+			if (hdr >= nlen) continue;
+			if (pack->data[off + hdr] == 0x02) {
+				pack->data[off + hdr] = 0x00;
+			}
+		}
+		return;
+	}
+	/* packNum == 0: single NAL */
+	if (pack->offset >= pack->length)
+		return;
+	{
+		MI_U32 off = pack->offset;
+		MI_U32 nlen = pack->length - off;
+		size_t hdr = star6e_nal_header_idx(pack->data + off, nlen);
+		if (hdr >= nlen) return;
+		if (pack->data[off + hdr] == 0x02) {
+			pack->data[off + hdr] = 0x00;
+		}
+	}
+}
+
+static void star6e_patch_stream_to_trail_n(MI_VENC_Stream_t *s)
+{
+	unsigned int i;
+	if (!s || !s->packet) return;
+	for (i = 0; i < s->count; i++)
+		star6e_patch_pack_to_trail_n(&s->packet[i]);
+}
+
+/* HEVC-only since 0.10.12: IDR_W_RADL = nal_type 19. */
+static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 {
 	unsigned int i;
 	if (!s || !s->packet) return 0;
@@ -88,14 +161,11 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
 		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
 		if (n > 0) {
 			for (k = 0; k < n; k++) {
-				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
-					return 1;
-				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
+				if (p->packetInfo[k].packType.h265Nalu == 19)
 					return 1;
 			}
 		} else {
-			if (codec == 0 && p->naluType.h264Nalu == 5) return 1;
-			if (codec != 0 && p->naluType.h265Nalu == 19) return 1;
+			if (p->naluType.h265Nalu == 19) return 1;
 		}
 	}
 	return 0;
@@ -127,7 +197,7 @@ static void scl_preset_emergency(void)
 {
 	static const char path[] = "/sys/devices/virtual/mstar/mscl/clk";
 	static const char val[] = "384000000\n";
-	static const char msg[] = "[venc] Emergency SCL preset written\n";
+	static const char msg[] = "[waybeam] Emergency SCL preset written\n";
 	int fd = open(path, O_WRONLY);
 
 	if (fd >= 0) {
@@ -839,11 +909,23 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		return ret;
 	}
 
+	/* refPred error-resilience marking — rewrite TRAIL_R → TRAIL_N for
+	 * frames the SDK marked as ENHANCE_P_NOTFORREF.  The encoder's own
+	 * SVC-T pyramid logic determines which frames are non-reference; we
+	 * just propagate that designation into the bitstream so generic
+	 * receivers can safely drop those NALs without cascade.
+	 *
+	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
+	 * encoder produces a flat single-ref stream and every frame matters. */
+	if (vcfg->video0.ref_base > 0 &&
+	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+		star6e_patch_stream_to_trail_n(&stream);
+	}
+
 	{
 		RtpSidecarEncInfo enc_info;
-		int codec = (strcmp(vcfg->video0.codec, "h264") == 0) ? 0 : 1;
 		uint32_t frame_size = star6e_scene_frame_size(&stream);
-		uint8_t is_idr = star6e_scene_is_idr(&stream, codec);
+		uint8_t is_idr = star6e_scene_is_idr(&stream);
 
 		scene_update(&ctx->scene, frame_size, is_idr,
 			star6e_scene_request_idr, &ps->venc_channel);
@@ -984,7 +1066,25 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		{
 			int osd_row = 2;
 			Star6eIntraRefreshStatus ir;
+			Star6eRefPredStatus      rp;
 			star6e_pipeline_intra_refresh_status(&ir);
+			star6e_pipeline_ref_pred_status(&rp);
+			/* Resilience banner: only render when the preset is set
+			 * to something other than "off" — keeps the OSD compact
+			 * when no resilience features are active. */
+			if (vcfg->video0.resilience[0] &&
+			    strcmp(vcfg->video0.resilience, "off") != 0) {
+				if (rp.active) {
+					debug_osd_text(ps->debug_osd, osd_row++,
+						"res", "%s rp=%u/%u",
+						vcfg->video0.resilience,
+						rp.base, rp.enhance);
+				} else {
+					debug_osd_text(ps->debug_osd, osd_row++,
+						"res", "%s",
+						vcfg->video0.resilience);
+				}
+			}
 			if (ir.active) {
 				debug_osd_text(ps->debug_osd, osd_row++, "intra",
 					"%s L%u q%u",
