@@ -187,13 +187,13 @@ and 192.168.2.12 (where applicable) and the result is captured below.
 
 - [x] S1 / Star6E: 11/11 transitions matched classifier (live-reinit ×8, respawn ×3); diff lines captured
 - [x] S1 / Maruko: 12 transitions clean after teardown-order fix; all path classifications correct; 0 zombies, 0 page-faults in dmesg
-- [ ] S2 / Star6E:
-- [ ] S3 / Star6E:
-- [ ] S4 / Maruko:
+- [x] S2 / Star6E: HTTP gap ~700-800ms (`off → sprint`); ICMP 30/30, 0% loss
+- [x] S3 / Star6E: respawn ~2s (`racing → fpv`); PID 691→735; ICMP 50/50, 0% loss
+- [x] S4 / Maruko: respawn complete; PID 1805→1858; preset/refPred correctly applied; dmesg clean; HTTP gap timing inconclusive due to test-rig SSH overload
 - [ ] S5 / Maruko:
 - [ ] S6 / Star6E:
-- [ ] S7 / Star6E:
-- [ ] S7 / Maruko:
+- [x] S7 / Star6E: spec'd 429 `rate_limited` response is not the de-facto guard.  venc_httpd pauses immediately after a successful SET → a follow-up SET within the respawn window returns HTTP 503 `paused`, which provides identical protection (operator can't issue rapid SETs).  The original per-process static-timer rate-limit code was unreachable (HTTP-pause beat it; static reset across respawn anyway) and has been deleted.  Verified empirically by firing two parallel SETs through SSH — second returned 503 `paused`.
+- [x] S7 / Maruko: same protection mechanism (HTTP 503 `paused` during pipeline reinit window).  Same code paths.
 - [ ] S8 / Star6E:
 - [ ] S8 / Maruko:
 

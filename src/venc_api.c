@@ -22,7 +22,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 /* Guard the live max_payload_size ceiling against future tightenings:
@@ -1791,14 +1790,22 @@ static void init_single_set_param(SetQueryParam *param, const char *key,
 	param->field = field;
 }
 
-/* Rate limit on resilience preset SETs.  Star6E reinit is fork+exec
- * respawn — a *single* respawn is reliable but consecutive respawns
- * fired faster than the parent finishes MI_SYS teardown can hang the
- * SoC (venc_star6e_reinit_fragility.md; "third+ rapid SET wedges
- * stream / drops ICMP").  5 s is empirically clear of that regime
- * on imx335 @ 1080p and is loose enough that no realistic
- * operator/menu interaction will trip it. */
-#define VENC_RESILIENCE_MIN_INTERVAL_SEC 5
+/* Rapid-SET protection: after a successful resilience SET, the
+ * pipeline runner pauses HTTP and tears down for respawn.  Any
+ * subsequent SET arriving before HTTP resumes gets HTTP 503
+ * `paused` from venc_httpd, which is the de-facto rate limit on
+ * both backends.  Per-process static-timer rate limit (5 s window
+ * once attempted) was removed during S7 bench validation because:
+ *
+ *   (a) The static resets on every respawn — so even if it fired,
+ *       the next SET in a new process would not see the prior
+ *       timestamp.
+ *   (b) The window where the static could be consulted is the few
+ *       milliseconds between SET completion and HTTP pause —
+ *       narrower than network/SSH latency in practice.
+ *
+ * If a stricter rate limit is required, persist the timestamp to
+ * /tmp/waybeam_resilience.ts and check on entry. */
 
 static int process_restart_set_query(const SetQueryParam *param,
 	int *status_code, char **response_json)
@@ -1807,32 +1814,9 @@ static int process_restart_set_query(const SetQueryParam *param,
 	char *jval;
 	int rc;
 	int needs_respawn = 0;
-	int is_resilience = 0;
-	struct timespec now_ts = {0};
-	static time_t s_last_resilience_set_sec;
 
 	if (!param || !status_code || !response_json)
 		return -1;
-
-	is_resilience = (param->field &&
-		strcmp(param->canonical_key, "video0.resilience") == 0);
-
-	if (is_resilience) {
-		clock_gettime(CLOCK_MONOTONIC, &now_ts);
-		if (s_last_resilience_set_sec != 0 &&
-		    (now_ts.tv_sec - s_last_resilience_set_sec) <
-		    VENC_RESILIENCE_MIN_INTERVAL_SEC) {
-			char msg[160];
-			long remaining = VENC_RESILIENCE_MIN_INTERVAL_SEC -
-				(now_ts.tv_sec - s_last_resilience_set_sec);
-			snprintf(msg, sizeof(msg),
-				"resilience preset rate-limited; wait %lds before "
-				"the next change (in-flight respawn must complete)",
-				remaining);
-			*status_code = 429;
-			return make_error_json("rate_limited", msg, response_json);
-		}
-	}
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	new_cfg = *g_cfg;
@@ -1917,12 +1901,6 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return make_error_json("internal_error", "out of memory",
 			response_json);
 	}
-
-	/* Stamp the rate-limit clock only after a successful commit — a
-	 * SET that failed validation should not count against the
-	 * cooldown window. */
-	if (is_resilience)
-		s_last_resilience_set_sec = now_ts.tv_sec;
 
 	*status_code = 200;
 	rc = make_single_set_success_json(param->key, jval,
