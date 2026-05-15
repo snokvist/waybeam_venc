@@ -1,38 +1,47 @@
 # History
 
-## Unreleased — review-pass cleanups
+## [0.10.14] - 2026-05-15
 
-Post-review cleanups on top of 0.10.13:
+Three new resilience presets that recover the picture via intra-refresh
+alone — no IDR required — while keeping partial refPred benefits.
+Empirically motivated by bench observation that `range` and `fpv` modes
+never finish stripe-based recovery (greenish artefacts persist between
+IDRs).
 
-- **Retire `/api/v1/intra/mode` HTTP route.**  Endpoint round-tripped
-  `video0.intra_refresh_mode` through disk, but `apply_resilience_preset()`
-  on reload always overwrote the granular field from the preset table,
-  so every write came back as `off`.  Pick a preset via
-  `video0.resilience` instead.
-- **`video0.resilience` is the sole user-facing knob** for
-  intra-refresh and refPred.  The granular schema fields
-  (`intra_refresh_*`, `ref_base/enhance/pred`) are not part of the
-  JSON schema or HTTP API — they are derived from the preset at load
-  time.  This is intentional; the granular knobs were never validated
-  in cross-product against the preset table and the SDK has fragile
-  state transitions on direct toggles.  File an issue if no existing
-  preset fits your use case.
-- **No legacy `/etc/venc.json` migration.**  The rebrand-era helper
-  in `scripts/maruko_direct_deploy.sh` that copied `/etc/venc.json` to
-  `/etc/waybeam.json` is dropped.  All bench devices are already
-  migrated; fresh installs land directly on `/etc/waybeam.json`.
-- **Log prefix unification.**  All `[venc] ...` runtime log strings
-  in `src/star6e_pipeline.c`, `src/star6e_runtime.c`, and
-  `src/maruko_pipeline.c` are now `[waybeam] ...`.
-- **H.264 dead-code removal in `intra_refresh.c`.**  Codec is HEVC-only
-  since 0.10.12; the dormant H.264 LCU-size (16) and QP column (33/29/25)
-  in `mode_default_qp()` and `intra_refresh_compute()` are deleted.
-  `intra_refresh_compute()` lost its `is_h265` argument; callers in
-  `star6e_pipeline.c`, `maruko_pipeline.c`, and `test_intra_refresh.c`
-  adjusted.  The 5 H.264-specific unit tests are removed.
-- **Struct comment for `intra_refresh_*` + `ref_*`** in
-  `include/venc_config.h` marks the fields as derived-from-preset only,
-  not user-writable.
+**Root cause:** the SVC-T temporal-layering rewrite marks `ref_enhance`
+of every `(ref_enhance + 1)` frames as TRAIL_N (display-only, dropped
+from the decoder's DPB).  Intra-refresh stripes in those frames are
+decoded once for display and then discarded — they never propagate into
+the reference state.  So the effective wavefront cycle in the DPB is
+
+    effective_wavefront_ms = nominal_wavefront_ms × (ref_enhance + 1)
+
+`range` (500ms × 5 = 2500ms) and `fpv` (1000ms × 5 = 5000ms) both
+exceed the 2.0s IDR cycle, so the picture never reaches a fully
+refreshed state via stripes alone.  Setting GOP shorter doesn't help
+recovery — it just makes IDRs more frequent.
+
+**New presets (all stripe-recoverable inside the GOP):**
+
+| preset      | nominal wavefront | ref_enhance | GOP   | effective wavefront | refPred ratio |
+|-------------|-------------------|-------------|-------|---------------------|---------------|
+| `rally`     | fast (150ms)      | 1           | 2.0s  | 300ms               | 1:1 (50%)     |
+| `endurance` | balanced (500ms)  | 2           | 2.0s  | 1500ms              | 1:2 (67%)     |
+| `patrol`    | balanced (500ms)  | 1           | 4.0s  | 1000ms              | 1:1 (50%)     |
+
+- **`rally`** is the recommended FPV-link default: behaves like
+  `racing` for recovery (300ms vs racing's 150ms — both inside any
+  realistic loss recovery window) while keeping ~50% of refPred's
+  bitrate / error-tolerance benefit.
+- **`endurance`** keeps more refPred compression efficiency (2/3 of
+  frames are TRAIL_N) at the cost of 1.5s recovery — for links with
+  rare packet loss where bitrate matters more.
+- **`patrol`** doubles the GOP to 4.0s for long stable flights, halving
+  the IDR-overhead bitrate share while still recovering in 1s.
+
+Existing `racing`, `range`, `fpv` presets unchanged for backward
+compatibility.  WebUI dashboard enum, API test suite, and preset
+expansion unit tests all updated.
 
 ## [0.10.13] - 2026-05-15
 

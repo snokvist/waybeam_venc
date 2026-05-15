@@ -607,7 +607,7 @@ const TOOLTIPS = {
 
 'video0.sceneHoldoff':'Consecutive scene-spike frames required before requesting IDR. Default: 2. Requires restart',
 
-'video0.resilience':'Error-resilience preset: off|quality|racing|range|fpv. Sole knob for intra-refresh + SVC-T refPred + GOP. Requires restart',
+'video0.resilience':'Error-resilience preset. Sole knob for intra-refresh + SVC-T refPred + GOP. off/quality (no refresh); racing (fast, no refPred); rally/endurance/patrol (refresh recovers without IDR + partial refPred); range/fpv (heavy refPred, needs IDR to recover). Requires restart',
 
 'video0.zoomPct':'Digital zoom crop fraction. 0 = off, 0.25-1.0 = crop fraction; smaller is deeper zoom. Requires restart',
 
@@ -670,7 +670,7 @@ const TOOLTIPS = {
 const ENUMS = {
 
 'video0.rcMode':['cbr','vbr','avbr','qvbr'],
-'video0.resilience':['off','quality','racing','range','fpv'],
+'video0.resilience':['off','quality','racing','rally','endurance','patrol','range','fpv'],
 'isp.aeEngine':['sdk','custom'],
 'isp.awbMode':['auto','ct_manual'],
 'audio.codec':['opus','pcm','g711a','g711u'],

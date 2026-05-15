@@ -364,12 +364,35 @@ static int apply_resilience_preset(const char *name, VencConfigVideo *v)
 		uint8_t ref_enhance;
 		double gop_sec;           /* 0 = preserve caller's gop_size */
 	};
+	/* Recovery-capable presets (rally / endurance / patrol) added in
+	 * 0.10.14.  The effective stripe wavefront in the DPB is
+	 *   nominal_wavefront × (ref_enhance + 1)
+	 * because the TRAIL_N rewrite drops `ref_enhance` of every
+	 * `(ref_enhance + 1)` enhancement frames from the decoder's
+	 * reference list — their intra-refresh stripes are decoded for
+	 * display only, not for reference.  Stripe-only recovery (no IDR
+	 * needed) requires the effective wavefront to fit inside the GOP.
+	 *
+	 *   preset     nominal  enh  eff.wave  GOP   recovery
+	 *   ─────────────────────────────────────────────────────────
+	 *   racing     150ms     0   150ms     2.0s  yes (no refPred)
+	 *   rally      150ms     1   300ms     2.0s  yes  (1:1 refPred)
+	 *   endurance  500ms     2  1500ms     2.0s  yes  (1:2 refPred)
+	 *   patrol     500ms     1  1000ms     4.0s  yes  (1:1 refPred,
+	 *                                                  4s GOP for
+	 *                                                  bitrate)
+	 *   range      500ms     4  2500ms     2.0s  no — needs IDR
+	 *   fpv       1000ms     4  5000ms     2.0s  no — needs IDR
+	 */
 	static const struct preset table[] = {
-		{ "off",     "off",      0, 0, 0.0 },  /* gopSize honoured */
-		{ "quality", "off",      0, 0, 4.0 },
-		{ "racing",  "fast",     0, 0, 2.0 },
-		{ "range",   "balanced", 1, 4, 2.0 },
-		{ "fpv",     "robust",   1, 4, 2.0 },
+		{ "off",        "off",      0, 0, 0.0 },  /* gopSize honoured */
+		{ "quality",    "off",      0, 0, 4.0 },
+		{ "racing",     "fast",     0, 0, 2.0 },
+		{ "rally",      "fast",     1, 1, 2.0 },
+		{ "endurance",  "balanced", 1, 2, 2.0 },
+		{ "patrol",     "balanced", 1, 1, 4.0 },
+		{ "range",      "balanced", 1, 4, 2.0 },
+		{ "fpv",        "robust",   1, 4, 2.0 },
 	};
 
 	const char *want = (!name || !*name) ? "off" : name;
