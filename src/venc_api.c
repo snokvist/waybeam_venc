@@ -314,11 +314,6 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(sensor, index,           FT_INT,    MUT_RESTART),
 	FIELD(sensor, mode,            FT_INT,    MUT_RESTART),
-	FIELD(sensor, unlock_enabled,  FT_BOOL,   MUT_RESTART),
-	FIELD(sensor, unlock_cmd,      FT_UINT,   MUT_RESTART),
-	FIELD(sensor, unlock_reg,      FT_UINT16, MUT_RESTART),
-	FIELD(sensor, unlock_value,    FT_UINT16, MUT_RESTART),
-	FIELD(sensor, unlock_dir,      FT_INT,    MUT_RESTART),
 
 	FIELD(isp, sensor_bin,         FT_STRING, MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
@@ -420,11 +415,6 @@ typedef struct {
 static const FieldAlias g_field_aliases[] = {
 	{ "system.webPort", "system.web_port" },
 	{ "system.overclockLevel", "system.overclock_level" },
-	{ "sensor.unlockEnabled", "sensor.unlock_enabled" },
-	{ "sensor.unlockCmd", "sensor.unlock_cmd" },
-	{ "sensor.unlockReg", "sensor.unlock_reg" },
-	{ "sensor.unlockValue", "sensor.unlock_value" },
-	{ "sensor.unlockDir", "sensor.unlock_dir" },
 	{ "isp.sensorBin", "isp.sensor_bin" },
 	{ "isp.gainMax", "isp.gain_max" },
 	{ "isp.awbMode", "isp.awb_mode" },

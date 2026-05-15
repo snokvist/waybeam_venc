@@ -73,10 +73,14 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->system.overclock_level = 1;
 	cfg->system.verbose = false;
 
-	/* sensor */
+	/* sensor.  The unlock_* fields drive the legacy IMX415 high-FPS
+	 * register hook (`MI_SNR_CustFunction(pad, cmd_id=0x23, reg=0x300a,
+	 * value=0x80, dir=0)`) and are no longer wired to the user-facing
+	 * config.  Defaults left in place so re-enabling means restoring
+	 * the schema entries — not chasing magic values. */
 	cfg->sensor.index = -1;
 	cfg->sensor.mode = -1;
-	cfg->sensor.unlock_enabled = true;
+	cfg->sensor.unlock_enabled = false;
 	cfg->sensor.unlock_cmd = 0x23;
 	cfg->sensor.unlock_reg = 0x300a;
 	cfg->sensor.unlock_value = 0x80;
@@ -235,13 +239,8 @@ static void load_sensor(const cJSON *root, VencConfigSensor *s)
 	if (!obj) return;
 	s->index = json_get_int(obj, "index", s->index);
 	s->mode = json_get_int(obj, "mode", s->mode);
-	s->unlock_enabled = json_get_bool(obj, "unlockEnabled", s->unlock_enabled);
-	s->unlock_cmd = (uint32_t)json_get_int(obj, "unlockCmd", (int)s->unlock_cmd);
-	s->unlock_reg = (uint16_t)json_get_int(obj, "unlockReg", (int)s->unlock_reg);
-	s->unlock_value = (uint16_t)json_get_int(obj, "unlockValue", (int)s->unlock_value);
-	s->unlock_dir = json_get_int(obj, "unlockDir", s->unlock_dir);
-	if (s->unlock_dir < 0) s->unlock_dir = 0;
-	if (s->unlock_dir > 1) s->unlock_dir = 1;
+	/* unlock* keys retired in 0.10.13 — legacy IMX415 high-FPS hook;
+	 * silently ignored on read so existing configs migrate cleanly. */
 }
 
 static void load_isp(const cJSON *root, VencConfigIsp *s)
@@ -926,12 +925,7 @@ static void render_sensor(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "sensor");
 	pp_field_int(p,    2, "index",          cfg->sensor.index,          0);
-	pp_field_int(p,    2, "mode",           cfg->sensor.mode,           0);
-	pp_field_bool(p,   2, "unlockEnabled",  cfg->sensor.unlock_enabled, 0);
-	pp_field_uint(p,   2, "unlockCmd",      cfg->sensor.unlock_cmd,     0);
-	pp_field_uint(p,   2, "unlockReg",      cfg->sensor.unlock_reg,     0);
-	pp_field_uint(p,   2, "unlockValue",    cfg->sensor.unlock_value,   0);
-	pp_field_int(p,    2, "unlockDir",      cfg->sensor.unlock_dir,     1);
+	pp_field_int(p,    2, "mode",           cfg->sensor.mode,           1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1120,11 +1114,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	if (snr) {
 		cJSON_AddNumberToObject(snr, "index", cfg->sensor.index);
 		cJSON_AddNumberToObject(snr, "mode", cfg->sensor.mode);
-		cJSON_AddBoolToObject(snr, "unlockEnabled", cfg->sensor.unlock_enabled);
-		cJSON_AddNumberToObject(snr, "unlockCmd", cfg->sensor.unlock_cmd);
-		cJSON_AddNumberToObject(snr, "unlockReg", cfg->sensor.unlock_reg);
-		cJSON_AddNumberToObject(snr, "unlockValue", cfg->sensor.unlock_value);
-		cJSON_AddNumberToObject(snr, "unlockDir", cfg->sensor.unlock_dir);
 	}
 
 	/* isp */

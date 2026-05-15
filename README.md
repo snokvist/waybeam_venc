@@ -229,11 +229,7 @@ omitted fields keep their compiled-in defaults.
 ```json
 {
   "system":   { "webPort": 80, "overclockLevel": 0, "verbose": false },
-  "sensor":   {
-    "index": -1, "mode": -1,
-    "unlockEnabled": true, "unlockCmd": 35,
-    "unlockReg": 12298, "unlockValue": 128, "unlockDir": 0
-  },
+  "sensor":   { "index": -1, "mode": -1 },
   "isp":      {
     "sensorBin": "",
     "legacyAe": true, "aeFps": 15,
@@ -286,8 +282,7 @@ omitted fields keep their compiled-in defaults.
 
 - **`system`** — HTTP API port, CPU overclock level, verbose logging
   toggle.
-- **`sensor`** — pad/mode selection (-1 = auto) plus the high-FPS
-  unlock register sequence (IMX415 defaults shown).
+- **`sensor`** — pad/mode selection (-1 = auto).
 - **`isp`** — ISP tuning bin path, AE source (legacy/custom 3A), gain
   ceiling, AWB mode, aspect-preserving crop. `aeMode` is Maruko-only.
 - **`image`** — mirror / flip / rotate.
@@ -576,11 +571,13 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 |-------|------|------------|-------------|
 | `sensor.index` | int | restart | Sensor pad index (-1 = auto) |
 | `sensor.mode` | int | restart | Sensor mode (-1 = auto) |
-| `sensor.unlock_enabled` | bool | restart | Enable high-FPS sensor unlock |
-| `sensor.unlock_cmd` | uint | restart | I2C register write command |
-| `sensor.unlock_reg` | uint16 | restart | Unlock register address |
-| `sensor.unlock_value` | uint16 | restart | Unlock register value |
-| `sensor.unlock_dir` | int | restart | I2C direction flag |
+
+The legacy `sensor.unlock_*` register-hook fields were retired in
+0.10.13 — the OpenIPC kernel sensor drivers and the per-mode ISP
+binaries now write the high-FPS unlock registers themselves, so the
+userspace pre-hook is redundant.  Existing configs containing
+`unlockEnabled`/`unlockCmd`/`unlockReg`/`unlockValue`/`unlockDir`
+load cleanly; the keys are silently ignored.
 
 #### ISP
 
@@ -1012,19 +1009,6 @@ frames-since-IDR.
 
 See `include/rtp_sidecar.h` and `tools/rtp_timing_probe.c` for the
 full wire protocol and reference probe.
-
-## Sensor Unlock
-
-IMX415 and IMX335 sensors support high-FPS modes (90/120 fps) via a
-register unlock sequence applied before pipeline initialization. This
-is enabled by default (`sensor.unlock_enabled=true`) with preset values
-for IMX415.
-
-For different sensors, adjust `sensor.unlock_cmd`, `sensor.unlock_reg`,
-and `sensor.unlock_value` in the config file or via the API before a
-restart.
-
-See `documentation/SENSOR_UNLOCK_IMX415_IMX335.md` for register details.
 
 ## Sensor Driver Sources
 

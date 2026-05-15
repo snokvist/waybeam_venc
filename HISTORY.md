@@ -1,6 +1,34 @@
 # History
 
-## [0.10.12] - 2026-05-14
+## [0.10.13] - 2026-05-15
+
+Config-surface simplification: drop dormant `sensor.unlock_*` fields
+from the user-facing schema.
+
+- **`sensor.unlockEnabled` / `unlockCmd` / `unlockReg` / `unlockValue` /
+  `unlockDir` retired from the user surface.**  The IMX415 high-FPS
+  register-hook these fields drove (a single
+  `MI_SNR_CustFunction(pad, cmd=0x23, reg=0x300a, value=0x80, dir=0)`
+  call before `MI_SNR_SetRes`) is now a no-op on both supported
+  platforms — the OpenIPC kernel sensor drivers and the per-mode ISP
+  binaries write the unlock registers themselves.  Bench-confirmed on
+  192.168.1.13 (IMX335 + Star6E) at 1920x1080@120 fps that
+  `unlockEnabled=false` produces an identical sensor mode selection
+  and stream as `unlockEnabled=true`.
+
+- **Migration:** existing `/etc/waybeam.json` files containing any of
+  the five legacy `unlock*` keys load cleanly — the parser silently
+  drops them.  Default JSON ships without the keys.
+
+- **Code path preserved.**  `VencConfigSensor::unlock_{enabled,cmd,
+  reg,value,dir}` remain in the struct (with the historical IMX415
+  values baked in as dormant defaults), and `sensor_unlock_strategy()`
+  + `MI_SNR_CustFunction` call sites in `star6e_pipeline.c` and
+  `maruko_config.c` stay intact.  Re-enabling means restoring the
+  five schema entries + aliases + parser reads — the apply path
+  needs no work.
+
+
 
 refPred (SVC-T temporal hierarchical reference) lands as a real feature
 behind a single user-facing knob: `video0.resilience`.

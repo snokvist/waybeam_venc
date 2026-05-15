@@ -100,7 +100,7 @@ Response `200`:
   "data": {
     "config": {
       "system": { "webPort": 80, "overclockLevel": 2, "verbose": false },
-      "sensor": { "index": -1, "mode": -1, "unlockEnabled": true, "..." : "..." },
+      "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "legacyAe": false, "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "frameLost": true, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomPct": 0.0, "zoomX": 0.5, "zoomY": 0.5 },
