@@ -1,7 +1,7 @@
 /* star6e_jpeg.c — Star6E (Infinity6E) MJPEG snapshot backend.
  *
  * Creates one dedicated VENC channel (default ch7) bound to the same
- * VPE output port the main H.264/H.265 channel taps.  Channel stays
+ * VPE output port the main H.265 channel taps.  Channel stays
  * idle (StartRecvPic off) between requests; on each capture we flip
  * StartRecvPic on, poll MI_VENC_Query for ready packs, drain one frame
  * via MI_VENC_GetStream, copy the bytes, ReleaseStream, then turn

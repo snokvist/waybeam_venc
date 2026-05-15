@@ -26,6 +26,16 @@ and merge per-backend AE selectors into one knob.
   in custom-AE mode (`[cus3a]` supervisory thread + 15 Hz limits
   enforcement) before the unification commit.
 
+- **H.265 dead-branch cleanup follow-up to 0.10.12.**
+  `rtp_session_payload_type()` is now an unconditional `97`,
+  `maruko_video.c` drops the defensive non-PT_H265 guard, and
+  `star6e_scene_is_idr()` drops the codec parameter (always 1 since
+  the H.264 retirement).  Three stale H.264/H.265 comments updated.
+  Encoder rate-control union branches (`H264CBR`/`H264VBR`/`H264AVBR`
+  in `*_controls.c`) remain in place as documented dead code — they
+  follow the SDK enum and ripping them out is more churn than it's
+  worth.
+
 
 
 - **`sensor.unlockEnabled` / `unlockCmd` / `unlockReg` / `unlockValue` /

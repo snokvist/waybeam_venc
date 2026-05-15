@@ -151,7 +151,8 @@ static void star6e_patch_stream_to_trail_n(MI_VENC_Stream_t *s)
 		star6e_patch_pack_to_trail_n(&s->packet[i]);
 }
 
-static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
+/* HEVC-only since 0.10.12: IDR_W_RADL = nal_type 19. */
+static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 {
 	unsigned int i;
 	if (!s || !s->packet) return 0;
@@ -160,14 +161,11 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s, int codec)
 		unsigned int k, n = p->packNum > 8 ? 8 : p->packNum;
 		if (n > 0) {
 			for (k = 0; k < n; k++) {
-				if (codec == 0 && p->packetInfo[k].packType.h264Nalu == 5)
-					return 1;
-				if (codec != 0 && p->packetInfo[k].packType.h265Nalu == 19)
+				if (p->packetInfo[k].packType.h265Nalu == 19)
 					return 1;
 			}
 		} else {
-			if (codec == 0 && p->naluType.h264Nalu == 5) return 1;
-			if (codec != 0 && p->naluType.h265Nalu == 19) return 1;
+			if (p->naluType.h265Nalu == 19) return 1;
 		}
 	}
 	return 0;
@@ -926,10 +924,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 	{
 		RtpSidecarEncInfo enc_info;
-		/* codec arg = 1 (H.265) — venc is HEVC-only since the
-		 * resilience-preset consolidation. */
 		uint32_t frame_size = star6e_scene_frame_size(&stream);
-		uint8_t is_idr = star6e_scene_is_idr(&stream, 1);
+		uint8_t is_idr = star6e_scene_is_idr(&stream);
 
 		scene_update(&ctx->scene, frame_size, is_idr,
 			star6e_scene_request_idr, &ps->venc_channel);

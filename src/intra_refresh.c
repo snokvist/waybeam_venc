@@ -14,8 +14,10 @@ static uint32_t mode_target_ms(IntraRefreshMode m)
 	}
 }
 
-/* Per-mode stripe QP. H.264 runs ~3 lower than H.265 for equivalent
- * perceived quality (PSNR/SSIM differ across the codecs at the same QP). */
+/* Per-mode stripe QP.  Encoder is H.265-only since 0.10.12, so the
+ * is_h265 argument is always 1 at runtime; the dormant H.264 column
+ * (PSNR/SSIM-equivalent values ~3 lower than HEVC) is kept to avoid
+ * churn in the function shape. */
 static uint32_t mode_default_qp(IntraRefreshMode m, int is_h265)
 {
 	switch (m) {
