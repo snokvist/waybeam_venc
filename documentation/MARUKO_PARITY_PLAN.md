@@ -384,38 +384,79 @@ Revisit and rewrite this plan if any of these happen:
 4. A BMI270-equipped Maruko board appears → reopen Phase 3. **(Done —
    board appeared 2026-05-02, Phase 3 closed in v0.9.13.)**
 
-## Open work / next decision point
+## Open work / next decision point (refreshed 2026-05-15)
 
-Phases 1, 2, 2b, 3, 6 (`mirror` + `dual`), 7 (probe + port), and 9
-are closed. Live branches/PRs: #81 (Phases 1/2/2b), #83 (Phase 9),
-#84 (Phase 3), #85 (Phase 7 probe), `feature/maruko-dual-venc-port`
-(Phase 7 port, PR #86), `feature/maruko-recording` (Phase 6, PR
-pending).  Next agenda:
+Phases 1, 2, 2b, 3, 5, 6 (`mirror` + `dual` + raw `.hevc` + HTTP control),
+7 (probe + port), and 9 are closed.  Phase 5 audio landed in v0.9.15;
+Phase 6 follow-ups (raw `.hevc`, HTTP `/record/start|stop`) landed in
+v0.10.2.  Subsequent v0.10.x work (digital zoom, TS audio universal
+decode, HTTP pause/resume, live ISP-bin reload, MJPEG snapshot, SIGHUP
+in-process reinit) brought the Maruko callback table to 1:1 with
+Star6E (`maruko_controls.c:1092-1115` vs `star6e_controls.c:1164-1187`).
 
-1. **Phase 5 (audio)** — biggest remaining standalone gap (Opus/G.711
-   + MI_AI shim).  Independent of Phase 4, so can land any time.
-   Once landed, it also unlocks audio mux into the Phase 6 TS file
-   (`audio_ring → ts_mux_write_audio`) — Star6E already wires this
-   so the Maruko side is mostly the AI capture + audio_ring push.
-   Cost: ~3-4 days.
-2. **Phase 6.5 (recording follow-ups)** — small, on demand:
-   - Raw `.hevc` recorder for Maruko (mirror Star6E adapter).
-   - HTTP `/api/v1/record/start|stop` for Maruko — still TODO; needs
-     a Maruko consumer of `venc_api_get_record_start/stop` flags in
-     the main loop.  (The `record_status_callback` half landed in
-     contract `0.8.4`; Maruko now reports live recorder state but
-     `/start|stop` still return 501 because the request flags have
-     no consumer.)
-   - Adaptive bitrate while SD-bound (the dual thread already has
-     it — only matters once a real SD card is in play).
-3. **Phase 4 (live AR-change reinit)** — medium-arch, unblocks
-   per-channel resolution.  Lower priority now that Phase 7
-   provides a separate channel for recording at a different
-   resolution.
+### Verified remaining gaps (read against v0.10.11 source)
 
-Recommendation: Phase 5 (audio) is the natural next item — it is the
-last big user-visible parity gap and it also retroactively completes
-the Phase 6 TS file (audio PMT + interleaved PCM packets).
+| # | Gap | Source evidence | Effort |
+|---|---|---|---|
+| 1 | `/api/v1/dual/set` returns 501 on Maruko | `venc_api.c:2476-2570` — `dual_apply_bitrate`/`dual_apply_gop` bind to Star6E `i6_venc_chn` layout; Maruko needs `i6c_venc_chn` via `maruko_mi_venc_*` helpers (cf. `maruko_controls.c:198-250`) | Small (~½–1 day) |
+| 2 | Live AR-change reinit hangs ISP | `maruko_runtime.c:124-159` clamps reinit to previous `sensor.index`/`mode` and caps fps to prior max; Star6E does the same live via fork+exec | Medium-arch (time-box 3 d) |
+| 3 | Maruko sensor-depth >30 fps verification | `CURRENT_STATUS_AND_NEXT_STEPS.md:96-99` still says "stable 30 fps streaming" but Phase 7 hit 118 fps and v0.10.10 fixed the IMX415 cold-boot dark image.  Need systematic per-mode max-FPS sweep + doc update | Small (verification + doc) |
+| 4 | Dual TS recording on real SD | v0.10.4 HISTORY entry — bench `192.168.2.12` SD slot CD switch stuck HIGH, so `record.mode="dual"` (TS-to-file path) was never exercised on Maruko hardware.  Code path is in place | Hardware blocker, not code |
+
+### N/A on Maruko (SDK-blocked)
+
+- **`MI_ISP_CUS3A` custom 3A daemon** (`star6e_cus3a.c`, 562 LOC) — no
+  `MI_ISP_CUS3A` surface in current Maruko SDK.  Phase 9 throttle is
+  the partial substitute.  Reopen on next SDK refresh.
+
+### Execution plan (next CLI session)
+
+Each step ends with `make verify` + bench cycle on `192.168.2.12`
+(`scripts/maruko_direct_deploy.sh` or `make remote-test`).
+
+1. **Doc baseline (this PR).**  Refresh this file's "Open work" section
+   (done) and drop the stale "30 fps only" claim in
+   `CURRENT_STATUS_AND_NEXT_STEPS.md`.  No code; lands as v0.10.12.
+2. **Gap 1 — `dual/set` parity (~½–1 day).**
+   - Add `maruko_dual_apply_bitrate` / `maruko_dual_apply_gop` in
+     `src/maruko_controls.c` using `maruko_mi_venc_get/set_chn_attr`
+     against `i6c_venc_chn`.  Mirror chn-0 apply helpers at
+     `src/maruko_controls.c:198-250`.
+   - Expose via a backend-dispatched function pointer registered when
+     `venc_api_dual_register()` is called (preferred over `#ifdef`
+     branching in `venc_api.c`) so the handler is backend-agnostic.
+   - Drop the 501 + `Star6E-only` comment block in `venc_api.c:2476-2570`.
+   - Verify with `record.mode="dual-stream"` + `/api/v1/dual/set?bitrate=N`,
+     `?gop=N` on `192.168.2.12`.  Update `HTTP_API_CONTRACT.md`.
+3. **Gap 3 — sensor-mode FPS sweep + doc (~½ day).**
+   - `make remote-test --host root@192.168.2.12 --soc-build maruko -- --list-sensor-modes --sensor-index 0`.
+   - Loop through each reported mode at its max FPS (imx415 first,
+     imx335 once available on a bench).
+   - Capture results in `documentation/SENSOR_UNLOCK_IMX415_IMX335.md`
+     (or a new `MARUKO_SENSOR_MATRIX.md`) and update
+     `CURRENT_STATUS_AND_NEXT_STEPS.md` to reflect reality.  No code
+     unless a mode fails.
+4. **Gap 2 — live sensor-mode switch spike (time-box 3 days).**
+   - Reproduce the ISP hang documented at `maruko_runtime.c:124-127`.
+     Capture dmesg + venc.log.
+   - Try the sysfs `clk_vpe`/`clk_scl` preset trick from
+     `star6e_pipeline.c:60-77` after `MI_SYS_Exit`.
+   - **Outcome decides direction:**
+     - *Works* → drop the `prev_mode` clamp in `maruko_reinit_pipeline`
+       (`maruko_runtime.c:150-159`); live AR change works end-to-end.
+       Update `HTTP_API_CONTRACT.md` MUT classification for
+       `sensor.mode`/`video0.size`.
+     - *Doesn't work* → ship `isp.allow_mode_switch=false` default +
+       config validation that rejects a live `sensor.mode` change with a
+       clear 409 message; mark Phase 4 closed-as-deferred in this doc.
+       Don't keep digging past 3 days — log decision in `HISTORY.md`.
+5. **Gap 4 — verification only.**  Get a working SD slot on a Maruko
+   bench (or borrow time on a Maruko unit that has one) and exercise
+   `record.mode="dual"` TS-to-file end-to-end.  No code expected.
+
+After steps 1-4, the only intentional Star6E-exclusive feature is
+custom 3A (`MI_ISP_CUS3A`), which stays SDK-blocked.  All other parity
+items will be functionally closed.
 
 ## Architectural notes worth carrying
 

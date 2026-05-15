@@ -94,9 +94,16 @@
   - Details: `documentation/SD_CARD_RECORDING.md` (Gemini Mode section)
 
 ## Known Limitations
-- Current Maruko image/driver stack appears sensor/ISP constrained in some cases.
-- Deep sensor-mode/high-FPS mapping on Maruko is deferred until newer driver update.
-- Treat Maruko validation scope for now as stable 30fps streaming + backend correctness.
+- Live sensor-mode switching on Maruko hangs the ISP; reinit clamps to the
+  previous mode (`src/maruko_runtime.c:124-159`).  Mode changes require a
+  full process restart.  See `documentation/MARUKO_PARITY_PLAN.md` Phase 4
+  for the planned investigation.
+- Maruko bench `192.168.2.12` SD slot CD switch is stuck HIGH, so
+  `record.mode="dual"` (TS-to-file path) is exercised on tmpfs only.
+  `mirror` / `dual-stream` modes are fully verified.
+- Maruko sensor-depth max-FPS coverage: Phase 7 verified chn 0 at
+  117-118 fps (IMX415 1472x816); systematic per-mode sweep across all
+  reported sensor modes is still pending (see Parity Plan Gap 3).
 
 ## High-FPS Unlock Summary (Star6E + Maruko)
 - Sensor custom-command pre-latch sequence for cold-boot unlock is documented in:
