@@ -710,11 +710,11 @@ length are all derived from the preset — no per-feature knobs.
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `video0.resilience` | string | **reboot** | `off` \| `quality` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
-| `video0.gopSize`    | double | **reboot** | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it. |
+| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it.  Live-reinit applies (no reboot). |
 
-> ⚠️  **Resilience changes require a reboot.**  Setting
-> `video0.resilience` (or any of the derived fields `intra_refresh_*`,
-> `ref_*`, `gop_size`) persists the new value to `/etc/venc.json` and
+> ⚠️  **Resilience preset changes require a reboot.**  Setting
+> `video0.resilience` (or any of the derived fields `intra_refresh_*`
+> or `ref_*`) persists the new value to `/etc/waybeam.json` and
 > returns `{"reboot_required": true}` to the caller.  The new preset
 > takes effect after the next daemon start.  The SigmaStar VENC SDK
 > does not cleanly release kernel encoder driver state across live

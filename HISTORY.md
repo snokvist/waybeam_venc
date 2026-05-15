@@ -31,12 +31,15 @@ new preset takes effect.
 
 **Implementation.**
 
-- `src/venc_api.c`: extended the `refpred_change` detector in
-  `process_restart_set_query()` to fire on changes to *any* of
-  `resilience`, `intra_refresh_mode/lines/qp`, `ref_base/enhance/pred`,
-  `gop_size`.  When a change matches, the new config is persisted to
-  disk, `venc_api_request_reinit()` is **not** called, and the
-  response carries `reboot_required: true`.
+- `src/venc_api.c`: extended the `resilience_change` detector in
+  `process_restart_set_query()` to fire on changes to any of
+  `resilience`, `intra_refresh_mode/lines/qp`, or
+  `ref_base/enhance/pred`.  When a change matches, the new config is
+  persisted to disk, `venc_api_request_reinit()` is **not** called,
+  and the response carries `reboot_required: true`.  `gop_size` is
+  intentionally NOT gated — it has always been live-changeable as a
+  plain MUT_RESTART field and preset switches are caught by the
+  `resilience` name change already.
 - README documents the reboot-required behaviour next to the field
   table.
 

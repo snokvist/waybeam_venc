@@ -1836,8 +1836,11 @@ static int process_restart_set_query(const SetQueryParam *param,
 	 * cost is ~30s for a reboot; the gain is 100% reliability.  This
 	 * applies to direct SETs of the preset name (`video0.resilience`)
 	 * AND to direct SETs of any of the underlying derived fields
-	 * (intra_refresh_*, ref_*, gop_size) — touching any of those puts
-	 * the encoder into the same fragile reinit path. */
+	 * (intra_refresh_*, ref_*) — touching any of those puts the
+	 * encoder into the same fragile reinit path.  `gop_size` is NOT
+	 * gated: it has always been live-changeable as a plain MUT_RESTART
+	 * field and a preset switch is already covered by the resilience
+	 * name comparison above. */
 	{
 		const VencConfigVideo *o = &g_cfg->video0;
 		const VencConfigVideo *n = &new_cfg.video0;
@@ -1848,8 +1851,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 		    o->intra_refresh_qp    != n->intra_refresh_qp ||
 		    o->ref_base    != n->ref_base ||
 		    o->ref_enhance != n->ref_enhance ||
-		    o->ref_pred    != n->ref_pred ||
-		    o->gop_size    != n->gop_size)
+		    o->ref_pred    != n->ref_pred)
 			resilience_change = 1;
 	}
 
