@@ -944,33 +944,6 @@ static int make_single_set_success_json(const char *field_key,
 	return *out_json ? 0 : -1;
 }
 
-/* Save-only response: config persisted to disk, but the change cannot be
- * applied live and requires a manual device reboot.  Used for transitions
- * that destabilise the SDK encoder driver state (currently refPred
- * activation/deactivation — empirically crashes the SoC across respawn). */
-static int make_single_set_reboot_required_json(const char *field_key,
-	const char *json_value, char **out_json)
-{
-	char buf[640];
-	int len;
-
-	if (!field_key || !json_value || !out_json)
-		return -1;
-
-	len = snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
-		"\"reboot_required\":true,"
-		"\"note\":\"resilience-related field persisted to disk; "
-		"reboot the device to apply (live reinit is unsafe for this "
-		"SDK — see HISTORY 0.10.15)\"}}",
-		field_key, json_value);
-	if (len >= (int)sizeof(buf))
-		len = (int)sizeof(buf) - 1;
-
-	*out_json = strdup(buf);
-	return *out_json ? 0 : -1;
-}
-
 static int make_multi_live_set_success_json(const SetQueryParam *params,
 	size_t count, char **out_json)
 {
@@ -1796,13 +1769,30 @@ static void init_single_set_param(SetQueryParam *param, const char *key,
 	param->field = field;
 }
 
+/* Rapid-SET protection: after a successful resilience SET, the
+ * pipeline runner pauses HTTP and tears down for respawn.  Any
+ * subsequent SET arriving before HTTP resumes gets HTTP 503
+ * `paused` from venc_httpd, which is the de-facto rate limit on
+ * both backends.  Per-process static-timer rate limit (5 s window
+ * once attempted) was removed during S7 bench validation because:
+ *
+ *   (a) The static resets on every respawn — so even if it fired,
+ *       the next SET in a new process would not see the prior
+ *       timestamp.
+ *   (b) The window where the static could be consulted is the few
+ *       milliseconds between SET completion and HTTP pause —
+ *       narrower than network/SSH latency in practice.
+ *
+ * If a stricter rate limit is required, persist the timestamp to
+ * /tmp/waybeam_resilience.ts and check on entry. */
+
 static int process_restart_set_query(const SetQueryParam *param,
 	int *status_code, char **response_json)
 {
 	VencConfig new_cfg;
 	char *jval;
 	int rc;
-	int resilience_change = 0;
+	int needs_respawn = 0;
 
 	if (!param || !status_code || !response_json)
 		return -1;
@@ -1816,43 +1806,81 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
-	/* Refuse live resilience changes — the MI SDK kernel driver cannot
-	 * survive a live re-configure of intra-refresh / refPred state.
-	 * Empirically confirmed on both backends (2026-05-15 bench testing):
+	/* Detect a resilience preset change.  stage_params_into_cfg() only
+	 * copied the new preset *name* into new_cfg; the derived
+	 * intra_refresh_* / ref_* / gop_size fields still hold the *old*
+	 * preset's expansion.  Expand the new preset into new_cfg now so
+	 * downstream code (and the diff log below) sees both old and new
+	 * derived state side-by-side.
 	 *
-	 *   Star6E (fork+exec respawn): SoC kernel panic within 1-2
-	 *     transitions, ICMP dies, requires power cycle.
-	 *   Maruko (in-process reinit): MI_SYS_IMPL_FlushInputPortTasks
-	 *     in the `mi` module takes a data-abort page fault during
-	 *     teardown (kernel stack: do_task_dead ← do_exit ← die ←
-	 *     __do_kernel_fault ← MI_SYS_IMPL_FlushInputPortTasks [mi]).
-	 *     waybeam zombies, system alive, reboot required.
-	 *
-	 * Cold-boot into any preset is 100% reliable on both backends.
-	 * Persist new config to disk and return reboot_required.  The
-	 * intra_refresh_* and ref_* struct fields are derived-from-preset
-	 * only (see include/venc_config.h) and have no JSON-schema or
-	 * HTTP-API entry point — only the `resilience` preset name can be
-	 * SET via the API, so that's the only field we need to compare. */
-	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0)
-		resilience_change = 1;
+	 * Phase 0 instrumentation: log the field-level delta produced by
+	 * the preset change.  This is the data we need to decide whether a
+	 * given resilience SET needs the full reinit / reboot path or can
+	 * be applied via lighter machinery (Phase 1+). */
+	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0) {
+		const VencConfigVideo old_v = g_cfg->video0;
 
-	/* For reboot-required changes, only persist to disk — leave the
-	 * live g_cfg untouched so `/status` and `/resilience/status`
-	 * continue to reflect the actually-running pipeline until the
-	 * reboot.  For all other changes, commit g_cfg in memory and
-	 * trigger the live reinit. */
-	if (resilience_change) {
-		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
-		pthread_mutex_unlock(&g_cfg_mutex);
-		(void)venc_api_save_config_to_disk(&new_cfg);
-	} else {
-		*g_cfg = new_cfg;
-		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
-		pthread_mutex_unlock(&g_cfg_mutex);
-		(void)venc_api_save_config_to_disk(&new_cfg);
-		venc_api_request_reinit();
+		(void)venc_config_apply_resilience_preset(
+			new_cfg.video0.resilience, &new_cfg.video0);
+
+		/* Classify the delta:
+		 *
+		 *   ref_* changed     The SVC-T reference pyramid is bound
+		 *                     to the VENC channel at creation and
+		 *                     cannot be reconfigured by any
+		 *                     documented MI SDK call.  Route via
+		 *                     process-level respawn (fork+exec a
+		 *                     fresh waybeam after clean teardown):
+		 *                     a new VENC channel binds the new
+		 *                     pyramid at creation.
+		 *
+		 *   intra/gop only    Honoured by the in-process reinit
+		 *                     path (reload from disk, re-expand
+		 *                     preset, teardown+reconfigure
+		 *                     pipeline).  Same path every other
+		 *                     MUT_RESTART field uses. */
+		if (old_v.ref_base != new_cfg.video0.ref_base ||
+		    old_v.ref_enhance != new_cfg.video0.ref_enhance ||
+		    old_v.ref_pred != new_cfg.video0.ref_pred)
+			needs_respawn = 1;
+
+		fprintf(stderr,
+			"[waybeam] resilience-diff: '%s' -> '%s'  "
+			"intra=%s->%s ref_base=%u->%u ref_enhance=%u->%u "
+			"ref_pred=%d->%d gop=%.3fs->%.3fs  path=%s\n",
+			old_v.resilience, new_cfg.video0.resilience,
+			old_v.intra_refresh_mode,
+			new_cfg.video0.intra_refresh_mode,
+			(unsigned)old_v.ref_base,
+			(unsigned)new_cfg.video0.ref_base,
+			(unsigned)old_v.ref_enhance,
+			(unsigned)new_cfg.video0.ref_enhance,
+			(int)old_v.ref_pred,
+			(int)new_cfg.video0.ref_pred,
+			old_v.gop_size, new_cfg.video0.gop_size,
+			needs_respawn ? "respawn" : "live-reinit");
 	}
+
+	/* Commit g_cfg in memory and persist to disk for both paths.
+	 * For respawn, the fresh process will reload from disk anyway,
+	 * but committing in-memory keeps /status / GET responses
+	 * coherent with the SET that just succeeded. */
+	*g_cfg = new_cfg;
+	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+	pthread_mutex_unlock(&g_cfg_mutex);
+	(void)venc_api_save_config_to_disk(&new_cfg);
+
+	/* Both classifications enqueue the same in-process signal: drop
+	 * out of the stream loop.  Each backend's runner then decides
+	 * what to do (Star6E and Maruko both currently always respawn on
+	 * reinit; the `path=` label above is forward-looking — it tells
+	 * an operator *why* this transition needs the slower path).  Do
+	 * not branch routing on needs_respawn yet — if a future change
+	 * re-enables in-process reconfigure for intra-only deltas, that
+	 * lives in the runner, not the HTTP path. */
+	(void)needs_respawn;
+	venc_api_request_reinit();
+
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -1860,11 +1888,8 @@ static int process_restart_set_query(const SetQueryParam *param,
 	}
 
 	*status_code = 200;
-	if (resilience_change)
-		rc = make_single_set_reboot_required_json(param->key, jval,
-			response_json);
-	else
-		rc = make_single_set_success_json(param->key, jval, 1, response_json);
+	rc = make_single_set_success_json(param->key, jval,
+		1 /* reinit_pending */, response_json);
 	free(jval);
 	return rc;
 }
