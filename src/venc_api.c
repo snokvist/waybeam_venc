@@ -944,6 +944,33 @@ static int make_single_set_success_json(const char *field_key,
 	return *out_json ? 0 : -1;
 }
 
+/* Save-only response: config persisted to disk, but the change cannot be
+ * applied live and requires a manual device reboot.  Used for transitions
+ * that destabilise the SDK encoder driver state (currently refPred
+ * activation/deactivation — empirically crashes the SoC across respawn). */
+static int make_single_set_reboot_required_json(const char *field_key,
+	const char *json_value, char **out_json)
+{
+	char buf[640];
+	int len;
+
+	if (!field_key || !json_value || !out_json)
+		return -1;
+
+	len = snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
+		"\"reboot_required\":true,"
+		"\"note\":\"resilience-related field persisted to disk; "
+		"reboot the device to apply (live reinit is unsafe for this "
+		"SDK — see HISTORY 0.10.15)\"}}",
+		field_key, json_value);
+	if (len >= (int)sizeof(buf))
+		len = (int)sizeof(buf) - 1;
+
+	*out_json = strdup(buf);
+	return *out_json ? 0 : -1;
+}
+
 static int make_multi_live_set_success_json(const SetQueryParam *params,
 	size_t count, char **out_json)
 {
@@ -1775,6 +1802,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 	VencConfig new_cfg;
 	char *jval;
 	int rc;
+	int resilience_change = 0;
 
 	if (!param || !status_code || !response_json)
 		return -1;
@@ -1788,15 +1816,43 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
-	*g_cfg = new_cfg;
-	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
-	pthread_mutex_unlock(&g_cfg_mutex);
-	/* Persist to disk so the change survives restart/crash.  The reinit
-	 * uses the in-memory snapshot we just committed; the on-disk copy now
-	 * matches.  Failure is logged by the helper — leave as void since the
-	 * reinit is still the right next step even if persistence stalled. */
-	(void)venc_api_save_config_to_disk(&new_cfg);
-	venc_api_request_reinit();
+	/* Refuse live resilience changes — the MI SDK kernel driver cannot
+	 * survive a live re-configure of intra-refresh / refPred state.
+	 * Empirically confirmed on both backends (2026-05-15 bench testing):
+	 *
+	 *   Star6E (fork+exec respawn): SoC kernel panic within 1-2
+	 *     transitions, ICMP dies, requires power cycle.
+	 *   Maruko (in-process reinit): MI_SYS_IMPL_FlushInputPortTasks
+	 *     in the `mi` module takes a data-abort page fault during
+	 *     teardown (kernel stack: do_task_dead ← do_exit ← die ←
+	 *     __do_kernel_fault ← MI_SYS_IMPL_FlushInputPortTasks [mi]).
+	 *     waybeam zombies, system alive, reboot required.
+	 *
+	 * Cold-boot into any preset is 100% reliable on both backends.
+	 * Persist new config to disk and return reboot_required.  The
+	 * intra_refresh_* and ref_* struct fields are derived-from-preset
+	 * only (see include/venc_config.h) and have no JSON-schema or
+	 * HTTP-API entry point — only the `resilience` preset name can be
+	 * SET via the API, so that's the only field we need to compare. */
+	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0)
+		resilience_change = 1;
+
+	/* For reboot-required changes, only persist to disk — leave the
+	 * live g_cfg untouched so `/status` and `/resilience/status`
+	 * continue to reflect the actually-running pipeline until the
+	 * reboot.  For all other changes, commit g_cfg in memory and
+	 * trigger the live reinit. */
+	if (resilience_change) {
+		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+		pthread_mutex_unlock(&g_cfg_mutex);
+		(void)venc_api_save_config_to_disk(&new_cfg);
+	} else {
+		*g_cfg = new_cfg;
+		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+		pthread_mutex_unlock(&g_cfg_mutex);
+		(void)venc_api_save_config_to_disk(&new_cfg);
+		venc_api_request_reinit();
+	}
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -1804,7 +1860,11 @@ static int process_restart_set_query(const SetQueryParam *param,
 	}
 
 	*status_code = 200;
-	rc = make_single_set_success_json(param->key, jval, 1, response_json);
+	if (resilience_change)
+		rc = make_single_set_reboot_required_json(param->key, jval,
+			response_json);
+	else
+		rc = make_single_set_success_json(param->key, jval, 1, response_json);
 	free(jval);
 	return rc;
 }

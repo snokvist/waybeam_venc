@@ -1,38 +1,143 @@
 # History
 
-## Unreleased — review-pass cleanups
+## [0.10.16] - 2026-05-15
 
-Post-review cleanups on top of 0.10.13:
+Two new OSD-safe resilience presets for ultra-low recovery latency:
 
-- **Retire `/api/v1/intra/mode` HTTP route.**  Endpoint round-tripped
-  `video0.intra_refresh_mode` through disk, but `apply_resilience_preset()`
-  on reload always overwrote the granular field from the preset table,
-  so every write came back as `off`.  Pick a preset via
-  `video0.resilience` instead.
-- **`video0.resilience` is the sole user-facing knob** for
-  intra-refresh and refPred.  The granular schema fields
-  (`intra_refresh_*`, `ref_base/enhance/pred`) are not part of the
-  JSON schema or HTTP API — they are derived from the preset at load
-  time.  This is intentional; the granular knobs were never validated
-  in cross-product against the preset table and the SDK has fragile
-  state transitions on direct toggles.  File an issue if no existing
-  preset fits your use case.
-- **No legacy `/etc/venc.json` migration.**  The rebrand-era helper
-  in `scripts/maruko_direct_deploy.sh` that copied `/etc/venc.json` to
-  `/etc/waybeam.json` is dropped.  All bench devices are already
-  migrated; fresh installs land directly on `/etc/waybeam.json`.
-- **Log prefix unification.**  All `[venc] ...` runtime log strings
-  in `src/star6e_pipeline.c`, `src/star6e_runtime.c`, and
-  `src/maruko_pipeline.c` are now `[waybeam] ...`.
-- **H.264 dead-code removal in `intra_refresh.c`.**  Codec is HEVC-only
-  since 0.10.12; the dormant H.264 LCU-size (16) and QP column (33/29/25)
-  in `mode_default_qp()` and `intra_refresh_compute()` are deleted.
-  `intra_refresh_compute()` lost its `is_h265` argument; callers in
-  `star6e_pipeline.c`, `maruko_pipeline.c`, and `test_intra_refresh.c`
-  adjusted.  The 5 H.264-specific unit tests are removed.
-- **Struct comment for `intra_refresh_*` + `ref_*`** in
-  `include/venc_config.h` marks the fields as derived-from-preset only,
-  not user-writable.
+- `rescue` — 0.25 s GOP, no intra-refresh, no SVC-T.  Pure IDR-spam
+  fallback.  ~35–40 % of the bitstream is IDR data, but the recovery
+  floor is the lowest of any preset (next IDR is never more than
+  250 ms away).  Useful as a spec-compliant baseline when
+  A/B-debugging whether an intra-refresh preset is misbehaving in
+  the field.
+- `sprint` — 0.5 s GOP + `fast` (150 ms) intra-refresh, no SVC-T.
+  Combines the stripe-recovery of `racing` with a guaranteed IDR
+  floor every 500 ms.  ~20–25 % IDR overhead.  Pick over `racing`
+  when you have bitrate headroom and want belt-and-suspenders
+  recovery on close-range / line-of-sight links.
+
+Both join the OSD-safe column (no green smear).  No code-path
+changes — just two new entries in the resilience preset table.
+
+## [0.10.15] - 2026-05-15
+
+Both backends: resilience SETs now persist their new value to
+`/etc/waybeam.json` and return `{"reboot_required": true}` rather than
+reinitialising the encoder in-place.
+
+Empirically confirmed on Maruko (192.168.2.12) that in-process pipeline
+reinit also crashes the SDK kernel module — not always, but reliably
+within a small number of transitions.  A controlled 7-transition sweep
+on the Feb 22 (pre-gate) binary worked for 6 transitions, then on the
+7th (range→fpv) the daemon zombied with a kernel page fault inside
+`MI_SYS_IMPL_FlushInputPortTasks` in the `mi` module:
+
+    do_task_dead ← do_exit ← die ← __do_kernel_fault ← do_page_fault
+        ← do_DataAbort ← __dabt_svc ← CamOsTimerModify
+        ← MI_SYS_IMPL_FlushInputPortTasks [mi]
+
+System stayed alive (ICMP OK) but waybeam process became State=Z and
+did not respawn (no init supervisor).  SIGHUP did not recover; reboot
+was required.
+
+**Why.**  The SigmaStar VENC SDK does not cleanly release kernel
+encoder driver state across live reinit cycles when intra-refresh or
+refPred toggles, even with fork+exec respawn and a 500 ms post-exit
+settle.  Bench testing (Star6E, 192.168.1.13) reproduced two failure
+modes:
+
+- **Cross-group transitions** (refPred on↔off, intra-refresh on↔off)
+  crash on the first transition.  The original gate in 0.10.14b
+  caught these.
+- **In-group transitions** (e.g. `endurance` → `patrol`, both
+  `ref_base = 0`, intra-refresh active) succeed once or twice then
+  crash.  The second sweep wedged the device after racing → endurance
+  (success) → patrol (SoC panic, ICMP dies, power cycle required).
+  No combination of settle delay or partial state reset prevented the
+  cumulative kernel state corruption.
+
+Cold-boot into any preset is 100 % reliable.  Shipping the reboot
+model is the conservative, no-surprises choice — users edit config or
+issue a SET, the daemon writes the change, the user reboots, and the
+new preset takes effect.
+
+**Implementation.**
+
+- `src/venc_api.c`: extended the `resilience_change` detector in
+  `process_restart_set_query()` to fire on changes to any of
+  `resilience`, `intra_refresh_mode/lines/qp`, or
+  `ref_base/enhance/pred`.  When a change matches, the new config is
+  persisted to disk, `venc_api_request_reinit()` is **not** called,
+  and the response carries `reboot_required: true`.  `gop_size` is
+  intentionally NOT gated — it has always been live-changeable as a
+  plain MUT_RESTART field and preset switches are caught by the
+  `resilience` name change already.
+- README documents the reboot-required behaviour next to the field
+  table.
+
+## [0.10.14] - 2026-05-15
+
+Three new resilience presets — `endurance`, `patrol`, `rally` — and a
+revised classification along an OSD-safe / OSD-unsafe axis after
+bench-isolating why `range`/`fpv` leave persistent green smear on the
+OSD panel.
+
+**Root cause (two layers):**
+
+1. **SVC-T TRAIL_N effective wavefront math.**  The temporal-layering
+   rewrite marks `ref_enhance` of every `(ref_enhance + 1)` frames as
+   TRAIL_N (display-only, dropped from the decoder's DPB), so the
+   effective wavefront in the DPB is
+       effective_wavefront_ms = nominal_wavefront_ms × (ref_enhance + 1)
+   `range` = 2500 ms and `fpv` = 5000 ms both exceed the 2.0 s GOP,
+   so the picture never reaches stripe-only recovery — only an IDR
+   completes it.
+
+2. **OSD-specific chroma artefact.**  For static high-contrast overlay
+   content (OSD text, near-neutral chroma everywhere), the R-D loop
+   picks chroma skip-mode in every MB because chroma residual is
+   essentially zero.  Once chroma drifts in a TRAIL_N frame, no
+   amount of intra-refresh recovers it — the stripe MBs land in
+   display-only frames and never reach the DPB.  Bench-confirmed via
+   JPEG snapshot from the same VPE port: the encoder *input* is
+   clean (sharp OSD, correct chroma), the H.265 bitstream is what
+   produces the green smear.  ROI delta-QP doesn't help because
+   skip-mode bypasses QP for zero-residual blocks, and the SigmaStar
+   i6c VENC API exposes no force-intra-MB knob.
+
+**Conclusion baked into the preset table:**
+
+Any preset with `ref_enhance > 0` is OSD-unsafe.  The fix is to
+classify presets along this axis and let users pick:
+
+| preset      | intra-refresh   | ref_enhance | GOP   | OSD-safe?         | role                                       |
+|-------------|-----------------|-------------|-------|-------------------|--------------------------------------------|
+| `off`       | off             | 0           | user  | yes (no refresh)  | manual control                              |
+| `quality`   | off             | 0           | 4.0 s | yes (IDR-based)   | best image, slow recovery                   |
+| `racing`    | fast (150 ms)   | 0           | 2.0 s | yes               | close-range LOS, fast stripe recovery       |
+| `endurance` | balanced (500ms)| **0** (was 2) | 2.0 s | yes               | less bitrate on stripes, slower wavefront   |
+| `patrol`    | balanced (500ms)| **0** (was 1) | 4.0 s | yes               | long stable flight, 4 s GOP for bandwidth   |
+| `rally`     | fast (150 ms)   | 1           | 2.0 s | no                | light refPred, motion-heavy scenes (no OSD) |
+| `range`     | balanced (500ms)| 4           | 2.0 s | no                | long-range FPV, heavy refPred (no OSD)      |
+| `fpv`       | robust (1000ms) | 4           | 2.0 s | no                | drone FPV, heaviest refPred (no OSD)        |
+
+`endurance` and `patrol` lose their original 1:2 / 1:1 SVC-T pyramid —
+they're now racing-class OSD-safe presets distinguished by slower
+wavefront (less stripe bitrate) and longer GOP respectively.  `rally`
+keeps its 1:1 SVC-T as the lightest refPred option for OSD-off
+scenarios.  `range` and `fpv` remain the heavy-refPred presets,
+unchanged.
+
+Existing config files that set `resilience=racing`, `range`, or `fpv`
+load with identical behaviour.  Users explicitly on `endurance` or
+`patrol` from intermediate 0.10.14 dev binaries lose SVC-T but gain
+OSD-safe recovery — a behavioural change documented in README.md.
+
+WebUI dashboard enum, API test suite (1588 unit tests), and preset
+expansion test cases all updated.  Bench-validated on Star6E
+192.168.1.13: racing/endurance/patrol clean up the OSD area within
+~10 wavefront cycles; rally/range/fpv leave persistent green smear
+that only an IDR can clear.
 
 ## [0.10.13] - 2026-05-15
 

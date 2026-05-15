@@ -364,12 +364,49 @@ static int apply_resilience_preset(const char *name, VencConfigVideo *v)
 		uint8_t ref_enhance;
 		double gop_sec;           /* 0 = preserve caller's gop_size */
 	};
+	/* Resilience preset table.
+	 *
+	 * Stripe-only recovery (no IDR needed) requires the effective
+	 * wavefront to fit inside the GOP.  Effective wavefront is
+	 *   nominal_wavefront × (ref_enhance + 1)
+	 * because the TRAIL_N rewrite drops `ref_enhance` of every
+	 * `(ref_enhance + 1)` frames from the decoder's reference list.
+	 *
+	 * OSD-safe column: presets with `ref_enhance > 0` (SVC-T) leave
+	 * persistent chroma artefacts in static high-contrast overlays
+	 * (OSD text).  Confirmed by bench testing: even `rally` (1:1
+	 * SVC-T) shows green smear over the OSD area that won't clear
+	 * via stripes — only via IDR.  Root cause: chroma stays in
+	 * skip mode for static-content MBs, and intra-refresh stripes
+	 * landing in TRAIL_N frames don't propagate the chroma fix
+	 * into the DPB.  SDK exposes no force-intra-MB knob to fix it
+	 * (ROI is delta-QP only, doesn't override skip-mode for
+	 * zero-residual blocks).  See README.md for full discussion.
+	 *
+	 *   preset      nominal   enh  GOP    eff.wave  OSD-safe?
+	 *   ─────────────────────────────────────────────────────
+	 *   off         off       0    user   -         yes (no refresh)
+	 *   rescue      off       0    0.25s  -         yes (IDR-spam, lowest latency)
+	 *   quality     off       0    4.0s   -         yes (IDR-based)
+	 *   sprint      150ms     0    0.5s   150ms     yes (intra+short GOP)
+	 *   racing      150ms     0    2.0s   150ms     yes
+	 *   endurance   500ms     0    2.0s   500ms     yes
+	 *   patrol      500ms     0    4.0s   500ms     yes
+	 *   rally       150ms     1    2.0s   300ms     no  (light refPred)
+	 *   range       500ms     4    2.0s   2500ms    no  (heavy refPred)
+	 *   fpv        1000ms     4    2.0s   5000ms    no  (heaviest refPred)
+	 */
 	static const struct preset table[] = {
-		{ "off",     "off",      0, 0, 0.0 },  /* gopSize honoured */
-		{ "quality", "off",      0, 0, 4.0 },
-		{ "racing",  "fast",     0, 0, 2.0 },
-		{ "range",   "balanced", 1, 4, 2.0 },
-		{ "fpv",     "robust",   1, 4, 2.0 },
+		{ "off",        "off",      0, 0, 0.0 },   /* gopSize honoured */
+		{ "rescue",     "off",      0, 0, 0.25 },  /* IDR-spam, ~35% bitrate to IDRs */
+		{ "quality",    "off",      0, 0, 4.0 },
+		{ "sprint",     "fast",     0, 0, 0.5 },   /* intra-refresh + aggressive IDR */
+		{ "racing",     "fast",     0, 0, 2.0 },
+		{ "endurance",  "balanced", 0, 0, 2.0 },
+		{ "patrol",     "balanced", 0, 0, 4.0 },
+		{ "rally",      "fast",     1, 1, 2.0 },
+		{ "range",      "balanced", 1, 4, 2.0 },
+		{ "fpv",        "robust",   1, 4, 2.0 },
 	};
 
 	const char *want = (!name || !*name) ? "off" : name;

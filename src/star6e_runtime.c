@@ -773,6 +773,21 @@ void star6e_runtime_respawn_after_exit(void)
 		_exit(1);
 	}
 
+	/* Additional settle delay after parent-PID exit, before execv.
+	 *
+	 * Parent-PID death (kill ESRCH) only confirms the userspace
+	 * process is gone — the kernel-resident MI SDK driver state
+	 * (MI_VENC channel teardown, DMA drain, sensor mode release)
+	 * may still be in flight.  Executing a fresh waybeam against
+	 * half-released kernel state can panic the SoC on
+	 * refPred-active → refPred-inactive transitions (e.g.
+	 * `resilience=fpv` → `resilience=endurance` deactivates
+	 * SetRefParam, which triggers significant driver state
+	 * unwind).  500ms is empirically enough on imx335 @ 1080p120
+	 * to let the driver complete its post-exit cleanup before the
+	 * fresh MI_SYS_Init lands. */
+	usleep(500 * 1000);
+
 	sigset_t empty;
 	sigemptyset(&empty);
 	sigprocmask(SIG_SETMASK, &empty, NULL);

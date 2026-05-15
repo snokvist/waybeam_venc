@@ -107,10 +107,15 @@ static int test_resilience_preset_expansion(void)
 		uint8_t    e;
 		double     gop;
 	} cases[] = {
-		{ "quality", "off",      0, 0, 4.0 },
-		{ "racing",  "fast",     0, 0, 2.0 },
-		{ "range",   "balanced", 1, 4, 2.0 },
-		{ "fpv",     "robust",   1, 4, 2.0 },
+		{ "rescue",    "off",      0, 0, 0.25 }, /* IDR-spam, lowest recovery latency */
+		{ "quality",   "off",      0, 0, 4.0 },
+		{ "sprint",    "fast",     0, 0, 0.5 },  /* intra + aggressive IDR */
+		{ "racing",    "fast",     0, 0, 2.0 },
+		{ "endurance", "balanced", 0, 0, 2.0 },  /* OSD-safe */
+		{ "patrol",    "balanced", 0, 0, 4.0 },  /* OSD-safe + long GOP */
+		{ "rally",     "fast",     1, 1, 2.0 },  /* light refPred (OSD-unsafe) */
+		{ "range",     "balanced", 1, 4, 2.0 },  /* heavy refPred (OSD-unsafe) */
+		{ "fpv",       "robust",   1, 4, 2.0 },  /* heaviest refPred (OSD-unsafe) */
 	};
 	for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
 		/* User's gopSize=7.5 must be discarded by any named preset. */
