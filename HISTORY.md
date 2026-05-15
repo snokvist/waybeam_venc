@@ -95,6 +95,43 @@ section) for the full table and Phase-2 brute-force-sweep plan.
 
 Captures: `bench_logs/manual_sensor_diff_20260514T093447Z/`
 
+## [0.10.12] - 2026-05-15
+
+Maruko parity audit + plan refresh.  Doc-only release.
+
+Audited Maruko vs Star6E against the v0.10.11 source rather than the
+existing summaries.  Callback table is now 1:1
+(`maruko_controls.c:1092-1115` vs `star6e_controls.c:1164-1187`), so
+every `apply_*`/`query_*` consumed by `venc_api.c` resolves on both
+backends.
+
+Verified remaining gaps (with source evidence):
+
+1. `/api/v1/dual/set` returns 501 on Maruko — `venc_api.c:2476-2570`
+   `dual_apply_bitrate`/`dual_apply_gop` bind to the Star6E
+   `i6_venc_chn` layout; Maruko needs an `i6c_venc_chn` shim via
+   `maruko_mi_venc_*`.  Small.
+2. Live sensor-mode/AR change hangs the ISP — `maruko_runtime.c:124-159`
+   clamps reinit to the previous `sensor.index`/`mode` and caps fps to
+   the previous mode's max.  Medium-arch.
+3. Per-mode max-FPS sweep on Maruko is not yet on record — Phase 7
+   verified 118 fps on IMX415 1472x816 but the broader matrix is
+   undocumented and `CURRENT_STATUS` still claimed "30 fps only".
+   Small (verification + doc).
+4. Maruko bench `192.168.2.12` SD slot is stuck (CD switch HIGH), so
+   `record.mode="dual"` (TS-to-file) is hardware-blocked, not
+   code-blocked.
+
+Updates in this release:
+
+- `documentation/MARUKO_PARITY_PLAN.md` "Open work / next decision
+  point" rewritten against the v0.10.11 source.  New 5-step execution
+  plan with concrete file references and a 3-day time-box on the
+  Phase 4 (live mode switch) spike.
+- `documentation/CURRENT_STATUS_AND_NEXT_STEPS.md` "Known Limitations"
+  rewritten — drops the stale "stable 30 fps streaming" claim and
+  records the SD-slot and live-mode-switch caveats explicitly.
+
 ## [0.10.11] - 2026-05-14
 
 Maruko snapshot follow-up: SIGHUP reinit hardening, MJPG quality
