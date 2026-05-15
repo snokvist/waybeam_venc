@@ -355,7 +355,7 @@ static int parse_resolution(const char *str, uint32_t *w, uint32_t *h)
  *
  * Returns 0 on success ("off" or recognised preset), or -1 if `name`
  * is unrecognised (caller should warn and fall back to "off"). */
-static int apply_resilience_preset(const char *name, VencConfigVideo *v)
+int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 {
 	struct preset {
 		const char *name;
@@ -474,12 +474,12 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		const char *rname = json_get_string(obj, "resilience",
 			v->resilience);
 		safe_strcpy(v->resilience, sizeof(v->resilience), rname);
-		if (apply_resilience_preset(v->resilience, v) != 0) {
+		if (venc_config_apply_resilience_preset(v->resilience, v) != 0) {
 			fprintf(stderr, "[config] WARNING: unknown video0.resilience "
 				"'%s' (use off|quality|racing|range|fpv) — falling "
 				"back to off\n", v->resilience);
 			safe_strcpy(v->resilience, sizeof(v->resilience), "off");
-			(void)apply_resilience_preset("off", v);
+			(void)venc_config_apply_resilience_preset("off", v);
 		}
 	}
 

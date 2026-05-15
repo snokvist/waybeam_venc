@@ -247,6 +247,16 @@ char *venc_config_to_json_string(const VencConfig *cfg);
  * Returns 0 on success, -1 on write error. */
 int venc_config_save(const char *path, const VencConfig *cfg);
 
+/* Expand a resilience preset name into the derived intra_refresh_*, ref_*,
+ * and (for named presets) gop_size fields of `v`.  Mirrors what the disk
+ * loader does in load_video0() — exposed so the HTTP-API can evaluate the
+ * delta a preset change *would* produce before deciding whether to take
+ * the live-reinit path or the reboot-required path.
+ *
+ * Returns 0 on success ("off" or recognised preset), or -1 if `name` is
+ * not recognised (caller should warn / fall back to "off"). */
+int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v);
+
 #ifdef __cplusplus
 }
 #endif
