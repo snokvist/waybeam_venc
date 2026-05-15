@@ -264,8 +264,8 @@ ssh root@<HOST> "killall venc; sleep 2"
 scp -O out/star6e/venc root@<HOST>:/usr/bin/venc
 
 # 4. (Optional) Modify config — always use json_cli, never sed
-ssh root@<HOST> "json_cli -s .legacyAe false -i /etc/venc.json"
-ssh root@<HOST> "json_cli -s .system.verbose true -i /etc/venc.json"
+ssh root@<HOST> "json_cli -s .isp.aeEngine '\"custom\"' -i /etc/waybeam.json"
+ssh root@<HOST> "json_cli -s .system.verbose true -i /etc/waybeam.json"
 
 # 5. Start venc as daemon with log capture
 ssh root@<HOST> "nohup venc > /tmp/venc.log 2>&1 &"
@@ -288,9 +288,9 @@ ssh root@<HOST> "wget -q -O- http://127.0.0.1/api/v1/ae"
 ssh root@<HOST> "grep 'limits updated' /tmp/venc.log"
 
 # 11. Cleanup — restore config and stop
-ssh root@<HOST> "json_cli -s .legacyAe true -i /etc/venc.json"
-ssh root@<HOST> "json_cli -s .system.verbose false -i /etc/venc.json"
-ssh root@<HOST> "killall venc"
+ssh root@<HOST> "json_cli -s .isp.aeEngine '\"sdk\"' -i /etc/waybeam.json"
+ssh root@<HOST> "json_cli -s .system.verbose false -i /etc/waybeam.json"
+ssh root@<HOST> "killall waybeam"
 ```
 
 ### Key endpoints for verification
