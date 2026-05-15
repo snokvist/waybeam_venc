@@ -1816,59 +1816,26 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
-	/* Detect resilience-related state changes that the MI SDK kernel
-	 * driver cannot survive when applied live.  Empirically confirmed
-	 * on BOTH backends (2026-05-15 bench testing on 192.168.1.13 +
-	 * 192.168.2.12):
+	/* Refuse live resilience changes — the MI SDK kernel driver cannot
+	 * survive a live re-configure of intra-refresh / refPred state.
+	 * Empirically confirmed on both backends (2026-05-15 bench testing):
 	 *
-	 *   Star6E (fork+exec respawn)
-	 *     - First or second transition crashes the SoC entirely
-	 *       (kernel panic, ICMP dies, requires power cycle).  The
-	 *       previous-config kernel encoder state does not release in
-	 *       time for the new MI_VENC_* calls in the respawned process.
+	 *   Star6E (fork+exec respawn): SoC kernel panic within 1-2
+	 *     transitions, ICMP dies, requires power cycle.
+	 *   Maruko (in-process reinit): MI_SYS_IMPL_FlushInputPortTasks
+	 *     in the `mi` module takes a data-abort page fault during
+	 *     teardown (kernel stack: do_task_dead ← do_exit ← die ←
+	 *     __do_kernel_fault ← MI_SYS_IMPL_FlushInputPortTasks [mi]).
+	 *     waybeam zombies, system alive, reboot required.
 	 *
-	 *   Maruko (in-process pipeline reinit)
-	 *     - 6 of 7 consecutive transitions completed cleanly in <2 s.
-	 *     - 7th transition (range→fpv in that sweep) zombied the
-	 *       daemon: `MI_SYS_IMPL_FlushInputPortTasks` in the `mi`
-	 *       kernel module took a data-abort page fault during
-	 *       teardown.  Process State=Z, kernel stack:
-	 *           do_task_dead ← do_exit ← die ← __do_kernel_fault
-	 *           ← do_page_fault ← do_DataAbort ← __dabt_svc
-	 *           ← CamOsTimerModify
-	 *           ← MI_SYS_IMPL_FlushInputPortTasks [mi]
-	 *       System stays alive (ping OK), but waybeam has no init
-	 *       supervisor and does not respawn — a reboot is required to
-	 *       restart the daemon.
-	 *
-	 * Different exact failure modes, same root cause: the SDK kernel
-	 * module isn't designed for live re-configure of intra-refresh /
-	 * refPred / preset changes.  Cold-boot into any preset is 100 %
-	 * reliable on both backends.
-	 *
-	 * Decision: refuse live resilience changes on either backend.
-	 * Persist new config to disk and return reboot_required to the
-	 * caller.  The cost is ~30 s for a reboot; the gain is 100 %
-	 * reliability and predictable UX (no spurious zombie processes,
-	 * no power-cycles).  Applies to direct SETs of the preset name
-	 * (`video0.resilience`) AND to direct SETs of any of the underlying
-	 * derived fields (intra_refresh_*, ref_*).  `gop_size` is NOT
-	 * gated: it has always been live-changeable as a plain MUT_RESTART
-	 * field and a preset switch is already covered by the resilience
-	 * name comparison above. */
-	{
-		const VencConfigVideo *o = &g_cfg->video0;
-		const VencConfigVideo *n = &new_cfg.video0;
-
-		if (strcmp(o->resilience, n->resilience) != 0 ||
-		    strcmp(o->intra_refresh_mode, n->intra_refresh_mode) != 0 ||
-		    o->intra_refresh_lines != n->intra_refresh_lines ||
-		    o->intra_refresh_qp    != n->intra_refresh_qp ||
-		    o->ref_base    != n->ref_base ||
-		    o->ref_enhance != n->ref_enhance ||
-		    o->ref_pred    != n->ref_pred)
-			resilience_change = 1;
-	}
+	 * Cold-boot into any preset is 100% reliable on both backends.
+	 * Persist new config to disk and return reboot_required.  The
+	 * intra_refresh_* and ref_* struct fields are derived-from-preset
+	 * only (see include/venc_config.h) and have no JSON-schema or
+	 * HTTP-API entry point — only the `resilience` preset name can be
+	 * SET via the API, so that's the only field we need to compare. */
+	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0)
+		resilience_change = 1;
 
 	/* For reboot-required changes, only persist to disk — leave the
 	 * live g_cfg untouched so `/status` and `/resilience/status`
