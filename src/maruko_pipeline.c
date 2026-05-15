@@ -1087,8 +1087,9 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 }
 
 /* IntraRefresh status snapshot — populated by
- * maruko_pipeline_apply_intra_refresh() at every pipeline_start, cleared by
- * maruko_stop_venc().  Read by venc_api's /api/v1/intra/status handler. */
+ * maruko_pipeline_apply_intra_refresh() at every pipeline_start, cleared
+ * by the VENC destroy step of teardown_graph.  Read by venc_api's
+ * /api/v1/intra/status handler. */
 static MarukoIntraRefreshStatus g_intra_status;
 static pthread_mutex_t g_intra_status_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1420,23 +1421,6 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	}
 
 	return 0;
-}
-
-static void maruko_stop_venc(MI_VENC_DEV venc_dev, MI_VENC_CHN chn,
-	int destroy_dev)
-{
-	(void)maruko_mi_venc_stop_recv(venc_dev, chn);
-	(void)maruko_mi_venc_destroy_chn(venc_dev, chn);
-	if (destroy_dev)
-		(void)maruko_mi_venc_destroy_dev(venc_dev);
-
-	/* Clear IntraRefresh status snapshot — the channel is gone, so
-	 * /api/v1/intra/status should not keep reporting enabled=true
-	 * until the next pipeline_start runs. */
-	pthread_mutex_lock(&g_intra_status_mutex);
-	memset(&g_intra_status, 0, sizeof(g_intra_status));
-	pthread_mutex_unlock(&g_intra_status_mutex);
-	maruko_pipeline_clear_zoom_status();
 }
 
 static void maruko_sysfs_write(const char *path, const char *value)
@@ -3330,32 +3314,71 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		(void)g_mi_scl.fnDisablePort(0, 0, 1);
 		g_mi_scl_port1_enabled = 0;
 	}
+
+	/* MI teardown order mirrors Star6E (proven over many reinit
+	 * cycles).  The critical invariant: each consumer must be
+	 * stopped — or at least StopRecvPic'd — BEFORE its input port
+	 * is unbound.  The previous order tore down every UnBind first
+	 * and only then stopped VENC/VPE/VIF; this triggered a page
+	 * fault inside MI_SYS_IMPL_FlushInputPortTasks because the
+	 * kernel SDK was still flushing buffered frames into a port the
+	 * userspace side had just ripped out.  Empirically zombie'd the
+	 * process on ~14% of resilience reinits (S1 bench 2026-05-15).
+	 *
+	 * Sequence:
+	 *   1. VENC StopRecvPic (soft pause, lets buffered frames flow
+	 *      out one last time).
+	 *   2. Unbind VPE→VENC.
+	 *   3. Destroy VENC channel.
+	 *   4. Stop VPE channels (drains VPE's own buffer queue).
+	 *   5. Unbind ISP→VPE.
+	 *   6. Stop VIF.
+	 *   7. Unbind VIF→ISP.
+	 *   8. Sensor disable. */
+	if (ctx->venc_started)
+		(void)maruko_mi_venc_stop_recv(ctx->venc_device,
+			ctx->venc_channel);
+
 	if (ctx->bound_vpe_venc) {
 		(void)MI_SYS_UnBindChnPort(&ctx->vpe_port, &ctx->venc_port);
 		ctx->bound_vpe_venc = 0;
 	}
-	if (ctx->bound_isp_vpe) {
-		(void)MI_SYS_UnBindChnPort(&ctx->isp_port, &ctx->vpe_port);
-		ctx->bound_isp_vpe = 0;
-	}
-	if (ctx->bound_vif_vpe) {
-		(void)MI_SYS_UnBindChnPort(&ctx->vif_port, &ctx->isp_port);
-		ctx->bound_vif_vpe = 0;
-	}
+
 	if (ctx->venc_started) {
-		maruko_stop_venc(ctx->venc_device, ctx->venc_channel,
-			ctx->venc_dev_created);
+		(void)maruko_mi_venc_destroy_chn(ctx->venc_device,
+			ctx->venc_channel);
+		if (ctx->venc_dev_created)
+			(void)maruko_mi_venc_destroy_dev(ctx->venc_device);
 		ctx->venc_started = 0;
 		ctx->venc_dev_created = 0;
+
+		/* Clear IntraRefresh status — the channel is gone. */
+		pthread_mutex_lock(&g_intra_status_mutex);
+		memset(&g_intra_status, 0, sizeof(g_intra_status));
+		pthread_mutex_unlock(&g_intra_status_mutex);
+		maruko_pipeline_clear_zoom_status();
 	}
+
 	if (ctx->vpe_started) {
 		maruko_stop_vpe_channels();
 		ctx->vpe_started = 0;
 	}
+
+	if (ctx->bound_isp_vpe) {
+		(void)MI_SYS_UnBindChnPort(&ctx->isp_port, &ctx->vpe_port);
+		ctx->bound_isp_vpe = 0;
+	}
+
 	if (ctx->vif_started) {
 		maruko_stop_vif();
 		ctx->vif_started = 0;
 	}
+
+	if (ctx->bound_vif_vpe) {
+		(void)MI_SYS_UnBindChnPort(&ctx->vif_port, &ctx->isp_port);
+		ctx->bound_vif_vpe = 0;
+	}
+
 	if (ctx->sensor_enabled) {
 		(void)MI_SNR_Disable(ctx->sensor.pad_id);
 		ctx->sensor_enabled = 0;

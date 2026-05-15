@@ -87,7 +87,8 @@ for the corresponding diff line.  All ten must land on the path shown:
 | `sprint → off`          | live-reinit   |
 | `racing → rally`        | respawn       |
 | `rally → range`         | respawn       |
-| `range → fpv`           | respawn       |
+| `range → fpv`           | live-reinit   | <!-- identical ref_* (1,4,1) — only intra changes; no pyramid rewire needed -->
+| `fpv → racing`          | respawn       |
 
 (Insert a ≥ 6 s wait between SETs to clear the 5 s rate limit.)
 
@@ -184,8 +185,8 @@ and 192.168.2.12 (where applicable) and the result is captured below.
 
 (fill in after each run; one line per criterion per device)
 
-- [ ] S1 / Star6E:
-- [ ] S1 / Maruko:
+- [x] S1 / Star6E: 11/11 transitions matched classifier (live-reinit ×8, respawn ×3); diff lines captured
+- [x] S1 / Maruko: 12 transitions clean after teardown-order fix; all path classifications correct; 0 zombies, 0 page-faults in dmesg
 - [ ] S2 / Star6E:
 - [ ] S3 / Star6E:
 - [ ] S4 / Maruko:
