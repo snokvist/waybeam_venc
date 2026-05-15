@@ -68,7 +68,9 @@ typedef struct {
 } VencConfigImage;
 
 typedef struct {
-	char codec[16];        /* "h264" or "h265" */
+	/* Video codec is always H.265 — the encoder, RTP path, intra-refresh
+	 * scheduler, and SVC-T refPred all assume HEVC.  H.264 was retired
+	 * with the resilience-preset consolidation. */
 	char rc_mode[16];      /* "cbr", "vbr", "avbr", "qvbr" */
 	uint32_t fps;
 	uint32_t width;
@@ -90,12 +92,15 @@ typedef struct {
 	uint8_t ref_base;          /* base-layer period; 0 = off */
 	uint8_t ref_enhance;       /* enhance-layer ratio; ignored when ref_base=0 */
 	bool ref_pred;             /* enable enhance→base prediction (recommended) */
-	/* Resilience preset — combines intra-refresh + SVC-T into one knob.
-	 * Recognised values: "off" (granular fields drive), "quality",
-	 * "racing", "range", "fpv".  When set to a recognised preset, the
-	 * granular intra_refresh_* and ref_* fields are overwritten by the
-	 * preset's expansion (see venc_config_apply_resilience()).  Use
-	 * "off" to drive features manually via the granular fields. */
+	/* Resilience preset — sole user-facing knob for intra-refresh +
+	 * SVC-T refPred + GOP.  Recognised values: "off", "quality",
+	 * "racing", "range", "fpv".  Every recognised value (including
+	 * "off") overwrites the granular intra_refresh_* and ref_*
+	 * fields with the preset's expansion; named presets additionally
+	 * override gop_size, while "off" preserves the user's gopSize
+	 * and disables both intra-refresh and refPred.  Unknown values
+	 * fall back to "off".  See apply_resilience_preset() in
+	 * src/venc_config.c for the canonical table. */
 	char resilience[16];
 	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
 	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth

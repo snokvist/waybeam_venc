@@ -5,7 +5,7 @@
 <h1 align="center">Waybeam — Vehicle Video Encoder</h1>
 
 <p align="center">
-  <em>Standalone H.265/H.264 encoder &amp; RTP streamer for SigmaStar Infinity6E and Infinity6C camera SoCs.</em>
+  <em>Standalone H.265 (HEVC) encoder &amp; RTP streamer for SigmaStar Infinity6E and Infinity6C camera SoCs.</em>
 </p>
 
 ---
@@ -33,7 +33,7 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
 
 ## Features
 
-- H.265 (HEVC) and H.264 encoding with CBR / VBR / AVBR / FIXQP rate control
+- H.265 (HEVC) encoding with CBR / VBR / AVBR / FIXQP rate control
 - RTP packetization with adaptive payload sizing; compact UDP raw-NAL mode
 - Built-in web dashboard at `/` for configuration, API docs, and IQ tuning
 - HTTP API for live parameter tuning without pipeline restart
@@ -244,7 +244,7 @@ omitted fields keep their compiled-in defaults.
   },
   "image":    { "mirror": false, "flip": false, "rotate": 0 },
   "video0":   {
-    "codec": "h265", "rcMode": "cbr", "fps": 30,
+    "rcMode": "cbr", "fps": 30,
     "bitrate": 8192, "gopSize": 1.0,
     "qpDelta": -4,
     "sceneThreshold": 0, "sceneHoldoff": 2,
@@ -291,8 +291,9 @@ omitted fields keep their compiled-in defaults.
 - **`isp`** — ISP tuning bin path, AE source (legacy/custom 3A), gain
   ceiling, AWB mode, aspect-preserving crop. `aeMode` is Maruko-only.
 - **`image`** — mirror / flip / rotate.
-- **`video0`** — codec, rate control, fps, resolution, bitrate, GOP,
-  per-section QP delta. Scene-change-triggered IDR (`sceneThreshold`,
+- **`video0`** — rate control, fps, resolution, bitrate, GOP,
+  per-section QP delta. Video codec is hardcoded H.265 (HEVC).
+  Scene-change-triggered IDR (`sceneThreshold`,
   `sceneHoldoff`) is Star6E-only. Intra-refresh and digital zoom are
   both backends.
 - **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
@@ -329,7 +330,7 @@ an `{"ok": true/false, ...}` envelope.
 #### GET /api/v1/snapshot.jpg
 
 Returns one JPEG frame from a dedicated MJPEG VENC channel tapped off
-the same VPE/SCL output port the main H.264/H.265 stream uses. No
+the same VPE/SCL output port the main H.265 stream uses. No
 parameters; quality defaults to 80, resolution matches the main stream.
 Captures are serialized through a module mutex (concurrent clients
 queue rather than collide), and the channel is created at pipeline
@@ -604,9 +605,12 @@ the video stream. Fields marked **restart** trigger a pipeline reinit.
 
 #### Video
 
+Video codec is hardcoded H.265 (HEVC) — there is no `video0.codec`
+field. Existing configs containing `"codec": "h264"` or `"h265"` load
+cleanly; the key is silently ignored.
+
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.codec` | string | restart | `"h265"` (Maruko also supports `"h264"`; Star6E RTP remains h265-only) |
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
 | `video0.fps` | uint | live | Output frame rate |
 | `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
@@ -676,10 +680,6 @@ Typical usage:
 - Pair scene detection with `outgoing.sidecar_port>0` when an external
   controller needs per-frame `frame_type`, `complexity`, `scene_change`,
   `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
-
-Codec note:
-- Star6E with `outgoing.stream_mode="rtp"` requires `video0.codec="h265"`.
-- Maruko accepts both `h264` and `h265`.
 
 #### Resilience preset (Star6E + Maruko)
 

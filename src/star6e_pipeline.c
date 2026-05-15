@@ -1132,7 +1132,7 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	pconf->sensor_framerate = vcfg->video0.fps;
 	pconf->venc_max_rate   = vcfg->video0.bitrate;
 
-	if (codec_config_resolve_codec_rc(vcfg->video0.codec, vcfg->video0.rc_mode,
+	if (codec_config_resolve_codec_rc(vcfg->video0.rc_mode,
 	    &pconf->rc_codec, &pconf->rc_mode) != 0)
 		return -1;
 
@@ -1146,15 +1146,6 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	    vcfg->outgoing.stream_mode,
 	    vcfg->outgoing.connected_udp) != 0)
 		return -1;
-
-	if (star6e_output_setup_is_rtp(&pconf->output_setup) &&
-	    pconf->rc_codec != PT_H265) {
-		fprintf(stderr,
-			"ERROR: RTP mode on star6e currently supports H.265 only.\n");
-		fprintf(stderr,
-			"       Set video0.codec to h265 or use compact mode / non-RTP output.\n");
-		return -1;
-	}
 
 	/* Auto-cap exposure to frame period so the AE shutter never exceeds
 	 * the frame period.  Without this, the AE converges on a long

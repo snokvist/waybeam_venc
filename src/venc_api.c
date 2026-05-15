@@ -329,7 +329,6 @@ static const FieldDesc g_fields[] = {
 	FIELD(image, flip,             FT_BOOL,   MUT_RESTART),
 	FIELD(image, rotate,           FT_INT,    MUT_RESTART),
 
-	FIELD(video0, codec,           FT_STRING, MUT_RESTART),
 	FIELD(video0, rc_mode,         FT_STRING, MUT_RESTART),
 	FIELD(video0, fps,             FT_UINT,   MUT_LIVE),
 	{ "video0.size", FT_SIZE, MUT_RESTART,
@@ -773,26 +772,14 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 /* ── Config validation ───────────────────────────────────────────────── */
 
 /* Check config consistency after a field change.  Returns NULL if valid,
- * or a static error message string if invalid. */
-static int config_codec_is_h265(const VencConfig *cfg)
-{
-	return cfg &&
-		(strcmp(cfg->video0.codec, "h265") == 0 ||
-		 strcmp(cfg->video0.codec, "265") == 0);
-}
-
+ * or a static error message string if invalid.  Video codec is hardcoded
+ * H.265, so the historical star6e/H.264 RTP gate is no longer required. */
 static const char *validate_backend_config(const char *backend_name,
 	const VencConfig *cfg)
 {
+	(void)backend_name;
 	if (!cfg)
 		return "invalid config state";
-
-	if (backend_name && strcmp(backend_name, "star6e") == 0 &&
-	    strcmp(cfg->outgoing.stream_mode, "compact") != 0 &&
-	    !config_codec_is_h265(cfg)) {
-		return "star6e RTP mode currently supports h265 only";
-	}
-
 	return NULL;
 }
 

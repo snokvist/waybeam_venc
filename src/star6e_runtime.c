@@ -924,36 +924,12 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		star6e_patch_stream_to_trail_n(&stream);
 	}
 
-	/* refPred diagnostic — print eRefType histogram every 150 frames when
-	 * WAYBEAM_DEBUG_REFTYPE is set in the environment.  Reveals whether
-	 * the SDK is producing ENHANCE_P_NOTFORREF frames (which would make
-	 * the pyramid actually useful for error resilience). */
-	if (getenv("WAYBEAM_DEBUG_REFTYPE")) {
-		static unsigned int reftype_hist[8] = {0};
-		static unsigned int total = 0;
-		unsigned int rt = stream.h265Info.refType;
-		if (rt < 8)
-			reftype_hist[rt]++;
-		total++;
-		if (total % 150 == 0) {
-			fprintf(stderr,
-				"[refPred] eRefType histogram (n=%u): "
-				"BASE_P_REFTOIDR=%u BASE_P_REFBYBASE=%u "
-				"BASE_P_REFBYENHANCE=%u "
-				"ENHANCE_P_REFBYENHANCE=%u "
-				"ENHANCE_P_NOTFORREF=%u other=%u\n",
-				total, reftype_hist[0], reftype_hist[1],
-				reftype_hist[2], reftype_hist[3],
-				reftype_hist[4],
-				reftype_hist[5] + reftype_hist[6] + reftype_hist[7]);
-		}
-	}
-
 	{
 		RtpSidecarEncInfo enc_info;
-		int codec = (strcmp(vcfg->video0.codec, "h264") == 0) ? 0 : 1;
+		/* codec arg = 1 (H.265) — venc is HEVC-only since the
+		 * resilience-preset consolidation. */
 		uint32_t frame_size = star6e_scene_frame_size(&stream);
-		uint8_t is_idr = star6e_scene_is_idr(&stream, codec);
+		uint8_t is_idr = star6e_scene_is_idr(&stream, 1);
 
 		scene_update(&ctx->scene, frame_size, is_idr,
 			star6e_scene_request_idr, &ps->venc_channel);

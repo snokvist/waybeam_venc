@@ -96,8 +96,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->image.flip = false;
 	cfg->image.rotate = 0;
 
-	/* video0 */
-	safe_strcpy(cfg->video0.codec, sizeof(cfg->video0.codec), "h265");
+	/* video0 — codec is hardcoded H.265, see VencConfigVideo doc */
 	safe_strcpy(cfg->video0.rc_mode, sizeof(cfg->video0.rc_mode), "cbr");
 	cfg->video0.fps = 60;
 	cfg->video0.width = 0;
@@ -352,8 +351,9 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "video0");
 	if (!obj) return;
 
-	safe_strcpy(v->codec, sizeof(v->codec),
-		json_get_string(obj, "codec", v->codec));
+	/* "codec" is silently ignored — H.265 is hardcoded.  Existing
+	 * configs that set codec="h264" load cleanly; the value is
+	 * dropped and HEVC is used. */
 	safe_strcpy(v->rc_mode, sizeof(v->rc_mode),
 		json_get_string(obj, "rcMode", v->rc_mode));
 	v->fps = (uint32_t)json_get_int(obj, "fps", (int)v->fps);
@@ -961,7 +961,6 @@ static void render_image(PrettyBuf *p, const VencConfig *cfg, int is_last)
 static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "video0");
-	pp_field_string(p, 2, "codec",  cfg->video0.codec,  0);
 	pp_field_string(p, 2, "rcMode", cfg->video0.rc_mode, 0);
 	pp_field_uint(p,   2, "fps",    cfg->video0.fps,    0);
 	if (cfg->video0.width > 0 && cfg->video0.height > 0) {
@@ -1152,7 +1151,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	/* video0 */
 	cJSON *vid = cJSON_AddObjectToObject(root, "video0");
 	if (vid) {
-		cJSON_AddStringToObject(vid, "codec", cfg->video0.codec);
 		cJSON_AddStringToObject(vid, "rcMode", cfg->video0.rc_mode);
 		cJSON_AddNumberToObject(vid, "fps", cfg->video0.fps);
 		if (cfg->video0.width > 0 && cfg->video0.height > 0) {

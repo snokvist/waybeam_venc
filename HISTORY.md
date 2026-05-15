@@ -57,6 +57,17 @@ behind a single user-facing knob: `video0.resilience`.
   refPred on; OSD garbling on first apply resolves on next IDR (not a
   refPred corruption bug — documented in agent memory).
 
+- **H.265 hardcoded — `video0.codec` retired.**  The video codec is now
+  unconditionally HEVC across both backends; the user-facing field is
+  gone from the schema, default JSON, and pretty-print/JSON-export.
+  This removes the H.264 + refPred footgun (the SVC-T + TRAIL_N rewrite
+  is HEVC-only) and collapses several rcMode / RTP / refType branches
+  into a single H.265 path.  Migration: existing configs with
+  `"codec": "h264"` load cleanly — the key is silently dropped and the
+  daemon emits HEVC.  Legacy clients setting `video0.codec=h264` via
+  `/api/v1/set` receive a 404 `unknown config field` rather than silent
+  acceptance.  Resilience preset table is no longer codec-conditional.
+
 ## Investigation - 2026-05-14 — **SOLVED**: IMX415 driver regression is a single missing register write
 
 **Root cause**: `drivers/sensor_imx415_maruko.c` does not write

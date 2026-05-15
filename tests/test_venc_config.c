@@ -48,7 +48,6 @@ static int test_defaults(void)
 	CHECK("defaults_mirror", cfg.image.mirror == false);
 	CHECK("defaults_flip", cfg.image.flip == false);
 
-	CHECK("defaults_codec", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("defaults_rc_mode", strcmp(cfg.video0.rc_mode, "cbr") == 0);
 	CHECK("defaults_fps", cfg.video0.fps == 60);
 	CHECK("defaults_width_auto", cfg.video0.width == 0);
@@ -193,6 +192,7 @@ static int test_load_full_json(void)
 		"  \"isp\": { \"sensorBin\": \"/etc/sensors/imx415.bin\" },"
 		"  \"image\": { \"mirror\": true, \"flip\": true },"
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
+		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
 		"    \"frameLost\": false, \"zoomPct\": 0.5, \"zoomX\": 0.25, \"zoomY\": 0.75 },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
@@ -219,7 +219,6 @@ static int test_load_full_json(void)
 	CHECK("load_isp_bin", strcmp(cfg.isp.sensor_bin, "/etc/sensors/imx415.bin") == 0);
 	CHECK("load_mirror", cfg.image.mirror == true);
 	CHECK("load_flip", cfg.image.flip == true);
-	CHECK("load_codec", strcmp(cfg.video0.codec, "h264") == 0);
 	CHECK("load_rc", strcmp(cfg.video0.rc_mode, "vbr") == 0);
 	CHECK("load_fps", cfg.video0.fps == 90);
 	CHECK("load_width", cfg.video0.width == 1280);
@@ -264,7 +263,6 @@ static int test_load_partial_json(void)
 	CHECK("partial_fps_set", cfg.video0.fps == 120);
 	/* All other fields retain defaults */
 	CHECK("partial_bitrate_default", cfg.video0.bitrate == 8192);
-	CHECK("partial_codec_default", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("partial_web_port_default", cfg.system.web_port == 80);
 
 	return failures;
@@ -397,7 +395,6 @@ static int test_roundtrip(void)
 	CHECK("roundtrip_zoom_x", cfg2.video0.zoom_x == 0.25);
 	CHECK("roundtrip_zoom_y", cfg2.video0.zoom_y == 0.75);
 	/* Unchanged fields preserved */
-	CHECK("roundtrip_codec", strcmp(cfg2.video0.codec, "h265") == 0);
 	CHECK("roundtrip_gop", cfg2.video0.gop_size == 1.0);
 
 	return failures;
@@ -558,7 +555,6 @@ static int test_sample_config_file(void)
 	if (ret != 0) return failures;
 
 	CHECK("sample_fps_30", cfg.video0.fps == 60);
-	CHECK("sample_codec_h265", strcmp(cfg.video0.codec, "h265") == 0);
 	CHECK("sample_enabled", cfg.outgoing.enabled == false);
 	CHECK("sample_server", strcmp(cfg.outgoing.server, "") == 0);
 	CHECK("sample_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
