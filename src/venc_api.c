@@ -944,6 +944,33 @@ static int make_single_set_success_json(const char *field_key,
 	return *out_json ? 0 : -1;
 }
 
+/* Save-only response: config persisted to disk, but the change cannot be
+ * applied live and requires a manual device reboot.  Used for transitions
+ * that destabilise the SDK encoder driver state (currently refPred
+ * activation/deactivation — empirically crashes the SoC across respawn). */
+static int make_single_set_reboot_required_json(const char *field_key,
+	const char *json_value, char **out_json)
+{
+	char buf[640];
+	int len;
+
+	if (!field_key || !json_value || !out_json)
+		return -1;
+
+	len = snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
+		"\"reboot_required\":true,"
+		"\"note\":\"refPred or intra-refresh activation change "
+		"persisted to disk; reboot the device to apply (live respawn "
+		"is unsafe for this SDK)\"}}",
+		field_key, json_value);
+	if (len >= (int)sizeof(buf))
+		len = (int)sizeof(buf) - 1;
+
+	*out_json = strdup(buf);
+	return *out_json ? 0 : -1;
+}
+
 static int make_multi_live_set_success_json(const SetQueryParam *params,
 	size_t count, char **out_json)
 {
@@ -1775,6 +1802,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 	VencConfig new_cfg;
 	char *jval;
 	int rc;
+	int refpred_change = 0;
 
 	if (!param || !status_code || !response_json)
 		return -1;
@@ -1788,6 +1816,42 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
+	/* Detect SDK-fragile state changes — these crash the SoC if
+	 * applied live via fork+exec respawn (the kernel encoder driver
+	 * state from the previous config does not cleanly release in time
+	 * for the new MI_VENC_* configuration calls, even with a 500ms
+	 * post-exit settle).
+	 *
+	 * Two fragile axes empirically confirmed crash-prone on Star6E:
+	 *
+	 *   (a) refPred state — any change in ref_base / ref_enhance /
+	 *       ref_pred between transitions.  Crashes both directions
+	 *       (active→inactive and inactive→active).
+	 *   (b) intra-refresh activation toggle — transitions between
+	 *       intra_refresh_mode="off" and any active mode
+	 *       (fast/balanced/robust).  Within-active changes (e.g.
+	 *       fast↔balanced) are safe.
+	 *
+	 * Cold-boot into any preset works fine — no prior kernel state
+	 * exists.  The crash takes the whole SoC offline (ICMP dies),
+	 * requires a power cycle.
+	 *
+	 * Workaround: persist config to disk, refuse to trigger live
+	 * reinit, return reboot_required to the caller.  User reboots and
+	 * the new daemon cold-boots into the new preset cleanly. */
+	{
+		const char *old_ir = g_cfg->video0.intra_refresh_mode;
+		const char *new_ir = new_cfg.video0.intra_refresh_mode;
+		int old_ir_active = (old_ir[0] && strcmp(old_ir, "off") != 0);
+		int new_ir_active = (new_ir[0] && strcmp(new_ir, "off") != 0);
+
+		if (g_cfg->video0.ref_base    != new_cfg.video0.ref_base ||
+		    g_cfg->video0.ref_enhance != new_cfg.video0.ref_enhance ||
+		    g_cfg->video0.ref_pred    != new_cfg.video0.ref_pred ||
+		    old_ir_active != new_ir_active)
+			refpred_change = 1;
+	}
+
 	*g_cfg = new_cfg;
 	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
 	pthread_mutex_unlock(&g_cfg_mutex);
@@ -1796,7 +1860,8 @@ static int process_restart_set_query(const SetQueryParam *param,
 	 * matches.  Failure is logged by the helper — leave as void since the
 	 * reinit is still the right next step even if persistence stalled. */
 	(void)venc_api_save_config_to_disk(&new_cfg);
-	venc_api_request_reinit();
+	if (!refpred_change)
+		venc_api_request_reinit();
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
@@ -1804,7 +1869,11 @@ static int process_restart_set_query(const SetQueryParam *param,
 	}
 
 	*status_code = 200;
-	rc = make_single_set_success_json(param->key, jval, 1, response_json);
+	if (refpred_change)
+		rc = make_single_set_reboot_required_json(param->key, jval,
+			response_json);
+	else
+		rc = make_single_set_success_json(param->key, jval, 1, response_json);
 	free(jval);
 	return rc;
 }
