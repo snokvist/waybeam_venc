@@ -383,20 +383,24 @@ static int apply_resilience_preset(const char *name, VencConfigVideo *v)
 	 * (ROI is delta-QP only, doesn't override skip-mode for
 	 * zero-residual blocks).  See README.md for full discussion.
 	 *
-	 *   preset      nominal   enh  GOP   eff.wave  OSD-safe?
-	 *   ────────────────────────────────────────────────────
-	 *   off         off       0    user  -         yes (no refresh)
-	 *   quality     off       0    4.0s  -         yes (IDR-based)
-	 *   racing      150ms     0    2.0s  150ms     yes
-	 *   endurance   500ms     0    2.0s  500ms     yes
-	 *   patrol      500ms     0    4.0s  500ms     yes
-	 *   rally       150ms     1    2.0s  300ms     no  (light refPred)
-	 *   range       500ms     4    2.0s  2500ms    no  (heavy refPred)
-	 *   fpv        1000ms     4    2.0s  5000ms    no  (heaviest refPred)
+	 *   preset      nominal   enh  GOP    eff.wave  OSD-safe?
+	 *   ─────────────────────────────────────────────────────
+	 *   off         off       0    user   -         yes (no refresh)
+	 *   rescue      off       0    0.25s  -         yes (IDR-spam, lowest latency)
+	 *   quality     off       0    4.0s   -         yes (IDR-based)
+	 *   sprint      150ms     0    0.5s   150ms     yes (intra+short GOP)
+	 *   racing      150ms     0    2.0s   150ms     yes
+	 *   endurance   500ms     0    2.0s   500ms     yes
+	 *   patrol      500ms     0    4.0s   500ms     yes
+	 *   rally       150ms     1    2.0s   300ms     no  (light refPred)
+	 *   range       500ms     4    2.0s   2500ms    no  (heavy refPred)
+	 *   fpv        1000ms     4    2.0s   5000ms    no  (heaviest refPred)
 	 */
 	static const struct preset table[] = {
-		{ "off",        "off",      0, 0, 0.0 },  /* gopSize honoured */
+		{ "off",        "off",      0, 0, 0.0 },   /* gopSize honoured */
+		{ "rescue",     "off",      0, 0, 0.25 },  /* IDR-spam, ~35% bitrate to IDRs */
 		{ "quality",    "off",      0, 0, 4.0 },
+		{ "sprint",     "fast",     0, 0, 0.5 },   /* intra-refresh + aggressive IDR */
 		{ "racing",     "fast",     0, 0, 2.0 },
 		{ "endurance",  "balanced", 0, 0, 2.0 },
 		{ "patrol",     "balanced", 0, 0, 4.0 },

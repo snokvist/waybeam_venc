@@ -1,5 +1,24 @@
 # History
 
+## [0.10.16] - 2026-05-15
+
+Two new OSD-safe resilience presets for ultra-low recovery latency:
+
+- `rescue` — 0.25 s GOP, no intra-refresh, no SVC-T.  Pure IDR-spam
+  fallback.  ~35–40 % of the bitstream is IDR data, but the recovery
+  floor is the lowest of any preset (next IDR is never more than
+  250 ms away).  Useful as a spec-compliant baseline when
+  A/B-debugging whether an intra-refresh preset is misbehaving in
+  the field.
+- `sprint` — 0.5 s GOP + `fast` (150 ms) intra-refresh, no SVC-T.
+  Combines the stripe-recovery of `racing` with a guaranteed IDR
+  floor every 500 ms.  ~20–25 % IDR overhead.  Pick over `racing`
+  when you have bitrate headroom and want belt-and-suspenders
+  recovery on close-range / line-of-sight links.
+
+Both join the OSD-safe column (no green smear).  No code-path
+changes — just two new entries in the resilience preset table.
+
 ## [0.10.15] - 2026-05-15
 
 Both backends: resilience SETs now persist their new value to

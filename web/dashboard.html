@@ -607,7 +607,7 @@ const TOOLTIPS = {
 
 'video0.sceneHoldoff':'Consecutive scene-spike frames required before requesting IDR. Default: 2. Requires restart',
 
-'video0.resilience':'Error-resilience preset (intra-refresh + SVC-T refPred + GOP). OSD-safe: off/quality/racing/endurance/patrol. OSD-unsafe (persistent green smear over OSD area): rally/range/fpv use SVC-T refPred. See README for the full table. Requires restart',
+'video0.resilience':'Error-resilience preset (intra-refresh + SVC-T refPred + GOP). OSD-safe: off/rescue/quality/sprint/racing/endurance/patrol. OSD-unsafe (persistent green smear over OSD area): rally/range/fpv use SVC-T refPred. rescue=0.25s IDR-spam. sprint=intra+0.5s IDR. See README for the full table. Requires reboot',
 
 'video0.zoomPct':'Digital zoom crop fraction. 0 = off, 0.25-1.0 = crop fraction; smaller is deeper zoom. Requires restart',
 
@@ -670,7 +670,7 @@ const TOOLTIPS = {
 const ENUMS = {
 
 'video0.rcMode':['cbr','vbr','avbr','qvbr'],
-'video0.resilience':['off','quality','racing','rally','endurance','patrol','range','fpv'],
+'video0.resilience':['off','rescue','quality','sprint','racing','rally','endurance','patrol','range','fpv'],
 'isp.aeEngine':['sdk','custom'],
 'isp.awbMode':['auto','ct_manual'],
 'audio.codec':['opus','pcm','g711a','g711u'],

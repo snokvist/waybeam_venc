@@ -107,7 +107,9 @@ static int test_resilience_preset_expansion(void)
 		uint8_t    e;
 		double     gop;
 	} cases[] = {
+		{ "rescue",    "off",      0, 0, 0.25 }, /* IDR-spam, lowest recovery latency */
 		{ "quality",   "off",      0, 0, 4.0 },
+		{ "sprint",    "fast",     0, 0, 0.5 },  /* intra + aggressive IDR */
 		{ "racing",    "fast",     0, 0, 2.0 },
 		{ "endurance", "balanced", 0, 0, 2.0 },  /* OSD-safe */
 		{ "patrol",    "balanced", 0, 0, 4.0 },  /* OSD-safe + long GOP */

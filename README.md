@@ -702,6 +702,8 @@ length are all derived from the preset — no per-feature knobs.
 
 |                            | **OSD-safe** (no SVC-T)                      | **OSD-unsafe** (uses SVC-T → refPred)         |
 |----------------------------|----------------------------------------------|-----------------------------------------------|
+| **Ultra-low recovery**     | `rescue` — IDR-spam, no intra-refresh       | —                                             |
+| **Very fast recovery**     | `sprint` — close-range + plenty of bitrate  | —                                             |
 | **Fast recovery needed**   | `racing` — close-range LOS                   | `rally` — light refPred, motion-heavy scenes  |
 | **Recovery time tradable** | `endurance` — balanced wavefront, less bitrate | `range` — long-range FPV (heavy refPred)    |
 | **Long stable flight**     | `patrol` — balanced + 4 s GOP                | `fpv` — drone FPV (heaviest refPred)          |
@@ -709,7 +711,7 @@ length are all derived from the preset — no per-feature knobs.
 
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.resilience` | string | **reboot** | `off` \| `quality` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
+| `video0.resilience` | string | **reboot** | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
 | `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it.  Live-reinit applies (no reboot). |
 
 > ⚠️  **Resilience changes require a reboot on both Star6E and Maruko.**
@@ -741,13 +743,32 @@ Expansion table:
 | Preset      | intra-refresh    | refPred (base/enhance) | gopSize override | OSD-safe?         |
 |-------------|------------------|------------------------|------------------|-------------------|
 | `off`       | off              | off                    | user-set         | yes (no refresh)  |
+| `rescue`    | off              | off                    | **0.25 s**       | yes (IDR-spam)    |
 | `quality`   | off              | off                    | 4.0 s            | yes (IDR-based)   |
+| `sprint`    | fast (150 ms)    | off                    | **0.5 s**        | yes               |
 | `racing`    | fast (150 ms)    | off                    | 2.0 s            | yes               |
 | `endurance` | balanced (500 ms)| off                    | 2.0 s            | yes               |
 | `patrol`    | balanced (500 ms)| off                    | 4.0 s            | yes               |
 | `rally`     | fast (150 ms)    | base=1, enhance=1      | 2.0 s            | no — green smear  |
 | `range`     | balanced (500 ms)| base=1, enhance=4      | 2.0 s            | no — green smear  |
 | `fpv`       | robust (1000 ms) | base=1, enhance=4      | 2.0 s            | no — green smear  |
+
+**Latency vs bitrate cost of short-GOP presets.**  Short GOPs reduce
+worst-case recovery latency (next IDR is closer) but cost bitrate
+because IDRs are 10–20× the size of P-frames.  At 1080p60 / 13 Mbps:
+
+| GOP    | IDRs per 120 frames | IDR share of bitstream |
+|--------|---------------------|------------------------|
+| 4.0 s  | 0.5 (one every 240 fr) | ~3 %               |
+| 2.0 s  | 1                       | ~5 %               |
+| 0.5 s  | 4                       | ~20–25 %           |
+| 0.25 s | 8                       | ~35–40 %           |
+
+Pick `sprint` over `racing` when you have headroom and want a
+guaranteed IDR floor on top of intra-refresh stripes.  Pick `rescue`
+when you specifically want spec-compliant pure-IDR recovery (e.g. for
+A/B-debugging whether an intra-refresh preset is misbehaving in the
+field).  Both are OSD-safe.
 
 Quick start:
 
