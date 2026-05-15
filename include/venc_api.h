@@ -108,6 +108,25 @@ void venc_api_request_reinit(void);
 bool venc_api_get_reinit(void);
 void venc_api_clear_reinit(void);
 
+/* Process-level respawn request flag.  Distinct from `reinit`:
+ *
+ *   reinit  = "tear down the pipeline graph, reload config from
+ *             disk, reconfigure" — all in-process.  Cheap (~1 s).
+ *
+ *   respawn = "tear down everything cleanly, then fork+exec a fresh
+ *             waybeam".  Used when in-process reconfigure is unsafe
+ *             (SVC-T reference pyramid change on Maruko, where
+ *             MI_SYS_IMPL_FlushInputPortTasks can page-fault under
+ *             in-process teardown).  ~3 s.
+ *
+ * Calling venc_api_request_respawn() also sets the reinit flag so
+ * the runtime drops out of its stream loop; the runner then sees
+ * the respawn flag after teardown and skips the in-process
+ * reconfigure step, letting main.c invoke venc_respawn_after_exit(). */
+void venc_api_request_respawn(void);
+bool venc_api_get_respawn(void);
+void venc_api_clear_respawn(void);
+
 /* Record control flags (set by HTTP thread, consumed by main loop). */
 void venc_api_request_record_start(const char *dir);
 void venc_api_request_record_stop(void);

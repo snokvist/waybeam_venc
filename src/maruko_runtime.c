@@ -9,6 +9,7 @@
 #include "star6e_ts_recorder.h"
 #include "venc_api.h"
 #include "venc_config.h"
+#include "venc_respawn.h"
 #include "venc_httpd.h"
 
 #include <stdio.h>
@@ -209,6 +210,23 @@ static int maruko_runner_run(void *opaque)
 		venc_httpd_pause();
 		printf("> [maruko] reinit: tearing down pipeline graph\n");
 		maruko_pipeline_teardown_graph(&ctx->backend);
+
+		/* Respawn path: the API layer set the respawn flag (typically
+		 * because a resilience-preset ref_* delta requires a fresh
+		 * VENC channel that the in-process reconfigure cannot
+		 * synthesize, and the in-process teardown can page-fault
+		 * MI_SYS_IMPL_FlushInputPortTasks anyway).  Skip the
+		 * reconfigure step and exit the run loop — main() observes
+		 * venc_respawn_pending() after backend teardown and forks a
+		 * successor process. */
+		if (venc_api_get_respawn()) {
+			venc_api_clear_respawn();
+			venc_respawn_request();
+			printf("> [maruko] respawn requested, "
+				"exiting run loop for fork+exec\n");
+			result = 0;
+			break;
+		}
 
 		if (maruko_reinit_pipeline(ctx) != 0) {
 			venc_httpd_resume();

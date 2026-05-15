@@ -225,3 +225,26 @@ Reference / memory:
    green throughout, no kernel-fault dmesg lines.
 4. The `reboot_required` JSON response is no longer reachable from any
    user-visible SET path.
+
+## Status (host-side work — bench validation pending)
+
+- [x] Phase 0 — diff logging in `process_restart_set_query`
+- [x] Phase 1 — split: intra/gop-only deltas → live-reinit;
+      ref_* deltas → respawn (was: reboot-required)
+- [x] Phase 2 — Maruko respawn parity (shared `venc_respawn.c`;
+      both backends now fork+exec on ref_* deltas; `g_respawn`
+      flag in `venc_api.c` signals the runner)
+- [x] Phase 3 — `make_single_set_reboot_required_json` deleted;
+      `reboot_required:true` no longer reachable from any SET path
+- [ ] Bench: `racing → endurance` live transition verified on 192.168.1.13
+- [ ] Bench: `racing → fpv` respawn verified on 192.168.2.12 (Maruko)
+- [ ] Bench: 100-cycle automated preset sweep on both devices, daemon
+      alive, ICMP green, no kernel-fault dmesg
+
+## Defensive measures shipped alongside Phase 0-3
+
+- 5-second rate limit on consecutive `video0.resilience` SETs.
+  Star6E single-respawn is reliable; back-to-back respawns fired faster
+  than parent MI_SYS teardown completes wedge the SoC
+  (venc_star6e_reinit_fragility.md).  HTTP 429 with a `rate_limited`
+  error response body until the cooldown expires.

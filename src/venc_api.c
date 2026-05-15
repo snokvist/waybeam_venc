@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Guard the live max_payload_size ceiling against future tightenings:
@@ -216,6 +217,27 @@ bool venc_api_get_reinit(void)
 void venc_api_clear_reinit(void)
 {
 	g_reinit = 0;
+}
+
+static volatile sig_atomic_t g_respawn = 0;
+
+void venc_api_request_respawn(void)
+{
+	/* Setting reinit too forces the runtime to drop out of its
+	 * stream loop; the runner observes the respawn flag after
+	 * teardown and skips the in-process reconfigure step. */
+	g_respawn = 1;
+	g_reinit = 1;
+}
+
+bool venc_api_get_respawn(void)
+{
+	return g_respawn != 0;
+}
+
+void venc_api_clear_respawn(void)
+{
+	g_respawn = 0;
 }
 
 void venc_api_request_record_start(const char *dir)
@@ -937,34 +959,6 @@ static int make_single_set_success_json(const char *field_key,
 			"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s}}",
 			field_key, json_value);
 	}
-	if (len >= (int)sizeof(buf))
-		len = (int)sizeof(buf) - 1;
-
-	*out_json = strdup(buf);
-	return *out_json ? 0 : -1;
-}
-
-/* Save-only response: config persisted to disk, but the change cannot be
- * applied live and requires a manual device reboot.  Used for transitions
- * that destabilise the SDK encoder driver state (currently refPred
- * activation/deactivation — empirically crashes the SoC across respawn). */
-static int make_single_set_reboot_required_json(const char *field_key,
-	const char *json_value, char **out_json)
-{
-	char buf[640];
-	int len;
-
-	if (!field_key || !json_value || !out_json)
-		return -1;
-
-	len = snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
-		"\"reboot_required\":true,"
-		"\"note\":\"resilience preset changes the SVC-T reference "
-		"pyramid (ref_base/ref_enhance/ref_pred) — that part of the "
-		"VENC channel is built at creation and cannot be reconfigured "
-		"live.  Persisted to disk; reboot to apply.\"}}",
-		field_key, json_value);
 	if (len >= (int)sizeof(buf))
 		len = (int)sizeof(buf) - 1;
 
@@ -1797,16 +1791,48 @@ static void init_single_set_param(SetQueryParam *param, const char *key,
 	param->field = field;
 }
 
+/* Rate limit on resilience preset SETs.  Star6E reinit is fork+exec
+ * respawn — a *single* respawn is reliable but consecutive respawns
+ * fired faster than the parent finishes MI_SYS teardown can hang the
+ * SoC (venc_star6e_reinit_fragility.md; "third+ rapid SET wedges
+ * stream / drops ICMP").  5 s is empirically clear of that regime
+ * on imx335 @ 1080p and is loose enough that no realistic
+ * operator/menu interaction will trip it. */
+#define VENC_RESILIENCE_MIN_INTERVAL_SEC 5
+
 static int process_restart_set_query(const SetQueryParam *param,
 	int *status_code, char **response_json)
 {
 	VencConfig new_cfg;
 	char *jval;
 	int rc;
-	int needs_reboot = 0;
+	int needs_respawn = 0;
+	int is_resilience = 0;
+	struct timespec now_ts = {0};
+	static time_t s_last_resilience_set_sec;
 
 	if (!param || !status_code || !response_json)
 		return -1;
+
+	is_resilience = (param->field &&
+		strcmp(param->canonical_key, "video0.resilience") == 0);
+
+	if (is_resilience) {
+		clock_gettime(CLOCK_MONOTONIC, &now_ts);
+		if (s_last_resilience_set_sec != 0 &&
+		    (now_ts.tv_sec - s_last_resilience_set_sec) <
+		    VENC_RESILIENCE_MIN_INTERVAL_SEC) {
+			char msg[160];
+			long remaining = VENC_RESILIENCE_MIN_INTERVAL_SEC -
+				(now_ts.tv_sec - s_last_resilience_set_sec);
+			snprintf(msg, sizeof(msg),
+				"resilience preset rate-limited; wait %lds before "
+				"the next change (in-flight respawn must complete)",
+				remaining);
+			*status_code = 429;
+			return make_error_json("rate_limited", msg, response_json);
+		}
+	}
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	new_cfg = *g_cfg;
@@ -1834,23 +1860,26 @@ static int process_restart_set_query(const SetQueryParam *param,
 		(void)venc_config_apply_resilience_preset(
 			new_cfg.video0.resilience, &new_cfg.video0);
 
-		/* Classify the delta: ref_* (SVC-T reference pyramid) is bound
-		 * to the VENC channel at creation and cannot be reconfigured
-		 * by any documented MI SDK call.  intra_refresh_mode and
-		 * gop_size, by contrast, are honoured by the in-process
-		 * reinit path (reload from disk, re-expand preset,
-		 * teardown+reconfigure pipeline).
+		/* Classify the delta:
 		 *
-		 * Strategy: route ref_* deltas through the reboot-required
-		 * path (Phase 2 will replace this with Maruko fork+exec
-		 * respawn parity, eliminating the need entirely); route
-		 * intra/gop-only deltas through the normal RESTART live-
-		 * reinit path that every other MUT_RESTART field already uses. */
+		 *   ref_* changed     The SVC-T reference pyramid is bound
+		 *                     to the VENC channel at creation and
+		 *                     cannot be reconfigured by any
+		 *                     documented MI SDK call.  Route via
+		 *                     process-level respawn (fork+exec a
+		 *                     fresh waybeam after clean teardown):
+		 *                     a new VENC channel binds the new
+		 *                     pyramid at creation.
+		 *
+		 *   intra/gop only    Honoured by the in-process reinit
+		 *                     path (reload from disk, re-expand
+		 *                     preset, teardown+reconfigure
+		 *                     pipeline).  Same path every other
+		 *                     MUT_RESTART field uses. */
 		if (old_v.ref_base != new_cfg.video0.ref_base ||
 		    old_v.ref_enhance != new_cfg.video0.ref_enhance ||
-		    old_v.ref_pred != new_cfg.video0.ref_pred) {
-			needs_reboot = 1;
-		}
+		    old_v.ref_pred != new_cfg.video0.ref_pred)
+			needs_respawn = 1;
 
 		fprintf(stderr,
 			"[waybeam] resilience-diff: '%s' -> '%s'  "
@@ -1866,38 +1895,38 @@ static int process_restart_set_query(const SetQueryParam *param,
 			(int)old_v.ref_pred,
 			(int)new_cfg.video0.ref_pred,
 			old_v.gop_size, new_cfg.video0.gop_size,
-			needs_reboot ? "reboot-required" : "live-reinit");
+			needs_respawn ? "respawn" : "live-reinit");
 	}
 
-	/* For reboot-required changes (ref_* delta), only persist to disk —
-	 * leave the live g_cfg untouched so `/status` and
-	 * `/resilience/status` continue to reflect the actually-running
-	 * pipeline until the reboot.  For everything else (including
-	 * intra-refresh-mode-only or gop-size-only resilience deltas),
-	 * commit g_cfg in memory and trigger the live reinit. */
-	if (needs_reboot) {
-		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
-		pthread_mutex_unlock(&g_cfg_mutex);
-		(void)venc_api_save_config_to_disk(&new_cfg);
-	} else {
-		*g_cfg = new_cfg;
-		jval = field_to_json_value_from_cfg(&new_cfg, param->field);
-		pthread_mutex_unlock(&g_cfg_mutex);
-		(void)venc_api_save_config_to_disk(&new_cfg);
+	/* Commit g_cfg in memory and persist to disk for both paths.
+	 * For respawn, the fresh process will reload from disk anyway,
+	 * but committing in-memory keeps /status / GET responses
+	 * coherent with the SET that just succeeded. */
+	*g_cfg = new_cfg;
+	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
+	pthread_mutex_unlock(&g_cfg_mutex);
+	(void)venc_api_save_config_to_disk(&new_cfg);
+
+	if (needs_respawn)
+		venc_api_request_respawn();
+	else
 		venc_api_request_reinit();
-	}
+
 	if (!jval) {
 		*status_code = 500;
 		return make_error_json("internal_error", "out of memory",
 			response_json);
 	}
 
+	/* Stamp the rate-limit clock only after a successful commit — a
+	 * SET that failed validation should not count against the
+	 * cooldown window. */
+	if (is_resilience)
+		s_last_resilience_set_sec = now_ts.tv_sec;
+
 	*status_code = 200;
-	if (needs_reboot)
-		rc = make_single_set_reboot_required_json(param->key, jval,
-			response_json);
-	else
-		rc = make_single_set_success_json(param->key, jval, 1, response_json);
+	rc = make_single_set_success_json(param->key, jval,
+		1 /* reinit_pending */, response_json);
 	free(jval);
 	return rc;
 }
