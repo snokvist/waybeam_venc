@@ -2337,6 +2337,22 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 			state->bound_vif_vpe = 0;
 			return ret;
 		}
+		/* OSD must init BEFORE the stab thread starts pumping frames
+		 * into VENC ch0's input port.  The kernel RGN driver rejects
+		 * MI_RGN_Init when a downstream channel is actively receiving
+		 * user-fed frames (empirically: returns failure on Star6E
+		 * libmi_rgn when called after star6e_stab_start).  Doing it
+		 * here — between port reapply and stab_start — keeps VENC
+		 * quiescent during RGN attach. */
+		if (vcfg->debug.show_osd) {
+			state->debug_osd = debug_osd_create_for_venc(
+				state->image_width, state->image_height,
+				(int)venc_device, (int)state->venc_channel);
+			if (!state->debug_osd)
+				fprintf(stderr, "[waybeam] WARNING: debug OSD attach to "
+					"VENC failed (libmi_rgn build may use a different "
+					"VENC module id) — continuing without OSD\n");
+		}
 		ret = star6e_stab_start(&state->vpe_port, &state->venc_port);
 		if (ret != 0) {
 			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
@@ -2473,11 +2489,13 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * port output.  Consequence: OSD lands on the encoded stream (ch0)
 	 * only — dual ch1 recordings and JPEG snapshots stay OSD-free, which
 	 * matches the typical FPV workflow (overlay on the live feed, clean
-	 * recording, clean stills).  Also gives stabilization a correctly-
-	 * positioned overlay because the BufBlit thread feeds VENC directly.
-	 * Falls back to no-OSD with a clear warning if MI_RGN_AttachToChn
-	 * rejects the VENC module id on this libmi_rgn build. */
-	if (vcfg->debug.show_osd) {
+	 * recording, clean stills).  Falls back to no-OSD with a clear
+	 * warning if MI_RGN_AttachToChn rejects the VENC module id on this
+	 * libmi_rgn build.  When stabilization is on this block is skipped:
+	 * OSD was already created earlier (before the stab thread started)
+	 * because the kernel RGN driver refuses MI_RGN_Init while VENC ch0
+	 * is being actively fed via the manual ChnInputPortPutBuf path. */
+	if (vcfg->debug.show_osd && !state->debug_osd) {
 		state->debug_osd = debug_osd_create_for_venc(
 			state->image_width, state->image_height,
 			(int)venc_device, (int)state->venc_channel);
