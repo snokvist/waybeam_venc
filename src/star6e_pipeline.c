@@ -1157,7 +1157,6 @@ static void *star6e_stab_thread_main(void *arg)
 	int acc_x = 0;
 	int acc_y = 0;
 	int dbg_frame = 0;
-	int leak_counter = 0;
 	StabIveImage_t dx;
 	StabIveImage_t dy;
 
@@ -1281,15 +1280,26 @@ static void *star6e_stab_thread_main(void *arg)
 			if (acc_y < -max_y) acc_y = -max_y;
 			if (acc_y >  max_y) acc_y =  max_y;
 
+			/* Exponential decay recenter: every frame, scale the
+			 * accumulator toward zero by (tau-1)/tau.  This produces
+			 * smooth per-frame motion (matching the look of the IVE
+			 * stabilization corrections) instead of the visible
+			 * 1-pixel ticks the old linear leak produced every N
+			 * frames.  Integer truncation toward zero guarantees
+			 * convergence -- |acc|=1 always becomes 0 in one step
+			 * regardless of tau, and the decay slows naturally as
+			 * the accumulator approaches zero. */
 			if (g_stab_recenter_period > 0) {
-				leak_counter++;
-				if ((uint32_t)leak_counter >= g_stab_recenter_period) {
-					leak_counter = 0;
-					if (acc_x > 0) acc_x--;
-					else if (acc_x < 0) acc_x++;
-					if (acc_y > 0) acc_y--;
-					else if (acc_y < 0) acc_y++;
-				}
+				uint32_t tau = g_stab_recenter_period;
+				if (tau < 2) tau = 2;
+				if (acc_x > 0)
+					acc_x = (int)((uint32_t)acc_x * (tau - 1) / tau);
+				else if (acc_x < 0)
+					acc_x = -(int)((uint32_t)(-acc_x) * (tau - 1) / tau);
+				if (acc_y > 0)
+					acc_y = (int)((uint32_t)acc_y * (tau - 1) / tau);
+				else if (acc_y < 0)
+					acc_y = -(int)((uint32_t)(-acc_y) * (tau - 1) / tau);
 			}
 
 			pthread_mutex_lock(&g_stab_lock);
