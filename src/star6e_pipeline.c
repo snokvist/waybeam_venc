@@ -864,6 +864,47 @@ static void star6e_stab_set_pan(double pan_x, double pan_y)
 	g_stab_pan_y_mil = star6e_stab_pan_clamp_mil(pan_y);
 }
 
+int star6e_pipeline_stab_panel_anchor(int *out_x, int *out_y)
+{
+	int off_x;
+	int off_y;
+	int pan_x;
+	int pan_y;
+	int center_x;
+	int center_y;
+	int src_x;
+	int src_y;
+	int max_x;
+	int max_y;
+
+	if (!g_stab_running || g_stab_enc_w == 0 || g_stab_enc_h == 0)
+		return 0;
+	if (!out_x || !out_y)
+		return 0;
+
+	pthread_mutex_lock(&g_stab_lock);
+	off_x = g_stab_off_x;
+	off_y = g_stab_off_y;
+	pthread_mutex_unlock(&g_stab_lock);
+
+	pan_x = g_stab_pan_x_mil;
+	pan_y = g_stab_pan_y_mil;
+	center_x = (int)((g_stab_src_w * (uint32_t)pan_x) / 1000u);
+	center_y = (int)((g_stab_src_h * (uint32_t)pan_y) / 1000u);
+	src_x = center_x - (int)g_stab_enc_w / 2 + off_x;
+	src_y = center_y - (int)g_stab_enc_h / 2 + off_y;
+	max_x = (int)(g_stab_src_w - g_stab_enc_w);
+	max_y = (int)(g_stab_src_h - g_stab_enc_h);
+	if (src_x < 0) src_x = 0;
+	if (src_x > max_x) src_x = max_x;
+	if (src_y < 0) src_y = 0;
+	if (src_y > max_y) src_y = max_y;
+
+	*out_x = src_x;
+	*out_y = src_y;
+	return 1;
+}
+
 static int star6e_stab_max_off_x(void)
 {
 	return (int)((g_stab_src_w - g_stab_enc_w) / 2u);
