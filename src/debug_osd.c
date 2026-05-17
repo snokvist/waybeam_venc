@@ -108,6 +108,10 @@ struct DebugOsdState {
 	i6_sys_bind vpe_bind;
 	OsdDirty dirty;           /* previous frame's drawn area */
 	int font_scale;           /* pixel scaling factor for text */
+	int panel_off_x;          /* added to PANEL_X for text positioning */
+	int panel_off_y;          /* added to PANEL_Y — used when VPE port
+	                           * dim > encoded dim (e.g. image stab) so
+	                           * panel lands inside the encoded view */
 
 	/* CPU usage sampler (from /proc/stat) */
 	unsigned long long cpu_prev_total, cpu_prev_idle;
@@ -401,7 +405,9 @@ void debug_osd_text(DebugOsdState *osd, int row, const char *label,
 	int char_h = 8 * s;
 	int row_h = char_h + 2 * s;  /* glyph height + gap */
 	int char_w = 6 * s;          /* 5px glyph + 1px gap, scaled */
-	uint16_t y = (uint16_t)(PANEL_Y + row * row_h);
+	int panel_x = PANEL_X + osd->panel_off_x;
+	int panel_y = PANEL_Y + osd->panel_off_y;
+	uint16_t y = (uint16_t)(panel_y + row * row_h);
 	if ((uint32_t)y + (uint32_t)char_h > osd->height) return;
 
 	char line[LINE_MAX];
@@ -414,14 +420,22 @@ void debug_osd_text(DebugOsdState *osd, int row, const char *label,
 
 	/* Semi-transparent background behind text */
 	uint16_t bg_w = (uint16_t)(len * char_w + 4 * s);
-	int bg_x = PANEL_X - 2;
+	int bg_x = panel_x - 2;
 	int bg_y = (int)y - s;
 	if (bg_x < 0) bg_x = 0;
 	if (bg_y < 0) bg_y = 0;
 	osd_draw_rect(&c, &osd->dirty, (uint16_t)bg_x, (uint16_t)bg_y, bg_w,
 		(uint16_t)(char_h + 2 * s), DEBUG_OSD_SEMITRANS_BLACK, 1);
 
-	osd_draw_string(&c, &osd->dirty, PANEL_X, y, line, s, DEBUG_OSD_WHITE);
+	osd_draw_string(&c, &osd->dirty, (uint16_t)panel_x, y, line, s,
+		DEBUG_OSD_WHITE);
+}
+
+void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y)
+{
+	if (!osd) return;
+	osd->panel_off_x = off_x;
+	osd->panel_off_y = off_y;
 }
 
 void debug_osd_sample_cpu(DebugOsdState *osd)
@@ -921,6 +935,11 @@ void debug_osd_line(DebugOsdState *osd, uint16_t x0, uint16_t y0,
 	osd_draw_line(&c, &osd->dirty, x0, y0, x1, y1, color);
 }
 
+/* Maruko OSD attaches at fixed SCL/0/0/0 dim = encoded dim, so no panel
+ * offset is ever needed. Provided to satisfy the shared header. */
+void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y)
+{ (void)osd; (void)off_x; (void)off_y; }
+
 #else /* !PLATFORM_STAR6E && !PLATFORM_MARUKO */
 
 DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
@@ -931,6 +950,9 @@ DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
                                          int venc_device, int venc_channel)
 { (void)frame_w; (void)frame_h; (void)venc_device; (void)venc_channel;
   return NULL; }
+
+void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y)
+{ (void)osd; (void)off_x; (void)off_y; }
 
 void debug_osd_destroy(DebugOsdState *osd) { (void)osd; }
 void debug_osd_begin_frame(DebugOsdState *osd) { (void)osd; }

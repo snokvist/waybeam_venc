@@ -1256,6 +1256,16 @@ static void *star6e_stab_thread_main(void *arg)
 			g_stab_off_y = acc_y;
 			pthread_mutex_unlock(&g_stab_lock);
 			dbg_frame++;
+			if ((dbg_frame % 120) == 0)
+				fprintf(stderr, "[waybeam] stab tick %d: raw=(%d,%d) "
+					"acc=(%d,%d) max=(%d,%d) pan=(%d,%d)\n",
+					dbg_frame, (int)raw_dx, (int)raw_dy,
+					acc_x, acc_y, max_x, max_y,
+					g_stab_pan_x_mil, g_stab_pan_y_mil);
+		} else {
+			if ((dbg_frame++ % 120) == 0)
+				fprintf(stderr, "[waybeam] stab Shift_Detector "
+					"ret=0x%x\n", (unsigned)ret);
 		}
 
 		ret = star6e_stab_send_frame_to_venc(&curr_buf);
@@ -2337,22 +2347,6 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 			state->bound_vif_vpe = 0;
 			return ret;
 		}
-		/* OSD must init BEFORE the stab thread starts pumping frames
-		 * into VENC ch0's input port.  The kernel RGN driver rejects
-		 * MI_RGN_Init when a downstream channel is actively receiving
-		 * user-fed frames (empirically: returns failure on Star6E
-		 * libmi_rgn when called after star6e_stab_start).  Doing it
-		 * here — between port reapply and stab_start — keeps VENC
-		 * quiescent during RGN attach. */
-		if (vcfg->debug.show_osd) {
-			state->debug_osd = debug_osd_create_for_venc(
-				state->image_width, state->image_height,
-				(int)venc_device, (int)state->venc_channel);
-			if (!state->debug_osd)
-				fprintf(stderr, "[waybeam] WARNING: debug OSD attach to "
-					"VENC failed (libmi_rgn build may use a different "
-					"VENC module id) — continuing without OSD\n");
-		}
 		ret = star6e_stab_start(&state->vpe_port, &state->venc_port);
 		if (ret != 0) {
 			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
@@ -2485,24 +2479,33 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* Debug OSD attaches at the VENC channel input on Star6E, NOT the VPE
-	 * port output.  Consequence: OSD lands on the encoded stream (ch0)
-	 * only — dual ch1 recordings and JPEG snapshots stay OSD-free, which
-	 * matches the typical FPV workflow (overlay on the live feed, clean
-	 * recording, clean stills).  Falls back to no-OSD with a clear
-	 * warning if MI_RGN_AttachToChn rejects the VENC module id on this
-	 * libmi_rgn build.  When stabilization is on this block is skipped:
-	 * OSD was already created earlier (before the stab thread started)
-	 * because the kernel RGN driver refuses MI_RGN_Init while VENC ch0
-	 * is being actively fed via the manual ChnInputPortPutBuf path. */
-	if (vcfg->debug.show_osd && !state->debug_osd) {
-		state->debug_osd = debug_osd_create_for_venc(
-			state->image_width, state->image_height,
-			(int)venc_device, (int)state->venc_channel);
-		if (!state->debug_osd)
-			fprintf(stderr, "[waybeam] WARNING: debug OSD attach to "
-				"VENC failed (libmi_rgn build may use a different "
-				"VENC module id) — continuing without OSD\n");
+	/* Debug OSD attaches at the VPE port on Star6E.  Bench testing showed
+	 * MI_RGN_AttachToChn against the VENC channel (module id 2) succeeds
+	 * but the kernel/lib silently no-ops compositing — the canvas never
+	 * lands on the encoded frames.  VPE attach reliably composites, so
+	 * stick to it even though that means OSD appears on dual ch1 and
+	 * JPEG snapshots too.  When image stabilization is on, the VPE port
+	 * dim (full image) is larger than the encoded ch0 dim (crop), so the
+	 * default top-left panel anchor (port 8,8) falls outside the centered
+	 * crop window and is invisible.  Shift the panel origin by the
+	 * centered crop offset so it lands inside the encoded view.  Tiny
+	 * stab corrections (±tens of pixels) make the panel drift slightly
+	 * within the encoded view but never off-screen given the headroom. */
+	if (vcfg->debug.show_osd) {
+		uint32_t osd_w = star6e_stab_enabled(vcfg) ?
+			g_stab_src_w : state->image_width;
+		uint32_t osd_h = star6e_stab_enabled(vcfg) ?
+			g_stab_src_h : state->image_height;
+		state->debug_osd = debug_osd_create(osd_w, osd_h,
+			&state->vpe_port);
+		if (!state->debug_osd) {
+			fprintf(stderr, "[waybeam] WARNING: debug OSD requested but "
+				"MI_RGN unavailable\n");
+		} else if (star6e_stab_enabled(vcfg)) {
+			int off_x = (int)((g_stab_src_w - g_stab_enc_w) / 2u);
+			int off_y = (int)((g_stab_src_h - g_stab_enc_h) / 2u);
+			debug_osd_set_panel_offset(state->debug_osd, off_x, off_y);
+		}
 	}
 
 	return 0;
