@@ -7,12 +7,16 @@ two new `video0` config fields:
 
 Follow-up patches in this same release:
 
-- Debug OSD now attaches at the VENC channel input when stab is on, so
-  the overlay is composited AFTER stabilization and stays correctly
-  positioned regardless of how the stab crop window moves.  Falls back
-  to "no OSD" with a warning if MI_RGN_AttachToChn rejects the VENC
-  module id (assumed `2` per standard Infinity6E layout; revisit if a
-  future libmi_rgn build refuses).
+- Debug OSD on Star6E now always attaches at the VENC channel input,
+  not at the VPE port.  Consequence: the overlay lands on the live
+  ch0 stream only — dual ch1 recordings and JPEG snapshots stay
+  OSD-free, matching the typical FPV workflow (overlay on the live
+  feed, clean recording, clean stills).  Stab gets a correctly-
+  positioned overlay for free because the BufBlit thread feeds VENC
+  directly.  Falls back to no-OSD with a clear warning if
+  `MI_RGN_AttachToChn` rejects the assumed VENC module id (2, per
+  standard Infinity6E layout; revisit if a future libmi_rgn build
+  refuses).  Maruko OSD attach is unchanged (still at SCL).
 - `zoomX` / `zoomY` are now honored as a pan center when stab is on.
   The stabilized framing tracks the user-chosen center, with the IVE
   shift accumulator adding shake-correction on top.  Edge clamps

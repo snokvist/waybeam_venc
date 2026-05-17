@@ -2469,30 +2469,22 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* Debug OSD.  Without stab the RGN attaches at the VPE port output
-	 * (post-SCL crop), so the canvas is 1:1 with the encoded frame.
-	 * With stab the encoded frame is built by the BufBlit thread feeding
-	 * VENC ch0's input port — attach at the VENC channel instead so OSD
-	 * is composited AFTER stabilization and stays correctly positioned
-	 * regardless of how the stab crop window moves. */
+	/* Debug OSD attaches at the VENC channel input on Star6E, NOT the VPE
+	 * port output.  Consequence: OSD lands on the encoded stream (ch0)
+	 * only — dual ch1 recordings and JPEG snapshots stay OSD-free, which
+	 * matches the typical FPV workflow (overlay on the live feed, clean
+	 * recording, clean stills).  Also gives stabilization a correctly-
+	 * positioned overlay because the BufBlit thread feeds VENC directly.
+	 * Falls back to no-OSD with a clear warning if MI_RGN_AttachToChn
+	 * rejects the VENC module id on this libmi_rgn build. */
 	if (vcfg->debug.show_osd) {
-		if (star6e_stab_enabled(vcfg)) {
-			MI_U32 osd_dev = venc_device;
-			state->debug_osd = debug_osd_create_for_venc(
-				state->image_width, state->image_height,
-				(int)osd_dev, (int)state->venc_channel);
-			if (!state->debug_osd)
-				fprintf(stderr, "[waybeam] WARNING: debug OSD on VENC "
-					"attach failed (libmi_rgn build may use a "
-					"different VENC module id) — continuing without OSD\n");
-		} else {
-			state->debug_osd = debug_osd_create(
-				state->image_width, state->image_height,
-				&state->vpe_port);
-			if (!state->debug_osd)
-				fprintf(stderr, "WARNING: debug OSD requested but "
-					"MI_RGN unavailable\n");
-		}
+		state->debug_osd = debug_osd_create_for_venc(
+			state->image_width, state->image_height,
+			(int)venc_device, (int)state->venc_channel);
+		if (!state->debug_osd)
+			fprintf(stderr, "[waybeam] WARNING: debug OSD attach to "
+				"VENC failed (libmi_rgn build may use a different "
+				"VENC module id) — continuing without OSD\n");
 	}
 
 	return 0;

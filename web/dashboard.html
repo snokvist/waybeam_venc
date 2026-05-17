@@ -615,7 +615,9 @@ const TOOLTIPS = {
 
 'video0.zoomY':'Digital zoom crop center Y, 0 = top and 1 = bottom. Applied live',
 
-'video0.stabCropPct':'Image stabilization crop fraction in percent. 0 = off, 50-100 = enabled with crop %. Star6E only; affects ch0 only (dual ch1/JPEG/OSD unchanged). Requires restart',
+'video0.stabCropPct':'Image stabilization crop fraction in percent. 0 = off, 50-100 = enabled with crop %. Star6E only; stabilizes live stream ch0 only (dual ch1 recording and JPEG snapshot stay unstabilized). Requires restart',
+
+'debug.showOsd':'Enable debug OSD overlay on the live stream. Star6E: overlay is composited at the VENC channel so it appears only on the encoded ch0 output — dual ch1 recordings and JPEG snapshots stay clean. Requires restart',
 
 'video0.stabRecenterSpeed':'Stabilization recenter speed in pixels/sec. 0 = stick to patch (no drift), >0 = drift accumulated offset back toward center. Lower is faster recenter. Requires restart',
 
