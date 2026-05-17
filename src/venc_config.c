@@ -183,6 +183,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.zoom_x = 0.5;
 	cfg->video0.zoom_y = 0.5;
 
+	/* image stabilization (video0) — disabled by default */
+	cfg->video0.stab_crop_pct = 0;
+	cfg->video0.stab_recenter_speed = 0;
+
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
 	 * snapshot at the same resolution as the live stream. */
@@ -505,6 +509,17 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		v->zoom_y = 0.0;
 	if (v->zoom_y > 1.0)
 		v->zoom_y = 1.0;
+
+	v->stab_crop_pct = (uint32_t)json_get_int(obj, "stabCropPct",
+		(int)v->stab_crop_pct);
+	v->stab_recenter_speed = (uint32_t)json_get_int(obj, "stabRecenterSpeed",
+		(int)v->stab_recenter_speed);
+	/* 0 = off; valid enabled range is 50..100 % crop.  Anything else gets
+	 * clamped to off rather than producing a tiny encoded frame the SDK
+	 * may reject. */
+	if (v->stab_crop_pct != 0 &&
+	    (v->stab_crop_pct < 50 || v->stab_crop_pct > 100))
+		v->stab_crop_pct = 0;
 }
 
 static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
@@ -1055,7 +1070,9 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
-	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
+	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
+	pp_field_uint(p,   2, "stabCropPct",       cfg->video0.stab_crop_pct,       0);
+	pp_field_uint(p,   2, "stabRecenterSpeed", cfg->video0.stab_recenter_speed, 1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1240,6 +1257,10 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "zoomPct", cfg->video0.zoom_pct);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
+		cJSON_AddNumberToObject(vid, "stabCropPct",
+			cfg->video0.stab_crop_pct);
+		cJSON_AddNumberToObject(vid, "stabRecenterSpeed",
+			cfg->video0.stab_recenter_speed);
 	}
 
 	/* outgoing */

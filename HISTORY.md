@@ -1,5 +1,41 @@
 # History
 
+## [0.11.0] - 2026-05-17
+
+Digital image stabilization on VPE for Star6E.  Off by default; opt-in via
+two new `video0` config fields:
+
+- `stabCropPct` — 0 = off, 50..100 = crop fraction percent.  Smaller crop
+  leaves more dead border for the IVE shift accumulator to wander in;
+  values around 80 % give visibly steady output at the cost of about 36 %
+  of the frame area.
+- `stabRecenterSpeed` — 0 = stick to current patch (no drift), >0 = number
+  of frames between 1-pixel leaks of the accumulated offset back toward
+  the center.  Lower = faster recenter.  Recommended starting point:
+  `stabCropPct=80, stabRecenterSpeed=10`.
+
+Implementation (Star6E only, Approach A): when enabled, VPE port0 is left
+at the full image dim, a private thread drains port0 frames, runs
+`MI_IVE_Shift_Detector` on a centered Y patch against the previous frame,
+and `MI_SYS_BufBlitPa`s a shifted NV12 crop into VENC ch0's input port.
+VPE→VENC is not bound on this path.  Encoded ch0 resolution becomes
+`image_w × pct` × `image_h × pct` (reported in SPS/PPS).
+
+Trade-offs vs. a port-crop based stabilizer:
+
+- Only VENC ch0 is stabilized.  Dual ch1, JPEG snapshot, and the debug
+  OSD continue to source frames from the unstabilized full port0 image.
+- `zoomPct` and `stabCropPct` cannot run together (both want VPE port0).
+  When both are set, the daemon prefers stabilization and logs a warning.
+- Sensor precrop (VIF capture window) is unaffected; aspect-preserving
+  cropping continues to work the same way.
+
+WebUI: new `Video` section entries `stabCropPct` and `stabRecenterSpeed`.
+HTTP API: same names exposed via `video0.stab_crop_pct` /
+`video0.stab_recenter_speed` (snake_case canonical, camelCase alias).
+Both fields are MUT_RESTART — changing them requires a pipeline restart
+because the encoded resolution changes.
+
 ## [0.10.16] - 2026-05-15
 
 Two new OSD-safe resilience presets for ultra-low recovery latency:

@@ -126,6 +126,15 @@ typedef struct {
 	double zoom_pct;
 	double zoom_x;             /* crop centre x, 0..1 */
 	double zoom_y;             /* crop centre y, 0..1 */
+	/* Digital image stabilization on VPE (Star6E only).  Manual VPE
+	 * port0 drain + IVE shift detection + BufBlit shifted crop into
+	 * VENC ch0 input.  Affects ch0 only; dual ch1, JPEG snapshot, and
+	 * debug OSD continue to see the unstabilized full port0 frame.
+	 * Encoded resolution shrinks to (image_w * pct) x (image_h * pct),
+	 * which is reported in SPS/PPS.  Requires restart. */
+	uint32_t stab_crop_pct;       /* 0 = off, 50..100 = crop % */
+	uint32_t stab_recenter_speed; /* 0 = stick to patch, >0 = pixels/sec
+	                               * drift of accumulated offset toward 0 */
 } VencConfigVideo;
 
 typedef struct {
