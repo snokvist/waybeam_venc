@@ -221,22 +221,28 @@ static void cpu_sample(DebugOsdState *osd)
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
-                                const void *vpe_port)
+/* RGN module ids for Star6E libmi_rgn.so.  MI_RGN_AttachToChn takes an
+ * i6_sys_bind whose module field uses RGN's private enum, NOT the
+ * i6_sys_mod enum.  Standard SigmaStar Infinity6E layout puts VENC at 2,
+ * but the exact value is determined by the device's libmi_rgn build —
+ * if VENC attach starts failing after a firmware update, this is the
+ * first place to check. */
+#define RGN_MODID_VPE  0
+#define RGN_MODID_VENC 2
+
+static DebugOsdState *debug_osd_create_impl(uint32_t frame_w, uint32_t frame_h,
+	int rgn_mod_id, int dev_id, int chn_id, int port_id)
 {
-	(void)vpe_port;
 	DebugOsdState *ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) return NULL;
 
 	ctx->width = frame_w;
 	ctx->height = frame_h;
 	ctx->font_scale = 3;
-	/* MI_RGN uses its own module ID enum (VPE=0), not the system
-	 * i6_sys_mod enum (where VPE=11).  Build the RGN ChnPort manually. */
-	ctx->vpe_bind.module = 0;  /* E_MI_RGN_MODID_VPE */
-	ctx->vpe_bind.device = 0;
-	ctx->vpe_bind.channel = 0;
-	ctx->vpe_bind.port = 0;
+	ctx->vpe_bind.module = rgn_mod_id;
+	ctx->vpe_bind.device = dev_id;
+	ctx->vpe_bind.channel = chn_id;
+	ctx->vpe_bind.port = port_id;
 
 	if (rgn_load(ctx) != 0) {
 		free(ctx);
@@ -285,7 +291,10 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 	chn.osd.constAlphaOn = 0;
 
 	if (ctx->fnAttachChannel(RGN_HANDLE, &ctx->vpe_bind, &chn) != 0) {
-		fprintf(stderr, "[debug_osd] MI_RGN_AttachToChn failed\n");
+		fprintf(stderr, "[debug_osd] MI_RGN_AttachToChn failed "
+			"(module=%d dev=%d chn=%d port=%d)\n",
+			ctx->vpe_bind.module, ctx->vpe_bind.device,
+			ctx->vpe_bind.channel, ctx->vpe_bind.port);
 		ctx->fnDestroyRegion(RGN_HANDLE);
 		ctx->fnDeinit();
 		dlclose(ctx->lib);
@@ -317,10 +326,28 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 
 	osd_dirty_reset(&ctx->dirty, frame_w, frame_h);
 
-	fprintf(stderr, "[debug_osd] overlay %ux%u stride=%u virtAddr=%p\n",
+	fprintf(stderr, "[debug_osd] overlay %ux%u stride=%u virtAddr=%p "
+		"attached to rgn_mod=%d dev=%d chn=%d\n",
 		ctx->canvas.stSize.u32Width, ctx->canvas.stSize.u32Height,
-		ctx->canvas.u32Stride, (void *)(uintptr_t)ctx->canvas.virtAddr);
+		ctx->canvas.u32Stride, (void *)(uintptr_t)ctx->canvas.virtAddr,
+		ctx->vpe_bind.module, ctx->vpe_bind.device,
+		ctx->vpe_bind.channel);
 	return ctx;
+}
+
+DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
+                                const void *vpe_port)
+{
+	(void)vpe_port;
+	return debug_osd_create_impl(frame_w, frame_h,
+		RGN_MODID_VPE, 0, 0, 0);
+}
+
+DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
+                                         int venc_device, int venc_channel)
+{
+	return debug_osd_create_impl(frame_w, frame_h,
+		RGN_MODID_VENC, venc_device, venc_channel, 0);
 }
 
 void debug_osd_destroy(DebugOsdState *osd)
@@ -777,6 +804,16 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 	return ctx;
 }
 
+/* Stub on Maruko — image stabilization is Star6E-only, so no caller
+ * reaches this path; provided only to satisfy the shared header. */
+DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
+                                         int venc_device, int venc_channel)
+{
+	(void)frame_w; (void)frame_h;
+	(void)venc_device; (void)venc_channel;
+	return NULL;
+}
+
 void debug_osd_destroy(DebugOsdState *osd)
 {
 	if (!osd) return;
@@ -889,6 +926,11 @@ void debug_osd_line(DebugOsdState *osd, uint16_t x0, uint16_t y0,
 DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
                                 const void *vpe_port)
 { (void)frame_w; (void)frame_h; (void)vpe_port; return NULL; }
+
+DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
+                                         int venc_device, int venc_channel)
+{ (void)frame_w; (void)frame_h; (void)venc_device; (void)venc_channel;
+  return NULL; }
 
 void debug_osd_destroy(DebugOsdState *osd) { (void)osd; }
 void debug_osd_begin_frame(DebugOsdState *osd) { (void)osd; }

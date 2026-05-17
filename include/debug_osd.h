@@ -27,6 +27,16 @@ typedef struct DebugOsdState DebugOsdState;
  *  vpe_port is internally cast to i6_sys_bind *. */
 DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
                                 const void *vpe_port);
+
+/** Star6E: create OSD attached to a VENC channel instead of VPE.  Used
+ *  when image stabilization is enabled — composites OSD onto the encoded
+ *  frame after the stab thread has fed it, so OSD position is correct in
+ *  the encoded view regardless of how the stab crop window moves.
+ *  Returns NULL if RGN is unavailable, attach fails (likely wrong module
+ *  id for this libmi_rgn build), or on error. */
+DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
+                                         int venc_device, int venc_channel);
+
 void debug_osd_destroy(DebugOsdState *osd);
 
 /** Frame lifecycle — bracket all draw calls between begin/end. */

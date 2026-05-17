@@ -733,6 +733,12 @@ static uint32_t g_stab_crop_percent;
 static uint32_t g_stab_recenter_period;   /* frames between 1-pixel leak; 0=off */
 static volatile int g_stab_off_x;
 static volatile int g_stab_off_y;
+/* User-controlled pan center as parts-per-thousand of (src_w, src_h).
+ * 500/500 = exact center.  Updated live via star6e_stab_set_pan() so
+ * the existing zoomX/zoomY HTTP controls steer the stabilized framing
+ * without a pipeline restart. */
+static volatile int g_stab_pan_x_mil = 500;
+static volatile int g_stab_pan_y_mil = 500;
 static MI_SYS_ChnPort_t g_stab_vpe_port;
 static MI_SYS_ChnPort_t g_stab_venc_port;
 
@@ -810,8 +816,21 @@ static void star6e_stab_compute_crop_dims(uint32_t src_w, uint32_t src_h,
 	*out_h = h;
 }
 
+static int star6e_stab_pan_clamp_mil(double v)
+{
+	int mil;
+
+	if (!isfinite(v) || v <= 0.0) return 0;
+	if (v >= 1.0) return 1000;
+	mil = (int)(v * 1000.0 + 0.5);
+	if (mil < 0) mil = 0;
+	if (mil > 1000) mil = 1000;
+	return mil;
+}
+
 static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
-	uint32_t crop_pct, uint32_t recenter_speed, uint32_t venc_fps)
+	uint32_t crop_pct, uint32_t recenter_speed, uint32_t venc_fps,
+	double pan_x, double pan_y)
 {
 	g_stab_src_w = src_w & ~1u;
 	g_stab_src_h = src_h & ~1u;
@@ -827,11 +846,22 @@ static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 	 * in frames so the knob stays direct + deterministic. */
 	(void)venc_fps;
 	g_stab_recenter_period = recenter_speed;
+	g_stab_pan_x_mil = star6e_stab_pan_clamp_mil(pan_x);
+	g_stab_pan_y_mil = star6e_stab_pan_clamp_mil(pan_y);
 
 	pthread_mutex_lock(&g_stab_lock);
 	g_stab_off_x = 0;
 	g_stab_off_y = 0;
 	pthread_mutex_unlock(&g_stab_lock);
+}
+
+/* Live pan update — called from the LIVE_GROUP_ZOOM apply path so that
+ * the existing zoomX/zoomY HTTP controls steer the stabilized framing
+ * without a pipeline restart. */
+static void star6e_stab_set_pan(double pan_x, double pan_y)
+{
+	g_stab_pan_x_mil = star6e_stab_pan_clamp_mil(pan_x);
+	g_stab_pan_y_mil = star6e_stab_pan_clamp_mil(pan_y);
 }
 
 static int star6e_stab_max_off_x(void)
@@ -1044,15 +1074,26 @@ static int star6e_stab_send_frame_to_venc(const StabSysBufInfo_t *src_buf)
 	off_y = g_stab_off_y;
 	pthread_mutex_unlock(&g_stab_lock);
 
-	max_x = star6e_stab_max_off_x();
-	max_y = star6e_stab_max_off_y();
-	if (off_x < -max_x) off_x = -max_x;
-	if (off_x > max_x) off_x = max_x;
-	if (off_y < -max_y) off_y = -max_y;
-	if (off_y > max_y) off_y = max_y;
-
-	src_x = (int)((g_stab_src_w - g_stab_enc_w) / 2u) + off_x;
-	src_y = (int)((g_stab_src_h - g_stab_enc_h) / 2u) + off_y;
+	/* User pan + stab shake-correction.  The crop window center is placed
+	 * at (pan_x, pan_y) parts-per-thousand of the source frame; the IVE
+	 * shift accumulator then shifts the window further to cancel camera
+	 * motion.  Asymmetric clamps follow naturally from clipping src_x /
+	 * src_y into [0, src - enc]: when the user pans hard toward an edge,
+	 * stab loses headroom on that side first. */
+	{
+		int pan_x = g_stab_pan_x_mil;
+		int pan_y = g_stab_pan_y_mil;
+		int center_x = (int)((g_stab_src_w * (uint32_t)pan_x) / 1000u);
+		int center_y = (int)((g_stab_src_h * (uint32_t)pan_y) / 1000u);
+		src_x = center_x - (int)g_stab_enc_w / 2 + off_x;
+		src_y = center_y - (int)g_stab_enc_h / 2 + off_y;
+		max_x = (int)(g_stab_src_w - g_stab_enc_w);
+		max_y = (int)(g_stab_src_h - g_stab_enc_h);
+		if (src_x < 0) src_x = 0;
+		if (src_x > max_x) src_x = max_x;
+		if (src_y < 0) src_y = 0;
+		if (src_y > max_y) src_y = max_y;
+	}
 	ret = star6e_stab_blit_nv12_crop(&venc_buf.stFrameData,
 		&src_buf->stFrameData, src_x, src_y,
 		(int)g_stab_enc_w, (int)g_stab_enc_h);
@@ -1518,6 +1559,13 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	if (!state) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
+	/* When stabilization is active it owns the VPE port0 crop window;
+	 * route the pan center to the stab thread instead of touching
+	 * MI_VPE_SetPortCrop (which would break the manual drain path). */
+	if (g_stab_running) {
+		star6e_stab_set_pan(x, y);
+		return 0;
+	}
 	if (pct <= 0.0 || pct >= 1.0) {
 		star6e_pipeline_clear_zoom_status();
 		return 0;  /* zoom off — nothing to pan */
@@ -2421,14 +2469,30 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* Debug OSD.  Canvas dim is the encoded frame dim; on Star6E RGN
-	 * attaches at the VPE port output (post-SCL crop), so the canvas is
-	 * already 1:1 with the encoded frame and needs no zoom-time offset. */
+	/* Debug OSD.  Without stab the RGN attaches at the VPE port output
+	 * (post-SCL crop), so the canvas is 1:1 with the encoded frame.
+	 * With stab the encoded frame is built by the BufBlit thread feeding
+	 * VENC ch0's input port — attach at the VENC channel instead so OSD
+	 * is composited AFTER stabilization and stays correctly positioned
+	 * regardless of how the stab crop window moves. */
 	if (vcfg->debug.show_osd) {
-		state->debug_osd = debug_osd_create(
-			state->image_width, state->image_height, &state->vpe_port);
-		if (!state->debug_osd)
-			fprintf(stderr, "WARNING: debug OSD requested but MI_RGN unavailable\n");
+		if (star6e_stab_enabled(vcfg)) {
+			MI_U32 osd_dev = venc_device;
+			state->debug_osd = debug_osd_create_for_venc(
+				state->image_width, state->image_height,
+				(int)osd_dev, (int)state->venc_channel);
+			if (!state->debug_osd)
+				fprintf(stderr, "[waybeam] WARNING: debug OSD on VENC "
+					"attach failed (libmi_rgn build may use a "
+					"different VENC module id) — continuing without OSD\n");
+		} else {
+			state->debug_osd = debug_osd_create(
+				state->image_width, state->image_height,
+				&state->vpe_port);
+			if (!state->debug_osd)
+				fprintf(stderr, "WARNING: debug OSD requested but "
+					"MI_RGN unavailable\n");
+		}
 	}
 
 	return 0;
@@ -2660,16 +2724,20 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	/* Image stabilization (Approach A): VPE port0 stays at full image dim,
 	 * a private thread drains port0, runs IVE shift detection, and BufBlits
 	 * a shifted crop into VENC ch0's input port.  VENC ch0 is created at
-	 * the crop dim.  Zoom shares port0 so the two cannot coexist — stab
-	 * wins. */
+	 * the crop dim.  zoomPct is incompatible (it shrinks the VPE port
+	 * output via SCL crop, fighting the manual drain path); zoomX/zoomY
+	 * however ARE consumed — they pick the crop center, so the stabilized
+	 * stream pans live within the source frame. */
 	if (star6e_stab_enabled(vcfg)) {
 		if (vcfg->video0.zoom_pct > 0.0)
 			fprintf(stderr, "[waybeam] WARNING: video0.stab_crop_pct "
-				"in use; ignoring video0.zoom_pct (they share VPE port0)\n");
+				"in use; ignoring video0.zoom_pct (use stab_crop_pct "
+				"to set crop size); zoom_x/zoom_y are honored as pan\n");
 		star6e_stab_configure(pconf.image_width, pconf.image_height,
 			vcfg->video0.stab_crop_pct,
 			vcfg->video0.stab_recenter_speed,
-			vcfg->video0.fps);
+			vcfg->video0.fps,
+			vcfg->video0.zoom_x, vcfg->video0.zoom_y);
 		pconf.image_width = g_stab_enc_w;
 		pconf.image_height = g_stab_enc_h;
 		state->image_width = g_stab_enc_w;

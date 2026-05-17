@@ -5,6 +5,24 @@
 Digital image stabilization on VPE for Star6E.  Off by default; opt-in via
 two new `video0` config fields:
 
+Follow-up patches in this same release:
+
+- Debug OSD now attaches at the VENC channel input when stab is on, so
+  the overlay is composited AFTER stabilization and stays correctly
+  positioned regardless of how the stab crop window moves.  Falls back
+  to "no OSD" with a warning if MI_RGN_AttachToChn rejects the VENC
+  module id (assumed `2` per standard Infinity6E layout; revisit if a
+  future libmi_rgn build refuses).
+- `zoomX` / `zoomY` are now honored as a pan center when stab is on.
+  The stabilized framing tracks the user-chosen center, with the IVE
+  shift accumulator adding shake-correction on top.  Edge clamps
+  become naturally asymmetric: panning hard toward an edge consumes
+  the stab headroom on that side first.  Live updates flow through
+  the existing `LIVE_GROUP_ZOOM` HTTP path — no restart needed for
+  pan changes.  `zoomPct` itself is still incompatible with stab
+  (both control crop size; use `stabCropPct` instead) and a warning
+  is logged when both are set.
+
 - `stabCropPct` — 0 = off, 50..100 = crop fraction percent.  Smaller crop
   leaves more dead border for the IVE shift accumulator to wander in;
   values around 80 % give visibly steady output at the cost of about 36 %
