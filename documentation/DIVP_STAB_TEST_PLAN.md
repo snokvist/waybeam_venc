@@ -230,6 +230,7 @@ break the golden path.
 | 2026-05-18 | Q2  | code analysis vs vendor `mi_divp_datatype.h` | **N/A by construction** | Surgical swap kept original VPE start order. `MI_DIVP_DirectBuf_t` has no flip flags — `MI_DIVP_StretchBuf` cannot change orientation. |
 | 2026-05-18 | Q2  | Y-plane dump (`STAB_DUMP` env var) on bench 192.168.1.13 | **PASS — empirically confirmed** | With `image.mirror=false`: src and dst dumps both show fan-right / power-strip-left (sensor native). With `image.mirror=true`: BOTH src and dst dumps show fan-LEFT / power-strip-RIGHT — `MI_SNR_SetOrien` mirrored the sensor and DIVP preserved the mirror. DIVP is a pure crop. The earlier "switched back" observation was viewer buffer catch-up timing, not DIVP. |
 | 2026-05-18 | Q2  | side observation | known issue (separate) | `image.mirror=true + image.flip=true` together cause the IMX335 to stop producing frames on this branch. mirror-only and flip-off both work; combined `flip=true` is the trigger. Pre-existing, unrelated to DIVP — see roadmap item `IMX335_FLIP_WEDGE` followup. |
+| 2026-05-18 | Q3  | 5-min RTP soak on bench 192.168.1.13 (1280x960 stab 80%, H.265 CBR 6.3 Mbps, 60 fps) | **PASS** | Sender: continuous 59–60 fps for all 300 s, 338 `[verbose]` lines, no slow seconds. Receiver: avg 59.47 fps / 6.45 Mbps, p50 frame interval 16.68 ms, p99 21.68 ms. One outlier (max 2.4 s) corresponded one-for-one to a sender-side `[net] 13 send errors` UDP-link blip (LAN cause, not encoder). No DIVP-induced regressions. |
 
 ### Q1 findings that change implementation
 
