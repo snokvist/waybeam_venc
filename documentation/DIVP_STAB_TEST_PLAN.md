@@ -1,15 +1,16 @@
 # DIVP-Backed Stabilization — Test & Verification Plan
 
-<!-- version: 0.1.0 -->
+<!-- version: 1.0.0 -->
 
-Branch: `claude/review-divp-pipeline-HASzf`
-Status: pre-implementation (on-device validation phase)
-Reference candidate: `f2d45c19-star6e_pipeline_1.c` (uploaded, not yet merged)
+Branch: `claude/review-divp-pipeline-HASzf` (PR #119)
+Status: **COMPLETE** — all gates passed; surgical stretch swap and full
+channel backend both landed on the branch.
+Reference candidate: `f2d45c19-star6e_pipeline_1.c` (informed the design;
+final implementation in commits `338036c`..`051887b`).
 
-This plan validates the **open questions** raised by the review of the
-candidate pipeline before any production code is touched. We only commit
-implementation changes after every Q here resolves to PASS or has a clear
-mitigation.
+This plan validated the **open questions** raised by the review of the
+candidate pipeline before production code was touched. All Q gates are
+resolved; results recorded in §5.
 
 ---
 
@@ -210,14 +211,17 @@ follow-up action. Append results below in §5.
 
 ## 4. Go / No-Go for Implementation
 
-Implementation begins only when:
+**Decision: GO — implementation landed on PR #119.** All gates passed:
 
-- Q1a, Q1b: PASS (or a documented `CreateChn` mitigation is in place).
-- Q4: PASS or downgraded to the `Stab*` prefix style.
-- Q2: PASS or `reapply_stab_vpe_port` patched to preserve params.
+- Q1a, Q1b: PASS — `MI_DIVP_StretchBuf` works without `CreateChn` on this BSP.
+- Q4: PASS — clean build, `Stab*` prefix style retained.
+- Q2: PASS by construction and empirically (Y-plane dump confirmed DIVP is pure crop).
+- Q3: PASS — 5-min soak shows ±1 fps and bandwidth tracking the BlitPa baseline.
 
-Q3, Q5, Q6 may be downgraded to known-issue follow-ups if they don't
-break the golden path.
+Q5, Q6 deferred as known-issue followups; they don't block the golden
+path. After the surgical swap landed, a follow-on design pass added the
+channel backend — see `DIVP_CHANNEL_OSD_ARCH.md` for Q-DIVP-1..4
+(resolved during channel-backend bring-up in commit `051887b`).
 
 ## 5. Results Log
 
@@ -232,10 +236,11 @@ break the golden path.
 | 2026-05-18 | Q2  | side observation | known issue (separate) | `image.mirror=true + image.flip=true` together cause the IMX335 to stop producing frames on this branch. mirror-only and flip-off both work; combined `flip=true` is the trigger. Pre-existing, unrelated to DIVP — see roadmap item `IMX335_FLIP_WEDGE` followup. |
 | 2026-05-18 | Q3  | 5-min RTP soak on bench 192.168.1.13 (1280x960 stab 80%, H.265 CBR 6.3 Mbps, 60 fps) | **PASS** | Sender: continuous 59–60 fps for all 300 s, 338 `[verbose]` lines, no slow seconds. Receiver: avg 59.47 fps / 6.45 Mbps, p50 frame interval 16.68 ms, p99 21.68 ms. One outlier (max 2.4 s) corresponded one-for-one to a sender-side `[net] 13 send errors` UDP-link blip (LAN cause, not encoder). No DIVP-induced regressions. |
 
-### Q1 findings that change implementation
+### Q1 findings that changed implementation
 
-1. **No `MI_DIVP_CreateChn` needed.** The candidate's no-channel assumption
-   is confirmed on this BSP. No production code change required.
+1. **No `MI_DIVP_CreateChn` needed for stretch backend.** The candidate's
+   no-channel assumption is confirmed on this BSP. No production code
+   change required for the surgical swap (commit `338036c`).
 2. **Pixel format value matters.** The vendor `libmi_divp.so` on this build
    accepts `ePixelFormat = 0x0B` (which equals `I6_PIXFMT_YUV420SP` in the
    waybeam compat layer), and **rejects** the canonical
@@ -244,9 +249,31 @@ break the golden path.
    `divp_src/dst.ePixelFormat`, so it is correct on this point — but the
    value is BSP-specific. If the firmware is rebuilt against a different
    SDK revision, rerun `divp_probe --pixfmt-sweep` to confirm the accepted
-   value.
+   value. The channel backend uses the same 0x0B for its
+   `MI_DIVP_OutputPortAttr_t.ePixelFormat`.
 3. **DIVP MMA heap names.** Custom names (`#nocache_divp_probe`) work on
-   this BSP. The candidate uses VENC-input buffers, not raw MMA, so this
-   doesn't affect production directly — but it's the closest we'll get to
-   a synthetic stretch benchmark.
+   this BSP. Production uses VENC-input / DIVP-internal buffers, not raw
+   MMA, so this doesn't affect production directly — but it's the closest
+   we'll get to a synthetic stretch benchmark.
+
+### Channel backend additional findings (commits `051887b`)
+
+1. **VPE port0 serves both bind and manual drain.** The channel backend's
+   stab thread continues to `ChnOutputPortGetBuf` on VPE port0 for IVE
+   input, while the same port is bound to DIVP via `MI_SYS_BindChnPort2`.
+   No port budget pressure observed.
+2. **`MI_DIVP_SetChnAttr` is safe at 60 Hz.** Updating `stCropRect` every
+   frame on a running channel does not stall the engine. The new crop
+   applies to the next inbound frame; frames already inflight use the
+   previous crop.
+3. **RGN attach to DIVP composites correctly.** `E_MI_RGN_MODID_DIVP=1`
+   works as documented. Snapshot endpoint proves OSD pixels reach DIVP
+   output. The earlier "VENC attach succeeded but produced no pixels"
+   observation was a misnamed enum constant (`RGN_MODID_VENC=2` actually
+   means LDC per the vendor `MI_RGN_ModId_e` definition); VENC is not a
+   valid RGN attach point on this BSP.
+4. **JPEG-VENC bind to DIVP output works in parallel with VENC ch0 bind.**
+   `/api/v1/snapshot.jpg` returns a 1024×768 JPEG with the OSD baked in
+   while ch0 continues to encode at 60 fps. Previously timed out under
+   the stretch backend due to VPE port0 contention with the stab thread.
 

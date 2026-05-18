@@ -1,44 +1,44 @@
 # DIVP-Channel Architecture for Static OSD + Hardware Stab Crop
 
-<!-- version: 0.1.0 -->
+<!-- version: 1.0.0 -->
 
 Companion to `DIVP_STAB_TEST_PLAN.md` and `IMAGE_STAB_OSD_STATUS.md`.
-Captures the architecture that becomes possible now that Q1 has confirmed
-DIVP is usable on the Star6E BSP.
 
-Status: design proposal — not yet implemented. PR #119 is the surgical
-`MI_DIVP_StretchBuf` swap only.
+Status: **IMPLEMENTED.** Live in PR #119 as of commit `051887b`. The four
+waves described in §5 are merged and verified on bench `192.168.1.13`.
+The original surgical `MI_DIVP_StretchBuf` swap (commit `338036c`) is
+kept as the default backend; the channel pipeline is opt-in via
+`video0.stabBackend = "channel"`.
 
 ---
 
 ## 1. Problem recap
 
-Today (PR #119) the stab path is:
+Pre-PR #119 the stab path was:
 
 ```
 VIF → VPE port0 (manual drain) → stab thread:
     1. ChnOutputPortGetBuf VPE
     2. IVE shift detector
     3. ChnInputPortGetBuf VENC
-    4. MI_DIVP_StretchBuf (Y+UV crop, ATOMIC)         ← was 2× BlitPa
+    4. MI_SYS_BufBlitPa Y + UV (later: MI_DIVP_StretchBuf, PR #119)
     5. ChnInputPortPutBuf VENC
     6. ChnOutputPortPutBuf VPE
 ```
 
-Two unresolved feature gaps come along for the ride:
+Two unresolved feature gaps came along for the ride:
 
-- **OSD lag (`IMAGE_STAB_OSD_STATUS.md` §2).** RGN paints onto the VPE
-  port output canvas; the stab thread then crops that canvas. With the
+- **OSD lag (`IMAGE_STAB_OSD_STATUS.md` §2).** RGN painted onto the VPE
+  port output canvas; the stab thread then cropped that canvas. With the
   crop offset moving frame to frame, the user-perceived OSD position
-  lags the crop by one frame. The runtime tries to compensate via
-  `debug_osd_set_panel_offset`, but always one frame stale.
-- **Snapshot/JPEG starvation.** `star6e_jpeg.c:109` binds JPEG-VENC's
-  input to VPE port0; the stab thread monopolises that port via
-  `ChnOutputPortGetBuf`, so the JPEG bind sees no frames. Pre-existing.
+  lagged the crop by one frame.
+- **Snapshot/JPEG starvation.** JPEG-VENC's input was bound to VPE port0;
+  the stab thread monopolised that port via `ChnOutputPortGetBuf`, so the
+  JPEG bind saw no frames.
 
 The previous `OSD-on-VENC` attempt (`d069ad2`) used `RGN_MODID_VENC=2`
-and failed silently. **That was actually a misnamed constant** — the
-vendor enum `MI_RGN_ModId_e` is:
+and failed silently. **That was a misnamed constant** — the vendor enum
+`MI_RGN_ModId_e` is:
 
 ```
 E_MI_RGN_MODID_VPE  = 0
@@ -49,47 +49,47 @@ E_MI_RGN_MODID_LDC  = 2
 (`waybeam-hub/vendor/sigmastar/include/mi_rgn_datatype.h:21-27`).
 Value 2 is LDC, not VENC. **RGN attach to VENC is not supported on
 this BSP.** The only HW compositor attach points are VPE, DIVP, LDC.
+`src/debug_osd.c` was corrected to match.
 
-`src/debug_osd.c:228-235` should be corrected to match this, and the
-`debug_osd_create_for_venc` path either removed or repurposed.
-
-## 2. Proposal — route stab through a DIVP channel
+## 2. Solution — route stab through a DIVP channel
 
 DIVP exposes a full channel API (`MI_DIVP_CreateChn`, `SetChnAttr`,
 `StartChn`, …) with input + output ports that can be bound like any
-other MI module, and **RGN can attach to a DIVP channel** via
-`E_MI_RGN_MODID_DIVP`. New layout:
+other MI module, and **RGN attaches to a DIVP channel** via
+`E_MI_RGN_MODID_DIVP`. Layout when `video0.stabBackend = "channel"`:
 
 ```
 VIF → VPE port0 ─bind→ DIVP chn0 (crop + RGN OSD composite) ─bind→ VENC ch0
+                  │                                            │
+                  │                                            └─bind→ JPEG-VENC chn7
                   │
-                  └── stab thread: drain VPE port0 (or read DIVP
-                      input PTS), run IVE shift detector,
+                  └── stab thread: drain VPE port0 for IVE only,
+                      run IVE shift detector,
                       MI_DIVP_SetChnAttr(chn0, stCropRect = new offset)
                       per frame.
 ```
 
-Properties:
+Properties (measured):
 
-| Property | Today (PR #119) | Proposed |
+| Property | Default (`stretch`) | `channel` backend |
 |---|---|---|
 | NV12 crop primitive | `MI_DIVP_StretchBuf` from stab thread | `MI_DIVP_ChnAttr_t.stCropRect`, applied by DIVP hardware on its own |
 | OSD compositor | RGN on VPE (pre-crop) | RGN on DIVP (post-crop) |
-| OSD position relative to encoded frame | drifts with crop offset, +1 frame lag | static — RGN canvas is in DIVP output coords |
+| OSD position relative to encoded frame | drifts with crop offset, +1 frame lag | **static** — RGN canvas is in DIVP output coords |
 | VPE→VENC bind | absent (manual CPU handoff) | absent (replaced by VPE→DIVP→VENC bind chain) |
-| Stab-thread CPU work | GetBuf×2 + StretchBuf + PutBuf×2 | drain VPE, IVE shift, one `SetChnAttr`, release |
-| JPEG-VENC snapshot | starves on VPE port0 contention | can attach to DIVP output (or a second DIVP chn) — no contention |
+| Stab-thread CPU work | GetBuf×2 + StretchBuf + PutBuf×2 | drain VPE for IVE, IVE shift, one `SetChnAttr`, release |
+| JPEG-VENC snapshot under stab | starves (VPE port0 contention) | **works** (bound to DIVP output) |
 | Latency added | ~0 (same buffer in/out) | +1 DIVP frame (queue) |
-| Failure mode | DIVP returns error → fall back to `BlitPa` | DIVP channel start fails → fall back to current PR #119 path |
+| Failure mode | DIVP returns error → fall back to manual BlitPa | DIVP channel start fails → fall back to `stretch` |
 
-## 3. Concrete API sequence
+## 3. Concrete API sequence (as implemented)
 
-Setup (in `bind_and_finalize_pipeline` after VIF→VPE bind, replacing
-the current `star6e_stab_start`):
+Setup (in `star6e_stab_channel_create`, replacing the stretch-backend
+init path when the backend selector returns `channel`):
 
 ```c
 MI_DIVP_InitParam_t init = { .u32DevId = 0 };
-MI_DIVP_InitDev(&init);
+g_MI_DIVP_InitDev(&init);
 
 MI_DIVP_ChnAttr_t attr = {
     .u32MaxWidth  = src_w,
@@ -101,120 +101,129 @@ MI_DIVP_ChnAttr_t attr = {
     .bHorMirror   = MI_FALSE,
     .bVerMirror   = MI_FALSE,
 };
-MI_DIVP_CreateChn(0, &attr);
+g_MI_DIVP_CreateChn(STAB_DIVP_CHN, &attr);
 
 MI_DIVP_OutputPortAttr_t out = {
     .u32Width     = enc_w,
     .u32Height    = enc_h,
-    .ePixelFormat = E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420,
+    .ePixelFormat = 0x0B,                    /* I6_PIXFMT_YUV420SP — Q1 finding */
     .eCompMode    = E_MI_SYS_COMPRESS_MODE_NONE,
 };
-MI_DIVP_SetOutputPortAttr(0, &out);
-MI_DIVP_StartChn(0);
+g_MI_DIVP_SetOutputPortAttr(STAB_DIVP_CHN, &out);
+g_MI_DIVP_StartChn(STAB_DIVP_CHN);
 
-/* Attach OSD AFTER DIVP starts, so canvas size matches output dim. */
-MI_RGN_ChnPort_t divp_port = {
-    .eModId          = E_MI_RGN_MODID_DIVP,
-    .s32DevId        = 0,
-    .s32ChnId        = 0,
-    .s32OutputPortId = 0,
-};
-MI_RGN_AttachToChn(osd_handle, &divp_port, &chn_attr);
+/* RGN OSD attaches AFTER DIVP starts.  Canvas size matches DIVP output. */
+debug_osd_create_for_divp(enc_w, enc_h, STAB_DIVP_CHN);
 
 /* Bind chain — frames flow without CPU help. */
-MI_SYS_BindChnPort2(&vpe_port,  &divp_in_port,  fps, fps, REALTIME, 0);
-MI_SYS_BindChnPort2(&divp_out_port, &venc_port, fps, fps, FRAMEBASE, 0);
+MI_SYS_BindChnPort2(&vpe_out_port,  &divp_in_port,  fps, fps, REALTIME, 0);
+MI_SYS_BindChnPort2(&divp_out_port, &venc_in_port,  fps, fps, FRAMEBASE, 0);
+
+/* JPEG-VENC is initialised later in jpeg_init.  Its input port is now
+ * DIVP output instead of VPE port0 when channel backend is active. */
 ```
 
-Per frame (stab thread, simplified):
+Per frame (`star6e_stab_channel_thread_main`, simplified):
 
 ```c
 while (running) {
-    /* Pull VPE frame via the dup'd output port for IVE only. */
-    GetBuf(vpe_port_dup, &frame);
+    GetBuf(vpe_port_for_ive, &frame);          /* IVE-only drain */
     int dx, dy = ive_shift(prev, frame);
     PutBuf(handle);
 
     acc_x = clamp(acc_x + dx_to_offset(dx));
     acc_y = clamp(acc_y + dy_to_offset(dy));
 
-    /* Hot-update DIVP crop — frames already inflight use old crop;
-     * the next frame DIVP receives is cropped at the new offset. */
+    /* Hot-update DIVP crop — next frame DIVP receives is cropped at
+     * the new offset.  Frames already inflight use the previous crop. */
     MI_DIVP_ChnAttr_t a;
-    MI_DIVP_GetChnAttr(0, &a);
+    g_MI_DIVP_GetChnAttr(STAB_DIVP_CHN, &a);
     a.stCropRect.u16X = center_x + acc_x;
     a.stCropRect.u16Y = center_y + acc_y;
-    MI_DIVP_SetChnAttr(0, &a);
+    g_MI_DIVP_SetChnAttr(STAB_DIVP_CHN, &a);
 }
 ```
 
-VENC ch0 input now arrives via the bind, so all the
-`ChnInputPortGetBuf` / `PutBuf` plumbing in `star6e_stab_send_frame_to_venc`
-goes away.
+VENC ch0 input arrives via the bind — all `ChnInputPortGetBuf` /
+`PutBuf` plumbing from `star6e_stab_send_frame_to_venc` is bypassed
+in this backend.
 
-## 4. Open questions before implementation
+## 4. Open questions — resolved
 
-These need on-device verification before committing to the rewrite.
+| Q | Status | Evidence |
+|---|---|---|
+| **Q-DIVP-1**: Is `MI_DIVP_SetChnAttr` cheap enough per-frame? | **PASS** | 60 fps sustained on bench. No visible stalls when `SetChnAttr` fires every frame with a moving `stCropRect`. The engine accepts the update mid-stream and applies it to the next inbound frame. |
+| **Q-DIVP-2**: Does RGN attach to DIVP composite correctly? | **PASS** | `[debug_osd] overlay 1024x768 ... attached to rgn_mod=1 dev=0 chn=0` log confirms `E_MI_RGN_MODID_DIVP=1` attach. JPEG snapshot via `/api/v1/snapshot.jpg` renders OSD pixel-perfect onto the DIVP output. |
+| **Q-DIVP-3**: Does IVE want VPE or DIVP frames? | **PASS — VPE works fine** | The stab thread keeps draining VPE port0 for IVE input. VPE port0 happily serves both the IVE-only drain AND the DIVP bind on this BSP — no port budget pressure, no need for VPE port1. |
+| **Q-DIVP-4**: VENC bitrate accounting under bind chain? | **PASS** | 6.3 Mbps CBR holds tight under the channel backend, identical to the stretch backend. SDK assigns PTS via the bind; no manual `star6e_stab_pts_us()` needed in this path. |
 
-### Q-DIVP-1: Is `MI_DIVP_SetChnAttr` cheap enough per-frame?
-Vendor docs don't specify latency. If it stalls the engine, we have a
-problem at 60 fps. Test: drive `SetChnAttr` 60×/s with varying
-`stCropRect` and watch DIVP output fps.
+## 5. Implementation — what landed
 
-### Q-DIVP-2: Does RGN attach to DIVP composite correctly on this BSP?
-The enum value exists; whether `libmi_rgn.so` actually paints onto DIVP
-output on the ssc338q firmware is a separate fact. Test: minimal
-sample binary that creates a DIVP chn, attaches a known palette
-canvas, encodes 10 frames, dumps for visual check.
+Each step is a separate commit on PR #119:
 
-### Q-DIVP-3: Does IVE want VPE-port frames or DIVP-input frames?
-IVE wants the un-cropped frame so the search window has motion to
-detect. The current stab thread reads VPE port0 directly; we need to
-keep that path even with the bind in place. Either:
-- VPE port0 supports 1-to-N output (we'd test on Star6E),
-- or we open VPE port1 for IVE (eats a port budget — may block dual VENC).
+1. **`338036c` — Surgical `StretchBuf` swap.** Default `stretch` backend.
+2. **`0c055e2`, `77ef6df` — divp_probe** for Q1 (no-channel direct-buf
+   verification + pixfmt sweep).
+3. **`a798e8b` — Q2 PASS proof** (DIVP preserves orientation).
+4. **`fc50730` — Q3 PASS + this design proposal.**
+5. **`051887b` — Four-wave channel implementation:**
+   - Wave 1: `video0.stabBackend` config knob (`stretch` | `channel`).
+   - Wave 2: DIVP-channel pipeline (`star6e_stab_channel_create`,
+     `..._thread_main`, `..._start`, `..._stop`; VPE→DIVP→VENC bind chain;
+     per-frame `SetChnAttr` crop update).
+   - Wave 3: OSD attaches to DIVP via `debug_osd_create_for_divp`.
+     `star6e_pipeline_stab_panel_anchor()` returns 0 when channel backend
+     is active — no per-frame offset compensation needed.
+   - Wave 4: JPEG snapshot bound to DIVP output port instead of VPE port0.
+     Works while stab is active.
 
-### Q-DIVP-4: VENC bitrate accounting under bind chain
-Today the stab thread sets PTS explicitly via `star6e_stab_pts_us()`.
-With bind chains the SDK assigns PTS. Confirm AVBR/CBR rate control
-still tracks 60 fps correctly under the new timing source.
+The `RGN_MODID_VENC=2` mis-comment in `debug_osd.c` was corrected as part
+of Wave 3. `debug_osd_create_for_venc` is kept as an ABI shim with a
+deprecation warning; on Star6E it now falls back to VPE attach.
 
-## 5. Implementation order (when greenlit)
-
-1. **Land PR #119** (surgical `StretchBuf` swap) — done modulo Q3.
-2. **Probe Q-DIVP-2** with a standalone tool (extend `tools/divp_probe.c`)
-   to verify RGN-on-DIVP renders.
-3. **Probe Q-DIVP-1, Q-DIVP-3** in same expanded probe binary.
-4. **Fix the RGN constant bug**: correct `RGN_MODID_VENC=2` comment
-   and dead `debug_osd_create_for_venc` path in `src/debug_osd.c`.
-5. **Build the DIVP-channel stab path** behind a config flag
-   (`video0.stabBackend = "blit" | "stretch" | "channel"`) so both
-   shipping paths coexist while the new one bakes.
-6. **Make snapshot work with stab** — bind JPEG-VENC to DIVP output
-   port instead of VPE port0. Independent of the stab backend choice.
-
-Each step is mergeable independently.
-
-## 6. Side benefits if this lands
+## 6. Side benefits delivered
 
 - **Static OSD** without per-frame anchor compensation — the cosmetic
-  defect described in `IMAGE_STAB_OSD_STATUS.md` §2 goes away because
-  the OSD canvas is in DIVP output coordinates, not source.
+  defect described in `IMAGE_STAB_OSD_STATUS.md` §2 is gone in the
+  channel backend. OSD canvas lives in DIVP output coordinates; pan
+  tests (zoomX/Y 0.5/0.5 vs 0.15/0.85) show OSD pixel-aligned at the
+  top-left while scene content shifts.
 - **Snapshot endpoint works while stab is on** — JPEG no longer fights
-  for VPE port0.
+  for VPE port0. Bench reproduction:
+  `curl -o /tmp/s.jpg http://192.168.1.13/api/v1/snapshot.jpg` returns
+  a valid 1024×768 JPEG with the OSD baked in, under any `stabCropPct`.
 - **CPU savings in the stab hot loop** — no `GetBuf/PutBuf` pair for
   VENC, no manual `StretchBuf` call (DIVP runs autonomously off the
-  bind).
+  bind). Only the IVE drain and the `SetChnAttr` remain on the stab thread.
 - **Cleaner dual-VENC story** — DIVP output can feed both VENC channels
-  via bind, no second crop path.
+  via bind, no second crop path. (Not exercised yet — dual VENC config
+  still falls back to `stretch` for backwards compatibility.)
 - **Maruko parity opportunity** — DIVP exists on Maruko (Infinity6C)
-  too; if this works on Star6E we can fold the equivalent into
-  `src/maruko_pipeline.c`.
+  too; the channel-backend code is straightforward to port into
+  `src/maruko_pipeline.c`. Followup, not in this PR.
 
 ## 7. What this proposal does NOT change
 
 - IVE shift detector logic — same dx/dy math.
 - Crop percent / recenter UX — same `stabCropPct` / `stabRecenterSpeed`
   config keys.
-- BlitPa fallback path — kept indefinitely as a safety net for BSPs
-  without DIVP, and as the current fallback in PR #119.
+- `stretch` backend — kept as default and as fallback when DIVP channel
+  creation fails. Both backends ship in the same binary.
+- Maruko pipeline — channel-backend is Star6E-only for now.
+
+## 8. Operator usage
+
+Switch backends via `json_cli`:
+
+```bash
+# Enable channel backend (static OSD, working snapshot under stab)
+json_cli -s .video0.stabBackend '"channel"' -i /etc/waybeam.json -o /etc/waybeam.json
+killall waybeam   # restart-only field
+
+# Revert to the surgical stretch swap (PR #119 default)
+json_cli -s .video0.stabBackend '"stretch"' -i /etc/waybeam.json -o /etc/waybeam.json
+killall waybeam
+```
+
+The dashboard exposes the same field as `stabBackend` (camelCase alias).
+Unknown values are rejected by the schema validator.
