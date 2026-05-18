@@ -135,6 +135,14 @@ typedef struct {
 	uint32_t stab_crop_pct;       /* 0 = off, 50..100 = crop % */
 	uint32_t stab_recenter_speed; /* 0 = stick to patch, >0 = pixels/sec
 	                               * drift of accumulated offset toward 0 */
+	/* Stab backend selector.  "stretch" = direct-buf MI_DIVP_StretchBuf
+	 * driven by the stab thread (DIVP_STAB_TEST_PLAN.md path, ships
+	 * with PR #119).  "channel" = full DIVP channel with VPE→DIVP→VENC
+	 * binds; stab thread only updates DIVP's crop rect.  Channel path
+	 * enables RGN-OSD attach on DIVP (static OSD in output coords) and
+	 * frees JPEG-VENC from VPE-port-0 contention.  See
+	 * DIVP_CHANNEL_OSD_ARCH.md. */
+	char stab_backend[16];        /* "stretch" (default) | "channel" */
 } VencConfigVideo;
 
 typedef struct {

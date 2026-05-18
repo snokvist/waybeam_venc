@@ -186,6 +186,8 @@ void venc_config_defaults(VencConfig *cfg)
 	/* image stabilization (video0) — disabled by default */
 	cfg->video0.stab_crop_pct = 0;
 	cfg->video0.stab_recenter_speed = 0;
+	snprintf(cfg->video0.stab_backend, sizeof(cfg->video0.stab_backend),
+		"stretch");
 
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
@@ -514,6 +516,20 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		(int)v->stab_crop_pct);
 	v->stab_recenter_speed = (uint32_t)json_get_int(obj, "stabRecenterSpeed",
 		(int)v->stab_recenter_speed);
+	{
+		const char *be = json_get_string(obj, "stabBackend",
+			v->stab_backend);
+		if (be && *be)
+			snprintf(v->stab_backend, sizeof(v->stab_backend),
+				"%s", be);
+		/* Accept only the two known backends; anything else falls back
+		 * to "stretch" so a typo in the config file doesn't strand the
+		 * pipeline. */
+		if (strcmp(v->stab_backend, "stretch") != 0 &&
+		    strcmp(v->stab_backend, "channel") != 0)
+			snprintf(v->stab_backend, sizeof(v->stab_backend),
+				"stretch");
+	}
 	/* 0 = off; valid enabled range is 50..100 % crop.  Anything else gets
 	 * clamped to off rather than producing a tiny encoded frame the SDK
 	 * may reject. */
@@ -1072,7 +1088,8 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
 	pp_field_uint(p,   2, "stabCropPct",       cfg->video0.stab_crop_pct,       0);
-	pp_field_uint(p,   2, "stabRecenterSpeed", cfg->video0.stab_recenter_speed, 1);
+	pp_field_uint(p,   2, "stabRecenterSpeed", cfg->video0.stab_recenter_speed, 0);
+	pp_field_string(p, 2, "stabBackend",       cfg->video0.stab_backend,        1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1261,6 +1278,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->video0.stab_crop_pct);
 		cJSON_AddNumberToObject(vid, "stabRecenterSpeed",
 			cfg->video0.stab_recenter_speed);
+		cJSON_AddStringToObject(vid, "stabBackend",
+			cfg->video0.stab_backend);
 	}
 
 	/* outgoing */

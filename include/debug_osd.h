@@ -28,14 +28,22 @@ typedef struct DebugOsdState DebugOsdState;
 DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
                                 const void *vpe_port);
 
-/** Star6E: create OSD attached to a VENC channel instead of VPE.  Used
- *  when image stabilization is enabled — composites OSD onto the encoded
- *  frame after the stab thread has fed it, so OSD position is correct in
- *  the encoded view regardless of how the stab crop window moves.
- *  Returns NULL if RGN is unavailable, attach fails (likely wrong module
- *  id for this libmi_rgn build), or on error. */
+/** Star6E: deprecated.  RGN attach to VENC is not supported on this
+ *  BSP — the vendor MI_RGN_ModId_e enum only has VPE / DIVP / LDC.
+ *  Use debug_osd_create_for_divp instead when the channel stab backend
+ *  is active.  Kept for ABI; falls back to VPE attach with a warning. */
 DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
                                          int venc_device, int venc_channel);
+
+/** Star6E: create OSD attached to a DIVP channel.  Used when
+ *  video0.stabBackend = "channel" — the DIVP engine composites the
+ *  OSD canvas onto its already-cropped output, so the OSD is static in
+ *  the encoded frame coordinates regardless of how the stab crop
+ *  window moves.  Canvas dimensions should match the DIVP output
+ *  (= encoded view), not the VPE source.  Returns NULL if RGN is
+ *  unavailable or attach fails. */
+DebugOsdState *debug_osd_create_for_divp(uint32_t frame_w, uint32_t frame_h,
+                                         int divp_chn);
 
 void debug_osd_destroy(DebugOsdState *osd);
 

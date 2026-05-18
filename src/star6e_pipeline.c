@@ -704,6 +704,52 @@ typedef struct {
 typedef MI_S32 (*stab_divp_stretch_buf_fn_t)(StabDivpDirectBuf_t *src,
 	StabSysWindowRect_t *crop, StabDivpDirectBuf_t *dst);
 
+/* DIVP CHANNEL ABI for the OSD-on-DIVP backend
+ * (documentation/DIVP_CHANNEL_OSD_ARCH.md).  Selected with
+ * video0.stabBackend = "channel".  All field orders track
+ * waybeam-hub/vendor/sigmastar/include/mi_divp*.h. */
+typedef int StabDivpTnrLevel_e;
+typedef int StabDivpDiType_e;
+typedef int StabSysRotate_e;
+typedef int StabSysCompressMode_e;
+
+typedef struct {
+	MI_U32 u32MaxWidth;
+	MI_U32 u32MaxHeight;
+	StabDivpTnrLevel_e eTnrLevel;     /* 0 = OFF */
+	StabDivpDiType_e eDiType;         /* 0 = OFF */
+	StabSysRotate_e eRotateType;      /* 0 = NONE */
+	StabSysWindowRect_t stCropRect;
+	MI_BOOL bHorMirror;
+	MI_BOOL bVerMirror;
+} StabDivpChnAttr_t;
+
+typedef struct {
+	MI_U32 u32Width;
+	MI_U32 u32Height;
+	int ePixelFormat;                 /* = I6_PIXFMT_YUV420SP (0x0B) */
+	StabSysCompressMode_e eCompMode;  /* 0 = NONE */
+} StabDivpOutputPortAttr_t;
+
+typedef struct {
+	MI_U32 u32DevId;
+	MI_U8 *u8Data;
+} StabDivpInitParam_t;
+
+typedef MI_S32 (*stab_divp_init_dev_fn_t)(StabDivpInitParam_t *init);
+typedef MI_S32 (*stab_divp_deinit_dev_fn_t)(void);
+typedef MI_S32 (*stab_divp_create_chn_fn_t)(MI_U32 chn,
+	StabDivpChnAttr_t *attr);
+typedef MI_S32 (*stab_divp_destroy_chn_fn_t)(MI_U32 chn);
+typedef MI_S32 (*stab_divp_set_chn_attr_fn_t)(MI_U32 chn,
+	StabDivpChnAttr_t *attr);
+typedef MI_S32 (*stab_divp_get_chn_attr_fn_t)(MI_U32 chn,
+	StabDivpChnAttr_t *attr);
+typedef MI_S32 (*stab_divp_set_out_attr_fn_t)(MI_U32 chn,
+	StabDivpOutputPortAttr_t *attr);
+typedef MI_S32 (*stab_divp_start_chn_fn_t)(MI_U32 chn);
+typedef MI_S32 (*stab_divp_stop_chn_fn_t)(MI_U32 chn);
+
 typedef int StabIveHandle_t;
 typedef MI_S32 (*stab_ive_create_fn_t)(StabIveHandle_t handle);
 typedef MI_S32 (*stab_ive_destroy_fn_t)(StabIveHandle_t handle);
@@ -731,6 +777,26 @@ static stab_sys_flush_inv_cache_fn_t g_stab_sys_flush_inv_cache;
 static stab_sys_va2pa_fn_t g_stab_sys_va2pa;
 static stab_divp_stretch_buf_fn_t g_stab_divp_stretch_buf;
 static void *g_stab_divp_lib;
+
+static stab_divp_init_dev_fn_t   g_stab_divp_init_dev;
+static stab_divp_deinit_dev_fn_t g_stab_divp_deinit_dev;
+static stab_divp_create_chn_fn_t g_stab_divp_create_chn;
+static stab_divp_destroy_chn_fn_t g_stab_divp_destroy_chn;
+static stab_divp_set_chn_attr_fn_t g_stab_divp_set_chn_attr;
+static stab_divp_get_chn_attr_fn_t g_stab_divp_get_chn_attr;
+static stab_divp_set_out_attr_fn_t g_stab_divp_set_out_attr;
+static stab_divp_start_chn_fn_t  g_stab_divp_start_chn;
+static stab_divp_stop_chn_fn_t   g_stab_divp_stop_chn;
+
+/* Whether the DIVP channel backend is active.  Set by
+ * star6e_stab_channel_start(); checked by OSD attach and JPEG bind so
+ * they pick the DIVP module instead of VPE port 0 when this is true. */
+static int g_stab_chn_active;
+static int g_stab_chn_created;
+static int g_stab_chn_started;
+static int g_stab_chn_bind_vpe_divp;
+static int g_stab_chn_bind_divp_venc;
+#define STAB_DIVP_CHN 0   /* DIVP channel id we own */
 
 static stab_ive_create_fn_t g_stab_ive_create;
 static stab_ive_destroy_fn_t g_stab_ive_destroy;
@@ -803,6 +869,27 @@ static int star6e_stab_load_sys_extra_symbols(void)
 	if (g_stab_divp_lib && !g_stab_divp_stretch_buf) {
 		g_stab_divp_stretch_buf = (stab_divp_stretch_buf_fn_t)
 			dlsym(g_stab_divp_lib, "MI_DIVP_StretchBuf");
+	}
+	/* DIVP channel API — for the "channel" stab backend. */
+	if (g_stab_divp_lib && !g_stab_divp_init_dev) {
+		g_stab_divp_init_dev = (stab_divp_init_dev_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_InitDev");
+		g_stab_divp_deinit_dev = (stab_divp_deinit_dev_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_DeInitDev");
+		g_stab_divp_create_chn = (stab_divp_create_chn_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_CreateChn");
+		g_stab_divp_destroy_chn = (stab_divp_destroy_chn_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_DestroyChn");
+		g_stab_divp_set_chn_attr = (stab_divp_set_chn_attr_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_SetChnAttr");
+		g_stab_divp_get_chn_attr = (stab_divp_get_chn_attr_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_GetChnAttr");
+		g_stab_divp_set_out_attr = (stab_divp_set_out_attr_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_SetOutputPortAttr");
+		g_stab_divp_start_chn = (stab_divp_start_chn_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_StartChn");
+		g_stab_divp_stop_chn = (stab_divp_stop_chn_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_StopChn");
 	}
 
 	return (g_stab_sys_out_get_buf && g_stab_sys_out_put_buf &&
@@ -913,6 +1000,12 @@ int star6e_pipeline_stab_panel_anchor(int *out_x, int *out_y)
 	if (!g_stab_running || g_stab_enc_w == 0 || g_stab_enc_h == 0)
 		return 0;
 	if (!out_x || !out_y)
+		return 0;
+	/* Channel backend: OSD is attached to DIVP output (already in
+	 * encoded-frame coords), so no per-frame anchor compensation is
+	 * needed.  Returning 0 keeps the panel at its statically-placed
+	 * (0,0) origin in the DIVP canvas. */
+	if (g_stab_chn_active)
 		return 0;
 
 	pthread_mutex_lock(&g_stab_lock);
@@ -1568,6 +1661,485 @@ static int star6e_stab_enabled(const VencConfig *vcfg)
 {
 	return vcfg && vcfg->video0.stab_crop_pct >= 50 &&
 		vcfg->video0.stab_crop_pct <= 100;
+}
+
+static int star6e_stab_channel_backend(const VencConfig *vcfg)
+{
+	return star6e_stab_enabled(vcfg) && vcfg &&
+		strcmp(vcfg->video0.stab_backend, "channel") == 0;
+}
+
+/* Public accessor — lets OSD attach + JPEG bind discover the DIVP chn
+ * port when the channel backend is active.  Returns NULL otherwise. */
+const void *star6e_pipeline_stab_divp_port(int *out_module_id)
+{
+	static MI_SYS_ChnPort_t port;
+	if (!g_stab_chn_active)
+		return NULL;
+	port.module = I6_SYS_MOD_DIVP;
+	port.device = 0;
+	port.channel = STAB_DIVP_CHN;
+	port.port = 0;
+	if (out_module_id)
+		*out_module_id = I6_SYS_MOD_DIVP;
+	return &port;
+}
+
+/* Channel-backend stab thread.  Same IVE motion-detect logic as the
+ * stretch backend, but the per-frame action is `MI_DIVP_SetChnAttr` to
+ * shift the DIVP crop rect — the VPE→DIVP→VENC bind chain moves the
+ * pixels, and an RGN region attached to DIVP renders OSD in encoded
+ * output coordinates (no per-frame anchor adjustment needed).  See
+ * documentation/DIVP_CHANNEL_OSD_ARCH.md. */
+static void *star6e_stab_channel_thread_main(void *arg)
+{
+	MI_S32 ret;
+	MI_S32 fd = -1;
+	StabSysBufInfo_t prev_buf;
+	StabSysBufHandle_t prev_handle = 0;
+	StabIveImage_t prev_img;
+	int have_prev = 0;
+	int acc_x = 0;
+	int acc_y = 0;
+	int dbg_frame = 0;
+	StabIveImage_t dx;
+	StabIveImage_t dy;
+
+	(void)arg;
+	memset(&prev_buf, 0, sizeof(prev_buf));
+	memset(&prev_img, 0, sizeof(prev_img));
+	memset(&dx, 0, sizeof(dx));
+	memset(&dy, 0, sizeof(dy));
+
+	if (star6e_stab_alloc_ive_image(&dx, 1, 1,
+	    STAB_E_IVE_IMAGE_TYPE_S8C1) != 0 ||
+	    star6e_stab_alloc_ive_image(&dy, 1, 1,
+	    STAB_E_IVE_IMAGE_TYPE_S8C1) != 0)
+		goto out;
+
+	if (g_stab_sys_get_fd)
+		ret = g_stab_sys_get_fd(&g_stab_vpe_port, &fd);
+	else
+		ret = -1;
+	if (ret != 0)
+		fd = -1;
+
+	while (g_stab_running) {
+		StabSysBufInfo_t curr_buf;
+		StabSysBufHandle_t curr_handle = 0;
+		StabIveImage_t curr_img;
+		int img_w, img_h, box, left, top;
+
+		memset(&curr_buf, 0, sizeof(curr_buf));
+
+		if (fd >= 0) {
+			fd_set rfds;
+			struct timeval tv;
+
+			FD_ZERO(&rfds);
+			FD_SET(fd, &rfds);
+			tv.tv_sec = 0;
+			tv.tv_usec = 50000;
+			ret = select(fd + 1, &rfds, NULL, NULL, &tv);
+			if (ret <= 0 || !FD_ISSET(fd, &rfds))
+				continue;
+		}
+
+		ret = g_stab_sys_out_get_buf(&g_stab_vpe_port,
+			&curr_buf, &curr_handle);
+		if (ret != 0) {
+			if (fd < 0)
+				usleep(1000);
+			continue;
+		}
+
+		if (curr_buf.eBufType != STAB_E_BUFDATA_FRAME ||
+		    !curr_buf.stFrameData.phyAddr[0] ||
+		    !curr_buf.stFrameData.pVirAddr[0]) {
+			g_stab_sys_out_put_buf(curr_handle);
+			continue;
+		}
+
+		if (star6e_stab_make_center_y_crop(&curr_img, &curr_buf,
+		    STAB_SHIFT_CROP_W, STAB_SHIFT_CROP_H) != 0) {
+			g_stab_sys_out_put_buf(curr_handle);
+			continue;
+		}
+
+		if (!have_prev) {
+			prev_buf = curr_buf;
+			prev_handle = curr_handle;
+			prev_img = curr_img;
+			have_prev = 1;
+			continue;
+		}
+
+		img_w = (int)curr_img.u16Width;
+		img_h = (int)curr_img.u16Height;
+		box = STAB_BOX_SIZE;
+		if (box > img_w) box = img_w;
+		if (box > img_h) box = img_h;
+		left = ((img_w - box) / 2) & ~1;
+		top  = ((img_h - box) / 2) & ~1;
+
+		{
+			StabIveShiftDetectCtrl_t ctrl = {
+				.enMode = STAB_E_IVE_SHIFT_DETECT_MODE_SINGLE,
+				.pyramid_level = STAB_PYRAMID,
+				.search_range = STAB_SEARCH_RANGE,
+				.u16Left = (MI_U16)left,
+				.u16Top  = (MI_U16)top,
+				.u16Width  = (MI_U16)box,
+				.u16Height = (MI_U16)box,
+			};
+			ret = g_stab_ive_shift(g_stab_ive_handle,
+				&prev_img, &curr_img, &dx, &dy, &ctrl, true);
+		}
+
+		if (ret == 0) {
+			int8_t raw_dx, raw_dy;
+			int max_x, max_y;
+			StabDivpChnAttr_t a;
+			MI_S32 sret;
+
+			g_stab_sys_flush_inv_cache(dx.apu8VirAddr[0],
+				dx.azu16Stride[0]);
+			g_stab_sys_flush_inv_cache(dy.apu8VirAddr[0],
+				dy.azu16Stride[0]);
+			raw_dx = ((int8_t *)dx.apu8VirAddr[0])[0];
+			raw_dy = ((int8_t *)dy.apu8VirAddr[0])[0];
+			acc_x += STAB_SHIFT_SIGN_X * (int)raw_dx;
+			acc_y += STAB_SHIFT_SIGN_Y * (int)raw_dy;
+			max_x = star6e_stab_max_off_x();
+			max_y = star6e_stab_max_off_y();
+			if (acc_x < -max_x) acc_x = -max_x;
+			if (acc_x >  max_x) acc_x =  max_x;
+			if (acc_y < -max_y) acc_y = -max_y;
+			if (acc_y >  max_y) acc_y =  max_y;
+
+			if (g_stab_recenter_period > 0) {
+				uint32_t tau = g_stab_recenter_period;
+				if (tau < 2) tau = 2;
+				if (acc_x > 0)
+					acc_x = (int)((uint32_t)acc_x * (tau - 1) / tau);
+				else if (acc_x < 0)
+					acc_x = -(int)((uint32_t)(-acc_x) * (tau - 1) / tau);
+				if (acc_y > 0)
+					acc_y = (int)((uint32_t)acc_y * (tau - 1) / tau);
+				else if (acc_y < 0)
+					acc_y = -(int)((uint32_t)(-acc_y) * (tau - 1) / tau);
+			}
+
+			pthread_mutex_lock(&g_stab_lock);
+			g_stab_off_x = acc_x;
+			g_stab_off_y = acc_y;
+			pthread_mutex_unlock(&g_stab_lock);
+
+			/* Translate acc + pan into the DIVP crop rect, then hot
+			 * update.  GetChnAttr → mutate → SetChnAttr keeps any
+			 * other field (TNR, rotate, max dims) intact. */
+			{
+				int pan_x = g_stab_pan_x_mil;
+				int pan_y = g_stab_pan_y_mil;
+				int center_x = (int)((g_stab_src_w *
+					(uint32_t)pan_x) / 1000u);
+				int center_y = (int)((g_stab_src_h *
+					(uint32_t)pan_y) / 1000u);
+				int src_x = center_x - (int)g_stab_enc_w / 2 + acc_x;
+				int src_y = center_y - (int)g_stab_enc_h / 2 + acc_y;
+				int mx = (int)(g_stab_src_w - g_stab_enc_w);
+				int my = (int)(g_stab_src_h - g_stab_enc_h);
+				if (src_x < 0) src_x = 0;
+				if (src_x > mx) src_x = mx;
+				if (src_y < 0) src_y = 0;
+				if (src_y > my) src_y = my;
+				src_x &= ~1;
+				src_y &= ~1;
+
+				memset(&a, 0, sizeof(a));
+				if (g_stab_divp_get_chn_attr)
+					g_stab_divp_get_chn_attr(STAB_DIVP_CHN, &a);
+				a.stCropRect.u16X = (MI_U16)src_x;
+				a.stCropRect.u16Y = (MI_U16)src_y;
+				a.stCropRect.u16Width  = (MI_U16)g_stab_enc_w;
+				a.stCropRect.u16Height = (MI_U16)g_stab_enc_h;
+				sret = g_stab_divp_set_chn_attr ?
+					g_stab_divp_set_chn_attr(STAB_DIVP_CHN, &a) :
+					-1;
+				if (sret != 0 && (dbg_frame % 60) == 0)
+					fprintf(stderr, "[waybeam] DIVP "
+						"SetChnAttr ret=0x%x crop=%d,%d "
+						"%ux%u\n", (unsigned)sret,
+						src_x, src_y,
+						g_stab_enc_w, g_stab_enc_h);
+			}
+
+			dbg_frame++;
+			if ((dbg_frame % 120) == 0)
+				fprintf(stderr, "[waybeam] stab-chn tick %d: "
+					"raw=(%d,%d) acc=(%d,%d) max=(%d,%d) "
+					"pan=(%d,%d)\n", dbg_frame,
+					(int)raw_dx, (int)raw_dy, acc_x, acc_y,
+					max_x, max_y, g_stab_pan_x_mil,
+					g_stab_pan_y_mil);
+		} else {
+			if ((dbg_frame++ % 120) == 0)
+				fprintf(stderr, "[waybeam] stab-chn "
+					"Shift_Detector ret=0x%x\n",
+					(unsigned)ret);
+		}
+
+		if (prev_handle)
+			g_stab_sys_out_put_buf(prev_handle);
+		prev_buf = curr_buf;
+		prev_handle = curr_handle;
+		prev_img = curr_img;
+	}
+
+	if (prev_handle)
+		g_stab_sys_out_put_buf(prev_handle);
+	if (fd >= 0 && g_stab_sys_close_fd)
+		g_stab_sys_close_fd(fd);
+out:
+	free(dx.apu8VirAddr[0]);
+	free(dy.apu8VirAddr[0]);
+	return NULL;
+}
+
+/* Set up the DIVP channel + VPE→DIVP→VENC bind chain.  vpe_port is the
+ * VPE module port the stab thread also drains for IVE; venc_port is the
+ * VENC ch0 input port. */
+static int star6e_stab_channel_create(const MI_SYS_ChnPort_t *vpe_port,
+	const MI_SYS_ChnPort_t *venc_port)
+{
+	MI_SYS_ChnPort_t divp_in = {
+		.module = I6_SYS_MOD_DIVP, .device = 0,
+		.channel = STAB_DIVP_CHN, .port = 0 };
+	MI_SYS_ChnPort_t divp_out = {
+		.module = I6_SYS_MOD_DIVP, .device = 0,
+		.channel = STAB_DIVP_CHN, .port = 0 };
+	StabDivpInitParam_t init_param = { .u32DevId = 0, .u8Data = NULL };
+	StabDivpChnAttr_t attr;
+	StabDivpOutputPortAttr_t out_attr;
+	int center_x = (int)((g_stab_src_w - g_stab_enc_w) / 2u);
+	int center_y = (int)((g_stab_src_h - g_stab_enc_h) / 2u);
+	MI_S32 ret;
+
+	if (!g_stab_divp_init_dev || !g_stab_divp_create_chn ||
+	    !g_stab_divp_set_out_attr || !g_stab_divp_start_chn ||
+	    !g_stab_divp_set_chn_attr) {
+		fprintf(stderr, "[waybeam] stab-chn: DIVP channel symbols "
+			"missing — fall back to stretch backend\n");
+		return -1;
+	}
+
+	ret = g_stab_divp_init_dev(&init_param);
+	if (ret != 0 && ret != (MI_S32)0xA0148009 /* HAS_CREATED */) {
+		fprintf(stderr, "[waybeam] DIVP InitDev failed ret=0x%x\n",
+			(unsigned)ret);
+		return -1;
+	}
+
+	memset(&attr, 0, sizeof(attr));
+	attr.u32MaxWidth  = g_stab_src_w;
+	attr.u32MaxHeight = g_stab_src_h;
+	attr.eTnrLevel    = 0;
+	attr.eDiType      = 0;
+	attr.eRotateType  = 0;
+	attr.bHorMirror   = 0;
+	attr.bVerMirror   = 0;
+	attr.stCropRect.u16X = (MI_U16)(center_x & ~1);
+	attr.stCropRect.u16Y = (MI_U16)(center_y & ~1);
+	attr.stCropRect.u16Width  = (MI_U16)g_stab_enc_w;
+	attr.stCropRect.u16Height = (MI_U16)g_stab_enc_h;
+
+	ret = g_stab_divp_create_chn(STAB_DIVP_CHN, &attr);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] DIVP CreateChn ret=0x%x\n",
+			(unsigned)ret);
+		return -1;
+	}
+	g_stab_chn_created = 1;
+
+	memset(&out_attr, 0, sizeof(out_attr));
+	out_attr.u32Width  = g_stab_enc_w;
+	out_attr.u32Height = g_stab_enc_h;
+	out_attr.ePixelFormat = I6_PIXFMT_YUV420SP;
+	out_attr.eCompMode = 0;
+	ret = g_stab_divp_set_out_attr(STAB_DIVP_CHN, &out_attr);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] DIVP SetOutputPortAttr ret=0x%x\n",
+			(unsigned)ret);
+		goto fail;
+	}
+
+	ret = g_stab_divp_start_chn(STAB_DIVP_CHN);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] DIVP StartChn ret=0x%x\n",
+			(unsigned)ret);
+		goto fail;
+	}
+	g_stab_chn_started = 1;
+
+	/* Bind VPE port0 → DIVP input.  Frame-base link so DIVP gets
+	 * complete frames (RGN composite needs full frames). */
+	ret = MI_SYS_BindChnPort2((MI_SYS_ChnPort_t *)vpe_port, &divp_in,
+		60, 60, I6_SYS_LINK_FRAMEBASE, 0);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] BindChnPort2 VPE→DIVP ret=0x%x\n",
+			(unsigned)ret);
+		goto fail;
+	}
+	g_stab_chn_bind_vpe_divp = 1;
+
+	/* Bind DIVP output → VENC ch0 input. */
+	ret = MI_SYS_BindChnPort2(&divp_out, (MI_SYS_ChnPort_t *)venc_port,
+		60, 60, I6_SYS_LINK_FRAMEBASE, 0);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] BindChnPort2 DIVP→VENC ret=0x%x\n",
+			(unsigned)ret);
+		goto fail;
+	}
+	g_stab_chn_bind_divp_venc = 1;
+
+	g_stab_chn_active = 1;
+	fprintf(stderr, "[waybeam] stab-chn: DIVP chn0 %ux%u → "
+		"VENC ch0; OSD-on-DIVP attach point ready\n",
+		g_stab_enc_w, g_stab_enc_h);
+	return 0;
+
+fail:
+	if (g_stab_chn_bind_divp_venc) {
+		MI_SYS_UnBindChnPort(&divp_out, (MI_SYS_ChnPort_t *)venc_port);
+		g_stab_chn_bind_divp_venc = 0;
+	}
+	if (g_stab_chn_bind_vpe_divp) {
+		MI_SYS_UnBindChnPort((MI_SYS_ChnPort_t *)vpe_port, &divp_in);
+		g_stab_chn_bind_vpe_divp = 0;
+	}
+	if (g_stab_chn_started) {
+		g_stab_divp_stop_chn(STAB_DIVP_CHN);
+		g_stab_chn_started = 0;
+	}
+	if (g_stab_chn_created) {
+		g_stab_divp_destroy_chn(STAB_DIVP_CHN);
+		g_stab_chn_created = 0;
+	}
+	return -1;
+}
+
+/* Channel-backend variant of star6e_stab_start.  Same IVE/symbol setup
+ * but spawns the channel thread main and creates the DIVP channel +
+ * bind chain. */
+static int star6e_stab_channel_start(const MI_SYS_ChnPort_t *vpe_port,
+	const MI_SYS_ChnPort_t *venc_port)
+{
+	MI_S32 ret;
+
+	g_stab_vpe_port = *vpe_port;
+	g_stab_venc_port = *venc_port;
+
+	if (star6e_stab_load_sys_extra_symbols() != 0) {
+		fprintf(stderr, "[waybeam] ERROR: stab-chn cannot resolve "
+			"required MI_SYS symbols\n");
+		return -1;
+	}
+
+	g_stab_ive_lib = dlopen("libmi_ive.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!g_stab_ive_lib)
+		g_stab_ive_lib = dlopen("libive.so", RTLD_LAZY | RTLD_GLOBAL);
+	if (!g_stab_ive_lib)
+		return -1;
+	g_stab_ive_create = (stab_ive_create_fn_t)dlsym(g_stab_ive_lib,
+		"MI_IVE_Create");
+	g_stab_ive_destroy = (stab_ive_destroy_fn_t)dlsym(g_stab_ive_lib,
+		"MI_IVE_Destroy");
+	g_stab_ive_shift = (stab_ive_shift_fn_t)dlsym(g_stab_ive_lib,
+		"MI_IVE_Shift_Detector");
+	if (!g_stab_ive_create || !g_stab_ive_destroy || !g_stab_ive_shift) {
+		dlclose(g_stab_ive_lib);
+		g_stab_ive_lib = NULL;
+		return -1;
+	}
+	g_stab_ive_handle = 0;
+	ret = g_stab_ive_create(g_stab_ive_handle);
+	if (ret != 0) {
+		dlclose(g_stab_ive_lib);
+		g_stab_ive_lib = NULL;
+		return ret;
+	}
+	g_stab_ive_created = 1;
+
+	if (star6e_stab_channel_create(vpe_port, venc_port) != 0) {
+		g_stab_ive_destroy(g_stab_ive_handle);
+		g_stab_ive_created = 0;
+		dlclose(g_stab_ive_lib);
+		g_stab_ive_lib = NULL;
+		return -1;
+	}
+
+	g_stab_running = 1;
+	if (pthread_create(&g_stab_thread, NULL,
+	    star6e_stab_channel_thread_main, NULL) != 0) {
+		g_stab_running = 0;
+		fprintf(stderr, "[waybeam] stab-chn thread spawn failed\n");
+		/* Tear down DIVP channel state. */
+		if (g_stab_chn_bind_divp_venc || g_stab_chn_bind_vpe_divp ||
+		    g_stab_chn_started || g_stab_chn_created)
+			g_stab_chn_active = 0;
+		g_stab_ive_destroy(g_stab_ive_handle);
+		g_stab_ive_created = 0;
+		dlclose(g_stab_ive_lib);
+		g_stab_ive_lib = NULL;
+		return -1;
+	}
+
+	fprintf(stderr, "[waybeam] stab-chn: src=%ux%u out=%ux%u crop=%u%% "
+		"recenter=%u backend=channel\n", g_stab_src_w, g_stab_src_h,
+		g_stab_enc_w, g_stab_enc_h, g_stab_crop_percent,
+		g_stab_recenter_period);
+	return 0;
+}
+
+static void star6e_stab_channel_stop(void)
+{
+	MI_SYS_ChnPort_t divp_in = {
+		.module = I6_SYS_MOD_DIVP, .device = 0,
+		.channel = STAB_DIVP_CHN, .port = 0 };
+	MI_SYS_ChnPort_t divp_out = {
+		.module = I6_SYS_MOD_DIVP, .device = 0,
+		.channel = STAB_DIVP_CHN, .port = 0 };
+
+	if (g_stab_running) {
+		g_stab_running = 0;
+		pthread_join(g_stab_thread, NULL);
+		memset(&g_stab_thread, 0, sizeof(g_stab_thread));
+	}
+	if (g_stab_chn_bind_divp_venc) {
+		MI_SYS_UnBindChnPort(&divp_out, &g_stab_venc_port);
+		g_stab_chn_bind_divp_venc = 0;
+	}
+	if (g_stab_chn_bind_vpe_divp) {
+		MI_SYS_UnBindChnPort(&g_stab_vpe_port, &divp_in);
+		g_stab_chn_bind_vpe_divp = 0;
+	}
+	if (g_stab_chn_started && g_stab_divp_stop_chn) {
+		g_stab_divp_stop_chn(STAB_DIVP_CHN);
+		g_stab_chn_started = 0;
+	}
+	if (g_stab_chn_created && g_stab_divp_destroy_chn) {
+		g_stab_divp_destroy_chn(STAB_DIVP_CHN);
+		g_stab_chn_created = 0;
+	}
+	g_stab_chn_active = 0;
+	if (g_stab_ive_created) {
+		g_stab_ive_destroy(g_stab_ive_handle);
+		g_stab_ive_created = 0;
+	}
+	if (g_stab_ive_lib) {
+		dlclose(g_stab_ive_lib);
+		g_stab_ive_lib = NULL;
+	}
 }
 
 /* Compute the effective output dim for digital zoom.
@@ -2493,19 +3065,41 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		/* Stabilization path: reapply VPE port0 attrs at full src dim
 		 * AFTER the VIF→VPE bind (the standalone DIS sample relies on
 		 * this ordering on Star6E), bump the output queue depth so the
-		 * drain thread can keep up, and spawn the IVE+BufBlit thread
-		 * feeding VENC ch0's input port.  No VPE→VENC bind. */
+		 * drain thread can keep up, then start the chosen backend. */
 		ret = star6e_stab_reapply_vpe_port(g_stab_src_w, g_stab_src_h);
 		if (ret != 0) {
 			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
 			state->bound_vif_vpe = 0;
 			return ret;
 		}
-		ret = star6e_stab_start(&state->vpe_port, &state->venc_port);
-		if (ret != 0) {
-			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
-			state->bound_vif_vpe = 0;
-			return ret;
+		if (star6e_stab_channel_backend(vcfg)) {
+			/* Channel backend (video0.stabBackend = "channel"):
+			 * spin up a DIVP channel, bind VPE → DIVP → VENC, and
+			 * spawn a stab thread that hot-updates DIVP's crop
+			 * rect every frame.  Enables RGN-OSD attach on DIVP
+			 * (static OSD in output coords) and frees JPEG-VENC
+			 * from VPE-port-0 contention.  See
+			 * documentation/DIVP_CHANNEL_OSD_ARCH.md. */
+			ret = star6e_stab_channel_start(&state->vpe_port,
+				&state->venc_port);
+			if (ret != 0) {
+				MI_SYS_UnBindChnPort(&state->vif_port,
+					&state->vpe_port);
+				state->bound_vif_vpe = 0;
+				return ret;
+			}
+		} else {
+			/* Stretch backend (default): manual VPE drain + CPU
+			 * MI_DIVP_StretchBuf (or BufBlitPa fallback) handoff
+			 * into the VENC input port. */
+			ret = star6e_stab_start(&state->vpe_port,
+				&state->venc_port);
+			if (ret != 0) {
+				MI_SYS_UnBindChnPort(&state->vif_port,
+					&state->vpe_port);
+				state->bound_vif_vpe = 0;
+				return ret;
+			}
 		}
 		state->bound_vpe_venc = 0;
 	} else {
@@ -2527,12 +3121,25 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
 	}
 
-	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
-	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
-	 * just serves 503 if init fails.  Config from venc.json snapshot.*
-	 * section; width=0/height=0 inherits main stream dimensions. */
+	/* Bring up the JPEG snapshot subsystem.  Failure is non-fatal —
+	 * /api/v1/snapshot.jpg just serves 503 if init fails.  Config from
+	 * venc.json snapshot.* section; width=0/height=0 inherits main stream
+	 * dimensions.  When the channel stab backend is active, bind JPEG to
+	 * the DIVP output port instead of VPE port 0 — DIVP is a 1-to-N
+	 * producer (already feeding VENC ch0) so JPEG-VENC can hang off the
+	 * same output port without contending with the stab thread's manual
+	 * VPE drain for IVE motion detection. */
 	{
-		venc_jpeg_set_source(&state->vpe_port);
+		MI_SYS_ChnPort_t jpeg_src;
+		if (g_stab_chn_active) {
+			jpeg_src.module = I6_SYS_MOD_DIVP;
+			jpeg_src.device = 0;
+			jpeg_src.channel = STAB_DIVP_CHN;
+			jpeg_src.port = 0;
+			venc_jpeg_set_source(&jpeg_src);
+		} else {
+			venc_jpeg_set_source(&state->vpe_port);
+		}
 		const VencConfigSnapshot *snap = &vcfg->snapshot;
 		VencJpegConfig jcfg = {
 			.width   = snap->width  ? snap->width  : state->image_width,
@@ -2646,19 +3253,36 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * stab corrections (±tens of pixels) make the panel drift slightly
 	 * within the encoded view but never off-screen given the headroom. */
 	if (vcfg->debug.show_osd) {
-		uint32_t osd_w = star6e_stab_enabled(vcfg) ?
-			g_stab_src_w : state->image_width;
-		uint32_t osd_h = star6e_stab_enabled(vcfg) ?
-			g_stab_src_h : state->image_height;
-		state->debug_osd = debug_osd_create(osd_w, osd_h,
-			&state->vpe_port);
-		if (!state->debug_osd) {
-			fprintf(stderr, "[waybeam] WARNING: debug OSD requested but "
-				"MI_RGN unavailable\n");
-		} else if (star6e_stab_enabled(vcfg)) {
-			int off_x = (int)((g_stab_src_w - g_stab_enc_w) / 2u);
-			int off_y = (int)((g_stab_src_h - g_stab_enc_h) / 2u);
-			debug_osd_set_panel_offset(state->debug_osd, off_x, off_y);
+		if (g_stab_chn_active) {
+			/* Channel-backend path: OSD canvas is sized to the DIVP
+			 * output (= encoded view).  RGN composites onto DIVP
+			 * output, so panel coordinates are in encoded-frame
+			 * coords — no anchor offset compensation needed; panel
+			 * is static across stab crop drift. */
+			state->debug_osd = debug_osd_create_for_divp(
+				g_stab_enc_w, g_stab_enc_h, STAB_DIVP_CHN);
+			if (!state->debug_osd)
+				fprintf(stderr, "[waybeam] WARNING: debug OSD "
+					"requested but RGN-on-DIVP attach "
+					"failed\n");
+		} else {
+			uint32_t osd_w = star6e_stab_enabled(vcfg) ?
+				g_stab_src_w : state->image_width;
+			uint32_t osd_h = star6e_stab_enabled(vcfg) ?
+				g_stab_src_h : state->image_height;
+			state->debug_osd = debug_osd_create(osd_w, osd_h,
+				&state->vpe_port);
+			if (!state->debug_osd) {
+				fprintf(stderr, "[waybeam] WARNING: debug OSD "
+					"requested but MI_RGN unavailable\n");
+			} else if (star6e_stab_enabled(vcfg)) {
+				int off_x = (int)((g_stab_src_w -
+					g_stab_enc_w) / 2u);
+				int off_y = (int)((g_stab_src_h -
+					g_stab_enc_h) / 2u);
+				debug_osd_set_panel_offset(state->debug_osd,
+					off_x, off_y);
+			}
 		}
 	}
 
@@ -2789,7 +3413,10 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	/* Stop the stabilization drain+feed thread before any unbind, so
 	 * the manual GetBuf/PutBuf path stops touching VPE port0 first.
 	 * Idempotent: no-op when stab was not started. */
-	star6e_stab_stop();
+	if (g_stab_chn_active)
+		star6e_stab_channel_stop();
+	else
+		star6e_stab_stop();
 
 	/* Unbind VPE→VENC.  Safe now — no concurrent consumers calling
 	 * GetStream, so the kernel unbind won't deadlock. */

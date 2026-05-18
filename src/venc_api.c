@@ -396,6 +396,7 @@ static const FieldDesc g_fields[] = {
 	 * so the whole pipeline must restart. */
 	FIELD(video0, stab_crop_pct,       FT_UINT, MUT_RESTART),
 	FIELD(video0, stab_recenter_speed, FT_UINT, MUT_RESTART),
+	FIELD(video0, stab_backend,        FT_STRING, MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -453,6 +454,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },
 	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
+	{ "video0.stabBackend", "video0.stab_backend" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -678,6 +680,11 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		uint32_t v = cfg->video0.stab_crop_pct;
 		if (v != 0 && (v < 50 || v > 100))
 			return "stab_crop_pct must be 0 (off) or in range [50, 100]";
+	}
+	if (strcmp(key, "video0.stab_backend") == 0) {
+		if (strcmp(cfg->video0.stab_backend, "stretch") != 0 &&
+		    strcmp(cfg->video0.stab_backend, "channel") != 0)
+			return "stab_backend must be \"stretch\" or \"channel\"";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)

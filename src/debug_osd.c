@@ -225,14 +225,16 @@ static void cpu_sample(DebugOsdState *osd)
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-/* RGN module ids for Star6E libmi_rgn.so.  MI_RGN_AttachToChn takes an
- * i6_sys_bind whose module field uses RGN's private enum, NOT the
- * i6_sys_mod enum.  Standard SigmaStar Infinity6E layout puts VENC at 2,
- * but the exact value is determined by the device's libmi_rgn build —
- * if VENC attach starts failing after a firmware update, this is the
- * first place to check. */
+/* RGN module ids — match the vendor MI_RGN_ModId_e enum in
+ * mi_rgn_datatype.h (only VPE / DIVP / LDC; VENC is NOT supported).
+ * The previous "attach to VENC" attempt used value 2 and silently
+ * attached to LDC instead — which never composites for ssc338q since
+ * LDC isn't running.  Use RGN_MODID_DIVP (=1) together with the
+ * "channel" stab backend to render OSD into the post-crop DIVP output
+ * (static OSD in output coordinates). */
 #define RGN_MODID_VPE  0
-#define RGN_MODID_VENC 2
+#define RGN_MODID_DIVP 1
+#define RGN_MODID_LDC  2
 
 static DebugOsdState *debug_osd_create_impl(uint32_t frame_w, uint32_t frame_h,
 	int rgn_mod_id, int dev_id, int chn_id, int port_id)
@@ -347,11 +349,28 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 		RGN_MODID_VPE, 0, 0, 0);
 }
 
+/* Deprecated: RGN attach to VENC is NOT supported on Star6E.  The
+ * vendor MI_RGN_ModId_e enum only has VPE / DIVP / LDC.  The old
+ * implementation passed value 2 ("VENC") which actually maps to LDC
+ * and silently no-ops on this BSP — that was the failure mode that
+ * led to the OSD-on-VENC attempt being reverted.  Routes through
+ * debug_osd_create_for_divp instead (the static-OSD attach point
+ * available when video0.stabBackend = "channel"). */
 DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
                                          int venc_device, int venc_channel)
 {
+	(void)venc_device;
+	(void)venc_channel;
+	fprintf(stderr, "[debug_osd] WARNING: create_for_venc deprecated — "
+		"vendor RGN has no VENC attach point.  Falling back to VPE.\n");
+	return debug_osd_create_impl(frame_w, frame_h, RGN_MODID_VPE, 0, 0, 0);
+}
+
+DebugOsdState *debug_osd_create_for_divp(uint32_t frame_w, uint32_t frame_h,
+                                         int divp_chn)
+{
 	return debug_osd_create_impl(frame_w, frame_h,
-		RGN_MODID_VENC, venc_device, venc_channel, 0);
+		RGN_MODID_DIVP, 0, divp_chn, 0);
 }
 
 void debug_osd_destroy(DebugOsdState *osd)
@@ -828,6 +847,14 @@ DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
 	return NULL;
 }
 
+DebugOsdState *debug_osd_create_for_divp(uint32_t frame_w, uint32_t frame_h,
+                                         int divp_chn)
+{
+	(void)frame_w; (void)frame_h;
+	(void)divp_chn;
+	return NULL;
+}
+
 void debug_osd_destroy(DebugOsdState *osd)
 {
 	if (!osd) return;
@@ -950,6 +977,10 @@ DebugOsdState *debug_osd_create_for_venc(uint32_t frame_w, uint32_t frame_h,
                                          int venc_device, int venc_channel)
 { (void)frame_w; (void)frame_h; (void)venc_device; (void)venc_channel;
   return NULL; }
+
+DebugOsdState *debug_osd_create_for_divp(uint32_t frame_w, uint32_t frame_h,
+                                         int divp_chn)
+{ (void)frame_w; (void)frame_h; (void)divp_chn; return NULL; }
 
 void debug_osd_set_panel_offset(DebugOsdState *osd, int off_x, int off_y)
 { (void)osd; (void)off_x; (void)off_y; }
