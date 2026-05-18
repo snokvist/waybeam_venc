@@ -689,6 +689,21 @@ typedef MI_S32 (*stab_sys_blit_pa_fn_t)(StabSysFrameData_t *dst,
 typedef MI_S32 (*stab_sys_flush_inv_cache_fn_t)(void *vir, MI_U32 size);
 typedef MI_S32 (*stab_sys_va2pa_fn_t)(void *vir, STAB_MI_PHY *phy);
 
+/* DIVP direct-buffer ABI for MI_DIVP_StretchBuf.  Verified on this BSP
+ * (ssc338q / OpenIPC 4.9.84) by tools/divp_probe.c: pixfmt 0x0B
+ * (== I6_PIXFMT_YUV420SP) is accepted, channel-create is NOT required.
+ * See documentation/DIVP_STAB_TEST_PLAN.md §Q1. */
+typedef struct {
+	int ePixelFormat;
+	MI_U32 u32Width;
+	MI_U32 u32Height;
+	MI_U32 u32Stride[3];
+	STAB_MI_PHY phyAddr[3];
+} StabDivpDirectBuf_t;
+
+typedef MI_S32 (*stab_divp_stretch_buf_fn_t)(StabDivpDirectBuf_t *src,
+	StabSysWindowRect_t *crop, StabDivpDirectBuf_t *dst);
+
 typedef int StabIveHandle_t;
 typedef MI_S32 (*stab_ive_create_fn_t)(StabIveHandle_t handle);
 typedef MI_S32 (*stab_ive_destroy_fn_t)(StabIveHandle_t handle);
@@ -714,6 +729,8 @@ static stab_sys_in_put_buf_fn_t g_stab_sys_in_put_buf;
 static stab_sys_blit_pa_fn_t g_stab_sys_blit_pa;
 static stab_sys_flush_inv_cache_fn_t g_stab_sys_flush_inv_cache;
 static stab_sys_va2pa_fn_t g_stab_sys_va2pa;
+static stab_divp_stretch_buf_fn_t g_stab_divp_stretch_buf;
+static void *g_stab_divp_lib;
 
 static stab_ive_create_fn_t g_stab_ive_create;
 static stab_ive_destroy_fn_t g_stab_ive_destroy;
@@ -771,6 +788,22 @@ static int star6e_stab_load_sys_extra_symbols(void)
 	g_stab_sys_flush_inv_cache = (stab_sys_flush_inv_cache_fn_t)dlsym(h,
 		"MI_SYS_FlushInvCache");
 	g_stab_sys_va2pa = (stab_sys_va2pa_fn_t)dlsym(h, "MI_SYS_Va2Pa");
+
+	/* DIVP is an optional accelerator for the NV12 crop.  When present,
+	 * star6e_stab_blit_nv12_crop replaces the two-step Y+UV BlitPa with
+	 * a single MI_DIVP_StretchBuf call.  If the lib or symbol is
+	 * missing, the BlitPa fallback path still works. */
+	if (!g_stab_divp_lib) {
+		g_stab_divp_lib = dlopen("libmi_divp.so",
+			RTLD_LAZY | RTLD_GLOBAL);
+		if (!g_stab_divp_lib)
+			g_stab_divp_lib = dlopen("libdivp.so",
+				RTLD_LAZY | RTLD_GLOBAL);
+	}
+	if (g_stab_divp_lib && !g_stab_divp_stretch_buf) {
+		g_stab_divp_stretch_buf = (stab_divp_stretch_buf_fn_t)
+			dlsym(g_stab_divp_lib, "MI_DIVP_StretchBuf");
+	}
 
 	return (g_stab_sys_out_get_buf && g_stab_sys_out_put_buf &&
 		g_stab_sys_in_get_buf && g_stab_sys_in_put_buf &&
@@ -922,7 +955,61 @@ static STAB_MI_PHY star6e_stab_uv_pa(const StabSysFrameData_t *f, uint32_t h)
 	return f->phyAddr[0] + (STAB_MI_PHY)f->u32Stride[0] * h;
 }
 
-static int star6e_stab_blit_nv12_crop(StabSysFrameData_t *dst,
+/* Atomic NV12 crop via DIVP — single call, Y+UV together.  Confirmed
+ * accepted with ePixelFormat=I6_PIXFMT_YUV420SP (= 0x0B) on the ssc338q
+ * BSP; see documentation/DIVP_STAB_TEST_PLAN.md §Q1. */
+static int star6e_stab_divp_nv12_crop(StabSysFrameData_t *dst,
+	const StabSysFrameData_t *src, int src_x, int src_y,
+	int width, int height)
+{
+	StabDivpDirectBuf_t divp_src;
+	StabDivpDirectBuf_t divp_dst;
+	StabSysWindowRect_t crop;
+	STAB_MI_PHY src_uv_pa;
+	STAB_MI_PHY dst_uv_pa;
+	int src_y_stride;
+	int dst_y_stride;
+	int src_uv_stride;
+	int dst_uv_stride;
+
+	src_y_stride = (int)src->u32Stride[0];
+	dst_y_stride = (int)dst->u32Stride[0];
+	src_uv_stride = src->u32Stride[1] ? (int)src->u32Stride[1] : src_y_stride;
+	dst_uv_stride = dst->u32Stride[1] ? (int)dst->u32Stride[1] : dst_y_stride;
+	src_uv_pa = star6e_stab_uv_pa(src, g_stab_src_h);
+	dst_uv_pa = star6e_stab_uv_pa(dst, g_stab_enc_h);
+	if (!src_uv_pa || !dst_uv_pa)
+		return -1;
+
+	memset(&divp_src, 0, sizeof(divp_src));
+	memset(&divp_dst, 0, sizeof(divp_dst));
+	memset(&crop, 0, sizeof(crop));
+
+	divp_src.ePixelFormat = I6_PIXFMT_YUV420SP;
+	divp_src.u32Width  = g_stab_src_w;
+	divp_src.u32Height = g_stab_src_h;
+	divp_src.u32Stride[0] = (MI_U32)src_y_stride;
+	divp_src.u32Stride[1] = (MI_U32)src_uv_stride;
+	divp_src.phyAddr[0] = src->phyAddr[0];
+	divp_src.phyAddr[1] = src_uv_pa;
+
+	divp_dst.ePixelFormat = I6_PIXFMT_YUV420SP;
+	divp_dst.u32Width  = g_stab_enc_w;
+	divp_dst.u32Height = g_stab_enc_h;
+	divp_dst.u32Stride[0] = (MI_U32)dst_y_stride;
+	divp_dst.u32Stride[1] = (MI_U32)dst_uv_stride;
+	divp_dst.phyAddr[0] = dst->phyAddr[0];
+	divp_dst.phyAddr[1] = dst_uv_pa;
+
+	crop.u16X = (MI_U16)src_x;
+	crop.u16Y = (MI_U16)src_y;
+	crop.u16Width  = (MI_U16)width;
+	crop.u16Height = (MI_U16)height;
+
+	return g_stab_divp_stretch_buf(&divp_src, &crop, &divp_dst);
+}
+
+static int star6e_stab_blit_pa_nv12_crop(StabSysFrameData_t *dst,
 	const StabSysFrameData_t *src, int src_x, int src_y,
 	int width, int height)
 {
@@ -941,21 +1028,6 @@ static int star6e_stab_blit_nv12_crop(StabSysFrameData_t *dst,
 	int src_uv_stride;
 	int dst_uv_stride;
 	MI_S32 ret;
-
-	if (!dst || !src || !dst->phyAddr[0] || !src->phyAddr[0])
-		return -1;
-
-	src_x &= ~1;
-	src_y &= ~1;
-	width &= ~1;
-	height &= ~1;
-
-	if (src_x < 0) src_x = 0;
-	if (src_y < 0) src_y = 0;
-	if (src_x + width > (int)g_stab_src_w)
-		src_x = (int)g_stab_src_w - width;
-	if (src_y + height > (int)g_stab_src_h)
-		src_y = (int)g_stab_src_h - height;
 
 	src_y_stride = (int)src->u32Stride[0];
 	dst_y_stride = (int)dst->u32Stride[0];
@@ -1017,6 +1089,37 @@ static int star6e_stab_blit_nv12_crop(StabSysFrameData_t *dst,
 
 	return g_stab_sys_blit_pa(&dst_uv_frame, &dst_uv_rect,
 		&src_uv_frame, &src_uv_rect);
+}
+
+/* NV12 crop dispatch — DIVP if available, BlitPa otherwise.
+ * The argument clamping is shared; the back-end choice happens at the
+ * very last step. */
+static int star6e_stab_blit_nv12_crop(StabSysFrameData_t *dst,
+	const StabSysFrameData_t *src, int src_x, int src_y,
+	int width, int height)
+{
+	if (!dst || !src || !dst->phyAddr[0] || !src->phyAddr[0])
+		return -1;
+
+	src_x &= ~1;
+	src_y &= ~1;
+	width &= ~1;
+	height &= ~1;
+
+	if (src_x < 0) src_x = 0;
+	if (src_y < 0) src_y = 0;
+	if (src_x + width > (int)g_stab_src_w)
+		src_x = (int)g_stab_src_w - width;
+	if (src_y + height > (int)g_stab_src_h)
+		src_y = (int)g_stab_src_h - height;
+	if (width <= 0 || height <= 0)
+		return -1;
+
+	if (g_stab_divp_stretch_buf)
+		return star6e_stab_divp_nv12_crop(dst, src, src_x, src_y,
+			width, height);
+	return star6e_stab_blit_pa_nv12_crop(dst, src, src_x, src_y,
+		width, height);
 }
 
 static int star6e_stab_make_center_y_crop(StabIveImage_t *image,

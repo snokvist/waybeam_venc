@@ -99,19 +99,41 @@ The review flagged `star6e_pipeline_reapply_stab_vpe_port` calling
 `MI_VPE_SetChannelParam(0, {level3DNR=0, mirror=0, flip=0})` after the
 real values were set in `star6e_pipeline_start_vpe_dis_channel`.
 
-**Test Q2 — config-driven smoke:**
+**Outcome — N/A by design.** The surgical DIVP swap landed on this
+branch keeps the original waybeam VPE-start order: `MI_VPE_CreateChannel`
+→ `MI_VPE_SetChannelParam(level3DNR, mirror, flip)` →
+`MI_SNR_SetOrien(mirror, flip)` → `MI_VPE_StartChannel`. The
+`reapply_stab_vpe_port` function from the candidate is never imported,
+so the clobber bug cannot be triggered.
 
-1. Set `/etc/venc.json`: `fpv.noise_level=4`, `image.mirror=true`,
-   `image.flip=true`.
-2. Run candidate build, capture stream.
-3. Compare image orientation and noise floor at low light against the
-   current `BlitPa` build with the same config.
+Independent code-analysis result for the DIVP API itself: the vendor
+`MI_DIVP_DirectBuf_t` struct
+(`waybeam-hub/vendor/sigmastar/include/mi_divp_datatype.h:69-76`) has
+**no orientation fields** — only pixel format, dims, strides, and
+phyAddrs. `MI_DIVP_StretchBuf` therefore cannot apply any mirror, flip,
+or rotation. Mirror / flip flags only exist on the channel-attribute
+API (`MI_DIVP_ChnAttr_t.bHorMirror/bVerMirror`), which is *not* used
+here. Whatever orientation the VPE port produces is what DIVP outputs.
 
-Pass: stream is mirrored + flipped and shows the same noise reduction
-characteristic as the current build.
-Fail: orientation reverts to identity and/or noise floor visibly rises →
-remove the second `SetChannelParam` from `reapply_stab_vpe_port`, OR pass
-the real `level3DNR/mirror/flip` through. Retest.
+**Pending visual confirmation (recorded as Q2-followup):** during a
+deploy cycle (mirror=false → mirror=true) the user briefly observed the
+flipped frame, then it appeared to revert. This is more likely the
+viewer holding onto a buffer from the previous run / SetOrien register
+commit latency, but it warrants a clean check. Definitive method:
+
+1. Disable stab: `json_cli -s .video0.stabCropPct 0 -i /etc/waybeam.json -o /etc/waybeam.json`
+2. Restart waybeam, take baseline snapshot:
+   `curl -o /tmp/stab_off.jpg http://192.168.1.13/api/v1/snapshot.jpg`
+3. Re-enable stab: `... .video0.stabCropPct 80 ...`, restart.
+4. With stab active, snapshot is starved because both MJPEG-bind and
+   stab thread consume VPE port0. Capture orientation via a live RTP
+   viewer instead, side-by-side with the stab-off baseline.
+
+Note: the snapshot endpoint timing out under stab is a **pre-existing
+issue**, present on BlitPa too — JPEG channel is bound to VPE port0
+(`star6e_pipeline.c:2535`) and starves when stab's tight-loop
+`ChnOutputPortGetBuf` drains the port. Worth a separate fix later
+(feed JPEG from the stab thread's VENC input handoff instead).
 
 ### Q3. Memory bandwidth / frame-pacing under DIVP load
 
@@ -204,6 +226,8 @@ break the golden path.
 | 2026-05-18 | Q1a | bench 192.168.1.13 (ssc338q, OpenIPC 4.9.84) | **PASS** | All required symbols present; `MI_SYS_Pa2Va` absent (probe falls back to `MI_SYS_Mmap`). |
 | 2026-05-18 | Q1b | same | **PASS, no channel needed** | `MI_DIVP_StretchBuf` returns 0 standalone — `MI_DIVP_CreateChn` not required. Row-0 verification: dst gradient matches src at `crop_x = 128 (0x80)`. |
 | 2026-05-18 | Q1b | same, `--with-chn` | PASS (sanity) | Channel path also works; either pattern is valid. |
+| 2026-05-18 | Q4  | local `make lint` (-Wall -Wextra -Werror) on `src/star6e_pipeline.c` after DIVP swap | **PASS** | Clean build, zero warnings. `Stab*` prefix style retained so no header collisions. |
+| 2026-05-18 | Q2  | code analysis vs vendor `mi_divp_datatype.h` | **N/A by construction** | Surgical swap kept original VPE start order. `MI_DIVP_DirectBuf_t` has no flip flags — `MI_DIVP_StretchBuf` cannot change orientation. Visual confirmation pending (snapshot endpoint blocked by VPE-port-0 contention with stab). |
 
 ### Q1 findings that change implementation
 
