@@ -28,6 +28,9 @@ REGSCAN_TARGET := $(OUT_DIR)/regscan
 TIMING_PROBE_TARGET := rtp_timing_probe
 TIMING_PROBE_SRC := tools/rtp_timing_probe.c
 
+DIVP_PROBE_TARGET := divp_probe
+DIVP_PROBE_SRC := tools/divp_probe.c
+
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # -MMD -MP emits per-object .d files so a one-line change rebuilds just
 # that object + relink, instead of every source under the sun.  -s is in
@@ -152,6 +155,12 @@ $(TARGET): $(OBJS)
 # Host-native timing probe (no cross-compiler or SDK libs needed)
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
+
+# DIVP open-question probe.  Cross-compiled with the Star6E toolchain;
+# uses only dlopen/dlsym so it links against no SDK libs at build time.
+# Validates Q1a/Q1b of documentation/DIVP_STAB_TEST_PLAN.md.
+$(DIVP_PROBE_TARGET): $(DIVP_PROBE_SRC) $(TOOLCHAIN_TARGET)
+	$(STAR6E_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE $(DIVP_PROBE_SRC) -ldl -o $@
 
 # json_cli — vendored from waybeam-hub (tools/json_cli/{json_cli.c,jsmn.h}).
 # Cross-compiled with the SOC's toolchain so the same binary that runs venc
@@ -373,5 +382,6 @@ pre-pr: verify
 clean:
 	rm -rf out/star6e out/maruko
 	rm -f $(TIMING_PROBE_TARGET)
+	rm -f $(DIVP_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
 	rm -f .build_soc

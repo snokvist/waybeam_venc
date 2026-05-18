@@ -42,34 +42,56 @@ Those land after the DIVP swap is proven.
 Risk: most SigmaStar SDK revisions require an explicit DIVP channel before
 any buffer op. The candidate never creates one.
 
+Tool: `tools/divp_probe.c` — dlopen-only ARM binary, cross-compile with
+`make divp_probe`. Implements both Q1a and Q1b. Exit codes: 0 PASS,
+1 missing symbol, 2 MMA/init failure, 3 StretchBuf non-zero return,
+4 destination pixels mismatch.
+
 **Test Q1a — symbol probe (no pipeline run):**
 
-1. Build a tiny `test_divp_probe` binary that:
-   - `dlopen("libmi_divp.so", RTLD_LAZY | RTLD_GLOBAL)`
-   - resolves `MI_DIVP_StretchBuf`, `MI_DIVP_CreateChn`, `MI_DIVP_StartChn`,
-     `MI_DIVP_InitDev`
-   - prints which symbols are present
-2. Run on bench.
+```bash
+make divp_probe
+scp divp_probe root@192.168.1.13:/tmp/
+ssh root@192.168.1.13 /tmp/divp_probe --probe-only
+```
 
-Pass: `MI_DIVP_StretchBuf` symbol resolves.
-Fail: link error / missing symbol → DIVP path is a no-go on this BSP,
-escalate before continuing.
+Pass: stdout reports `PRESENT` for `MI_DIVP_StretchBuf` and the final
+line is `PASS Q1a: MI_DIVP_StretchBuf is resolvable.` Exit 0.
+Fail: any required symbol marked `MISSING` → DIVP path is a no-go on
+this BSP. Capture stdout to §5 and escalate.
 
 **Test Q1b — direct-buf one-shot:**
 
-1. Same probe binary: after `MI_SYS_Init`, allocate two NV12 framebufs via
-   `MI_SYS_MMA_Alloc` (1280x720 src, 1024x576 dst).
-2. Fill src Y plane with a known gradient.
-3. Call `MI_DIVP_StretchBuf` with a centred crop window, no
-   `MI_DIVP_CreateChn`.
-4. `MI_SYS_FlushInvCache` dst, dump first scanline to stdout.
+```bash
+ssh root@192.168.1.13 /tmp/divp_probe
+```
 
-Pass: return code 0 and dst scanline matches the expected gradient slice.
-Fail (any non-zero return, garbage output, or kernel oops):
-- Retry after adding `MI_DIVP_InitDev` + `MI_DIVP_CreateChn(0, attr)` +
-  `MI_DIVP_StartChn(0)` before the stretch call.
-- If that path passes, the production change is: add channel
-  create/destroy to `star6e_stab_start` / `star6e_stab_stop`.
+The probe:
+- `MI_SYS_Init` (auto-detects zero-arg vs single-arg ABI).
+- Allocates 1280x720 + 1024x576 NV12 buffers via `MI_SYS_MMA_Alloc`
+  under the `#nocache_divp_probe` MMA name.
+- Paints src Y plane with `row[x] = x & 0xff`, UV with 128.
+- Calls `MI_DIVP_StretchBuf` with a centred 1024x576 crop, no channel.
+- `FlushInvCache` dst, prints first 16 bytes of row 0, verifies that
+  `dst[x] == ((crop_x + x) & 0xff)` for every pixel in row 0.
+
+Pass: `MI_DIVP_StretchBuf -> 0` and `PASS Q1b: ... direct-buf path
+does NOT need a channel`. Exit 0.
+
+Fail (non-zero StretchBuf return, or row-0 mismatch):
+
+```bash
+ssh root@192.168.1.13 /tmp/divp_probe --with-chn
+```
+
+`--with-chn` calls `MI_DIVP_InitDev` + `CreateChn(0)` + `StartChn(0)`
+before StretchBuf and tears them down after. If `--with-chn` passes
+but the bare path failed, the production change is: add channel
+create/start to `star6e_stab_start` and stop/destroy to
+`star6e_stab_stop` in the candidate before merging.
+
+If `--with-chn` also fails, DIVP is unusable on this BSP — keep the
+existing `MI_SYS_BlitPa` path and record the failure log in §5.
 
 ### Q2. Does the candidate clobber 3DNR / mirror / flip?
 

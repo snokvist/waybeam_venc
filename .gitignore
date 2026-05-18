@@ -7,6 +7,9 @@ out/
 
 tools/ioctl_trace_preload.so
 
+# Cross-compiled DIVP open-question probe (built by `make divp_probe`)
+divp_probe
+
 tests/test_runner
 tests/test_imu_ring
 
