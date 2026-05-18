@@ -38,6 +38,7 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -57,9 +58,12 @@ typedef struct {
 	MI_U16 u16Height;
 } MI_SYS_WindowRect_t;
 
-/* Pixel format constant for NV12 (YUV420SP).  Sigmastar I6E ABI:
- * MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420 = 0x10. */
-#define DIVP_PIXFMT_NV12 0x10
+/* Pixel format constant for NV12 (YUV420SP).  The SigmaStar enum value
+ * varies by SDK revision: 0x0A on newer I6E vendor headers,
+ * 0x0B matches the waybeam compat layer's I6_PIXFMT_YUV420SP, and 0x10
+ * shows up in some intermediate SDKs.  --pixfmt-sweep tries each. */
+static const int pixfmt_candidates[] = { 0x0A, 0x0B, 0x10, 0x16 };
+#define PIXFMT_DEFAULT 0x0A
 
 typedef struct {
 	int ePixelFormat;
@@ -70,11 +74,8 @@ typedef struct {
 } MI_DIVP_DirectBuf_t;
 
 typedef MI_S32 (*fn_sys_init_t)(void);
-typedef MI_S32 (*fn_sys_init_one_t)(MI_U32);
 typedef MI_S32 (*fn_sys_exit_t)(void);
 typedef MI_S32 (*fn_sys_mma_alloc_t)(const char *mma, MI_U32 size, MI_PHY *phy);
-typedef MI_S32 (*fn_sys_mma_alloc_named_t)(MI_U16 dev, const char *mma,
-	MI_U32 size, MI_PHY *phy);
 typedef MI_S32 (*fn_sys_mma_free_t)(MI_PHY phy);
 typedef MI_S32 (*fn_sys_va2pa_t)(void *vir, MI_PHY *phy);
 typedef MI_S32 (*fn_sys_pa2va_t)(MI_PHY phy, void **vir);
@@ -95,10 +96,8 @@ static void *h_sys;
 static void *h_divp;
 
 static fn_sys_init_t       sys_init;
-static fn_sys_init_one_t   sys_init_one;
 static fn_sys_exit_t       sys_exit;
 static fn_sys_mma_alloc_t  sys_mma_alloc;
-static fn_sys_mma_alloc_named_t sys_mma_alloc_named;
 static fn_sys_mma_free_t   sys_mma_free;
 static fn_sys_mmap_t       sys_mmap;
 static fn_sys_munmap_t     sys_munmap;
@@ -124,10 +123,8 @@ static int load_sys(void)
 	}
 
 	sys_init            = (fn_sys_init_t)           dlsym(h_sys, "MI_SYS_Init");
-	sys_init_one        = (fn_sys_init_one_t)       dlsym(h_sys, "MI_SYS_Init");
 	sys_exit            = (fn_sys_exit_t)           dlsym(h_sys, "MI_SYS_Exit");
 	sys_mma_alloc       = (fn_sys_mma_alloc_t)      dlsym(h_sys, "MI_SYS_MMA_Alloc");
-	sys_mma_alloc_named = (fn_sys_mma_alloc_named_t)dlsym(h_sys, "MI_SYS_MMA_Alloc");
 	sys_mma_free        = (fn_sys_mma_free_t)       dlsym(h_sys, "MI_SYS_MMA_Free");
 	sys_mmap            = (fn_sys_mmap_t)           dlsym(h_sys, "MI_SYS_Mmap");
 	sys_munmap          = (fn_sys_munmap_t)         dlsym(h_sys, "MI_SYS_Munmap");
@@ -199,38 +196,42 @@ static int report_symbols(void)
 	return 0;
 }
 
-/* MI_SYS_Init has two known ABI shapes across versions: zero-arg and
- * single-arg (device id). Try the no-arg form first. */
+/* MI_SYS_Init has historically been zero-arg on I6E vendor headers.
+ * Match the rest of this codebase (src/star6e_pipeline.c, tools/snr_*.c)
+ * which always calls the zero-arg form. */
 static MI_S32 sys_init_compat(void)
 {
-	MI_S32 ret;
-
-	if (sys_init) {
-		ret = sys_init();
-		if (ret == 0)
-			return 0;
-	}
-	if (sys_init_one) {
-		ret = sys_init_one(0);
-		if (ret == 0)
-			return 0;
-	}
-	return -1;
+	if (!sys_init)
+		return -1;
+	return sys_init();
 }
+
+/* The Sigmastar I6E MMA heap names are picky.  Empty string typically
+ * binds to the default heap; "#mma_heap_name0" is the legacy named heap.
+ * Custom strings are rejected on most BSPs. */
+static const char * const mma_heap_candidates[] = {
+	"#nocache_divp_probe",
+	"#mma_heap_name0",
+	"mma_heap_name0",
+	"",
+};
 
 static MI_S32 sys_mma_alloc_compat(MI_U32 size, MI_PHY *phy)
 {
 	MI_S32 ret;
+	size_t i;
 
-	if (sys_mma_alloc_named) {
-		ret = sys_mma_alloc_named(0, "#nocache_divp_probe", size, phy);
-		if (ret == 0 && *phy)
-			return 0;
-	}
-	if (sys_mma_alloc) {
-		ret = sys_mma_alloc("#nocache_divp_probe", size, phy);
-		if (ret == 0 && *phy)
-			return 0;
+	*phy = 0;
+	for (i = 0; i < sizeof(mma_heap_candidates) / sizeof(mma_heap_candidates[0]); i++) {
+		const char *name = mma_heap_candidates[i];
+		if (sys_mma_alloc) {
+			ret = sys_mma_alloc(name, size, phy);
+			printf("[divp_probe]   MMA_Alloc(3-arg, name='%s') -> ret=%d phy=0x%llx\n",
+				name, ret, (unsigned long long)*phy);
+			if (ret == 0 && *phy)
+				return 0;
+			*phy = 0;
+		}
 	}
 	return -1;
 }
@@ -296,7 +297,7 @@ static int verify_dst_row(uint8_t *vir, MI_U32 stride, MI_U32 dst_w,
 	return mismatches;
 }
 
-static int run_stretch_test(int with_chn)
+static int run_stretch_test(int with_chn, int pixfmt_override, int sweep)
 {
 	const MI_U32 src_w = 1280;
 	const MI_U32 src_h = 720;
@@ -320,10 +321,12 @@ static int run_stretch_test(int with_chn)
 	int chn_created = 0;
 	int rc = 0;
 
+	puts("[divp_probe] calling MI_SYS_Init...");
 	if (sys_init_compat() != 0) {
 		fprintf(stderr, "[divp_probe] MI_SYS_Init failed\n");
 		return 2;
 	}
+	puts("[divp_probe] MI_SYS_Init returned 0");
 
 	if (with_chn) {
 		if (divp_init_dev) {
@@ -343,13 +346,17 @@ static int run_stretch_test(int with_chn)
 		}
 	}
 
+	printf("[divp_probe] allocating src (%u bytes)...\n", src_bufsize);
 	if (sys_mma_alloc_compat(src_bufsize, &src_phy) != 0) {
-		fprintf(stderr, "[divp_probe] MMA_Alloc src failed\n");
+		fprintf(stderr, "[divp_probe] MMA_Alloc src failed across all "
+			"heap-name candidates\n");
 		rc = 2;
 		goto out;
 	}
+	printf("[divp_probe] allocating dst (%u bytes)...\n", dst_bufsize);
 	if (sys_mma_alloc_compat(dst_bufsize, &dst_phy) != 0) {
-		fprintf(stderr, "[divp_probe] MMA_Alloc dst failed\n");
+		fprintf(stderr, "[divp_probe] MMA_Alloc dst failed across all "
+			"heap-name candidates\n");
 		rc = 2;
 		goto out;
 	}
@@ -386,50 +393,65 @@ static int run_stretch_test(int with_chn)
 	if (sys_flush)
 		sys_flush(dst_vir, dst_bufsize);
 
-	memset(&src_buf, 0, sizeof(src_buf));
-	memset(&dst_buf, 0, sizeof(dst_buf));
-	memset(&crop, 0, sizeof(crop));
+	/* Build a list of pixfmts to try.  Default is one shot at the
+	 * caller-chosen value; --pixfmt-sweep walks every candidate so we
+	 * can identify which enum the vendor lib actually wants. */
+	{
+		size_t n_pixfmts = sweep ?
+			sizeof(pixfmt_candidates) / sizeof(pixfmt_candidates[0]) : 1;
+		size_t i;
+		int chosen_pixfmt = pixfmt_override;
+		MI_S32 last_ret = -1;
 
-	src_buf.ePixelFormat = DIVP_PIXFMT_NV12;
-	src_buf.u32Width  = src_w;
-	src_buf.u32Height = src_h;
-	src_buf.u32Stride[0] = src_stride;
-	src_buf.u32Stride[1] = src_stride;
-	src_buf.phyAddr[0] = src_phy;
-	src_buf.phyAddr[1] = src_phy + (MI_PHY)src_stride * src_h;
+		for (i = 0; i < n_pixfmts; i++) {
+			int pf = sweep ? pixfmt_candidates[i] : chosen_pixfmt;
 
-	dst_buf.ePixelFormat = DIVP_PIXFMT_NV12;
-	dst_buf.u32Width  = dst_w;
-	dst_buf.u32Height = dst_h;
-	dst_buf.u32Stride[0] = dst_stride;
-	dst_buf.u32Stride[1] = dst_stride;
-	dst_buf.phyAddr[0] = dst_phy;
-	dst_buf.phyAddr[1] = dst_phy + (MI_PHY)dst_stride * dst_h;
+			memset(&src_buf, 0, sizeof(src_buf));
+			memset(&dst_buf, 0, sizeof(dst_buf));
+			memset(&crop, 0, sizeof(crop));
 
-	/* Pure crop: take an identically-sized window from the centre. */
-	crop_x = (src_w - dst_w) / 2;
-	crop_y = (src_h - dst_h) / 2;
-	crop.u16X = (MI_U16)crop_x;
-	crop.u16Y = (MI_U16)crop_y;
-	crop.u16Width  = (MI_U16)dst_w;
-	crop.u16Height = (MI_U16)dst_h;
+			src_buf.ePixelFormat = pf;
+			src_buf.u32Width  = src_w;
+			src_buf.u32Height = src_h;
+			src_buf.u32Stride[0] = src_stride;
+			src_buf.u32Stride[1] = src_stride;
+			src_buf.phyAddr[0] = src_phy;
+			src_buf.phyAddr[1] = src_phy + (MI_PHY)src_stride * src_h;
 
-	printf("[divp_probe] StretchBuf src=%ux%u dst=%ux%u crop=%u,%u %ux%u "
-		"src_phy=0x%llx dst_phy=0x%llx with_chn=%d\n",
-		src_w, src_h, dst_w, dst_h,
-		(unsigned)crop.u16X, (unsigned)crop.u16Y,
-		(unsigned)crop.u16Width, (unsigned)crop.u16Height,
-		(unsigned long long)src_phy, (unsigned long long)dst_phy,
-		with_chn);
+			dst_buf.ePixelFormat = pf;
+			dst_buf.u32Width  = dst_w;
+			dst_buf.u32Height = dst_h;
+			dst_buf.u32Stride[0] = dst_stride;
+			dst_buf.u32Stride[1] = dst_stride;
+			dst_buf.phyAddr[0] = dst_phy;
+			dst_buf.phyAddr[1] = dst_phy + (MI_PHY)dst_stride * dst_h;
 
-	ret = divp_stretch_buf(&src_buf, &crop, &dst_buf);
-	printf("[divp_probe] MI_DIVP_StretchBuf -> %d (0x%x)\n", ret, ret);
-	if (ret != 0) {
-		printf("[divp_probe] FAIL Q1b: StretchBuf returned non-zero%s\n",
-			with_chn ? " even with a channel created"
-			         : "; retry with --with-chn");
-		rc = 3;
-		goto out;
+			crop_x = (src_w - dst_w) / 2;
+			crop_y = (src_h - dst_h) / 2;
+			crop.u16X = (MI_U16)crop_x;
+			crop.u16Y = (MI_U16)crop_y;
+			crop.u16Width  = (MI_U16)dst_w;
+			crop.u16Height = (MI_U16)dst_h;
+
+			ret = divp_stretch_buf(&src_buf, &crop, &dst_buf);
+			printf("[divp_probe] StretchBuf pixfmt=0x%02x -> %d (0x%x)%s\n",
+				pf, ret, ret, ret == 0 ? "  <- ACCEPTED" : "");
+			last_ret = ret;
+			if (ret == 0) {
+				chosen_pixfmt = pf;
+				break;
+			}
+		}
+		ret = last_ret;
+		if (ret != 0) {
+			printf("[divp_probe] FAIL Q1b: StretchBuf returned non-zero%s "
+				"(last err=0x%x, pixfmt sweep=%s)\n",
+				with_chn ? " even with a channel" : "",
+				ret, sweep ? "on" : "off");
+			rc = 3;
+			goto out;
+		}
+		printf("[divp_probe] Accepted pixfmt: 0x%02x\n", chosen_pixfmt);
 	}
 
 	if (sys_flush)
@@ -471,11 +493,15 @@ out:
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"Usage: %s [--probe-only] [--with-chn]\n"
-		"  --probe-only   only dlsym-check symbols, do not allocate "
-		"or stretch (Q1a)\n"
-		"  --with-chn     create+start a DIVP channel before "
-		"StretchBuf (Q1b fallback)\n",
+		"Usage: %s [--probe-only] [--with-chn] [--pixfmt 0xNN] "
+		"[--pixfmt-sweep]\n"
+		"  --probe-only       dlsym-only symbol check (Q1a)\n"
+		"  --with-chn         create+start DIVP channel before "
+		"StretchBuf (Q1b fallback)\n"
+		"  --pixfmt 0xNN      ePixelFormat value to use "
+		"(default 0x0A == YUV_SEMIPLANAR_420)\n"
+		"  --pixfmt-sweep     try every NV12 enum candidate "
+		"(0x0A/0x0B/0x10/0x16)\n",
 		argv0);
 }
 
@@ -483,14 +509,23 @@ int main(int argc, char **argv)
 {
 	int probe_only = 0;
 	int with_chn = 0;
+	int pixfmt_override = PIXFMT_DEFAULT;
+	int sweep = 0;
 	int rc;
 	int i;
+
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--probe-only"))
 			probe_only = 1;
 		else if (!strcmp(argv[i], "--with-chn"))
 			with_chn = 1;
+		else if (!strcmp(argv[i], "--pixfmt-sweep"))
+			sweep = 1;
+		else if (!strcmp(argv[i], "--pixfmt") && i + 1 < argc)
+			pixfmt_override = (int)strtol(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
 			usage(argv[0]);
 			return 0;
@@ -510,5 +545,5 @@ int main(int argc, char **argv)
 	if (rc != 0 || probe_only)
 		return rc;
 
-	return run_stretch_test(with_chn);
+	return run_stretch_test(with_chn, pixfmt_override, sweep);
 }

@@ -201,4 +201,25 @@ break the golden path.
 
 | Date | Q | Sensor / Config | Result | Notes |
 |------|---|-----------------|--------|-------|
-|      |   |                 |        |       |
+| 2026-05-18 | Q1a | bench 192.168.1.13 (ssc338q, OpenIPC 4.9.84) | **PASS** | All required symbols present; `MI_SYS_Pa2Va` absent (probe falls back to `MI_SYS_Mmap`). |
+| 2026-05-18 | Q1b | same | **PASS, no channel needed** | `MI_DIVP_StretchBuf` returns 0 standalone — `MI_DIVP_CreateChn` not required. Row-0 verification: dst gradient matches src at `crop_x = 128 (0x80)`. |
+| 2026-05-18 | Q1b | same, `--with-chn` | PASS (sanity) | Channel path also works; either pattern is valid. |
+
+### Q1 findings that change implementation
+
+1. **No `MI_DIVP_CreateChn` needed.** The candidate's no-channel assumption
+   is confirmed on this BSP. No production code change required.
+2. **Pixel format value matters.** The vendor `libmi_divp.so` on this build
+   accepts `ePixelFormat = 0x0B` (which equals `I6_PIXFMT_YUV420SP` in the
+   waybeam compat layer), and **rejects** the canonical
+   `MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420 = 0x0A` with error `0x1F`.
+   The candidate already assigns `I6_PIXFMT_YUV420SP` to
+   `divp_src/dst.ePixelFormat`, so it is correct on this point — but the
+   value is BSP-specific. If the firmware is rebuilt against a different
+   SDK revision, rerun `divp_probe --pixfmt-sweep` to confirm the accepted
+   value.
+3. **DIVP MMA heap names.** Custom names (`#nocache_divp_probe`) work on
+   this BSP. The candidate uses VENC-input buffers, not raw MMA, so this
+   doesn't affect production directly — but it's the closest we'll get to
+   a synthetic stretch benchmark.
+
