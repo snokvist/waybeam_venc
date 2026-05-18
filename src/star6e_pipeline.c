@@ -824,6 +824,14 @@ static volatile int g_stab_pan_x_mil = 500;
 static volatile int g_stab_pan_y_mil = 500;
 static MI_SYS_ChnPort_t g_stab_vpe_port;
 static MI_SYS_ChnPort_t g_stab_venc_port;
+/* Channel backend: VPE port 0 is FRAMEBASE-bound to DIVP, so manual
+ * GetBuf on port 0 returns stale/identical frames (IVE silently sees
+ * no motion).  We open VPE port 1 as a dedicated mirror for IVE drain,
+ * and keep g_stab_chn_vpe_bind_port pointing at port 0 for the bind
+ * teardown in star6e_stab_channel_stop.  g_stab_vpe_port is repointed
+ * to port 1 by star6e_stab_channel_start in this backend. */
+static MI_SYS_ChnPort_t g_stab_chn_vpe_bind_port;
+static int g_stab_chn_vpe_port1_enabled;
 
 static int star6e_stab_load_sys_extra_symbols(void)
 {
@@ -1574,6 +1582,57 @@ static int star6e_stab_reapply_vpe_port(uint32_t src_w, uint32_t src_h)
 	return 0;
 }
 
+/* Channel backend: open VPE port 1 as a sibling mirror of port 0 so the
+ * stab thread can drain real frames for IVE while port 0 stays bound to
+ * DIVP.  Without this, FRAMEBASE bind on port 0 starves the manual reader
+ * — IVE compares identical frames and reports (0,0) forever. */
+static int star6e_stab_enable_vpe_port1_for_ive(uint32_t src_w,
+	uint32_t src_h)
+{
+	MI_VPE_PortAttr_t port = {0};
+	MI_SYS_ChnPort_t vpe1 = {
+		.module = I6_SYS_MOD_VPE, .device = 0, .channel = 0, .port = 1 };
+	MI_S32 ret;
+
+	port.output.width = src_w;
+	port.output.height = src_h;
+	port.pixFmt = I6_PIXFMT_YUV420SP;
+	port.compress = I6_COMPR_NONE;
+
+	ret = MI_VPE_SetPortMode(0, 1, &port);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] ERROR: stab-chn VPE port1 "
+			"SetPortMode %ux%u failed %d\n",
+			src_w, src_h, (int)ret);
+		return ret;
+	}
+	ret = MI_VPE_EnablePort(0, 1);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] ERROR: stab-chn VPE port1 "
+			"EnablePort failed %d\n", (int)ret);
+		return ret;
+	}
+	ret = MI_SYS_SetChnOutputPortDepth(&vpe1, 4, 8);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] ERROR: stab-chn VPE port1 "
+			"SetChnOutputPortDepth failed %d\n", (int)ret);
+		MI_VPE_DisablePort(0, 1);
+		return ret;
+	}
+	g_stab_chn_vpe_port1_enabled = 1;
+	fprintf(stderr, "[waybeam] stab-chn: VPE port1 %ux%u up for IVE drain "
+		"(port0 stays bound to DIVP)\n", src_w, src_h);
+	return 0;
+}
+
+static void star6e_stab_disable_vpe_port1(void)
+{
+	if (!g_stab_chn_vpe_port1_enabled)
+		return;
+	MI_VPE_DisablePort(0, 1);
+	g_stab_chn_vpe_port1_enabled = 0;
+}
+
 static int star6e_stab_start(const MI_SYS_ChnPort_t *vpe_port,
 	const MI_SYS_ChnPort_t *venc_port)
 {
@@ -2078,6 +2137,23 @@ static int star6e_stab_channel_start(const MI_SYS_ChnPort_t *vpe_port,
 		return -1;
 	}
 
+	/* Remember port 0 (the bind source) so star6e_stab_channel_stop can
+	 * unbind even after we repoint g_stab_vpe_port to port 1. */
+	g_stab_chn_vpe_bind_port = *vpe_port;
+
+	/* Open VPE port 1 and redirect the IVE drain there.  Port 0 stays
+	 * bound to DIVP for the actual frame flow; port 1 mirrors the same
+	 * VPE-processed content into a dedicated user-readable queue, so
+	 * MI_IVE_Shift_Detector finally sees genuinely-new frames. */
+	if (star6e_stab_enable_vpe_port1_for_ive(g_stab_src_w,
+	    g_stab_src_h) != 0) {
+		fprintf(stderr, "[waybeam] WARN: stab-chn falling back to "
+			"port0 drain (port1 setup failed) — IVE may report "
+			"(0,0) under FRAMEBASE bind\n");
+	} else {
+		g_stab_vpe_port.port = 1;
+	}
+
 	g_stab_running = 1;
 	if (pthread_create(&g_stab_thread, NULL,
 	    star6e_stab_channel_thread_main, NULL) != 0) {
@@ -2120,7 +2196,9 @@ static void star6e_stab_channel_stop(void)
 		g_stab_chn_bind_divp_venc = 0;
 	}
 	if (g_stab_chn_bind_vpe_divp) {
-		MI_SYS_UnBindChnPort(&g_stab_vpe_port, &divp_in);
+		/* Bind source is always port 0 — g_stab_vpe_port may have been
+		 * repointed to port 1 for the IVE drain in channel_start. */
+		MI_SYS_UnBindChnPort(&g_stab_chn_vpe_bind_port, &divp_in);
 		g_stab_chn_bind_vpe_divp = 0;
 	}
 	if (g_stab_chn_started && g_stab_divp_stop_chn) {
@@ -2131,6 +2209,7 @@ static void star6e_stab_channel_stop(void)
 		g_stab_divp_destroy_chn(STAB_DIVP_CHN);
 		g_stab_chn_created = 0;
 	}
+	star6e_stab_disable_vpe_port1();
 	g_stab_chn_active = 0;
 	if (g_stab_ive_created) {
 		g_stab_ive_destroy(g_stab_ive_handle);
