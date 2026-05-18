@@ -154,7 +154,7 @@ in this backend.
 |---|---|---|
 | **Q-DIVP-1**: Is `MI_DIVP_SetChnAttr` cheap enough per-frame? | **PASS** | 60 fps sustained on bench. No visible stalls when `SetChnAttr` fires every frame with a moving `stCropRect`. The engine accepts the update mid-stream and applies it to the next inbound frame. |
 | **Q-DIVP-2**: Does RGN attach to DIVP composite correctly? | **PASS** | `[debug_osd] overlay 1024x768 ... attached to rgn_mod=1 dev=0 chn=0` log confirms `E_MI_RGN_MODID_DIVP=1` attach. JPEG snapshot via `/api/v1/snapshot.jpg` renders OSD pixel-perfect onto the DIVP output. |
-| **Q-DIVP-3**: Does IVE want VPE or DIVP frames? | **PASS — VPE works fine** | The stab thread keeps draining VPE port0 for IVE input. VPE port0 happily serves both the IVE-only drain AND the DIVP bind on this BSP — no port budget pressure, no need for VPE port1. |
+| **Q-DIVP-3**: Does IVE want VPE or DIVP frames? | **PASS — VPE port 1 needed** | VPE port 0 is FRAMEBASE-bound to DIVP. Manual `MI_SYS_ChnOutputPortGetBuf` on port 0 returns stale/identical frames under that bind — IVE silently sees no motion (`raw=(0,0)` every frame). Fix in commit `76101e1`: open VPE port 1 as a sibling mirror dedicated to the IVE drain, leave port 0 exclusively bound to DIVP. Eats one VPE port from the dual-VENC budget (port 2 still available). |
 | **Q-DIVP-4**: VENC bitrate accounting under bind chain? | **PASS** | 6.3 Mbps CBR holds tight under the channel backend, identical to the stretch backend. SDK assigns PTS via the bind; no manual `star6e_stab_pts_us()` needed in this path. |
 
 ## 5. Implementation — what landed
@@ -176,6 +176,15 @@ Each step is a separate commit on PR #119:
      is active — no per-frame offset compensation needed.
    - Wave 4: JPEG snapshot bound to DIVP output port instead of VPE port0.
      Works while stab is active.
+6. **`76101e1` — Port-1 IVE drain fix.** Channel backend was silently
+   broken until this commit: the stab thread's manual `GetBuf` on the
+   same VPE port that DIVP is FRAMEBASE-bound to returns stale frames,
+   so IVE always reported `raw=(0,0)` and the crop never moved. Fix
+   opens VPE port 1 (`star6e_stab_enable_vpe_port1_for_ive`) and
+   repoints `g_stab_vpe_port` to port 1 for the drain; port 0 stays
+   the bind source (saved as `g_stab_chn_vpe_bind_port` for teardown).
+   Bench-confirmed: `raw` values become real (`(96,0)`, `(5,-3)`,
+   `(-34,0)`, etc.) when the camera moves.
 
 The `RGN_MODID_VENC=2` mis-comment in `debug_osd.c` was corrected as part
 of Wave 3. `debug_osd_create_for_venc` is kept as an ABI shim with a
@@ -211,7 +220,34 @@ deprecation warning; on Star6E it now falls back to VPE attach.
   creation fails. Both backends ship in the same binary.
 - Maruko pipeline — channel-backend is Star6E-only for now.
 
-## 8. Operator usage
+## 8. Known gotcha — pan position vs stab headroom
+
+The crop window's resting position is determined by `zoomX`/`zoomY` (pan),
+and the IVE accumulator (`acc_x`, `acc_y`) is bounded to half the
+unused source headroom: `±(src_w − enc_w)/2`. When the pan target is
+within `acc` range of the source center, stab works as expected. When
+the pan is far enough toward an edge that the desired crop origin
+would be negative (or beyond `src − enc`), the crop is **clamped to
+the edge and `acc` has no visible effect** on that axis.
+
+Example for `image=2560×1920`, `stabCropPct=80` (enc=2048×1536),
+`zoomX=0.15`:
+- desired crop x = `2560·0.15 − 2048/2 + acc_x = −640 + acc_x`
+- clamped to `[0, 512]`
+- `acc_x` bounded to `±256`, so crop x stays at `0` regardless of motion
+
+Same math in both backends — this is a pre-existing limitation of the
+stab+pan composition, not channel-backend specific. Workaround: keep
+`zoomX/zoomY` close to `0.5` when stabilizing, or use smaller
+`stabCropPct` for more pan freedom at the cost of less stab headroom.
+
+Followup ideas (not implemented):
+- Print a startup warning when the saved pan consumes the full stab
+  headroom on an axis.
+- Make `acc` clamps asymmetric based on actual side-headroom rather
+  than half-symmetric.
+
+## 9. Operator usage
 
 Switch backends via `json_cli`:
 

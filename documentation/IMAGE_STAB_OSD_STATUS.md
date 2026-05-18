@@ -102,6 +102,7 @@ Key facts (`channel`):
 - Pipeline reports the **encoded dim** (same as the DIVP output port attr).
 - JPEG-VENC is bound to **DIVP output** instead of VPE port0 — snapshot works while stab is on.
 - `star6e_pipeline_stab_panel_anchor()` returns 0 (no per-frame anchor compensation needed; OSD is already in post-crop coords).
+- IVE drains **VPE port 1** (not port 0). VPE port 0 is FRAMEBASE-bound to DIVP; a manual `GetBuf` on the same port returns stale frames, so port 1 is opened as a sibling mirror dedicated to the IVE drain (`star6e_stab_enable_vpe_port1_for_ive`, commit `76101e1`).
 
 ### Debug OSD integration
 
@@ -207,7 +208,31 @@ confirms DIVP attach (rgn_mod=1).
 
 ---
 
-## 4. Known followups (independent of stab)
+## 4. Pan headroom gotcha (both backends)
+
+When `zoomX/zoomY` push the crop window toward an edge, the IVE
+accumulator can be fully consumed before it makes any visible difference
+because the crop is clamped to `[0, src−enc]`. Example with
+`image=2560×1920`, `stabCropPct=80` (enc=2048×1536), `zoomX=0.15`:
+
+- desired crop x = `2560·0.15 − 2048/2 + acc_x = −640 + acc_x`
+- clamped to `[0, 512]`
+- `acc_x` is bounded to `±max_off_x = ±256` → crop stays at `0` no
+  matter what IVE reports
+
+Symptom: IVE detects motion correctly (`raw=(−34,0)`, `raw=(96,−6)`,
+etc.) but the encoded view doesn't appear stabilized. The crop is
+mechanically pinned at the edge.
+
+Workaround: keep `zoomX/zoomY` near `0.5` when relying on stab, or
+lower `stabCropPct` for more pan freedom (smaller `enc` → more
+`max_off` headroom). Same math in both backends.
+
+Followup ideas (not implemented):
+- Startup warning when saved pan consumes the full headroom on an axis.
+- Asymmetric `acc` clamps based on actual per-side headroom.
+
+## 5. Known followups (independent of stab)
 
 - **IMX335 mirror+flip combo wedge.** `image.mirror=true + image.flip=true`
   together cause the IMX335 to stop producing frames on this firmware.
