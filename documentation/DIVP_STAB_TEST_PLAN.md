@@ -227,7 +227,9 @@ break the golden path.
 | 2026-05-18 | Q1b | same | **PASS, no channel needed** | `MI_DIVP_StretchBuf` returns 0 standalone — `MI_DIVP_CreateChn` not required. Row-0 verification: dst gradient matches src at `crop_x = 128 (0x80)`. |
 | 2026-05-18 | Q1b | same, `--with-chn` | PASS (sanity) | Channel path also works; either pattern is valid. |
 | 2026-05-18 | Q4  | local `make lint` (-Wall -Wextra -Werror) on `src/star6e_pipeline.c` after DIVP swap | **PASS** | Clean build, zero warnings. `Stab*` prefix style retained so no header collisions. |
-| 2026-05-18 | Q2  | code analysis vs vendor `mi_divp_datatype.h` | **N/A by construction** | Surgical swap kept original VPE start order. `MI_DIVP_DirectBuf_t` has no flip flags — `MI_DIVP_StretchBuf` cannot change orientation. Visual confirmation pending (snapshot endpoint blocked by VPE-port-0 contention with stab). |
+| 2026-05-18 | Q2  | code analysis vs vendor `mi_divp_datatype.h` | **N/A by construction** | Surgical swap kept original VPE start order. `MI_DIVP_DirectBuf_t` has no flip flags — `MI_DIVP_StretchBuf` cannot change orientation. |
+| 2026-05-18 | Q2  | Y-plane dump (`STAB_DUMP` env var) on bench 192.168.1.13 | **PASS — empirically confirmed** | With `image.mirror=false`: src and dst dumps both show fan-right / power-strip-left (sensor native). With `image.mirror=true`: BOTH src and dst dumps show fan-LEFT / power-strip-RIGHT — `MI_SNR_SetOrien` mirrored the sensor and DIVP preserved the mirror. DIVP is a pure crop. The earlier "switched back" observation was viewer buffer catch-up timing, not DIVP. |
+| 2026-05-18 | Q2  | side observation | known issue (separate) | `image.mirror=true + image.flip=true` together cause the IMX335 to stop producing frames on this branch. mirror-only and flip-off both work; combined `flip=true` is the trigger. Pre-existing, unrelated to DIVP — see roadmap item `IMX335_FLIP_WEDGE` followup. |
 
 ### Q1 findings that change implementation
 
