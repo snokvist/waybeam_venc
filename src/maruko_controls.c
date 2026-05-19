@@ -1068,7 +1068,7 @@ static char *maruko_query_audio_status(void)
 	return maruko_audio_query_status(&backend->audio);
 }
 
-static int maruko_apply_zoom(double pct, double x, double y, uint32_t ramp_ms)
+static int maruko_apply_zoom(double pct, double x, double y)
 {
 	MarukoBackendContext *backend = g_ctx.backend;
 	if (!backend)
@@ -1077,7 +1077,6 @@ static int maruko_apply_zoom(double pct, double x, double y, uint32_t ramp_ms)
 	 * the next maruko_config_from_venc() (SIGHUP / reinit) reads from
 	 * VencConfig directly.  Avoiding the cfg write also avoids a torn
 	 * 8-byte double race with the runner thread on 32-bit ARM. */
-	maruko_pipeline_apply_zoom_ramp_ms(ramp_ms);
 	return maruko_pipeline_apply_zoom(backend, pct, x, y);
 }
 

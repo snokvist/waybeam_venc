@@ -114,6 +114,10 @@ static void maruko_ae_crop_mark_ready(MarukoBackendContext *ctx);
  * if smoothness suffers. */
 #define MARUKO_PAN_RAMP_TICK_MS       33   /* ~30 Hz */
 #define MARUKO_PAN_RAMP_SNAP_EPSILON  0.0005
+/* Pan smoothing time constant — see star6e_pipeline.c
+ * PAN_RAMP_DEFAULT_MS for the rationale.  Same value on both backends
+ * so live pan feels identical regardless of platform. */
+#define MARUKO_PAN_RAMP_DEFAULT_MS    150
 
 typedef struct {
 	pthread_mutex_t lock;
@@ -133,12 +137,13 @@ typedef struct {
 static MarukoPanRampState g_maruko_pan_ramp = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 	.cv   = PTHREAD_COND_INITIALIZER,
+	.ramp_ms = MARUKO_PAN_RAMP_DEFAULT_MS,
 };
 
 static int  maruko_pan_apply_locked(MarukoBackendContext *ctx,
 	double pct, double x, double y);
 static int  maruko_pan_ramp_start(MarukoBackendContext *ctx,
-	double pct, double x, double y, uint32_t ramp_ms);
+	double pct, double x, double y);
 static void maruko_pan_ramp_stop(void);
 
 static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
@@ -1335,7 +1340,7 @@ static void *maruko_pan_ramp_thread(void *arg)
 }
 
 static int maruko_pan_ramp_start(MarukoBackendContext *ctx,
-	double pct, double x, double y, uint32_t ramp_ms)
+	double pct, double x, double y)
 {
 	int rc;
 
@@ -1349,7 +1354,7 @@ static int maruko_pan_ramp_start(MarukoBackendContext *ctx,
 		g_maruko_pan_ramp.target_y    = y;
 		g_maruko_pan_ramp.current_x   = x;
 		g_maruko_pan_ramp.current_y   = y;
-		g_maruko_pan_ramp.ramp_ms     = ramp_ms;
+		g_maruko_pan_ramp.ramp_ms     = MARUKO_PAN_RAMP_DEFAULT_MS;
 		pthread_cond_signal(&g_maruko_pan_ramp.cv);
 		pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
 		return 0;
@@ -1361,7 +1366,7 @@ static int maruko_pan_ramp_start(MarukoBackendContext *ctx,
 	g_maruko_pan_ramp.target_y    = y;
 	g_maruko_pan_ramp.current_x   = x;
 	g_maruko_pan_ramp.current_y   = y;
-	g_maruko_pan_ramp.ramp_ms     = ramp_ms;
+	g_maruko_pan_ramp.ramp_ms     = MARUKO_PAN_RAMP_DEFAULT_MS;
 	g_maruko_pan_ramp.running     = 1;
 	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
 
@@ -1397,16 +1402,6 @@ static void maruko_pan_ramp_stop(void)
 
 	if (was_running)
 		pthread_join(th, NULL);
-}
-
-void maruko_pipeline_apply_zoom_ramp_ms(uint32_t ramp_ms)
-{
-	if (ramp_ms > 2000)
-		ramp_ms = 2000;
-	pthread_mutex_lock(&g_maruko_pan_ramp.lock);
-	g_maruko_pan_ramp.ramp_ms = ramp_ms;
-	pthread_cond_signal(&g_maruko_pan_ramp.cv);
-	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
 }
 
 /* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
@@ -1446,8 +1441,7 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	int already_running = g_maruko_pan_ramp.running;
 	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
 	if (!already_running) {
-		uint32_t ramp_ms = g_maruko_pan_ramp.ramp_ms;
-		(void)maruko_pan_ramp_start(ctx, pct, x, y, ramp_ms);
+		(void)maruko_pan_ramp_start(ctx, pct, x, y);
 		return 0;
 	}
 
@@ -1457,10 +1451,6 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	g_maruko_pan_ramp.target_pct = pct;
 	g_maruko_pan_ramp.target_x   = x;
 	g_maruko_pan_ramp.target_y   = y;
-	if (g_maruko_pan_ramp.ramp_ms == 0) {
-		g_maruko_pan_ramp.current_x = x;
-		g_maruko_pan_ramp.current_y = y;
-	}
 	pthread_cond_signal(&g_maruko_pan_ramp.cv);
 	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
 

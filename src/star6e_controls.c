@@ -287,15 +287,10 @@ static int apply_gop(uint32_t gop_size)
 	return apply_encoder_gop(gop_size);
 }
 
-static int apply_zoom(double pct, double x, double y, uint32_t ramp_ms)
+static int apply_zoom(double pct, double x, double y)
 {
 	if (!g_star6e_control_ctx.pipeline)
 		return -1;
-	/* ramp_ms is process-global (the ramp thread is a singleton) so it can
-	 * be set before checking the pipeline pointer, but the pipeline guard
-	 * above already ensures we're past pipeline_start, where the ramp
-	 * thread exists. */
-	star6e_pipeline_apply_zoom_ramp_ms(ramp_ms);
 	return star6e_pipeline_apply_zoom(g_star6e_control_ctx.pipeline,
 		pct, x, y);
 }

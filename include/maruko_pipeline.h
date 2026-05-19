@@ -130,12 +130,6 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
   double pct, double x, double y);
 void maruko_pipeline_zoom_status(MarukoZoomStatus *out);
 
-/** Adjust the exponential-decay time constant (ms) used by the pan
- *  ramp thread to smooth x/y target → current.  0 disables smoothing
- *  (next live SET snaps instantly).  Clamped to [0, 2000].  Star6E
- *  parity — see star6e_pipeline_apply_zoom_ramp_ms. */
-void maruko_pipeline_apply_zoom_ramp_ms(uint32_t ramp_ms);
-
 /** Reload the ISP tuning bin against the running pipeline.
  *  configured_path is the new bin location (NULL/empty falls back to
  *  /etc/sensors/<sensor>.bin keyed off ctx->sensor.plane.sensName).

@@ -35,8 +35,7 @@
     "resilience": "off",
     "zoomPct": 0.0,
     "zoomX": 0.5,
-    "zoomY": 0.5,
-    "zoomRampMs": 200
+    "zoomY": 0.5
   },
   "outgoing": {
     "enabled": false,

@@ -303,9 +303,8 @@ static int test_apply_max_payload(uint16_t size)
 	return g_api_cb_state.fail_max_payload ? -1 : 0;
 }
 
-static int test_apply_zoom(double pct, double x, double y, uint32_t ramp_ms)
+static int test_apply_zoom(double pct, double x, double y)
 {
-	(void)ramp_ms;
 	g_api_cb_state.apply_zoom_calls++;
 	g_api_cb_state.last_zoom_pct = pct;
 	g_api_cb_state.last_zoom_x = x;

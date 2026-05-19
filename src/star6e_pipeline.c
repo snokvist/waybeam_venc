@@ -679,12 +679,19 @@ void star6e_pipeline_zoom_status(Star6eZoomStatus *out)
 /*  the SDK sees is computed from `current`, not from the user input.      */
 /*                                                                          */
 /*  Per-step: current += (target - current) * alpha, where                 */
-/*  alpha = 1 - exp(-tick_ms / ramp_ms).  ramp_ms = 0 disables decay and    */
-/*  each apply_zoom snaps current = target (preserving pre-0.11.0 feel).   */
+/*  alpha = 1 - exp(-tick_ms / PAN_RAMP_DEFAULT_MS).  Hardcoded — see       */
+/*  PAN_RAMP_DEFAULT_MS rationale below.                                   */
 /* ----------------------------------------------------------------------- */
 
 #define PAN_RAMP_TICK_MS         16   /* ~60 Hz */
 #define PAN_RAMP_SNAP_EPSILON    0.0005  /* fraction of frame */
+/* Pan smoothing time constant.  150 ms ≈ 95 % settle in ~450 ms — fast
+ * enough to feel responsive on a joystick, slow enough to mask the
+ * step-quantization of an HTTP-driven SET stream.  Was a live config
+ * field briefly; reverted to a hardcoded constant because the
+ * additional knob added schema/UI/API surface without a use case
+ * stronger than "user might want a different feel". */
+#define PAN_RAMP_DEFAULT_MS      150
 
 typedef struct {
 	pthread_t        thread;
@@ -707,6 +714,7 @@ typedef struct {
 static Star6ePanRampState g_pan_ramp = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 	.cv   = PTHREAD_COND_INITIALIZER,
+	.ramp_ms = PAN_RAMP_DEFAULT_MS,
 };
 
 /* MI_ISP_CUS3A_SetAECropSize confines the AE meter to a sub-rect of the
@@ -834,7 +842,7 @@ static void *star6e_pan_ramp_thread(void *arg)
 }
 
 static int star6e_pan_ramp_start(Star6ePipelineState *state,
-	double pct, double x, double y, uint32_t ramp_ms)
+	double pct, double x, double y)
 {
 	int rc;
 
@@ -848,7 +856,7 @@ static int star6e_pan_ramp_start(Star6ePipelineState *state,
 		g_pan_ramp.target_y     = y;
 		g_pan_ramp.current_x    = x;
 		g_pan_ramp.current_y    = y;
-		g_pan_ramp.ramp_ms      = ramp_ms;
+		g_pan_ramp.ramp_ms      = PAN_RAMP_DEFAULT_MS;
 		pthread_cond_signal(&g_pan_ramp.cv);
 		pthread_mutex_unlock(&g_pan_ramp.lock);
 		return 0;
@@ -860,7 +868,7 @@ static int star6e_pan_ramp_start(Star6ePipelineState *state,
 	g_pan_ramp.target_y     = y;
 	g_pan_ramp.current_x    = x;
 	g_pan_ramp.current_y    = y;
-	g_pan_ramp.ramp_ms      = ramp_ms;
+	g_pan_ramp.ramp_ms      = PAN_RAMP_DEFAULT_MS;
 	g_pan_ramp.running      = 1;
 	pthread_mutex_unlock(&g_pan_ramp.lock);
 
@@ -905,17 +913,6 @@ static void star6e_pan_ramp_stop(void)
 		pthread_join(th, NULL);
 	} else {
 	}
-}
-
-void star6e_pipeline_apply_zoom_ramp_ms(uint32_t ramp_ms)
-{
-	if (ramp_ms > 2000)
-		ramp_ms = 2000;
-	pthread_mutex_lock(&g_pan_ramp.lock);
-	g_pan_ramp.ramp_ms = ramp_ms;
-	/* If ramp was disabled, jump current to target on the next tick. */
-	pthread_cond_signal(&g_pan_ramp.cv);
-	pthread_mutex_unlock(&g_pan_ramp.lock);
 }
 
 /* Live pan: zoom_pct is MUT_RESTART (changing crop dim resizes VPE port and
@@ -2184,8 +2181,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	state->image_height = pconf.image_height;
 
 	(void)star6e_pan_ramp_start(state, vcfg->video0.zoom_pct,
-		vcfg->video0.zoom_x, vcfg->video0.zoom_y,
-		vcfg->video0.zoom_ramp_ms);
+		vcfg->video0.zoom_x, vcfg->video0.zoom_y);
 
 	state->venc_channel = 0;
 	venc_fps = vcfg->video0.fps;

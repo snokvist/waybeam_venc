@@ -8,12 +8,12 @@ features that make the existing `zoom_pct` + live `zoomX`/`zoomY`
 controls feel better — plus a respawn-handler bug fix that makes
 the `zoom_pct` MUT_RESTART path safe to use at runtime.
 
-**Pan ramping (`video0.zoomRampMs`, default `200`).**  Live pan is
-now smoothed via exponential decay: setting `zoomX`/`zoomY` records a
-*target*, and a dedicated ~60Hz thread tweens the current crop
-position toward it with time constant `zoomRampMs` (0..2000 ms).
-`0` reverts to the pre-0.11.0 snap-to-target behaviour.  Useful range:
-`100` (snappy), `200` (smooth/typical), `500+` (cinematic).
+**Pan ramping (hardcoded 150 ms).**  Live pan is now smoothed via
+exponential decay: setting `zoomX`/`zoomY` records a *target*, and a
+dedicated ramp thread tweens the current crop position toward it
+(Star6E ~60 Hz on `MI_VPE_SetPortCrop`, Maruko ~30 Hz on
+`MI_SCL_SetPortConfig`).  Time constant is hardcoded — `zoomRampMs`
+was briefly a config field but the surface didn't earn its keep.
 
 **Zoom-aware AE meter.**  Whenever zoom is active, the ISP's AE
 statistics window (`MI_ISP_CUS3A_SetAECropSize`, 0..1023 normalized)
