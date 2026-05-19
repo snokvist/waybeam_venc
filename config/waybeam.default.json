@@ -70,6 +70,15 @@
     "calFile": "/etc/imu.cal",
     "calSamples": 400
   },
+  "eis": {
+    "enabled": false,
+    "ldcConfigPath": "/etc/waybeam/eis/ldc_config.json",
+    "calibPath": "/etc/waybeam/eis/calib.bin",
+    "focalLengthX": 204137,
+    "focalLengthY": 204137,
+    "sliceCount": 1,
+    "recenterTauMs": 500
+  },
   "record": {
     "enabled": false,
     "dir": "/mnt/mmcblk0p1",

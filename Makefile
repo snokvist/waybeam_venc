@@ -36,7 +36,7 @@ COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VE
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c lib/cJSON.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c
-STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c
+STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_eis.c src/star6e_eis_eptz.c
 RECORDER_SRC := src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c
 LIB_RUNPATH ?= /usr/lib
 COMMON_LDFLAGS := -s -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
@@ -61,10 +61,11 @@ CC := $(STAR6E_CC)
 SRC := src/main.c src/backend_star6e.c src/star6e_mi.c $(STAR6E_ONLY_SRC) $(RECORDER_SRC) $(HELPER_SRC) $(CONFIG_SRC)
 DRV :=
 DRV_EXTRA :=
-SOC_CFLAGS := -mfpu=neon-vfpv4 -mfloat-abi=hard -ftree-vectorize
+SOC_CFLAGS := -mfpu=neon-vfpv4 -mfloat-abi=hard -ftree-vectorize \
+              -Ivendor/sigmastar-eis/include
 SOC_DEFS := -DPLATFORM_STAR6E -DHAVE_BACKEND_STAR6E=1
-SOC_LDFLAGS :=
-SOC_LIBS := -lm
+SOC_LDFLAGS := -Lvendor/sigmastar-eis/lib
+SOC_LIBS := -leptz -lm
 BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
 BUILD_TESTS := 1
 TOOLCHAIN_TARGET := toolchain

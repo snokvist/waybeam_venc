@@ -330,6 +330,13 @@ MI_S32 MI_VIF_DisableChnPort(MI_VIF_CHN chn, MI_VIF_PORT port);
 #define MI_VPE_EnablePort(chn, port)    g_mi_vpe.fnEnablePort((chn), (port))
 #define MI_VPE_DisablePort(chn, port)   g_mi_vpe.fnDisablePort((chn), (port))
 #define MI_VPE_SetPortCrop(chn, port, crop) g_mi_vpe.fnSetPortCrop((chn), (port), (crop))
+/* LDC view-config — nullable; EIS init verifies before use. */
+#define MI_VPE_LDCBegViewConfig(chn) g_mi_vpe.fnLDCBegViewConfig((chn))
+#define MI_VPE_LDCSetViewConfig(chn, buf, sz) \
+	g_mi_vpe.fnLDCSetViewConfig((chn), (buf), (sz))
+#define MI_VPE_LDCEndViewConfig(chn) g_mi_vpe.fnLDCEndViewConfig((chn))
+#define MI_VPE_LDCSetBatchViewConfig(chn, cfg, n) \
+	g_mi_vpe.fnLDCSetBatchViewConfig((chn), (cfg), (n))
 #elif !defined(PLATFORM_MARUKO)
 /* Test stubs */
 MI_S32 MI_VPE_CreateChannel(MI_VPE_CHANNEL chn, MI_VPE_ChannelAttr_t* attr);

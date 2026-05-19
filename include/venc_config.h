@@ -168,6 +168,21 @@ typedef struct {
 	int cal_samples;                           /* 400 */
 } VencConfigImu;
 
+/* Gyro-assisted EIS via SigmaStar VPE LDC engine.
+ * Star6E only; ignored on Maruko (different SDK vintage).
+ * Default off.  Output resolution is dictated by the LDC config
+ * blob, NOT by the user — pick a blob that matches the sensor's
+ * captured resolution. */
+typedef struct {
+	bool enabled;
+	char ldc_config_path[VENC_CONFIG_STRING_MAX]; /* LDC view config blob */
+	char calib_path[VENC_CONFIG_STRING_MAX];      /* sensor calibration bin */
+	uint32_t focal_length_x;                       /* f_mm/sensor_um × 1e5 */
+	uint32_t focal_length_y;
+	uint16_t slice_count;                          /* rolling-shutter slices */
+	uint32_t recenter_tau_ms;                      /* exp spring τ (Phase 3c) */
+} VencConfigEis;
+
 typedef struct {
 	bool enabled;
 	char dir[VENC_CONFIG_STRING_MAX];
@@ -206,6 +221,7 @@ typedef struct {
 	VencConfigFpv fpv;
 	VencConfigAudio audio;
 	VencConfigImu imu;
+	VencConfigEis eis;
 	VencConfigRecord record;
 	VencConfigSnapshot snapshot;
 	VencConfigDebug debug;

@@ -366,6 +366,14 @@ static const FieldDesc g_fields[] = {
 	FIELD(imu, cal_file,       FT_STRING, MUT_RESTART),
 	FIELD(imu, cal_samples,    FT_INT,    MUT_RESTART),
 
+	FIELD(eis, enabled,          FT_BOOL,   MUT_RESTART),
+	FIELD(eis, ldc_config_path,  FT_STRING, MUT_RESTART),
+	FIELD(eis, calib_path,       FT_STRING, MUT_RESTART),
+	FIELD(eis, focal_length_x,   FT_UINT,   MUT_RESTART),
+	FIELD(eis, focal_length_y,   FT_UINT,   MUT_RESTART),
+	FIELD(eis, slice_count,      FT_UINT16, MUT_RESTART),
+	FIELD(eis, recenter_tau_ms,  FT_UINT,   MUT_LIVE),
+
 	FIELD(record, enabled,     FT_BOOL,   MUT_RESTART),
 	FIELD(record, dir,         FT_STRING, MUT_RESTART),
 	FIELD(record, format,      FT_STRING, MUT_RESTART),

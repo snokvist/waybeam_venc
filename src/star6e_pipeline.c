@@ -5,6 +5,7 @@
 #include "debug_osd.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
+#include "star6e_eis.h"
 #include "file_util.h"
 #include "intra_refresh.h"
 #include "isp_runtime.h"
@@ -426,12 +427,13 @@ static void star6e_pipeline_stop_vif(void)
 static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 	const Star6ePrecropRect *precrop, uint32_t out_width,
 	uint32_t out_height, int mirror, int flip, int level_3dnr,
-	SdkQuietState *sdk_quiet)
+	const VencConfigEis *eis, SdkQuietState *sdk_quiet)
 {
 	MI_VPE_ChannelAttr_t channel_attr = {0};
 	MI_VPE_ChannelParam_t param = {0};
 	MI_VPE_PortAttr_t port = {0};
 	MI_S32 ret;
+	Star6eEis *eis_state = NULL;
 
 	channel_attr.capt.width = precrop->w;
 	channel_attr.capt.height = precrop->h;
@@ -445,11 +447,23 @@ static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 			sensor->plane.precision * I6_BAYER_END + sensor->plane.bayer);
 	}
 
+	if (star6e_eis_should_enable(eis)) {
+		eis_state = star6e_eis_attach(&channel_attr, eis);
+		if (!eis_state) {
+			fprintf(stderr, "ERROR: [eis] attach failed — "
+				"refusing to start pipeline with eis.enabled=true "
+				"and bad blob paths\n");
+			return -1;
+		}
+		channel_attr.lensAdjOn = 1;
+	}
+
 	sdk_quiet_begin(sdk_quiet);
 	ret = MI_VPE_CreateChannel(0, &channel_attr);
 	sdk_quiet_end(sdk_quiet);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_VPE_CreateChannel failed %d\n", ret);
+		star6e_eis_release(eis_state);
 		return ret;
 	}
 
@@ -457,13 +471,24 @@ static int star6e_pipeline_start_vpe(const SensorSelectResult *sensor,
 	param.level3DNR = level_3dnr;
 	param.mirror = mirror ? 1 : 0;
 	param.flip = flip ? 1 : 0;
-	param.lensAdjOn = 0;
+	param.lensAdjOn = eis_state ? 1 : 0;
 	ret = MI_VPE_SetChannelParam(0, &param);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_VPE_SetChannelParam failed %d\n", ret);
+		star6e_eis_release(eis_state);
 		MI_VPE_DestroyChannel(0);
 		return ret;
 	}
+
+	if (eis_state) {
+		if (star6e_eis_push_view_config(eis_state, 0) != 0) {
+			star6e_eis_release(eis_state);
+			MI_VPE_DestroyChannel(0);
+			return -1;
+		}
+	}
+	/* Blob copies live in the kernel now; userspace buffer can go. */
+	star6e_eis_release(eis_state);
 
 	/* Sensor-level orientation.  VPE digital flip is unreliable on some
 	 * sensor combos; MI_SNR_SetOrien programs the sensor's own flip
@@ -1778,7 +1803,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	ret = star6e_pipeline_start_vpe(&state->sensor, &pconf.precrop,
 		pconf.image_width, pconf.image_height,
 		pconf.image_mirror, pconf.image_flip,
-		pconf.vpe_level_3dnr, sdk_quiet);
+		pconf.vpe_level_3dnr, &vcfg->eis, sdk_quiet);
 	if (ret != 0)
 		goto fail_vif;
 

@@ -51,6 +51,13 @@ typedef struct {
 	int (*fnEnablePort)(int chn, int port);
 	int (*fnDisablePort)(int chn, int port);
 	int (*fnSetPortCrop)(int chn, int port, void *crop);
+	/* LDC view-config family.  Phase 3a sets the per-channel LDC mode
+	 * via i6e_vpe_chn.lensInit at CreateChannel; these are the
+	 * per-frame update path used in Phase 3b/3c. */
+	int (*fnLDCBegViewConfig)(int chn);
+	int (*fnLDCSetViewConfig)(int chn, void *buf, uint32_t size);
+	int (*fnLDCEndViewConfig)(int chn);
+	int (*fnLDCSetBatchViewConfig)(int chn, void *cfg, uint32_t view_num);
 } star6e_vpe_impl;
 
 typedef struct {

@@ -158,6 +158,17 @@ static int i6e_vpe_load(star6e_vpe_impl *vpe)
 		int (*)(int, int), "MI_VPE_DisablePort");
 	LOAD_SYM(vpe, "libmi_vpe.so", fnSetPortCrop,
 		int (*)(int, int, void *), "MI_VPE_SetPortCrop");
+	/* LDC view-config family — optional; nullable so eis=off builds
+	 * tolerate an older libmi_vpe.so that lacks these symbols.  EIS
+	 * init checks each pointer before use. */
+	LOAD_SYM(vpe, "libmi_vpe.so", fnLDCBegViewConfig,
+		int (*)(int), "MI_VPE_LDCBegViewConfig");
+	LOAD_SYM(vpe, "libmi_vpe.so", fnLDCSetViewConfig,
+		int (*)(int, void *, uint32_t), "MI_VPE_LDCSetViewConfig");
+	LOAD_SYM(vpe, "libmi_vpe.so", fnLDCEndViewConfig,
+		int (*)(int), "MI_VPE_LDCEndViewConfig");
+	LOAD_SYM(vpe, "libmi_vpe.so", fnLDCSetBatchViewConfig,
+		int (*)(int, void *, uint32_t), "MI_VPE_LDCSetBatchViewConfig");
 
 	if (!vpe->fnCreateChannel || !vpe->fnGetChannelAttr ||
 	    !vpe->fnSetChannelAttr ||

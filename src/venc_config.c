@@ -147,6 +147,18 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->imu.cal_file, sizeof(cfg->imu.cal_file), "/etc/imu.cal");
 	cfg->imu.cal_samples = 400;
 
+	cfg->eis.enabled = false;
+	safe_strcpy(cfg->eis.ldc_config_path,
+		sizeof(cfg->eis.ldc_config_path),
+		"/etc/waybeam/eis/ldc_config.json");
+	safe_strcpy(cfg->eis.calib_path,
+		sizeof(cfg->eis.calib_path),
+		"/etc/waybeam/eis/calib.bin");
+	cfg->eis.focal_length_x = 204137; /* IMX307 reference; IMX335 TBD */
+	cfg->eis.focal_length_y = 204137;
+	cfg->eis.slice_count = 1;
+	cfg->eis.recenter_tau_ms = 500;
+
 	/* record */
 	cfg->record.enabled = false;
 	safe_strcpy(cfg->record.dir, sizeof(cfg->record.dir), RECORDER_DEFAULT_DIR);
@@ -566,6 +578,27 @@ static void load_imu(const cJSON *root, VencConfigImu *s)
 	if (s->cal_samples < 10) s->cal_samples = 10;
 }
 
+static void load_eis(const cJSON *root, VencConfigEis *s)
+{
+	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "eis");
+	if (!obj) return;
+	s->enabled = json_get_bool(obj, "enabled", s->enabled);
+	safe_strcpy(s->ldc_config_path, sizeof(s->ldc_config_path),
+		json_get_string(obj, "ldcConfigPath", s->ldc_config_path));
+	safe_strcpy(s->calib_path, sizeof(s->calib_path),
+		json_get_string(obj, "calibPath", s->calib_path));
+	s->focal_length_x = (uint32_t)json_get_int(obj, "focalLengthX",
+		(int)s->focal_length_x);
+	s->focal_length_y = (uint32_t)json_get_int(obj, "focalLengthY",
+		(int)s->focal_length_y);
+	s->slice_count = (uint16_t)json_get_int(obj, "sliceCount",
+		(int)s->slice_count);
+	if (s->slice_count < 1) s->slice_count = 1;
+	if (s->slice_count > 8) s->slice_count = 8;
+	s->recenter_tau_ms = (uint32_t)json_get_int(obj, "recenterTauMs",
+		(int)s->recenter_tau_ms);
+}
+
 static void load_record(const cJSON *root, VencConfigRecord *s)
 {
 	const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, "record");
@@ -655,6 +688,7 @@ int venc_config_load(const char *path, VencConfig *cfg)
 	load_fpv(root, &cfg->fpv);
 	load_audio(root, &cfg->audio);
 	load_imu(root, &cfg->imu);
+	load_eis(root, &cfg->eis);
 	load_record(root, &cfg->record);
 	load_snapshot(root, &cfg->snapshot);
 	{
@@ -1111,6 +1145,19 @@ static void render_imu(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_close(p, 1, is_last);
 }
 
+static void render_eis(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "eis");
+	pp_field_bool(p,   2, "enabled",       cfg->eis.enabled,         0);
+	pp_field_string(p, 2, "ldcConfigPath", cfg->eis.ldc_config_path, 0);
+	pp_field_string(p, 2, "calibPath",     cfg->eis.calib_path,      0);
+	pp_field_uint(p,   2, "focalLengthX",  cfg->eis.focal_length_x,  0);
+	pp_field_uint(p,   2, "focalLengthY",  cfg->eis.focal_length_y,  0);
+	pp_field_uint(p,   2, "sliceCount",    cfg->eis.slice_count,     0);
+	pp_field_uint(p,   2, "recenterTauMs", cfg->eis.recenter_tau_ms, 1);
+	pp_section_close(p, 1, is_last);
+}
+
 static void render_record(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "record");
@@ -1162,6 +1209,7 @@ static char *config_render_pretty(const VencConfig *cfg)
 	render_fpv(&p,      cfg, 0);
 	render_audio(&p,    cfg, 0);
 	render_imu(&p,      cfg, 0);
+	render_eis(&p,      cfg, 0);
 	render_record(&p,   cfg, 0);
 	render_snapshot(&p, cfg, 0);
 	render_debug(&p,    cfg, 1);
@@ -1287,6 +1335,18 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(imu, "gyroRangeDps", cfg->imu.gyro_range_dps);
 		cJSON_AddStringToObject(imu, "calFile", cfg->imu.cal_file);
 		cJSON_AddNumberToObject(imu, "calSamples", cfg->imu.cal_samples);
+	}
+
+	/* eis */
+	cJSON *eis = cJSON_AddObjectToObject(root, "eis");
+	if (eis) {
+		cJSON_AddBoolToObject(eis,   "enabled",       cfg->eis.enabled);
+		cJSON_AddStringToObject(eis, "ldcConfigPath", cfg->eis.ldc_config_path);
+		cJSON_AddStringToObject(eis, "calibPath",     cfg->eis.calib_path);
+		cJSON_AddNumberToObject(eis, "focalLengthX",  cfg->eis.focal_length_x);
+		cJSON_AddNumberToObject(eis, "focalLengthY",  cfg->eis.focal_length_y);
+		cJSON_AddNumberToObject(eis, "sliceCount",    cfg->eis.slice_count);
+		cJSON_AddNumberToObject(eis, "recenterTauMs", cfg->eis.recenter_tau_ms);
 	}
 
 	/* record */
