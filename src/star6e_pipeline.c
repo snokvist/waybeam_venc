@@ -119,6 +119,10 @@ static int star6e_pipeline_disable_userspace3a(const IspRuntimeLib *lib,
 	return fn ? fn(0) : 0;
 }
 
+/* Forward decls — definitions live alongside the zoom/pan block but they
+ * are referenced from the ISP-ready waiters above it. */
+static void star6e_ae_crop_mark_ready(void);
+
 /* Poll MI_ISP_IQ_GetParaInitStatus until bFlag==1 or timeout (2000 ms).
  * Called standalone after VIF→VPE bind when a new VPE channel was just
  * created (first start or AR-change reinit): the ISP channel initialises
@@ -155,6 +159,7 @@ static void star6e_pipeline_wait_isp_channel(void)
 		if (fn(0, &info) == 0 && info.stParaAPI.bFlag == 1) {
 			printf("> ISP channel ready after %d ms\n", elapsed_ms);
 			dlclose(handle);
+			star6e_ae_crop_mark_ready();
 			return;
 		}
 		usleep(1000);
@@ -188,6 +193,7 @@ static int star6e_pipeline_wait_isp_ready(const IspRuntimeLib *lib, void *ctx)
 		memset(&info, 0, sizeof(info));
 		if (fn(0, &info) == 0 && info.stParaAPI.bFlag == 1) {
 			printf("> ISP ready after %d ms\n", elapsed_ms);
+			star6e_ae_crop_mark_ready();
 			return 0;
 		}
 		usleep(1000);
@@ -719,7 +725,9 @@ typedef int (*star6e_set_ae_crop_fn_t)(uint32_t channel,
 
 static star6e_set_ae_crop_fn_t g_star6e_set_ae_crop;
 static int g_star6e_ae_crop_resolved;
-static Star6eAeCropRect g_star6e_ae_crop_last;
+static int g_star6e_ae_crop_ready;     /* 1 once CUS3A/ISP can accept calls */
+static int g_star6e_ae_crop_disabled;  /* 1 if the SDK rejected a call — give up */
+static Star6eAeCropRect g_star6e_ae_crop_last = { 0, 0, 1023, 1023 };
 
 static void star6e_apply_ae_crop(double pct, double x, double y);
 
@@ -872,10 +880,10 @@ static int star6e_pan_ramp_start(Star6ePipelineState *state,
 
 	/* Program the initial crop rect synchronously.  The ramp thread would
 	 * otherwise idle because current==target on first start, leaving the
-	 * VPE port at full-frame. */
+	 * VPE port at full-frame.  AE crop fires from the ISP-ready hook
+	 * (star6e_ae_crop_mark_ready) — too early to call here. */
 	if (pct > 0.0 && pct < 1.0)
 		(void)star6e_pan_apply_locked(state, pct, x, y);
-	star6e_apply_ae_crop(pct, x, y);
 	return 0;
 }
 
@@ -953,12 +961,21 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 }
 
 /* Constrain the ISP's AE statistics window to the zoom rect.  Coords are
- * 0..1023 normalized against the ISP frame (which is the post-VIF input —
- * same domain as the VPE port input, i.e. `active_precrop`).  pct in
- * (0, 1) sets a sub-rect; pct outside that range (zoom off) restores the
- * full frame.  Side-effect: caches the last applied rect so identical
- * back-to-back calls (e.g. ramp tick when target hasn't moved) skip the
- * SDK call. */
+ * 0..1023 normalized against the ISP frame (the post-VIF input — same
+ * domain as the VPE port input, `active_precrop`).
+ *
+ * Failure modes the bench taught us:
+ *   - The SDK refuses calls before CUS3A handoff; we gate on
+ *     g_star6e_ae_crop_ready and just queue the change in the cache.
+ *   - Calling with full-frame (0,0,1023,1023) on this BSP returns -1
+ *     during init.  Whether it works at all is uncertain, so we never
+ *     emit a "restore to full frame" call — the cache is pre-seeded
+ *     full-frame and only sub-rects ever get pushed.  When zoom is
+ *     disabled live, the meter stays on the last zoom rect; the ISP's
+ *     own filtering re-equilibrates exposure over the next few seconds.
+ *   - On any non-zero return from the SDK, we set
+ *     g_star6e_ae_crop_disabled and stop calling for the rest of the
+ *     process.  Next start cold-resets via pipeline_stop. */
 static void star6e_apply_ae_crop(double pct, double x, double y)
 {
 	Star6eAeCropRect r;
@@ -967,6 +984,8 @@ static void star6e_apply_ae_crop(double pct, double x, double y)
 	double cx, cy, rx, ry;
 	Star6ePipelineState *state;
 
+	if (g_star6e_ae_crop_disabled)
+		return;
 	if (!g_star6e_ae_crop_resolved) {
 		g_star6e_set_ae_crop = (star6e_set_ae_crop_fn_t)
 			dlsym(RTLD_DEFAULT, "MI_ISP_CUS3A_SetAECropSize");
@@ -979,47 +998,48 @@ static void star6e_apply_ae_crop(double pct, double x, double y)
 	if (!g_star6e_set_ae_crop)
 		return;
 
-	memset(&r, 0, sizeof(r));
-	r.crop_w = 1023;
-	r.crop_h = 1023;
+	/* Skip the "full frame" path entirely.  See header comment. */
+	if (!isfinite(pct) || pct <= 0.0 || pct >= 1.0)
+		return;
 
 	pthread_mutex_lock(&g_pan_ramp.lock);
 	state = g_pan_ramp.has_state ? g_pan_ramp.state : NULL;
 	pthread_mutex_unlock(&g_pan_ramp.lock);
+	if (!state || state->active_precrop.w == 0 ||
+	    state->active_precrop.h == 0)
+		return;
 
-	if (state && isfinite(pct) && pct > 0.0 && pct < 1.0 &&
-	    state->active_precrop.w > 0 && state->active_precrop.h > 0) {
-		in_w   = state->active_precrop.w;
-		in_h   = state->active_precrop.h;
-		rect_w = state->image_width;
-		rect_h = state->image_height;
-		if (!isfinite(x)) x = 0.5;
-		if (!isfinite(y)) y = 0.5;
-		if (x < 0.0) x = 0.0;
-		if (x > 1.0) x = 1.0;
-		if (y < 0.0) y = 0.0;
-		if (y > 1.0) y = 1.0;
-		cx = (double)in_w * x - (double)rect_w * 0.5;
-		cy = (double)in_h * y - (double)rect_h * 0.5;
-		if (cx < 0.0) cx = 0.0;
-		if (cy < 0.0) cy = 0.0;
-		if (cx + (double)rect_w > (double)in_w)
-			cx = (double)(in_w - rect_w);
-		if (cy + (double)rect_h > (double)in_h)
-			cy = (double)(in_h - rect_h);
-		rx = cx * 1023.0 / (double)in_w;
-		ry = cy * 1023.0 / (double)in_h;
-		r.crop_x = (uint16_t)(rx + 0.5);
-		r.crop_y = (uint16_t)(ry + 0.5);
-		r.crop_w = (uint16_t)((double)rect_w * 1023.0 / (double)in_w + 0.5);
-		r.crop_h = (uint16_t)((double)rect_h * 1023.0 / (double)in_h + 0.5);
-		if (r.crop_w == 0) r.crop_w = 1;
-		if (r.crop_h == 0) r.crop_h = 1;
-		if (r.crop_x + r.crop_w > 1023)
-			r.crop_x = (uint16_t)(1023 - r.crop_w);
-		if (r.crop_y + r.crop_h > 1023)
-			r.crop_y = (uint16_t)(1023 - r.crop_h);
-	}
+	in_w   = state->active_precrop.w;
+	in_h   = state->active_precrop.h;
+	rect_w = state->image_width;
+	rect_h = state->image_height;
+	if (!isfinite(x)) x = 0.5;
+	if (!isfinite(y)) y = 0.5;
+	if (x < 0.0) x = 0.0;
+	if (x > 1.0) x = 1.0;
+	if (y < 0.0) y = 0.0;
+	if (y > 1.0) y = 1.0;
+	cx = (double)in_w * x - (double)rect_w * 0.5;
+	cy = (double)in_h * y - (double)rect_h * 0.5;
+	if (cx < 0.0) cx = 0.0;
+	if (cy < 0.0) cy = 0.0;
+	if (cx + (double)rect_w > (double)in_w)
+		cx = (double)(in_w - rect_w);
+	if (cy + (double)rect_h > (double)in_h)
+		cy = (double)(in_h - rect_h);
+	rx = cx * 1023.0 / (double)in_w;
+	ry = cy * 1023.0 / (double)in_h;
+	memset(&r, 0, sizeof(r));
+	r.crop_x = (uint16_t)(rx + 0.5);
+	r.crop_y = (uint16_t)(ry + 0.5);
+	r.crop_w = (uint16_t)((double)rect_w * 1023.0 / (double)in_w + 0.5);
+	r.crop_h = (uint16_t)((double)rect_h * 1023.0 / (double)in_h + 0.5);
+	if (r.crop_w == 0) r.crop_w = 1;
+	if (r.crop_h == 0) r.crop_h = 1;
+	if (r.crop_x + r.crop_w > 1023)
+		r.crop_x = (uint16_t)(1023 - r.crop_w);
+	if (r.crop_y + r.crop_h > 1023)
+		r.crop_y = (uint16_t)(1023 - r.crop_h);
 
 	if (r.crop_x == g_star6e_ae_crop_last.crop_x &&
 	    r.crop_y == g_star6e_ae_crop_last.crop_y &&
@@ -1027,11 +1047,40 @@ static void star6e_apply_ae_crop(double pct, double x, double y)
 	    r.crop_h == g_star6e_ae_crop_last.crop_h)
 		return;
 
-	if (g_star6e_set_ae_crop(0, &r) != 0)
-		fprintf(stderr,
-			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed\n",
-			r.crop_x, r.crop_y, r.crop_w, r.crop_h);
 	g_star6e_ae_crop_last = r;
+
+	if (!g_star6e_ae_crop_ready)
+		return;  /* queued — ISP not yet ready */
+
+	if (g_star6e_set_ae_crop(0, &r) != 0) {
+		fprintf(stderr,
+			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed — "
+			"disabling AE zoom-tracking for this run\n",
+			r.crop_x, r.crop_y, r.crop_w, r.crop_h);
+		g_star6e_ae_crop_disabled = 1;
+	}
+}
+
+/* Called from the ISP-ready hook in pipeline_start.  If the user booted
+ * with zoom active, this is the first chance the AE crop can actually
+ * reach the SDK; flush the cached rect now. */
+static void star6e_ae_crop_mark_ready(void)
+{
+	double pct, x, y;
+
+	g_star6e_ae_crop_ready = 1;
+
+	pthread_mutex_lock(&g_pan_ramp.lock);
+	pct = g_pan_ramp.target_pct;
+	x   = g_pan_ramp.target_x;
+	y   = g_pan_ramp.target_y;
+	pthread_mutex_unlock(&g_pan_ramp.lock);
+
+	if (isfinite(pct) && pct > 0.0 && pct < 1.0) {
+		/* Force re-emit: invalidate cache, then call. */
+		g_star6e_ae_crop_last.crop_w = 0;
+		star6e_apply_ae_crop(pct, x, y);
+	}
 }
 
 static void star6e_pipeline_fill_h26x_attr(i6_venc_attr_h26x *attr,
@@ -1968,7 +2017,15 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	venc_api_clear_active_precrop();
 	star6e_pipeline_clear_zoom_status();
 	star6e_pan_ramp_stop();
-	star6e_apply_ae_crop(0.0, 0.5, 0.5);  /* restore full-frame AE meter */
+	/* AE crop: the SDK rejected our "restore full-frame" call on this BSP,
+	 * so we never emit it.  Cycle the ready flag so the next start
+	 * re-arms via the ISP-ready hook, and re-seed the cache so the next
+	 * sub-rect (if any) is unconditionally re-emitted. */
+	g_star6e_ae_crop_ready = 0;
+	g_star6e_ae_crop_last.crop_x = 0;
+	g_star6e_ae_crop_last.crop_y = 0;
+	g_star6e_ae_crop_last.crop_w = 1023;
+	g_star6e_ae_crop_last.crop_h = 1023;
 
 	/* Clear IntraRefresh status snapshot — the channel it described is
 	 * about to be destroyed, so /api/v1/intra/status should not keep
