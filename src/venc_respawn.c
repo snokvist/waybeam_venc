@@ -151,14 +151,50 @@ void venc_respawn_after_exit(void)
 		if (d) {
 			int dfd_keep = dirfd(d);
 			struct dirent *e;
+			int closed_count = 0;
+			int skipped_count = 0;
 			while ((e = readdir(d)) != NULL) {
 				if (!isdigit((unsigned char)e->d_name[0]))
 					continue;
 				int fd = atoi(e->d_name);
 				if (fd <= STDERR_FILENO || fd == dfd_keep)
 					continue;
+				/* Bench-localized 2026-05-19 (PR #120): closing
+				 * /dev/mi_sys (and likely other /dev/mi_* SDK
+				 * descriptors) here deadlocks the SigmaStar
+				 * driver after a zoom_pct MUT_RESTART teardown.
+				 * MI_SYS_Exit returns cleanly but does not
+				 * release its kernel-side state for the fd, so
+				 * the close() syscall reaches the driver's
+				 * release handler in a half-torn-down state and
+				 * hangs uninterruptibly.  Watchdog escalation
+				 * then sysrq-b's the box.
+				 *
+				 * Skip /dev/mi_* fds — let them be inherited
+				 * into the exec'd image as orphans.  This
+				 * reintroduces a slow ~1-fd-per-respawn leak
+				 * (the original concern this scrub was for),
+				 * bounded by RLIMIT_NOFILE (1024); long-running
+				 * operational concern, vastly preferable to
+				 * wedging the SoC. */
+				char link_path[64];
+				char target[256] = {0};
+				snprintf(link_path, sizeof(link_path),
+					"/proc/self/fd/%d", fd);
+				ssize_t n = readlink(link_path, target,
+					sizeof(target) - 1);
+				if (n < 0) n = 0;
+				target[n] = '\0';
+				if (strncmp(target, "/dev/mi_", 8) == 0) {
+					skipped_count++;
+					continue;
+				}
 				close(fd);
+				closed_count++;
 			}
+			fprintf(stderr,
+				"[respawn] fd-scrub: closed=%d skipped=%d (SDK /dev/mi_*)\n",
+				closed_count, skipped_count); fflush(stderr);
 			closedir(d);
 		}
 	}

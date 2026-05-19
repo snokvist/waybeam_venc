@@ -1,5 +1,52 @@
 # History
 
+## [0.11.0] - 2026-05-19
+
+Star6E zoom improvements lifted from the DIVP/stabilization branch
+work — no DIVP pipeline swap, no stabilization, just two additive
+features that make the existing `zoom_pct` + live `zoomX`/`zoomY`
+controls feel better — plus a respawn-handler bug fix that makes
+the `zoom_pct` MUT_RESTART path safe to use at runtime.
+
+**Pan ramping (hardcoded 150 ms).**  Live pan is now smoothed via
+exponential decay: setting `zoomX`/`zoomY` records a *target*, and a
+dedicated ramp thread tweens the current crop position toward it
+(Star6E ~60 Hz on `MI_VPE_SetPortCrop`, Maruko ~30 Hz on
+`MI_SCL_SetPortConfig`).  Time constant is hardcoded — `zoomRampMs`
+was briefly a config field but the surface didn't earn its keep.
+
+**Zoom-aware AE meter.**  Whenever zoom is active, the ISP's AE
+statistics window (`MI_ISP_CUS3A_SetAECropSize`, 0..1023 normalized)
+is constrained to the zoom rect.  Sky-into-the-frame and
+bright-light-source-near-edge no longer crush the zoomed subject;
+pan across light↔dark regions and exposure follows.  Silent no-op
+if the SDK lacks the symbol; gated on CUS3A readiness so the
+boot-time WARNING from calling before the ISP channel is up no
+longer fires.
+
+**Respawn fd-scrub fix (root cause for SoC hang on MUT_RESTART).**
+The `venc_respawn` post-fork fd scrub loop unconditionally closed
+every non-stdio file descriptor before `execv`.  On Star6E this
+included `/dev/mi_sys` (and other `/dev/mi_*` SDK fds), whose
+release handler in the SigmaStar driver hangs uninterruptibly
+when called after `MI_SYS_Exit` returned cleanly — which is the
+normal state after a zoom_pct (or any MUT_RESTART) reinit.
+Userspace hang → watchdog 3s SIGKILL → sysrq-b emergency reboot.
+
+The fix: detect /dev/mi_* targets via readlink and skip closing
+them.  Reintroduces the slow 1-fd-per-respawn leak the scrub was
+originally written to plug, but bounded by RLIMIT_NOFILE (~1024
+respawns) — vastly preferable to wedging the device.  Bench-
+validated: 4 back-to-back zoom_pct toggles complete cleanly with
+no watchdog escalation.  This fixes a class of bug shared by
+zoom_pct, resilience preset, sensor mode, and any other
+MUT_RESTART field; resilience and sensor-mode just happened not to
+trip it as reliably (their teardown timing left mi_sys in a
+slightly different state).
+
+Star6E only.  Maruko `apply_zoom` accepts the new `ramp_ms` argument
+for API parity but ignores it; no Maruko pipeline changes.
+
 ## [0.10.16] - 2026-05-15
 
 Two new OSD-safe resilience presets for ultra-low recovery latency:

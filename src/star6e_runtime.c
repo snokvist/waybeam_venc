@@ -1121,8 +1121,9 @@ static void star6e_runner_teardown(void *opaque)
 			int i;
 			for (i = 0; i < 6; i++) {
 				usleep(500 * 1000);
-				if (kill(parent, 0) != 0)
+				if (kill(parent, 0) != 0) {
 					_exit(0);  /* parent exited cleanly */
+				}
 			}
 			if (kill(parent, 0) == 0) {
 				static const char m1[] =

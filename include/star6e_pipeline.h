@@ -118,10 +118,13 @@ void star6e_pipeline_stop(Star6ePipelineState *state);
 void star6e_pipeline_vpe_scl_preset_shutdown(void);
 
 /** Apply digital zoom on VPE port 0.  pct=0 disables (full-frame).
+ *  x/y set the *target* pan position; the live crop decays toward it
+ *  with a backend-hardcoded time constant (PAN_RAMP_DEFAULT_MS).
  *  Returns 0 on success, -1 if VPE not yet started or SDK rejected the
  *  rect.  Safe to call before pipeline start (no-op returns -1). */
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y);
+
 void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 
 /** Service custom 3A (AWB/AE) at regular intervals. */

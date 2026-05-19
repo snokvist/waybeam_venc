@@ -57,6 +57,8 @@ typedef struct {
 	 * compiled out or the backend has no observability hook. */
 	char *(*query_audio_status)(void);
 	/* Apply digital zoom (video0.zoom_pct/x/y) live.  pct=0 disables.
+	 * Pan smoothing time-constant is hardcoded per backend
+	 * (PAN_RAMP_DEFAULT_MS) — see star6e_pipeline.c / maruko_pipeline.c.
 	 * Returns 0 on success, -1 on backend/SDK error.  NULL when the
 	 * backend has no zoom path. */
 	int (*apply_zoom)(double pct, double x, double y);
