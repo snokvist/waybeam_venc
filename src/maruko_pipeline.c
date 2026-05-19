@@ -73,6 +73,74 @@ static int g_mi_scl_chn_created = 0;
  * to MJPG VENC dev 8 by venc_jpeg_backend_init (src/maruko_jpeg.c). */
 static int g_mi_scl_port1_enabled = 0;
 
+/* MI_ISP_CUS3A_SetAECropSize confines AE statistics to a sub-rect of the
+ * ISP frame in 0..1023 normalized coords.  Resolved lazily via dlsym; if
+ * absent every call becomes a silent no-op so the pipeline still runs.
+ * Same ABI as Star6E — see src/star6e_pipeline.c:712-1086 for the parent
+ * implementation (this is its Maruko twin). */
+typedef struct {
+	uint16_t crop_x;
+	uint16_t crop_y;
+	uint16_t crop_w;
+	uint16_t crop_h;
+} MarukoAeCropRect;
+
+/* Note: Maruko (infinity6c) ABI differs from Star6E (infinity6e).
+ *   Star6E:  MI_ISP_CUS3A_SetAECropSize(Channel, rect *)
+ *   Maruko:  MI_ISP_CUS3A_SetAECropSize(DevId, Channel, rect *)
+ * Calling with the Star6E 2-arg signature on Maruko corrupts the stack
+ * and crashes the process before the SDK function even returns. */
+typedef int (*maruko_set_ae_crop_fn_t)(uint32_t dev_id, uint32_t channel,
+	MarukoAeCropRect *data);
+
+static maruko_set_ae_crop_fn_t g_maruko_set_ae_crop;
+static int g_maruko_ae_crop_resolved;
+static int g_maruko_ae_crop_ready;     /* 1 once CUS3A handoff complete */
+static int g_maruko_ae_crop_disabled;  /* 1 if the SDK rejected a call */
+static MarukoAeCropRect g_maruko_ae_crop_last = { 0, 0, 1023, 1023 };
+
+static void maruko_apply_ae_crop(MarukoBackendContext *ctx,
+	double pct, double x, double y);
+static void maruko_ae_crop_mark_ready(MarukoBackendContext *ctx);
+
+/* Pan ramping — Star6E parity at lower tick rate.
+ *
+ * MI_SCL_SetPortConfig is heavier than Star6E's MI_VPE_SetPortCrop
+ * (writes a full port struct, not just a rect), so we drive the ramp
+ * at 30 Hz instead of 60 Hz to keep per-tick cost bounded.  Empirically
+ * the bench X/Y walk (9 SETs back-to-back via HTTP at ~5 Hz) ran clean
+ * without frame drops, so 30 Hz with the smoother in between should
+ * stay well under the budget.  Halve PAN_RAMP_TICK_MS to revisit later
+ * if smoothness suffers. */
+#define MARUKO_PAN_RAMP_TICK_MS       33   /* ~30 Hz */
+#define MARUKO_PAN_RAMP_SNAP_EPSILON  0.0005
+
+typedef struct {
+	pthread_mutex_t lock;
+	pthread_cond_t  cv;
+	pthread_t       thread;
+	int             running;
+	int             has_state;
+	double          target_pct;
+	double          target_x;
+	double          target_y;
+	double          current_x;
+	double          current_y;
+	uint32_t        ramp_ms;
+	MarukoBackendContext *ctx;  /* borrowed; cleared on ramp_stop */
+} MarukoPanRampState;
+
+static MarukoPanRampState g_maruko_pan_ramp = {
+	.lock = PTHREAD_MUTEX_INITIALIZER,
+	.cv   = PTHREAD_COND_INITIALIZER,
+};
+
+static int  maruko_pan_apply_locked(MarukoBackendContext *ctx,
+	double pct, double x, double y);
+static int  maruko_pan_ramp_start(MarukoBackendContext *ctx,
+	double pct, double x, double y, uint32_t ramp_ms);
+static void maruko_pan_ramp_stop(void);
+
 static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
 	MI_U16 max_width, MI_U16 max_height, MI_U16 ring_line)
 {
@@ -1022,11 +1090,124 @@ void maruko_pipeline_zoom_status(MarukoZoomStatus *out)
 	pthread_mutex_unlock(&g_zoom_status_mutex);
 }
 
-/* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
- * only updates x/y.  Re-issues SCL SetPortConfig with the same output dim
- * but new crop offsets.  pct is accepted to short-circuit when zoom is
- * off (no rect to pan). */
-int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
+/* Constrain the ISP's AE statistics window to the zoom rect.  Coords are
+ * 0..1023 normalized against the SCL input surface (`scl_crop_*`).
+ *
+ * Failure modes inherited from the Star6E twin:
+ *   - SDK refuses calls before CUS3A handoff is complete; gate on
+ *     g_maruko_ae_crop_ready and stash the change in the cache.
+ *   - Calling with a "full frame" 0..1023 rect returns -1 on some
+ *     vintages — skip that path entirely and let AE re-equilibrate
+ *     naturally when zoom is disabled.
+ *   - On any non-zero return latch g_maruko_ae_crop_disabled and stop
+ *     calling for the rest of the process; next start cold-resets. */
+static void maruko_apply_ae_crop(MarukoBackendContext *ctx,
+	double pct, double x, double y)
+{
+	MarukoAeCropRect r;
+	uint32_t in_w, in_h;
+	uint32_t rect_w, rect_h;
+	double cx, cy, rx, ry;
+
+	if (!ctx)
+		return;
+	if (g_maruko_ae_crop_disabled)
+		return;
+	if (!g_maruko_ae_crop_resolved) {
+		void *h = g_mi_isp.handle;
+		if (h)
+			g_maruko_set_ae_crop = (maruko_set_ae_crop_fn_t)
+				dlsym(h, "MI_ISP_CUS3A_SetAECropSize");
+		if (!g_maruko_set_ae_crop)
+			g_maruko_set_ae_crop = (maruko_set_ae_crop_fn_t)
+				dlsym(RTLD_DEFAULT,
+					"MI_ISP_CUS3A_SetAECropSize");
+		g_maruko_ae_crop_resolved = 1;
+		if (!g_maruko_set_ae_crop)
+			fprintf(stderr,
+				"WARNING: MI_ISP_CUS3A_SetAECropSize not present — "
+				"AE will not track zoom\n");
+	}
+	if (!g_maruko_set_ae_crop)
+		return;
+
+	/* Skip the "full frame" path entirely (see header comment). */
+	if (!isfinite(pct) || pct <= 0.0 || pct >= 1.0)
+		return;
+
+	in_w   = ctx->scl_crop_w;
+	in_h   = ctx->scl_crop_h;
+	rect_w = ctx->cfg.image_width;
+	rect_h = ctx->cfg.image_height;
+	if (in_w == 0 || in_h == 0 || rect_w == 0 || rect_h == 0)
+		return;
+
+	if (!isfinite(x)) x = 0.5;
+	if (!isfinite(y)) y = 0.5;
+	if (x < 0.0) x = 0.0;
+	if (x > 1.0) x = 1.0;
+	if (y < 0.0) y = 0.0;
+	if (y > 1.0) y = 1.0;
+	cx = (double)in_w * x - (double)rect_w * 0.5;
+	cy = (double)in_h * y - (double)rect_h * 0.5;
+	if (cx < 0.0) cx = 0.0;
+	if (cy < 0.0) cy = 0.0;
+	if (cx + (double)rect_w > (double)in_w)
+		cx = (double)(in_w - rect_w);
+	if (cy + (double)rect_h > (double)in_h)
+		cy = (double)(in_h - rect_h);
+	rx = cx * 1023.0 / (double)in_w;
+	ry = cy * 1023.0 / (double)in_h;
+	memset(&r, 0, sizeof(r));
+	r.crop_x = (uint16_t)(rx + 0.5);
+	r.crop_y = (uint16_t)(ry + 0.5);
+	r.crop_w = (uint16_t)((double)rect_w * 1023.0 / (double)in_w + 0.5);
+	r.crop_h = (uint16_t)((double)rect_h * 1023.0 / (double)in_h + 0.5);
+	if (r.crop_w == 0) r.crop_w = 1;
+	if (r.crop_h == 0) r.crop_h = 1;
+	if (r.crop_x + r.crop_w > 1023)
+		r.crop_x = (uint16_t)(1023 - r.crop_w);
+	if (r.crop_y + r.crop_h > 1023)
+		r.crop_y = (uint16_t)(1023 - r.crop_h);
+
+	if (r.crop_x == g_maruko_ae_crop_last.crop_x &&
+	    r.crop_y == g_maruko_ae_crop_last.crop_y &&
+	    r.crop_w == g_maruko_ae_crop_last.crop_w &&
+	    r.crop_h == g_maruko_ae_crop_last.crop_h)
+		return;
+
+	g_maruko_ae_crop_last = r;
+
+	if (!g_maruko_ae_crop_ready)
+		return;  /* queued — CUS3A not yet ready */
+
+	if (g_maruko_set_ae_crop(0, 0, &r) != 0) {
+		fprintf(stderr,
+			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed — "
+			"disabling AE zoom-tracking for this run\n",
+			r.crop_x, r.crop_y, r.crop_w, r.crop_h);
+		g_maruko_ae_crop_disabled = 1;
+	}
+}
+
+/* Called from bind_maruko_pipeline after the CUS3A handoff block runs
+ * (cold boot) or is known good (reinit, framework persists across the
+ * in-process pipeline reset).  Force a re-push by zeroing the cached w
+ * so apply_ae_crop's dedup short-circuit can't swallow the call. */
+static void maruko_ae_crop_mark_ready(MarukoBackendContext *ctx)
+{
+	g_maruko_ae_crop_ready = 1;
+	g_maruko_ae_crop_last.crop_w = 0;
+	if (ctx)
+		maruko_apply_ae_crop(ctx, ctx->cfg.zoom_pct,
+			ctx->cfg.zoom_x, ctx->cfg.zoom_y);
+}
+
+/* Program the SCL port crop for (pct, x, y).  Caller must already hold a
+ * valid ctx and a created SCL channel; the AR-precrop rect must be stashed
+ * in ctx->scl_crop_*.  Side effects: updates the public zoom_status
+ * snapshot and pushes the matching AE crop window. */
+static int maruko_pan_apply_locked(MarukoBackendContext *ctx,
 	double pct, double x, double y)
 {
 	MaruWindowRect_t rect;
@@ -1036,15 +1217,6 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	MI_S32 ret;
 
 	if (!ctx) return -1;
-	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
-		return -1;
-	if (pct <= 0.0 || pct >= 1.0) {
-		maruko_pipeline_clear_zoom_status();
-		return 0;  /* zoom off — nothing to pan */
-	}
-
-	/* SCL channel must be created; otherwise SetPortConfig has nothing
-	 * to update. */
 	if (!g_mi_scl_chn_created)
 		return -1;
 
@@ -1083,6 +1255,220 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	maruko_pipeline_set_zoom_status(pct, ctx->cfg.image_width,
 		ctx->cfg.image_height, crop_x, crop_y,
 		rect.u16Width, rect.u16Height);
+	maruko_apply_ae_crop(ctx, pct, x, y);
+	return 0;
+}
+
+static void *maruko_pan_ramp_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		struct timespec ts;
+		MarukoBackendContext *ctx;
+		double tx, ty, pct, cx, cy, alpha;
+		uint32_t ramp_ms;
+		int has_state;
+
+		pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += (long)MARUKO_PAN_RAMP_TICK_MS * 1000000L;
+		while (ts.tv_nsec >= 1000000000L) {
+			ts.tv_nsec -= 1000000000L;
+			ts.tv_sec  += 1;
+		}
+		while (g_maruko_pan_ramp.running &&
+		    fabs(g_maruko_pan_ramp.target_x - g_maruko_pan_ramp.current_x) < MARUKO_PAN_RAMP_SNAP_EPSILON &&
+		    fabs(g_maruko_pan_ramp.target_y - g_maruko_pan_ramp.current_y) < MARUKO_PAN_RAMP_SNAP_EPSILON) {
+			int rc = pthread_cond_wait(&g_maruko_pan_ramp.cv,
+				&g_maruko_pan_ramp.lock);
+			if (rc != 0)
+				break;
+		}
+		if (!g_maruko_pan_ramp.running) {
+			pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+			break;
+		}
+		(void)pthread_cond_timedwait(&g_maruko_pan_ramp.cv,
+			&g_maruko_pan_ramp.lock, &ts);
+		if (!g_maruko_pan_ramp.running) {
+			pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+			break;
+		}
+
+		ctx       = g_maruko_pan_ramp.ctx;
+		has_state = g_maruko_pan_ramp.has_state;
+		ramp_ms   = g_maruko_pan_ramp.ramp_ms;
+		tx        = g_maruko_pan_ramp.target_x;
+		ty        = g_maruko_pan_ramp.target_y;
+		pct       = g_maruko_pan_ramp.target_pct;
+
+		if (!has_state || !ctx || pct <= 0.0 || pct >= 1.0) {
+			g_maruko_pan_ramp.current_x = tx;
+			g_maruko_pan_ramp.current_y = ty;
+			pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+			continue;
+		}
+
+		if (ramp_ms == 0) {
+			alpha = 1.0;
+		} else {
+			alpha = 1.0 - exp(-(double)MARUKO_PAN_RAMP_TICK_MS /
+				(double)ramp_ms);
+			if (alpha > 1.0) alpha = 1.0;
+			if (alpha < 0.0) alpha = 0.0;
+		}
+
+		g_maruko_pan_ramp.current_x += (tx - g_maruko_pan_ramp.current_x) * alpha;
+		g_maruko_pan_ramp.current_y += (ty - g_maruko_pan_ramp.current_y) * alpha;
+		if (fabs(tx - g_maruko_pan_ramp.current_x) < MARUKO_PAN_RAMP_SNAP_EPSILON)
+			g_maruko_pan_ramp.current_x = tx;
+		if (fabs(ty - g_maruko_pan_ramp.current_y) < MARUKO_PAN_RAMP_SNAP_EPSILON)
+			g_maruko_pan_ramp.current_y = ty;
+
+		cx = g_maruko_pan_ramp.current_x;
+		cy = g_maruko_pan_ramp.current_y;
+		pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+
+		(void)maruko_pan_apply_locked(ctx, pct, cx, cy);
+	}
+	return NULL;
+}
+
+static int maruko_pan_ramp_start(MarukoBackendContext *ctx,
+	double pct, double x, double y, uint32_t ramp_ms)
+{
+	int rc;
+
+	pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+	if (g_maruko_pan_ramp.running) {
+		/* Re-arm without recreating the thread. */
+		g_maruko_pan_ramp.ctx         = ctx;
+		g_maruko_pan_ramp.has_state   = 1;
+		g_maruko_pan_ramp.target_pct  = pct;
+		g_maruko_pan_ramp.target_x    = x;
+		g_maruko_pan_ramp.target_y    = y;
+		g_maruko_pan_ramp.current_x   = x;
+		g_maruko_pan_ramp.current_y   = y;
+		g_maruko_pan_ramp.ramp_ms     = ramp_ms;
+		pthread_cond_signal(&g_maruko_pan_ramp.cv);
+		pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+		return 0;
+	}
+	g_maruko_pan_ramp.ctx         = ctx;
+	g_maruko_pan_ramp.has_state   = 1;
+	g_maruko_pan_ramp.target_pct  = pct;
+	g_maruko_pan_ramp.target_x    = x;
+	g_maruko_pan_ramp.target_y    = y;
+	g_maruko_pan_ramp.current_x   = x;
+	g_maruko_pan_ramp.current_y   = y;
+	g_maruko_pan_ramp.ramp_ms     = ramp_ms;
+	g_maruko_pan_ramp.running     = 1;
+	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+
+	rc = pthread_create(&g_maruko_pan_ramp.thread, NULL,
+		maruko_pan_ramp_thread, NULL);
+	if (rc != 0) {
+		fprintf(stderr,
+			"WARNING: pthread_create(maruko_pan_ramp) failed %d (%s)\n",
+			rc, strerror(rc));
+		pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+		g_maruko_pan_ramp.running   = 0;
+		g_maruko_pan_ramp.has_state = 0;
+		g_maruko_pan_ramp.ctx       = NULL;
+		pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+		return -1;
+	}
+	return 0;
+}
+
+static void maruko_pan_ramp_stop(void)
+{
+	pthread_t th;
+	int was_running;
+
+	pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+	was_running               = g_maruko_pan_ramp.running;
+	g_maruko_pan_ramp.running = 0;
+	g_maruko_pan_ramp.has_state = 0;
+	g_maruko_pan_ramp.ctx     = NULL;
+	th                        = g_maruko_pan_ramp.thread;
+	pthread_cond_broadcast(&g_maruko_pan_ramp.cv);
+	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+
+	if (was_running)
+		pthread_join(th, NULL);
+}
+
+void maruko_pipeline_apply_zoom_ramp_ms(uint32_t ramp_ms)
+{
+	if (ramp_ms > 2000)
+		ramp_ms = 2000;
+	pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+	g_maruko_pan_ramp.ramp_ms = ramp_ms;
+	pthread_cond_signal(&g_maruko_pan_ramp.cv);
+	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+}
+
+/* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
+ * only updates x/y.  Updates the *target*; the ramp thread tweens
+ * `current` toward it via maruko_pan_apply_locked.  pct is accepted to
+ * short-circuit when zoom is off (no rect to pan). */
+int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
+	double pct, double x, double y)
+{
+	if (!ctx) return -1;
+	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
+		return -1;
+	if (pct <= 0.0 || pct >= 1.0) {
+		maruko_pipeline_clear_zoom_status();
+		pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+		g_maruko_pan_ramp.target_pct = 0.0;
+		g_maruko_pan_ramp.target_x   = x;
+		g_maruko_pan_ramp.target_y   = y;
+		g_maruko_pan_ramp.current_x  = x;
+		g_maruko_pan_ramp.current_y  = y;
+		pthread_cond_signal(&g_maruko_pan_ramp.cv);
+		pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+		maruko_apply_ae_crop(ctx, pct, x, y);
+		return 0;  /* zoom off — nothing to pan */
+	}
+
+	/* SCL channel must be created; otherwise SetPortConfig has nothing
+	 * to update. */
+	if (!g_mi_scl_chn_created)
+		return -1;
+	if (ctx->scl_crop_w == 0 || ctx->scl_crop_h == 0)
+		return -1;
+
+	/* If the ramp thread isn't up yet, spawn it on first live pan with
+	 * current==target so the smoothing engages from the next SET. */
+	pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+	int already_running = g_maruko_pan_ramp.running;
+	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+	if (!already_running) {
+		uint32_t ramp_ms = g_maruko_pan_ramp.ramp_ms;
+		(void)maruko_pan_ramp_start(ctx, pct, x, y, ramp_ms);
+		return 0;
+	}
+
+	pthread_mutex_lock(&g_maruko_pan_ramp.lock);
+	g_maruko_pan_ramp.ctx        = ctx;
+	g_maruko_pan_ramp.has_state  = 1;
+	g_maruko_pan_ramp.target_pct = pct;
+	g_maruko_pan_ramp.target_x   = x;
+	g_maruko_pan_ramp.target_y   = y;
+	if (g_maruko_pan_ramp.ramp_ms == 0) {
+		g_maruko_pan_ramp.current_x = x;
+		g_maruko_pan_ramp.current_y = y;
+	}
+	pthread_cond_signal(&g_maruko_pan_ramp.cv);
+	pthread_mutex_unlock(&g_maruko_pan_ramp.lock);
+
+	/* AE crop still fires on the user-requested target (not the smoothed
+	 * intermediate value): the meter window stays committed to where the
+	 * pan WILL be, and the rect is identical from frame 1 of the SET so
+	 * deduplication is robust.  Same approach as Star6E. */
+	maruko_apply_ae_crop(ctx, pct, x, y);
 	return 0;
 }
 
@@ -1830,6 +2216,11 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 
 		g_mi_isp_initialized = 1;
 	}
+
+	/* Flush any pending AE crop now that CUS3A is up (cold boot) or the
+	 * framework is known-good from a prior lifecycle (reinit).  Star6E
+	 * parity — see star6e_ae_crop_mark_ready. */
+	maruko_ae_crop_mark_ready(ctx);
 
 	if (ctx->cfg.output_uri.type == VENC_OUTPUT_URI_SHM) {
 		if (ctx->cfg.stream_mode != MARUKO_STREAM_RTP) {
@@ -3262,6 +3653,15 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 
 	venc_api_clear_active_precrop();
 	maruko_pipeline_clear_zoom_status();
+	maruko_pan_ramp_stop();
+	/* Cycle AE-crop state so the next pipeline_start re-arms via the
+	 * ISP-ready hook and re-emits any cached sub-rect.  Star6E parity. */
+	g_maruko_ae_crop_ready = 0;
+	g_maruko_ae_crop_disabled = 0;
+	g_maruko_ae_crop_last.crop_x = 0;
+	g_maruko_ae_crop_last.crop_y = 0;
+	g_maruko_ae_crop_last.crop_w = 1023;
+	g_maruko_ae_crop_last.crop_h = 1023;
 	/* Drop the cached ISP bin path: the next configure_graph cold-boot
 	 * load must run unconditionally (kernel ISP state was destroyed by
 	 * the teardown sequence below).  Star6E gets this for free via the
