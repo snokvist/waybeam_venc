@@ -122,6 +122,5 @@ int main(int argc, char* argv[])
 	 * a clean kernel state.  See include/venc_respawn.h. */
 	if (venc_respawn_pending())
 		venc_respawn_after_exit();
-
 	return rc;
 }

@@ -901,8 +901,10 @@ static void star6e_pan_ramp_stop(void)
 	pthread_cond_broadcast(&g_pan_ramp.cv);
 	pthread_mutex_unlock(&g_pan_ramp.lock);
 
-	if (was_running)
+	if (was_running) {
 		pthread_join(th, NULL);
+	} else {
+	}
 }
 
 void star6e_pipeline_apply_zoom_ramp_ms(uint32_t ramp_ms)
