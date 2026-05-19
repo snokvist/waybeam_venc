@@ -57,9 +57,11 @@ typedef struct {
 	 * compiled out or the backend has no observability hook. */
 	char *(*query_audio_status)(void);
 	/* Apply digital zoom (video0.zoom_pct/x/y) live.  pct=0 disables.
-	 * Returns 0 on success, -1 on backend/SDK error.  NULL when the
-	 * backend has no zoom path. */
-	int (*apply_zoom)(double pct, double x, double y);
+	 * ramp_ms is the exponential-decay time constant for live pan; 0
+	 * snaps to the new x/y immediately (Star6E only — Maruko backend
+	 * may ignore the field).  Returns 0 on success, -1 on backend/SDK
+	 * error.  NULL when the backend has no zoom path. */
+	int (*apply_zoom)(double pct, double x, double y, uint32_t ramp_ms);
 	/* Reload the ISP tuning bin (isp.sensor_bin) on the running pipeline.
 	 * Empty path falls back to /etc/sensors/<sensor>.bin.  Returns 0 on
 	 * success (or no-op when the resolved path already matches the

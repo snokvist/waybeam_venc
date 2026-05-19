@@ -182,6 +182,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.zoom_pct = 0.0;
 	cfg->video0.zoom_x = 0.5;
 	cfg->video0.zoom_y = 0.5;
+	cfg->video0.zoom_ramp_ms = 200;
 
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
@@ -486,6 +487,10 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->zoom_pct = json_get_double(obj, "zoomPct", v->zoom_pct);
 	v->zoom_x   = json_get_double(obj, "zoomX",   v->zoom_x);
 	v->zoom_y   = json_get_double(obj, "zoomY",   v->zoom_y);
+	v->zoom_ramp_ms = (uint32_t)json_get_int(obj, "zoomRampMs",
+		(int)v->zoom_ramp_ms);
+	if (v->zoom_ramp_ms > 2000)
+		v->zoom_ramp_ms = 2000;
 	if (v->zoom_pct < 0.0)
 		v->zoom_pct = 0.0;
 	if (v->zoom_pct > 1.0)
@@ -1055,7 +1060,8 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_double(p, 2, "zoomPct",           cfg->video0.zoom_pct,            0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
-	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              1);
+	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
+	pp_field_uint(p,   2, "zoomRampMs",        cfg->video0.zoom_ramp_ms,        1);
 	pp_section_close(p, 1, is_last);
 }
 

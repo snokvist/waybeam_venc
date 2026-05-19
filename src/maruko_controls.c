@@ -1068,9 +1068,10 @@ static char *maruko_query_audio_status(void)
 	return maruko_audio_query_status(&backend->audio);
 }
 
-static int maruko_apply_zoom(double pct, double x, double y)
+static int maruko_apply_zoom(double pct, double x, double y, uint32_t ramp_ms)
 {
 	MarukoBackendContext *backend = g_ctx.backend;
+	(void)ramp_ms;  /* Maruko has no pan-ramp thread yet — apply instantly. */
 	if (!backend)
 		return -1;
 	/* Don't mirror into ctx->cfg — venc_api owns the canonical config and

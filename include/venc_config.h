@@ -126,6 +126,10 @@ typedef struct {
 	double zoom_pct;
 	double zoom_x;             /* crop centre x, 0..1 */
 	double zoom_y;             /* crop centre y, 0..1 */
+	/* Pan ramp time-constant in ms.  zoom_x/y are treated as a target;
+	 * the actual crop position decays exponentially toward it with this
+	 * time constant.  0 = no ramp (snap to target, current behaviour). */
+	uint32_t zoom_ramp_ms;
 } VencConfigVideo;
 
 typedef struct {

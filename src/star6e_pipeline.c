@@ -13,11 +13,14 @@
 #include "venc_jpeg.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct {
@@ -662,28 +665,77 @@ void star6e_pipeline_zoom_status(Star6eZoomStatus *out)
 	pthread_mutex_unlock(&g_zoom_status_mutex);
 }
 
-/* Live pan: zoom_pct is MUT_RESTART (changing crop dim resizes VPE port and
- * VENC, which needs reinit), so the live path only handles x/y.  pct is
- * accepted just to short-circuit when zoom is off (rect dim == image dim). */
-int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
+/* ----------------------------------------------------------------------- */
+/*  Pan ramp: smooth live x/y panning via exponential decay.               */
+/*                                                                          */
+/*  apply_zoom records the target x/y; a dedicated tick thread runs at      */
+/*  ~60Hz and steps `current` toward `target` each tick.  The crop rect     */
+/*  the SDK sees is computed from `current`, not from the user input.      */
+/*                                                                          */
+/*  Per-step: current += (target - current) * alpha, where                 */
+/*  alpha = 1 - exp(-tick_ms / ramp_ms).  ramp_ms = 0 disables decay and    */
+/*  each apply_zoom snaps current = target (preserving pre-0.11.0 feel).   */
+/* ----------------------------------------------------------------------- */
+
+#define PAN_RAMP_TICK_MS         16   /* ~60 Hz */
+#define PAN_RAMP_SNAP_EPSILON    0.0005  /* fraction of frame */
+
+typedef struct {
+	pthread_t        thread;
+	pthread_mutex_t  lock;
+	pthread_cond_t   cv;
+
+	int       running;        /* 1 while pipeline is live */
+	int       has_state;      /* 1 once pipeline_start populated `state` */
+
+	double    target_pct;
+	double    target_x, target_y;
+	double    current_x, current_y;
+	uint32_t  ramp_ms;        /* 0 = snap, else exponential decay τ */
+
+	/* Borrowed; lifetime owned by pipeline_start/stop.  Always NULL when
+	 * running==0. */
+	Star6ePipelineState *state;
+} Star6ePanRampState;
+
+static Star6ePanRampState g_pan_ramp = {
+	.lock = PTHREAD_MUTEX_INITIALIZER,
+	.cv   = PTHREAD_COND_INITIALIZER,
+};
+
+/* MI_ISP_CUS3A_SetAECropSize confines the AE meter to a sub-rect of the
+ * ISP frame in 0..1023 normalized coords.  Resolved lazily; if absent or
+ * libmi_isp didn't dlopen, every call is a silent no-op so the pipeline
+ * still runs (master behaviour before AE-aware zoom was added). */
+typedef struct {
+	uint16_t crop_x;  /* 0..1023 */
+	uint16_t crop_y;
+	uint16_t crop_w;
+	uint16_t crop_h;
+} Star6eAeCropRect;
+
+typedef int (*star6e_set_ae_crop_fn_t)(uint32_t channel,
+	Star6eAeCropRect *data);
+
+static star6e_set_ae_crop_fn_t g_star6e_set_ae_crop;
+static int g_star6e_ae_crop_resolved;
+static Star6eAeCropRect g_star6e_ae_crop_last;
+
+static void star6e_apply_ae_crop(double pct, double x, double y);
+
+/* Compute and program the VPE port crop for (pct, x, y).  Caller must
+ * already hold a valid pipeline state and image_width/height.  Side-
+ * effect: updates the zoom_status snapshot. */
+static int star6e_pan_apply_locked(Star6ePipelineState *state,
 	double pct, double x, double y)
 {
 	i6_common_rect rect;
 	MI_S32 ret;
-	uint32_t in_w, in_h;
+	uint32_t in_w = state->active_precrop.w;
+	uint32_t in_h = state->active_precrop.h;
 
-	if (!state) return -1;
-	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
-		return -1;
-	if (pct <= 0.0 || pct >= 1.0) {
-		star6e_pipeline_clear_zoom_status();
-		return 0;  /* zoom off — nothing to pan */
-	}
-
-	in_w = state->active_precrop.w;
-	in_h = state->active_precrop.h;
 	if (in_w == 0 || in_h == 0)
-		return -1;  /* VPE not started yet */
+		return -1;
 
 	rect = star6e_compute_zoom_rect(in_w, in_h,
 		state->image_width, state->image_height, x, y);
@@ -694,10 +746,292 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 			x, y, (int)ret);
 		return -1;
 	}
-
 	star6e_pipeline_set_zoom_status(pct, state->image_width,
 		state->image_height, &state->active_precrop, &rect);
 	return 0;
+}
+
+static void *star6e_pan_ramp_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		struct timespec ts;
+		Star6ePipelineState *st;
+		double tx, ty, pct, cx, cy, alpha;
+		uint32_t ramp_ms;
+		int has_state;
+
+		pthread_mutex_lock(&g_pan_ramp.lock);
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += (long)PAN_RAMP_TICK_MS * 1000000L;
+		while (ts.tv_nsec >= 1000000000L) {
+			ts.tv_nsec -= 1000000000L;
+			ts.tv_sec  += 1;
+		}
+		/* Idle when current already at target — wake on signal only. */
+		while (g_pan_ramp.running &&
+		    fabs(g_pan_ramp.target_x - g_pan_ramp.current_x) < PAN_RAMP_SNAP_EPSILON &&
+		    fabs(g_pan_ramp.target_y - g_pan_ramp.current_y) < PAN_RAMP_SNAP_EPSILON) {
+			int rc = pthread_cond_wait(&g_pan_ramp.cv, &g_pan_ramp.lock);
+			if (rc != 0)
+				break;
+		}
+		if (!g_pan_ramp.running) {
+			pthread_mutex_unlock(&g_pan_ramp.lock);
+			break;
+		}
+		/* Now we have a delta to step; pace the next iteration. */
+		(void)pthread_cond_timedwait(&g_pan_ramp.cv, &g_pan_ramp.lock, &ts);
+		if (!g_pan_ramp.running) {
+			pthread_mutex_unlock(&g_pan_ramp.lock);
+			break;
+		}
+
+		st        = g_pan_ramp.state;
+		has_state = g_pan_ramp.has_state;
+		ramp_ms   = g_pan_ramp.ramp_ms;
+		tx        = g_pan_ramp.target_x;
+		ty        = g_pan_ramp.target_y;
+		pct       = g_pan_ramp.target_pct;
+
+		if (!has_state || !st || pct <= 0.0 || pct >= 1.0) {
+			g_pan_ramp.current_x = tx;
+			g_pan_ramp.current_y = ty;
+			pthread_mutex_unlock(&g_pan_ramp.lock);
+			continue;
+		}
+
+		if (ramp_ms == 0) {
+			alpha = 1.0;
+		} else {
+			alpha = 1.0 - exp(-(double)PAN_RAMP_TICK_MS / (double)ramp_ms);
+			if (alpha > 1.0) alpha = 1.0;
+			if (alpha < 0.0) alpha = 0.0;
+		}
+
+		g_pan_ramp.current_x += (tx - g_pan_ramp.current_x) * alpha;
+		g_pan_ramp.current_y += (ty - g_pan_ramp.current_y) * alpha;
+		if (fabs(tx - g_pan_ramp.current_x) < PAN_RAMP_SNAP_EPSILON)
+			g_pan_ramp.current_x = tx;
+		if (fabs(ty - g_pan_ramp.current_y) < PAN_RAMP_SNAP_EPSILON)
+			g_pan_ramp.current_y = ty;
+
+		cx = g_pan_ramp.current_x;
+		cy = g_pan_ramp.current_y;
+		pthread_mutex_unlock(&g_pan_ramp.lock);
+
+		(void)star6e_pan_apply_locked(st, pct, cx, cy);
+	}
+	return NULL;
+}
+
+static int star6e_pan_ramp_start(Star6ePipelineState *state,
+	double pct, double x, double y, uint32_t ramp_ms)
+{
+	int rc;
+
+	pthread_mutex_lock(&g_pan_ramp.lock);
+	if (g_pan_ramp.running) {
+		/* Re-arm with the new state without recreating the thread. */
+		g_pan_ramp.state        = state;
+		g_pan_ramp.has_state    = 1;
+		g_pan_ramp.target_pct   = pct;
+		g_pan_ramp.target_x     = x;
+		g_pan_ramp.target_y     = y;
+		g_pan_ramp.current_x    = x;
+		g_pan_ramp.current_y    = y;
+		g_pan_ramp.ramp_ms      = ramp_ms;
+		pthread_cond_signal(&g_pan_ramp.cv);
+		pthread_mutex_unlock(&g_pan_ramp.lock);
+		return 0;
+	}
+	g_pan_ramp.state        = state;
+	g_pan_ramp.has_state    = 1;
+	g_pan_ramp.target_pct   = pct;
+	g_pan_ramp.target_x     = x;
+	g_pan_ramp.target_y     = y;
+	g_pan_ramp.current_x    = x;
+	g_pan_ramp.current_y    = y;
+	g_pan_ramp.ramp_ms      = ramp_ms;
+	g_pan_ramp.running      = 1;
+	pthread_mutex_unlock(&g_pan_ramp.lock);
+
+	rc = pthread_create(&g_pan_ramp.thread, NULL,
+		star6e_pan_ramp_thread, NULL);
+	if (rc != 0) {
+		fprintf(stderr,
+			"WARNING: pthread_create(pan_ramp) failed %d (%s)\n",
+			rc, strerror(rc));
+		pthread_mutex_lock(&g_pan_ramp.lock);
+		g_pan_ramp.running   = 0;
+		g_pan_ramp.has_state = 0;
+		g_pan_ramp.state     = NULL;
+		pthread_mutex_unlock(&g_pan_ramp.lock);
+		return -1;
+	}
+
+	/* Program the initial crop rect synchronously.  The ramp thread would
+	 * otherwise idle because current==target on first start, leaving the
+	 * VPE port at full-frame. */
+	if (pct > 0.0 && pct < 1.0)
+		(void)star6e_pan_apply_locked(state, pct, x, y);
+	star6e_apply_ae_crop(pct, x, y);
+	return 0;
+}
+
+static void star6e_pan_ramp_stop(void)
+{
+	pthread_t th;
+	int was_running;
+
+	pthread_mutex_lock(&g_pan_ramp.lock);
+	was_running          = g_pan_ramp.running;
+	g_pan_ramp.running   = 0;
+	g_pan_ramp.has_state = 0;
+	g_pan_ramp.state     = NULL;
+	th                   = g_pan_ramp.thread;
+	pthread_cond_broadcast(&g_pan_ramp.cv);
+	pthread_mutex_unlock(&g_pan_ramp.lock);
+
+	if (was_running)
+		pthread_join(th, NULL);
+}
+
+void star6e_pipeline_apply_zoom_ramp_ms(uint32_t ramp_ms)
+{
+	if (ramp_ms > 2000)
+		ramp_ms = 2000;
+	pthread_mutex_lock(&g_pan_ramp.lock);
+	g_pan_ramp.ramp_ms = ramp_ms;
+	/* If ramp was disabled, jump current to target on the next tick. */
+	pthread_cond_signal(&g_pan_ramp.cv);
+	pthread_mutex_unlock(&g_pan_ramp.lock);
+}
+
+/* Live pan: zoom_pct is MUT_RESTART (changing crop dim resizes VPE port and
+ * VENC, which needs reinit), so the live path only handles x/y.  pct is
+ * accepted just to short-circuit when zoom is off (rect dim == image dim).
+ * Updates the *target*; the ramp thread tweens `current` toward it. */
+int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
+	double pct, double x, double y)
+{
+	if (!state) return -1;
+	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
+		return -1;
+	if (pct <= 0.0 || pct >= 1.0) {
+		star6e_pipeline_clear_zoom_status();
+		pthread_mutex_lock(&g_pan_ramp.lock);
+		g_pan_ramp.target_pct = 0.0;
+		g_pan_ramp.target_x   = x;
+		g_pan_ramp.target_y   = y;
+		g_pan_ramp.current_x  = x;
+		g_pan_ramp.current_y  = y;
+		pthread_cond_signal(&g_pan_ramp.cv);
+		pthread_mutex_unlock(&g_pan_ramp.lock);
+		star6e_apply_ae_crop(pct, x, y);
+		return 0;  /* zoom off — nothing to pan */
+	}
+
+	if (state->active_precrop.w == 0 || state->active_precrop.h == 0)
+		return -1;  /* VPE not started yet */
+
+	pthread_mutex_lock(&g_pan_ramp.lock);
+	g_pan_ramp.state      = state;
+	g_pan_ramp.has_state  = 1;
+	g_pan_ramp.target_pct = pct;
+	g_pan_ramp.target_x   = x;
+	g_pan_ramp.target_y   = y;
+	if (g_pan_ramp.ramp_ms == 0) {
+		g_pan_ramp.current_x = x;
+		g_pan_ramp.current_y = y;
+	}
+	pthread_cond_signal(&g_pan_ramp.cv);
+	pthread_mutex_unlock(&g_pan_ramp.lock);
+
+	star6e_apply_ae_crop(pct, x, y);
+	return 0;
+}
+
+/* Constrain the ISP's AE statistics window to the zoom rect.  Coords are
+ * 0..1023 normalized against the ISP frame (which is the post-VIF input —
+ * same domain as the VPE port input, i.e. `active_precrop`).  pct in
+ * (0, 1) sets a sub-rect; pct outside that range (zoom off) restores the
+ * full frame.  Side-effect: caches the last applied rect so identical
+ * back-to-back calls (e.g. ramp tick when target hasn't moved) skip the
+ * SDK call. */
+static void star6e_apply_ae_crop(double pct, double x, double y)
+{
+	Star6eAeCropRect r;
+	uint32_t in_w, in_h;
+	uint32_t rect_w, rect_h;
+	double cx, cy, rx, ry;
+	Star6ePipelineState *state;
+
+	if (!g_star6e_ae_crop_resolved) {
+		g_star6e_set_ae_crop = (star6e_set_ae_crop_fn_t)
+			dlsym(RTLD_DEFAULT, "MI_ISP_CUS3A_SetAECropSize");
+		g_star6e_ae_crop_resolved = 1;
+		if (!g_star6e_set_ae_crop)
+			fprintf(stderr,
+				"WARNING: MI_ISP_CUS3A_SetAECropSize not present — "
+				"AE will not track zoom\n");
+	}
+	if (!g_star6e_set_ae_crop)
+		return;
+
+	memset(&r, 0, sizeof(r));
+	r.crop_w = 1023;
+	r.crop_h = 1023;
+
+	pthread_mutex_lock(&g_pan_ramp.lock);
+	state = g_pan_ramp.has_state ? g_pan_ramp.state : NULL;
+	pthread_mutex_unlock(&g_pan_ramp.lock);
+
+	if (state && isfinite(pct) && pct > 0.0 && pct < 1.0 &&
+	    state->active_precrop.w > 0 && state->active_precrop.h > 0) {
+		in_w   = state->active_precrop.w;
+		in_h   = state->active_precrop.h;
+		rect_w = state->image_width;
+		rect_h = state->image_height;
+		if (!isfinite(x)) x = 0.5;
+		if (!isfinite(y)) y = 0.5;
+		if (x < 0.0) x = 0.0;
+		if (x > 1.0) x = 1.0;
+		if (y < 0.0) y = 0.0;
+		if (y > 1.0) y = 1.0;
+		cx = (double)in_w * x - (double)rect_w * 0.5;
+		cy = (double)in_h * y - (double)rect_h * 0.5;
+		if (cx < 0.0) cx = 0.0;
+		if (cy < 0.0) cy = 0.0;
+		if (cx + (double)rect_w > (double)in_w)
+			cx = (double)(in_w - rect_w);
+		if (cy + (double)rect_h > (double)in_h)
+			cy = (double)(in_h - rect_h);
+		rx = cx * 1023.0 / (double)in_w;
+		ry = cy * 1023.0 / (double)in_h;
+		r.crop_x = (uint16_t)(rx + 0.5);
+		r.crop_y = (uint16_t)(ry + 0.5);
+		r.crop_w = (uint16_t)((double)rect_w * 1023.0 / (double)in_w + 0.5);
+		r.crop_h = (uint16_t)((double)rect_h * 1023.0 / (double)in_h + 0.5);
+		if (r.crop_w == 0) r.crop_w = 1;
+		if (r.crop_h == 0) r.crop_h = 1;
+		if (r.crop_x + r.crop_w > 1023)
+			r.crop_x = (uint16_t)(1023 - r.crop_w);
+		if (r.crop_y + r.crop_h > 1023)
+			r.crop_y = (uint16_t)(1023 - r.crop_h);
+	}
+
+	if (r.crop_x == g_star6e_ae_crop_last.crop_x &&
+	    r.crop_y == g_star6e_ae_crop_last.crop_y &&
+	    r.crop_w == g_star6e_ae_crop_last.crop_w &&
+	    r.crop_h == g_star6e_ae_crop_last.crop_h)
+		return;
+
+	if (g_star6e_set_ae_crop(0, &r) != 0)
+		fprintf(stderr,
+			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed\n",
+			r.crop_x, r.crop_y, r.crop_w, r.crop_h);
+	g_star6e_ae_crop_last = r;
 }
 
 static void star6e_pipeline_fill_h26x_attr(i6_venc_attr_h26x *attr,
@@ -1633,6 +1967,8 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	g_cus3a_handoff_done = 0;
 	venc_api_clear_active_precrop();
 	star6e_pipeline_clear_zoom_status();
+	star6e_pan_ramp_stop();
+	star6e_apply_ae_crop(0.0, 0.5, 0.5);  /* restore full-frame AE meter */
 
 	/* Clear IntraRefresh status snapshot — the channel it described is
 	 * about to be destroyed, so /api/v1/intra/status should not keep
@@ -1788,9 +2124,9 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	state->image_width = pconf.image_width;
 	state->image_height = pconf.image_height;
 
-	if (vcfg->video0.zoom_pct > 0.0)
-		(void)star6e_pipeline_apply_zoom(state, vcfg->video0.zoom_pct,
-			vcfg->video0.zoom_x, vcfg->video0.zoom_y);
+	(void)star6e_pan_ramp_start(state, vcfg->video0.zoom_pct,
+		vcfg->video0.zoom_x, vcfg->video0.zoom_y,
+		vcfg->video0.zoom_ramp_ms);
 
 	state->venc_channel = 0;
 	venc_fps = vcfg->video0.fps;

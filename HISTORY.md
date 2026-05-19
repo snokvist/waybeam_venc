@@ -1,5 +1,33 @@
 # History
 
+## [0.11.0] - 2026-05-19
+
+Star6E zoom improvements lifted from the DIVP/stabilization branch
+work — no DIVP pipeline swap, no stabilization, just two additive
+features that make the existing `zoom_pct` + live `zoomX`/`zoomY`
+controls feel better.
+
+**Pan ramping (`video0.zoomRampMs`, default `200`).**  Live pan is
+now smoothed via exponential decay: setting `zoomX`/`zoomY` records a
+*target*, and a dedicated ~60Hz thread tweens the current crop
+position toward it with time constant `zoomRampMs` (0..2000 ms).
+`0` reverts to the pre-0.11.0 snap-to-target behaviour.  Useful range:
+`100` (snappy), `200` (smooth/typical), `500+` (cinematic).  No effect
+on `zoom_pct` semantics — that remains MUT_RESTART pending a separate
+SPS/PPS-reissue followup.
+
+**Zoom-aware AE meter.**  Whenever zoom is active, the ISP's AE
+statistics window (`MI_ISP_CUS3A_SetAECropSize`, 0..1023 normalized)
+is constrained to the zoom rect.  Sky-into-the-frame and
+bright-light-source-near-edge no longer crush the zoomed subject;
+pan across light↔dark regions and exposure follows.  The meter is
+restored to full-frame on zoom-off and pipeline stop.  Silent no-op
+if the SDK lacks the symbol (Star6E backend assumes it is present;
+master Star6E SDK exposes it).
+
+Star6E only.  Maruko `apply_zoom` accepts the new `ramp_ms` argument
+for API parity but ignores it; no Maruko pipeline changes.
+
 ## [0.10.16] - 2026-05-15
 
 Two new OSD-safe resilience presets for ultra-low recovery latency:

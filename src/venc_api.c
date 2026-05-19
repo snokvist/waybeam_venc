@@ -392,6 +392,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
 	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
+	FIELD(video0, zoom_ramp_ms, FT_UINT,  MUT_LIVE),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -447,6 +448,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
+	{ "video0.zoomRampMs", "video0.zoom_ramp_ms" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -668,6 +670,10 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
 			return "zoom_y must be in range [0.0, 1.0]";
 	}
+	if (strcmp(key, "video0.zoom_ramp_ms") == 0) {
+		if (cfg->video0.zoom_ramp_ms > 2000)
+			return "zoom_ramp_ms must be 0..2000 (ms)";
+	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
@@ -743,6 +749,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.zoom_pct",
 		"video0.zoom_x",
 		"video0.zoom_y",
+		"video0.zoom_ramp_ms",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -1038,7 +1045,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_MUTE;
 	if (strcmp(canonical_key, "video0.zoom_pct") == 0 ||
 	    strcmp(canonical_key, "video0.zoom_x") == 0 ||
-	    strcmp(canonical_key, "video0.zoom_y") == 0)
+	    strcmp(canonical_key, "video0.zoom_y") == 0 ||
+	    strcmp(canonical_key, "video0.zoom_ramp_ms") == 0)
 		return LIVE_GROUP_ZOOM;
 	if (strcmp(canonical_key, "isp.sensor_bin") == 0)
 		return LIVE_GROUP_ISP_BIN;
@@ -1293,6 +1301,7 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->video0.zoom_pct = src->video0.zoom_pct;
 		dst->video0.zoom_x   = src->video0.zoom_x;
 		dst->video0.zoom_y   = src->video0.zoom_y;
+		dst->video0.zoom_ramp_ms = src->video0.zoom_ramp_ms;
 		break;
 	case LIVE_GROUP_ISP_BIN:
 		if (touched && touched->isp_sensor_bin) {
@@ -1400,7 +1409,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_mute(cfg->audio.mute);
 	case LIVE_GROUP_ZOOM:
 		return g_cb->apply_zoom(cfg->video0.zoom_pct,
-			cfg->video0.zoom_x, cfg->video0.zoom_y);
+			cfg->video0.zoom_x, cfg->video0.zoom_y,
+			cfg->video0.zoom_ramp_ms);
 	case LIVE_GROUP_ISP_BIN:
 		return g_cb->apply_isp_bin(cfg->isp.sensor_bin);
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
