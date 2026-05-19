@@ -86,10 +86,6 @@ void venc_respawn_after_exit(void)
 			break;
 		usleep(100 * 1000);
 		waited_ms += 100;
-		if (waited_ms == 500 || waited_ms == 1000 ||
-		    waited_ms == 2000 || waited_ms == 5000 ||
-		    waited_ms == 10000 || waited_ms == 20000) {
-		}
 	}
 	fprintf(stderr,
 		"> Respawn child: parent pid %d gone after %d ms, proceeding to exec\n",
