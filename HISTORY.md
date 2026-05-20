@@ -24,8 +24,18 @@ exclusive (zoomPct shrinks the VPE port output via SCL crop, which fights
 the manual drain) — when both are set, zoomPct is ignored with a warning.
 `zoomX`/`zoomY` are still honoured: under stabilization they pan the
 stabilized crop window directly via `star6e_stab_set_pan()`; with stab off
-they drive the 0.11.0 pan-ramp + AE-meter path unchanged.  `apply_zoom`
-short-circuits to the stab pan when the stab thread is running.
+they drive the 0.11.0 pan-ramp path.  `apply_zoom` short-circuits to the
+stab pan when the stab thread is running.
+
+**AE meter follows the crop in both modes.**  The zoom-aware AE meter
+(`MI_ISP_CUS3A_SetAECropSize`) now also tracks the stabilized crop window,
+so exposure is metered on the framed view rather than the full sensor —
+the only intended runtime difference between the two modes is the pan ramp
+(smooth under zoom, direct under stab) plus the stab loop's small per-frame
+correction.  The SDK emit/readiness/dedup/disable machinery is shared
+(`star6e_emit_ae_crop`); the stab window is sized as the crop fraction of
+the VPE output (`g_stab_enc / g_stab_src`), not `image_width / precrop` as
+the zoom path uses, because stab crops the VPE output rather than precrop.
 
 **Debug OSD under stabilization.**  The OSD attaches at the full source
 dim (port0 is never cropped on the stab path) and its stats panel offset
