@@ -124,8 +124,10 @@ static int star6e_pipeline_disable_userspace3a(const IspRuntimeLib *lib,
 }
 
 /* Forward decls — definitions live alongside the zoom/pan block but they
- * are referenced from the ISP-ready waiters above it. */
+ * are referenced from the ISP-ready waiters above it (and, for the stab AE
+ * crop, from the stabilization block which precedes that definition). */
 static void star6e_ae_crop_mark_ready(void);
+static void star6e_stab_apply_ae_crop(void);
 
 /* Poll MI_ISP_IQ_GetParaInitStatus until bFlag==1 or timeout (2000 ms).
  * Called standalone after VIF→VPE bind when a new VPE channel was just
@@ -882,6 +884,10 @@ static void star6e_stab_set_pan(double pan_x, double pan_y)
 {
 	g_stab_pan_x_mil = star6e_stab_pan_clamp_mil(pan_x);
 	g_stab_pan_y_mil = star6e_stab_pan_clamp_mil(pan_y);
+	/* Keep the AE meter on the stabilized crop as it pans, mirroring the
+	 * zoom path's AE tracking — the only intended runtime difference
+	 * between the two modes is the pan ramp. */
+	star6e_stab_apply_ae_crop();
 }
 
 int star6e_pipeline_stab_panel_anchor(int *out_x, int *out_y)
@@ -1993,30 +1999,24 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	return 0;
 }
 
-/* Constrain the ISP's AE statistics window to the zoom rect.  Coords are
- * 0..1023 normalized against the ISP frame (the post-VIF input — same
- * domain as the VPE port input, `active_precrop`).
+/* Emit a normalized (0..1023) AE-meter crop rect to the ISP.  Shared by the
+ * zoom and stabilization tracking paths.  Coords are normalized against the
+ * ISP frame (the post-VIF input — same domain as `active_precrop`).
  *
  * Failure modes the bench taught us:
  *   - The SDK refuses calls before CUS3A handoff; we gate on
  *     g_star6e_ae_crop_ready and just queue the change in the cache.
  *   - Calling with full-frame (0,0,1023,1023) on this BSP returns -1
- *     during init.  Whether it works at all is uncertain, so we never
- *     emit a "restore to full frame" call — the cache is pre-seeded
- *     full-frame and only sub-rects ever get pushed.  When zoom is
- *     disabled live, the meter stays on the last zoom rect; the ISP's
- *     own filtering re-equilibrates exposure over the next few seconds.
+ *     during init.  Whether it works at all is uncertain, so callers never
+ *     build a full-frame rect — the cache is pre-seeded full-frame and only
+ *     sub-rects ever get pushed.  When the crop is removed live, the meter
+ *     stays on the last rect; the ISP's own filtering re-equilibrates
+ *     exposure over the next few seconds.
  *   - On any non-zero return from the SDK, we set
  *     g_star6e_ae_crop_disabled and stop calling for the rest of the
  *     process.  Next start cold-resets via pipeline_stop. */
-static void star6e_apply_ae_crop(double pct, double x, double y)
+static void star6e_emit_ae_crop(const Star6eAeCropRect *r)
 {
-	Star6eAeCropRect r;
-	uint32_t in_w, in_h;
-	uint32_t rect_w, rect_h;
-	double cx, cy, rx, ry;
-	Star6ePipelineState *state;
-
 	if (g_star6e_ae_crop_disabled)
 		return;
 	if (!g_star6e_ae_crop_resolved) {
@@ -2026,12 +2026,43 @@ static void star6e_apply_ae_crop(double pct, double x, double y)
 		if (!g_star6e_set_ae_crop)
 			fprintf(stderr,
 				"WARNING: MI_ISP_CUS3A_SetAECropSize not present — "
-				"AE will not track zoom\n");
+				"AE will not track zoom/stab\n");
 	}
 	if (!g_star6e_set_ae_crop)
 		return;
 
-	/* Skip the "full frame" path entirely.  See header comment. */
+	if (r->crop_x == g_star6e_ae_crop_last.crop_x &&
+	    r->crop_y == g_star6e_ae_crop_last.crop_y &&
+	    r->crop_w == g_star6e_ae_crop_last.crop_w &&
+	    r->crop_h == g_star6e_ae_crop_last.crop_h)
+		return;
+
+	g_star6e_ae_crop_last = *r;
+
+	if (!g_star6e_ae_crop_ready)
+		return;  /* queued — ISP not yet ready */
+
+	if (g_star6e_set_ae_crop(0, (Star6eAeCropRect *)r) != 0) {
+		fprintf(stderr,
+			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed — "
+			"disabling AE crop-tracking for this run\n",
+			r->crop_x, r->crop_y, r->crop_w, r->crop_h);
+		g_star6e_ae_crop_disabled = 1;
+	}
+}
+
+/* Zoom path: constrain the AE meter to the zoom rect.  The encoded dim
+ * (state->image_width) is the crop size in precrop coords (Approach C SCL is
+ * 1:1), so the meter fraction is image_width / active_precrop.w. */
+static void star6e_apply_ae_crop(double pct, double x, double y)
+{
+	Star6eAeCropRect r;
+	uint32_t in_w, in_h;
+	uint32_t rect_w, rect_h;
+	double cx, cy, rx, ry;
+	Star6ePipelineState *state;
+
+	/* Skip the "full frame" path entirely.  See star6e_emit_ae_crop. */
 	if (!isfinite(pct) || pct <= 0.0 || pct >= 1.0)
 		return;
 
@@ -2074,24 +2105,50 @@ static void star6e_apply_ae_crop(double pct, double x, double y)
 	if (r.crop_y + r.crop_h > 1023)
 		r.crop_y = (uint16_t)(1023 - r.crop_h);
 
-	if (r.crop_x == g_star6e_ae_crop_last.crop_x &&
-	    r.crop_y == g_star6e_ae_crop_last.crop_y &&
-	    r.crop_w == g_star6e_ae_crop_last.crop_w &&
-	    r.crop_h == g_star6e_ae_crop_last.crop_h)
+	star6e_emit_ae_crop(&r);
+}
+
+/* Stabilization path: constrain the AE meter to the stabilized crop window.
+ * The crop is taken from the VPE *output* (g_stab_src), not from precrop, so
+ * the meter fraction is g_stab_enc / g_stab_src (= the crop %) regardless of
+ * any sensor→stream downscale — unlike the zoom path's image_width/precrop.
+ * Centre follows the live pan; the small per-frame stabilization offset is
+ * intentionally not tracked (a few px; the meter window need not chase it). */
+static void star6e_stab_apply_ae_crop(void)
+{
+	Star6eAeCropRect r;
+	double fw, fh, x, y, rx, ry;
+
+	if (g_stab_src_w == 0 || g_stab_src_h == 0)
 		return;
+	fw = (double)g_stab_enc_w / (double)g_stab_src_w;
+	fh = (double)g_stab_enc_h / (double)g_stab_src_h;
+	if (!isfinite(fw) || !isfinite(fh) ||
+	    fw <= 0.0 || fw >= 1.0 || fh <= 0.0 || fh >= 1.0)
+		return;  /* no crop → leave AE full-frame */
 
-	g_star6e_ae_crop_last = r;
+	x = (double)g_stab_pan_x_mil / 1000.0;
+	y = (double)g_stab_pan_y_mil / 1000.0;
+	rx = x - fw * 0.5;
+	ry = y - fh * 0.5;
+	if (rx < 0.0) rx = 0.0;
+	if (ry < 0.0) ry = 0.0;
+	if (rx + fw > 1.0) rx = 1.0 - fw;
+	if (ry + fh > 1.0) ry = 1.0 - fh;
 
-	if (!g_star6e_ae_crop_ready)
-		return;  /* queued — ISP not yet ready */
+	memset(&r, 0, sizeof(r));
+	r.crop_x = (uint16_t)(rx * 1023.0 + 0.5);
+	r.crop_y = (uint16_t)(ry * 1023.0 + 0.5);
+	r.crop_w = (uint16_t)(fw * 1023.0 + 0.5);
+	r.crop_h = (uint16_t)(fh * 1023.0 + 0.5);
+	if (r.crop_w == 0) r.crop_w = 1;
+	if (r.crop_h == 0) r.crop_h = 1;
+	if (r.crop_x + r.crop_w > 1023)
+		r.crop_x = (uint16_t)(1023 - r.crop_w);
+	if (r.crop_y + r.crop_h > 1023)
+		r.crop_y = (uint16_t)(1023 - r.crop_h);
 
-	if (g_star6e_set_ae_crop(0, &r) != 0) {
-		fprintf(stderr,
-			"WARNING: MI_ISP_CUS3A_SetAECropSize(%u,%u,%u,%u) failed — "
-			"disabling AE zoom-tracking for this run\n",
-			r.crop_x, r.crop_y, r.crop_w, r.crop_h);
-		g_star6e_ae_crop_disabled = 1;
-	}
+	star6e_emit_ae_crop(&r);
 }
 
 /* Called from the ISP-ready hook in pipeline_start.  If the user booted
@@ -2882,6 +2939,10 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 			return ret;
 		}
 		state->bound_vpe_venc = 0;
+		/* Seed the AE meter to the stabilized crop window.  The ISP-ready
+		 * wait above has already fired star6e_ae_crop_mark_ready(), so
+		 * this emits immediately rather than queueing. */
+		star6e_stab_apply_ae_crop();
 	} else {
 		bind_src_fps = state->sensor.mode.maxFps ?
 			state->sensor.mode.maxFps : pconf->sensor_framerate;
