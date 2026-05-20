@@ -323,6 +323,27 @@ void star6e_pipeline_cus3a_reset(void)
 	g_cus3a_handoff_done = 0;
 }
 
+/* Delayed legacy-AE cold-boot fps re-kick.  The pipeline-init MI_SNR_SetFps
+ * (bind_and_finalize_pipeline) fires before the ISP bin's AE has settled, so on
+ * a cold boot the sensor's physical timing register can be left below the
+ * configured fps (observed ~70fps @ target 90; a warm restart keeps the kernel
+ * sensor state so it shows ~90).  CUS3A handles this via its frame-15 thread
+ * kick; legacy AE has no periodic thread, so re-issue SetFps once from the run
+ * loop ~1.5s after start, after the bin load + AE converge, to force the sensor
+ * register to the target.  No-op when legacy_ae is off (CUS3A path) or fps is 0. */
+void star6e_pipeline_legacy_fps_rekick(const Star6ePipelineState *state,
+	const VencConfig *vcfg)
+{
+	if (!state || !vcfg || !vcfg->isp.legacy_ae)
+		return;
+	if (state->sensor.fps == 0)
+		return;
+	printf("[waybeam] legacy cold-boot fps re-kick: SetFps(%u)\n",
+		state->sensor.fps);
+	fflush(stdout);
+	MI_SNR_SetFps(state->sensor.pad_id, state->sensor.fps);
+}
+
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	struct timespec *ts_last)
 {

@@ -47,6 +47,27 @@ via `star6e_stab_set_pan()`; under a zoom preset they drive the 0.11.0
 pan-ramp path.  `apply_zoom` short-circuits to the stab pan when the stab
 thread is running.
 
+**Size-change reboot fixed (cold-init VIF/VPE on respawn).**  A
+`video0.size` change crosses a sensor-mode boundary; the fork+exec respawn
+keeps `/dev/mi_*` fds open (the PR#117/#120 deadlock fix), so the inherited
+VIF/VPE fds pinned the *old* mode and the fresh process wedged
+`vpe0_P0_MAIN` re-initing to the new mode.  The runtime now detects a
+size change (the only field that changes the sensor mode) and the fd-scrub
+additionally closes `/dev/mi_vif` + `/dev/mi_vpe` so they re-init cold —
+gated so it never runs on same-mode respawns (resilience/framing), which
+stay deadlock-safe.  Device-verified clean in both directions
+(1920↔2560) on a non-degraded device; closing those two fds does not
+deadlock.  (Heavy back-to-back respawn cycling can still hit the
+pre-existing cumulative SoC-state degradation that needs a power cycle —
+that is independent of this fix.)
+
+**Cold-boot fps re-kick (legacy AE).**  On a cold boot the init-time
+`MI_SNR_SetFps` can fire before the ISP bin's AE settles and leave the
+sensor timing register below the configured fps.  The CUS3A path already
+re-kicks at frame 15; legacy AE now gets an equivalent one-shot re-kick
+~1.5s into the run loop.  The CUS3A frame-15 kick was also decoupled from
+the shutter-above-cap gate so it fires reliably.
+
 **AE meter follows the crop in both modes.**  The zoom-aware AE meter
 (`MI_ISP_CUS3A_SetAECropSize`) now also tracks the stabilized crop window,
 so exposure is metered on the framed view rather than the full sensor —
