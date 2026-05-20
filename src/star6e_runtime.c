@@ -1175,6 +1175,20 @@ static int star6e_runner_run(void *opaque)
 	}
 
 	while (g_running) {
+		/* Live-resilience: a same-mode resilience SET whose only effect is
+		 * intra-refresh + GOP (classified in venc_api.c).  Apply on the
+		 * running VENC channel — no teardown, no respawn (the rebuild storms
+		 * the MMU on this SoC; see venc_star6e_reinit_fragility).  Pause HTTP
+		 * dispatch so a concurrent live SET doesn't race SetChnAttr on the
+		 * same channel. */
+		if (venc_api_get_live_resilience()) {
+			venc_api_clear_live_resilience();
+			venc_httpd_pause();
+			star6e_pipeline_apply_resilience_live(&ctx->ps, &ctx->vcfg);
+			venc_httpd_resume();
+			continue;
+		}
+
 		ret = star6e_runtime_handle_reinit(&handled);
 		if (ret != 0) {
 			return ret;

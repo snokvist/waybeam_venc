@@ -3847,6 +3847,64 @@ int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	return 0;
 }
 
+/* Live re-apply of a resilience preset's intra-refresh + GOP expansion to the
+ * RUNNING VENC channel — no teardown, no rebuild, no respawn.  This is the
+ * supported same-mode path: destroy+rebind of a VENC channel against the live
+ * VPE port storms the MMU on this SoC regardless of process model (proven on
+ * device — see venc_star6e_reinit_fragility), so resilience changes whose only
+ * effect is intra/GOP (ref_* / refPred unchanged, classified in venc_api.c) must
+ * be applied with live SDK calls instead.  ref_* / refPred deltas still take the
+ * fork+exec respawn (the SVC-T pyramid binds at channel creation).
+ *
+ * Mirrors the GOP/intra computation in star6e_pipeline_start so a live change
+ * lands identically to a cold start with the same preset.  Intra-refresh
+ * failure is non-fatal (logged; stream continues).  Returns 0. */
+int star6e_pipeline_apply_resilience_live(Star6ePipelineState *state,
+	const VencConfig *vcfg)
+{
+	PAYLOAD_TYPE_E codec;
+	int rc_mode;
+	uint32_t sensor_fps, venc_fps, gop_frames;
+	IntraRefreshDerived ir;
+	IntraRefreshMode mode;
+
+	if (!state || !vcfg)
+		return -1;
+
+	if (codec_config_resolve_codec_rc(vcfg->video0.rc_mode, &codec,
+	    &rc_mode) != 0)
+		return -1;
+
+	sensor_fps = state->sensor.mode.maxFps ?
+		state->sensor.mode.maxFps : state->sensor.fps;
+	venc_fps = vcfg->video0.fps;
+	if (venc_fps == 0 || venc_fps > sensor_fps)
+		venc_fps = sensor_fps;
+
+	/* Base GOP from gopSize (start keys this off sensor_framerate), then the
+	 * intra auto-GOP override when intra is on and gop is not user-pinned. */
+	gop_frames = pipeline_common_gop_frames(vcfg->video0.gop_size, sensor_fps);
+	mode = star6e_pipeline_intra_refresh_derive(vcfg, state->image_height,
+		venc_fps, codec, &ir);
+	if (mode != INTRA_MODE_OFF && !ir.gop_overridden && ir.gop_frames > 0)
+		gop_frames = ir.gop_frames;
+
+	if (gop_frames > 0)
+		(void)star6e_controls_apply_gop(gop_frames);
+
+	(void)star6e_pipeline_apply_intra_refresh(state->venc_channel, vcfg,
+		state->image_height, venc_fps, codec);
+
+	/* Force an IDR so the new GOP/intra config takes effect on the next
+	 * frame rather than at the next scheduled keyframe. */
+	(void)star6e_controls_request_idr();
+
+	printf("> resilience '%s' applied live (gop=%u frames, intra=%s)\n",
+		vcfg->video0.resilience, gop_frames, intra_refresh_mode_name(mode));
+	fflush(stdout);
+	return 0;
+}
+
 
 /* flatten: force GCC to inline all static callees into this function.
  * The SigmaStar I6E ISP driver depends on the monolithic stack layout

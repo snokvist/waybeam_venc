@@ -188,6 +188,13 @@ void venc_api_set_sensor_info(int pad, int mode_index, int forced_pad)
 
 static volatile sig_atomic_t g_reinit = 0;
 
+/* Live-resilience flag: set when a resilience SET's only effect is the
+ * intra-refresh + GOP expansion (ref_* / refPred unchanged).  The runner
+ * applies it live on the running VENC channel instead of routing through the
+ * storm-prone rebuild/respawn — see star6e_pipeline_apply_resilience_live and
+ * the venc_star6e_reinit_fragility findings. */
+static volatile sig_atomic_t g_live_resilience = 0;
+
 /* ── Record control flags ────────────────────────────────────────────── */
 
 static volatile sig_atomic_t g_record_start_pending = 0;
@@ -216,6 +223,21 @@ bool venc_api_get_reinit(void)
 void venc_api_clear_reinit(void)
 {
 	g_reinit = 0;
+}
+
+void venc_api_request_live_resilience(void)
+{
+	g_live_resilience = 1;
+}
+
+bool venc_api_get_live_resilience(void)
+{
+	return g_live_resilience != 0;
+}
+
+void venc_api_clear_live_resilience(void)
+{
+	g_live_resilience = 0;
 }
 
 void venc_api_request_record_start(const char *dir)
@@ -1793,6 +1815,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 	char *jval;
 	int rc;
 	int needs_respawn = 0;
+	int live_resilience = 0;
 
 	if (!param || !status_code || !response_json)
 		return -1;
@@ -1843,6 +1866,11 @@ static int process_restart_set_query(const SetQueryParam *param,
 		    old_v.ref_enhance != new_cfg.video0.ref_enhance ||
 		    old_v.ref_pred != new_cfg.video0.ref_pred)
 			needs_respawn = 1;
+		else if (strcmp(g_backend, "star6e") == 0)
+			/* Only Star6E has a live-resilience consumer (the runner's
+			 * star6e_pipeline_apply_resilience_live).  Maruko must keep
+			 * routing to reinit or the change would be silently dropped. */
+			live_resilience = 1;
 
 		fprintf(stderr,
 			"[waybeam] resilience-diff: '%s' -> '%s'  "
@@ -1858,7 +1886,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 			(int)old_v.ref_pred,
 			(int)new_cfg.video0.ref_pred,
 			old_v.gop_size, new_cfg.video0.gop_size,
-			needs_respawn ? "respawn" : "live-reinit");
+			needs_respawn ? "respawn" : "live-apply");
 	}
 
 	/* Detect a framing preset change.  Like resilience, the staged new_cfg
@@ -1879,16 +1907,18 @@ static int process_restart_set_query(const SetQueryParam *param,
 	pthread_mutex_unlock(&g_cfg_mutex);
 	(void)venc_api_save_config_to_disk(&new_cfg);
 
-	/* Both classifications enqueue the same in-process signal: drop
-	 * out of the stream loop.  Each backend's runner then decides
-	 * what to do (Star6E and Maruko both currently always respawn on
-	 * reinit; the `path=` label above is forward-looking — it tells
-	 * an operator *why* this transition needs the slower path).  Do
-	 * not branch routing on needs_respawn yet — if a future change
-	 * re-enables in-process reconfigure for intra-only deltas, that
-	 * lives in the runner, not the HTTP path. */
-	(void)needs_respawn;
-	venc_api_request_reinit();
+	/* Route the transition.  Intra/gop-only resilience deltas
+	 * (live_resilience) apply on the running VENC channel via the runner —
+	 * the destroy+rebuild/respawn path storms the MMU (client 0x15) on this
+	 * SoC regardless of process model (see venc_star6e_reinit_fragility), so
+	 * same-mode resilience must NOT rebuild.  Everything else (ref_* / refPred
+	 * deltas and all other MUT_RESTART fields) still drops out of the stream
+	 * loop for the backend's reinit/respawn.  Maruko has no live-resilience
+	 * consumer yet, so it falls through to reinit there too. */
+	if (live_resilience)
+		venc_api_request_live_resilience();
+	else
+		venc_api_request_reinit();
 
 	if (!jval) {
 		*status_code = 500;
@@ -1898,7 +1928,7 @@ static int process_restart_set_query(const SetQueryParam *param,
 
 	*status_code = 200;
 	rc = make_single_set_success_json(param->key, jval,
-		1 /* reinit_pending */, response_json);
+		live_resilience ? 0 : 1 /* reinit_pending */, response_json);
 	free(jval);
 	return rc;
 }

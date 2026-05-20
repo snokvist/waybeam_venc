@@ -1219,6 +1219,16 @@ int star6e_controls_apply_fps(uint32_t fps)
 	return apply_fps(fps);
 }
 
+int star6e_controls_apply_gop(uint32_t gop_size)
+{
+	return apply_encoder_gop(gop_size);
+}
+
+int star6e_controls_request_idr(void)
+{
+	return request_idr();
+}
+
 int star6e_controls_apply_roi_qp(int qp)
 {
 	return apply_roi_qp(qp);

@@ -20,6 +20,12 @@ const VencApplyCallbacks *star6e_controls_callbacks(void);
 /** Apply frame rate change to running encoder pipeline. */
 int star6e_controls_apply_fps(uint32_t fps);
 
+/** Apply GOP frame count to the running encoder (live MI_VENC_SetChnAttr). */
+int star6e_controls_apply_gop(uint32_t gop_size);
+
+/** Force an immediate IDR on the running encoder. */
+int star6e_controls_request_idr(void);
+
 /** Apply ROI-based QP adjustment for FPV center emphasis. */
 int star6e_controls_apply_roi_qp(int qp);
 

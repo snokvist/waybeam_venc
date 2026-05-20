@@ -110,6 +110,14 @@ void venc_api_request_reinit(void);
 bool venc_api_get_reinit(void);
 void venc_api_clear_reinit(void);
 
+/* Live-resilience flag: set by the HTTP thread when a resilience SET's only
+ * effect is the intra-refresh + GOP expansion (ref_* / refPred unchanged) AND
+ * the active backend has a live consumer (Star6E).  The runner applies it on
+ * the running VENC channel instead of rebuilding/respawning. */
+void venc_api_request_live_resilience(void);
+bool venc_api_get_live_resilience(void);
+void venc_api_clear_live_resilience(void);
+
 /* Record control flags (set by HTTP thread, consumed by main loop). */
 void venc_api_request_record_start(const char *dir);
 void venc_api_request_record_stop(void);

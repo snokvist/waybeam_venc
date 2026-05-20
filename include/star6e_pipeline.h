@@ -119,6 +119,13 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
 	SdkQuietState *sdk_quiet);
 
+/** Live re-apply of a resilience preset's intra-refresh + GOP to the running
+ *  VENC channel — no teardown.  Used for same-mode resilience SETs whose only
+ *  effect is intra/GOP (ref_* / refPred unchanged); avoids the MMU-storming
+ *  VENC rebuild.  Returns 0 (intra-refresh failure is non-fatal). */
+int star6e_pipeline_apply_resilience_live(Star6ePipelineState *state,
+	const VencConfig *vcfg);
+
 /** Stop streaming, unbind hardware, and release pipeline resources.
  *  Also clears pipeline-level persist state so the next start is cold. */
 void star6e_pipeline_stop(Star6ePipelineState *state);
