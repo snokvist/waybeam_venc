@@ -110,6 +110,15 @@ void star6e_pipeline_stop_dual(Star6ePipelineState *state);
 int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	SdkQuietState *sdk_quiet);
 
+/** In-process partial reinit for a same-mode MUT_RESTART: rebuild only the
+ *  VENC channel(s) + binds + output while keeping sensor/VIF/VPE and the live
+ *  ISP/CUS3A state.  Avoids the fork+exec respawn whose rebuild over inherited
+ *  /dev/mi_* fds storms the MMU (client 0x15).  Prototype scope: same-mode
+ *  geometry only (no sensor/size or framing-crop change), single stream.
+ *  Returns 0 on success; on failure the caller should fall back to respawn. */
+int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
+	SdkQuietState *sdk_quiet);
+
 /** Stop streaming, unbind hardware, and release pipeline resources.
  *  Also clears pipeline-level persist state so the next start is cold. */
 void star6e_pipeline_stop(Star6ePipelineState *state);

@@ -3681,6 +3681,173 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 }
 
 
+/* ---- In-process partial reinit (same-mode MUT_RESTART) -------------------
+ *
+ * Resurrects PR #8's partial-reinit path (dropped in PR #59 for fork+exec)
+ * to test the hypothesis that the rapid-respawn client-0x15 MMU read-fault
+ * storm is intrinsic to the fork+exec + inherited-/dev/mi_*-fd discontinuity,
+ * not to rebuilding VENC per se.  An in-process rebuild keeps MI_SYS, the
+ * sensor, VIF and VPE continuously owned by ONE pid — no fork, no
+ * MI_SYS_Exit, no inherited fds — so there is no window where a fresh process
+ * re-inits over kernel state another pid still refcounts.
+ *
+ * Scope (prototype): same-mode only (no sensor/size change — the runtime
+ * routes size changes to fork+exec).  Validated first on a bare framing=off
+ * /api/v1/restart, the proven storm reproducer.  Framing-change geometry
+ * (stab/zoom crop dims) is computed inline in star6e_pipeline_start and is
+ * NOT yet reproduced here; nor is the dual stream (re-created separately by
+ * the runtime).  Both are follow-ups once the mechanism is proven.
+ *
+ * Known prior limit: c09ebaf recorded this partial path VIF-locking
+ * ("_MI_VIF_EnqueueOutputTaskDev ... bindmode 4 not sync err") after ~4
+ * cycles — but that measurement predates the StopRecvPic-before-unbind
+ * teardown order (the same fix that addressed the MMU fault), which
+ * star6e_pipeline_stop_venc_level below now applies. */
+
+/* Partial teardown: tears down VENC channels, binds, output, audio, IMU,
+ * debug OSD, JPEG and stab, but keeps sensor/VIF/VPE AND the live ISP/CUS3A
+ * state.  Deliberately does NOT clear g_isp_initialized / g_last_isp_bin_path
+ * / g_cus3a_handoff_done / g_star6e_ae_crop_ready: the ISP stays initialised,
+ * so the rebuild's bind_and_finalize skips the CUS3A re-enable (segfaults on a
+ * live pipeline — see maruko ISP live-reload notes) and the bin reload
+ * (disturbs sensor timing), and the AE crop stays armed (the ISP-ready hook
+ * that arms it only fires inside the !bound_vif_vpe block, which reinit skips).
+ *
+ * Teardown ORDER mirrors the fixed star6e_pipeline_stop: StopRecvPic each
+ * VENC consumer BEFORE unbinding its VPE input port.  PR #8 used the OLD
+ * unbind-before-stop order — the same root cause as the client-0x15 fault. */
+static void star6e_pipeline_stop_venc_level(Star6ePipelineState *state)
+{
+	if (!state)
+		return;
+
+	/* VENC-channel-scoped status only — the channel is about to be
+	 * destroyed.  Leave ISP/CUS3A/AE-crop flags untouched (pipeline live). */
+	venc_api_clear_active_precrop();
+	star6e_pipeline_clear_zoom_status();
+	star6e_pan_ramp_stop();
+	pthread_mutex_lock(&g_intra_status_mutex);
+	memset(&g_intra_status, 0, sizeof(g_intra_status));
+	pthread_mutex_unlock(&g_intra_status_mutex);
+
+	if (state->imu) {
+		imu_stop(state->imu);
+		imu_destroy(state->imu);
+		state->imu = NULL;
+	}
+	if (state->debug_osd) {
+		debug_osd_destroy(state->debug_osd);
+		state->debug_osd = NULL;
+	}
+
+	star6e_audio_teardown(&state->audio);
+	star6e_output_teardown(&state->output);
+	if (state->dual)
+		star6e_output_teardown(&state->dual->output);
+
+	if (state->dual && state->dual->rec_started) {
+		state->dual->rec_running = 0;
+		pthread_join(state->dual->rec_thread, NULL);
+		state->dual->rec_started = 0;
+	}
+
+	venc_jpeg_shutdown();
+	star6e_stab_stop();
+
+	/* StopRecvPic each consumer BEFORE unbind (see star6e_pipeline_stop). */
+	if (state->dual)
+		MI_VENC_StopRecvPic(state->dual->channel);
+	MI_VENC_StopRecvPic(state->venc_channel);
+
+	drain_venc_channel(state->venc_channel, 150, "ch0-reinit");
+	if (state->dual)
+		drain_venc_channel(state->dual->channel, 150, "ch1-reinit");
+
+	if (state->dual && state->dual->bound) {
+		MI_SYS_UnBindChnPort(&state->vpe_port, &state->dual->port);
+		state->dual->bound = 0;
+	}
+	if (state->bound_vpe_venc) {
+		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
+		state->bound_vpe_venc = 0;
+	}
+
+	/* VIF→VPE bind stays active — do NOT unbind; do NOT stop VPE/VIF/sensor. */
+
+	if (state->dual) {
+		venc_api_dual_unregister();
+		MI_VENC_DestroyChn(state->dual->channel);
+		star6e_video_reset(&state->dual->video);
+		free(state->dual->stream_packs);
+		free(state->dual);
+		state->dual = NULL;
+	}
+	MI_VENC_DestroyChn(state->venc_channel);
+	free(state->stream_packs);
+	state->stream_packs = NULL;
+	state->stream_packs_cap = 0;
+
+	/* Reset VENC-level video/output state; preserve sensor/VIF/VPE/ISP. */
+	star6e_video_reset(&state->video);
+	star6e_output_reset(&state->output);
+}
+
+/* flatten: like star6e_pipeline_start, force the bind_and_finalize_pipeline()
+ * and prepare_pipeline_config() callees inlined here.  A non-flattened second
+ * call-site emits them out-of-line, which breaks the ISP init in
+ * star6e_pipeline_start (MI_ISP_IQ_GetParaInitStatus error 6) — the exact
+ * regression that 2882b26 fixed by flattening start.  This path skips the ISP
+ * init (bound_vif_vpe stays set), but it must still not defeat start's
+ * inlining, so it carries the same attribute. */
+__attribute__((flatten))
+int star6e_pipeline_reinit(Star6ePipelineState *state, const VencConfig *vcfg,
+	SdkQuietState *sdk_quiet)
+{
+	Star6ePipelineConfig pconf;
+	uint32_t venc_fps;
+	int ret;
+
+	if (!state || !vcfg)
+		return -1;
+
+	star6e_pipeline_stop_venc_level(state);
+
+	if (prepare_pipeline_config(state, vcfg, &pconf) != 0)
+		return -1;
+
+	/* Reuse the live sensor/VIF/VPE — skip select_and_configure_sensor and
+	 * start_vif/start_vpe.  On a same-mode reinit the VPE port output dim is
+	 * unchanged, so rebuild VENC at the dim the pipeline is already producing
+	 * (state->image_width/height, preserved by stop_venc_level).  Sensor
+	 * framerate comes from the live sensor mode. */
+	pconf.sensor_framerate = state->sensor.mode.maxFps ?
+		state->sensor.mode.maxFps : state->sensor.fps;
+	pconf.image_width = state->image_width;
+	pconf.image_height = state->image_height;
+	pconf.venc_gop_size = pipeline_common_gop_frames(vcfg->video0.gop_size,
+		pconf.sensor_framerate);
+
+	state->venc_channel = 0;
+	venc_fps = vcfg->video0.fps;
+	if (venc_fps == 0 || venc_fps > pconf.sensor_framerate)
+		venc_fps = pconf.sensor_framerate;
+	ret = star6e_pipeline_start_venc(pconf.image_width, pconf.image_height,
+		pconf.venc_max_rate, venc_fps, pconf.venc_gop_size,
+		pconf.rc_codec, pconf.rc_mode, vcfg->video0.frame_lost,
+		vcfg, &state->venc_channel);
+	if (ret != 0)
+		return ret;
+
+	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
+	if (ret != 0) {
+		star6e_pipeline_stop_venc(state->venc_channel);
+		return ret;
+	}
+
+	return 0;
+}
+
+
 /* flatten: force GCC to inline all static callees into this function.
  * The SigmaStar I6E ISP driver depends on the monolithic stack layout
  * that results from inlining bind_and_finalize_pipeline() and

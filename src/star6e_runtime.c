@@ -35,6 +35,25 @@
 
 static SdkQuietState g_sdk_quiet = SDK_QUIET_STATE_INIT;
 
+/* Prototype gate for the in-process partial reinit path (see
+ * star6e_pipeline_reinit).  Off by default — same-mode MUT_RESTART keeps using
+ * the fork+exec respawn.  Set WAYBEAM_INPROC_REINIT=1 to route same-mode
+ * reinit through the in-process rebuild instead, for A/B benching against the
+ * client-0x15 MMU storm. */
+static int g_inproc_reinit_enabled = -1;
+
+static int inproc_reinit_enabled(void)
+{
+	if (g_inproc_reinit_enabled < 0) {
+		const char *e = getenv("WAYBEAM_INPROC_REINIT");
+		g_inproc_reinit_enabled = (e && e[0] == '1') ? 1 : 0;
+		if (g_inproc_reinit_enabled)
+			printf("> in-process reinit ENABLED "
+				"(WAYBEAM_INPROC_REINIT=1)\n");
+	}
+	return g_inproc_reinit_enabled;
+}
+
 static MI_VENC_Pack_t *ensure_packs(MI_VENC_Pack_t **buf,
 	uint32_t *cap, uint32_t need)
 {
@@ -709,6 +728,8 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 
 static int star6e_runtime_handle_reinit(int *handled)
 {
+	int size_change;
+
 	*handled = 0;
 
 	if (!venc_api_get_reinit())
@@ -716,27 +737,66 @@ static int star6e_runtime_handle_reinit(int *handled)
 	*handled = 1;
 	venc_api_clear_reinit();
 
-	printf("> Reinit requested: cold restart via fork+exec on shutdown\n");
-	fflush(stdout);
-
 	/* Detect a video0.size change.  size is the only config field that
 	 * crosses a sensor-mode boundary; resilience/framing(stab|zoom) stay
 	 * within one mode.  On a mode change the respawn must cold-init VIF/VPE
 	 * (close their inherited /dev/mi_* fds in the fd-scrub) — otherwise the
 	 * fresh process re-inits VIF to a different mode against the old mode's
 	 * kernel state and wedges vpe0_P0_MAIN.  Same-size respawns leave the
-	 * fds inherited (the deadlock-safe default).  See venc_respawn.c.
-	 *
-	 * NOTE: same-mode respawns still hit a pre-existing MMU read-fault storm
-	 * (MMU client 0x15, IsWrite=0) on the ~2nd consecutive respawn — present
-	 * on master 1f6445f from a cold boot, so it is NOT the stab/framing work.
-	 * Forcing cold-vif on every respawn made it WORSE (the close mid-flight
-	 * triggers the storm immediately and the child dies), so that is not the
-	 * fix.  Root cause is in the MI VPE/VENC teardown ordering and is tracked
-	 * separately. */
-	if (g_runner_ctx &&
+	 * fds inherited (the deadlock-safe default).  See venc_respawn.c. */
+	size_change = g_runner_ctx &&
 	    (g_runner_ctx->vcfg.video0.width != g_runner_ctx->started_base_w ||
-	     g_runner_ctx->vcfg.video0.height != g_runner_ctx->started_base_h)) {
+	     g_runner_ctx->vcfg.video0.height != g_runner_ctx->started_base_h);
+
+	/* Same-mode reinit (no size change) can rebuild in-process instead of
+	 * respawning.  The fork+exec respawn's rebuild over inherited /dev/mi_*
+	 * fds storms the MMU (client 0x15, IsWrite=0) on the ~2nd consecutive
+	 * respawn — present on master 1f6445f from a cold boot, so it is NOT the
+	 * stab/framing work, and no userspace teardown reorder fixes it (forcing
+	 * cold-vif made it WORSE; the close mid-flight storms immediately).  The
+	 * in-process path keeps MI_SYS/sensor/VIF/VPE owned by one pid, removing
+	 * the inherited-fd discontinuity entirely.  Gated by WAYBEAM_INPROC_REINIT
+	 * while we A/B it; size changes always take the fork+exec path. */
+	if (!size_change && g_runner_ctx && inproc_reinit_enabled()) {
+		Star6eRunnerContext *ctx = g_runner_ctx;
+		int ret;
+
+		printf("> Reinit requested: in-process partial reinit (same mode)\n");
+		fflush(stdout);
+
+		/* Pause HTTP dispatch across the rebuild: the httpd worker stays
+		 * alive (unlike the respawn path where the process exits), so an
+		 * in-flight handler would touch VENC channels stop_venc_level is
+		 * destroying.  pause() drains in-flight work; new requests 503. */
+		venc_httpd_pause();
+		sdk_quiet_begin(&g_sdk_quiet);
+		ret = star6e_pipeline_reinit(&ctx->ps, &ctx->vcfg, &g_sdk_quiet);
+		sdk_quiet_end(&g_sdk_quiet);
+		if (ret == 0) {
+			/* Re-apply per-VENC-channel encoder controls to the rebuilt
+			 * channel (the once-only venc_api registration + controls bind
+			 * in apply_startup_controls stays valid; only channel-scoped
+			 * settings need re-issuing). */
+			if (ctx->vcfg.fpv.roi_enabled)
+				star6e_controls_apply_roi_qp(ctx->vcfg.fpv.roi_qp);
+			if (ctx->vcfg.video0.qp_delta != 0)
+				star6e_controls_apply_qp_delta(ctx->vcfg.video0.qp_delta);
+		}
+		venc_httpd_resume();
+
+		if (ret != 0) {
+			fprintf(stderr, "ERROR: in-process reinit failed (%d); "
+				"falling back to fork+exec respawn\n", ret);
+			venc_respawn_request();
+			g_running = 0;
+		}
+		return 0;
+	}
+
+	printf("> Reinit requested: cold restart via fork+exec on shutdown\n");
+	fflush(stdout);
+
+	if (size_change) {
 		printf("> size change %ux%u -> %ux%u: cold-init VIF/VPE on respawn\n",
 			g_runner_ctx->started_base_w, g_runner_ctx->started_base_h,
 			g_runner_ctx->vcfg.video0.width,
