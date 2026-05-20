@@ -26,6 +26,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <sys/prctl.h>
+#include <sys/reboot.h>
 #include <sys/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1187,6 +1188,27 @@ static int star6e_runner_run(void *opaque)
 			star6e_pipeline_apply_resilience_live(&ctx->ps, &ctx->vcfg);
 			venc_httpd_resume();
 			continue;
+		}
+
+		/* Reboot-pending: a rebuild-class config change (size, codec, framing,
+		 * sensor mode, ref_* resilience, subsystems) was already persisted to
+		 * disk by the HTTP thread.  The respawn that would otherwise apply it storms
+		 * the MMU (client 0x15) on the 2nd consecutive rebuild on this SoC,
+		 * regardless of process model — cold-init is the only storm-free apply
+		 * (see venc_star6e_reinit_fragility).  So sync the config to disk and
+		 * reboot; the fresh boot loads it.  No teardown (it can hang in
+		 * D-state); RB_AUTOBOOT is an immediate hardware reset and the SoC
+		 * reset clears all MI_SYS/VENC/VPE state. */
+		if (venc_api_get_reboot()) {
+			venc_api_clear_reboot();
+			fprintf(stderr,
+				"\n> reboot-class config change persisted; "
+				"rebooting to apply from cold-init\n");
+			fflush(stderr);
+			sync();
+			usleep(300 * 1000);  /* let the SET HTTP response drain first */
+			reboot(RB_AUTOBOOT);
+			/* unreachable on success */
 		}
 
 		ret = star6e_runtime_handle_reinit(&handled);

@@ -118,6 +118,14 @@ void venc_api_request_live_resilience(void);
 bool venc_api_get_live_resilience(void);
 void venc_api_clear_live_resilience(void);
 
+/* Reboot-pending flag (Star6E only): set by the HTTP thread when a config
+ * change requires a VENC channel rebuild, which the storm-prone respawn cannot
+ * apply safely on this SoC.  The runner persists config to disk and reboots so
+ * cold-init applies the change — see venc_star6e_reinit_fragility. */
+void venc_api_request_reboot(void);
+bool venc_api_get_reboot(void);
+void venc_api_clear_reboot(void);
+
 /* Record control flags (set by HTTP thread, consumed by main loop). */
 void venc_api_request_record_start(const char *dir);
 void venc_api_request_record_stop(void);

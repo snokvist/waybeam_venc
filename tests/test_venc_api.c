@@ -987,7 +987,11 @@ static int test_framing_preset_restart(void)
 	memset(&cb, 0, sizeof(cb));
 	cb.apply_zoom = test_apply_zoom;
 
-	/* A zoom framing preset is MUT_RESTART: derives zoom_pct, no live cb. */
+	/* A zoom framing preset is MUT_RESTART and changes the encode dimension,
+	 * so on Star6E it is rebuild-class: the response carries reboot:true and
+	 * the reboot flag (not reinit) is raised — the respawn would storm the MMU,
+	 * so the runner persists + cold-boots instead (see
+	 * venc_star6e_reinit_fragility).  No live zoom callback. */
 	CHECK("framing restart rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
 			"video0.framing=zoom-2x", &status, response,
@@ -996,10 +1000,12 @@ static int test_framing_preset_restart(void)
 	CHECK("framing restart cfg", strcmp(cfg.video0.framing, "zoom-2x") == 0);
 	CHECK("framing restart derives pct", cfg.video0.zoom_pct == 0.5);
 	CHECK("framing restart response",
-		strstr(response, "\"reinit_pending\":true") != NULL);
+		strstr(response, "\"reboot\":true") != NULL);
+	CHECK("framing restart raised reboot", venc_api_get_reboot());
+	CHECK("framing restart not reinit", !venc_api_get_reinit());
 	CHECK("framing restart no live callback",
 		g_api_cb_state.apply_zoom_calls == 0);
-	venc_api_clear_reinit();
+	venc_api_clear_reboot();
 
 	/* Invalid framing preset is rejected. */
 	CHECK("framing reject rc",
@@ -1010,6 +1016,54 @@ static int test_framing_preset_restart(void)
 	CHECK("framing reject error",
 		strstr(response, "framing must be one of") != NULL);
 	CHECK("framing reject unchanged", strcmp(cfg.video0.framing, "zoom-2x") == 0);
+
+	return failures;
+}
+
+static int test_dryrun_classifies_without_applying(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_zoom = test_apply_zoom;
+
+	/* Rebuild-class field with dryrun=1: reports would:reboot, applies
+	 * nothing (cfg unchanged, no reboot flag, no callback). */
+	CHECK("dryrun reboot rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.framing=zoom-2x&dryrun=1", &status, response,
+			sizeof(response)) == 0);
+	CHECK("dryrun reboot status", status == 200);
+	CHECK("dryrun reboot would",
+		strstr(response, "\"would\":\"reboot\"") != NULL);
+	CHECK("dryrun reboot flagged dryrun",
+		strstr(response, "\"dryrun\":true") != NULL);
+	CHECK("dryrun reboot cfg untouched",
+		strcmp(cfg.video0.framing, "off") == 0);
+	CHECK("dryrun reboot no reboot flag", !venc_api_get_reboot());
+	CHECK("dryrun reboot no reinit flag", !venc_api_get_reinit());
+
+	/* Live field with dryrun: would:live, no apply. */
+	CHECK("dryrun live rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.bitrate=8000&dryrun=1", &status, response,
+			sizeof(response)) == 0);
+	CHECK("dryrun live would",
+		strstr(response, "\"would\":\"live\"") != NULL);
+
+	/* No-op (set to current value) with dryrun: would:noop. */
+	CHECK("dryrun noop rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.framing=off&dryrun=1", &status, response,
+			sizeof(response)) == 0);
+	CHECK("dryrun noop would",
+		strstr(response, "\"would\":\"noop\"") != NULL);
 
 	return failures;
 }
@@ -1126,6 +1180,7 @@ int test_venc_api(void)
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();
 	failures += test_framing_preset_restart();
+	failures += test_dryrun_classifies_without_applying();
 	failures += test_live_set_isp_bin_dispatches_callback();
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();

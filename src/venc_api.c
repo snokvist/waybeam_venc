@@ -195,6 +195,16 @@ static volatile sig_atomic_t g_reinit = 0;
  * the venc_star6e_reinit_fragility findings. */
 static volatile sig_atomic_t g_live_resilience = 0;
 
+/* Reboot-pending flag (Star6E): set when a config change rebuilds the VENC
+ * channel (size, codec, framing/stab, image transforms, sensor mode, ref_*
+ * resilience, subsystems).  The fork+exec respawn that would otherwise apply
+ * such a change storms the MMU (client 0x15) on the 2nd consecutive rebuild
+ * regardless of process model — see venc_star6e_reinit_fragility.  A cold boot
+ * is the only path proven never to storm, so the runner persists the new
+ * config to disk and reboots; cold-init applies it.  Maruko keeps the respawn
+ * path (g_reinit) — its rebuild does not storm. */
+static volatile sig_atomic_t g_reboot_pending = 0;
+
 /* ── Record control flags ────────────────────────────────────────────── */
 
 static volatile sig_atomic_t g_record_start_pending = 0;
@@ -238,6 +248,21 @@ bool venc_api_get_live_resilience(void)
 void venc_api_clear_live_resilience(void)
 {
 	g_live_resilience = 0;
+}
+
+void venc_api_request_reboot(void)
+{
+	g_reboot_pending = 1;
+}
+
+bool venc_api_get_reboot(void)
+{
+	return g_reboot_pending != 0;
+}
+
+void venc_api_clear_reboot(void)
+{
+	g_reboot_pending = 0;
 }
 
 void venc_api_request_record_start(const char *dir)
@@ -942,7 +967,7 @@ static int make_handled_error_json(int status, const char *code,
 }
 
 static int make_single_set_success_json(const char *field_key,
-	const char *json_value, int reinit_pending, char **out_json)
+	const char *json_value, int reinit_pending, int reboot, char **out_json)
 {
 	char buf[512];
 	int len;
@@ -950,7 +975,14 @@ static int make_single_set_success_json(const char *field_key,
 	if (!field_key || !json_value || !out_json)
 		return -1;
 
-	if (reinit_pending) {
+	if (reboot) {
+		/* Star6E rebuild-class change: persisted to disk, device is
+		 * about to reboot to apply it from cold-init. */
+		len = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
+			"\"reboot\":true}}",
+			field_key, json_value);
+	} else if (reinit_pending) {
 		len = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{\"field\":\"%s\",\"value\":%s,"
 			"\"reinit_pending\":true}}",
@@ -1661,7 +1693,7 @@ static int make_live_set_response_locked(const VencConfig *cfg,
 				response_json);
 		}
 
-		rc = make_single_set_success_json(params[0].key, jval, 0,
+		rc = make_single_set_success_json(params[0].key, jval, 0, 0,
 			response_json);
 		free(jval);
 		if (rc != 0)
@@ -1808,19 +1840,106 @@ static void init_single_set_param(SetQueryParam *param, const char *key,
  * If a stricter rate limit is required, persist the timestamp to
  * /tmp/waybeam_resilience.ts and check on entry. */
 
+/* How a config transition is applied.  Single source of truth shared by the
+ * single-field SET path, the bare /api/v1/restart disk-diff, the defaults
+ * reset, and the dry-run probe — so the classification can never drift between
+ * "what a SET does" and "what dry-run says it will do". */
+typedef enum {
+	XACT_NOOP,        /* no effective field change */
+	XACT_LIVE_RESIL,  /* intra/gop-only resilience — applied on the running
+	                   * VENC channel (Star6E live consumer) */
+	XACT_REBOOT,      /* Star6E: rebuilds the VENC channel — respawn storms
+	                   * the MMU, so persist + cold-boot instead */
+	XACT_REINIT,      /* Maruko (or fallback): fork+exec respawn */
+} CfgTransition;
+
+/* Classify old_cfg -> new_cfg.  Both must have any resilience/framing presets
+ * already expanded into their derived fields (the caller does this).  Compares
+ * every g_fields[] entry; resilience/gop_size are the only live-applicable
+ * deltas, and only when the resilience ref_* pyramid (derived, not in
+ * g_fields) is unchanged and the backend is Star6E.  Everything else rebuilds:
+ * Star6E reboots (respawn storms — see venc_star6e_reinit_fragility), Maruko
+ * respawns. */
+static CfgTransition classify_cfg_transition(const VencConfig *old_cfg,
+	const VencConfig *new_cfg)
+{
+	int any_change = 0;
+	int rebuild = 0;
+	size_t i;
+	int is_star6e = (strcmp(g_backend, "star6e") == 0);
+
+	for (i = 0; i < FIELD_COUNT; i++) {
+		const FieldDesc *f = &g_fields[i];
+		char *a = field_to_json_value_from_cfg(new_cfg, f);
+		char *b = field_to_json_value_from_cfg(old_cfg, f);
+		int changed = (a && b && strcmp(a, b) != 0);
+		free(a);
+		free(b);
+		if (!changed)
+			continue;
+		any_change = 1;
+		/* resilience + gopSize are the only live-applicable deltas;
+		 * every other changed field forces a rebuild. */
+		if (strcmp(f->key, "video0.resilience") != 0 &&
+		    strcmp(f->key, "video0.gop_size") != 0)
+			rebuild = 1;
+	}
+
+	if (!any_change)
+		return XACT_NOOP;
+	if (rebuild)
+		return is_star6e ? XACT_REBOOT : XACT_REINIT;
+
+	/* Only resilience/gop changed.  A ref_* / refPred move needs a new
+	 * channel (the SVC-T pyramid binds at creation); intra/gop-only deltas
+	 * apply live, and only Star6E has the live consumer. */
+	if (is_star6e &&
+	    old_cfg->video0.ref_base == new_cfg->video0.ref_base &&
+	    old_cfg->video0.ref_enhance == new_cfg->video0.ref_enhance &&
+	    old_cfg->video0.ref_pred == new_cfg->video0.ref_pred)
+		return XACT_LIVE_RESIL;
+	return is_star6e ? XACT_REBOOT : XACT_REINIT;
+}
+
+static const char *cfg_transition_word(CfgTransition t)
+{
+	switch (t) {
+	case XACT_NOOP:        return "noop";
+	case XACT_LIVE_RESIL:  return "live";
+	case XACT_REBOOT:      return "reboot";
+	case XACT_REINIT:      return "reinit";
+	}
+	return "reinit";
+}
+
+/* Expand resilience/framing presets in cfg in place (the staged config holds
+ * only the new preset *name*; the derived fields still hold the old
+ * expansion).  Compares against ref_cfg's preset names to decide which presets
+ * actually changed. */
+static void expand_presets_for_diff(VencConfig *cfg, const VencConfig *ref_cfg)
+{
+	if (strcmp(ref_cfg->video0.resilience, cfg->video0.resilience) != 0)
+		(void)venc_config_apply_resilience_preset(
+			cfg->video0.resilience, &cfg->video0);
+	if (strcmp(ref_cfg->video0.framing, cfg->video0.framing) != 0)
+		(void)venc_config_apply_framing_preset(
+			cfg->video0.framing, &cfg->video0);
+}
+
 static int process_restart_set_query(const SetQueryParam *param,
 	int *status_code, char **response_json)
 {
+	VencConfig old_cfg;
 	VencConfig new_cfg;
+	CfgTransition action;
 	char *jval;
 	int rc;
-	int needs_respawn = 0;
-	int live_resilience = 0;
 
 	if (!param || !status_code || !response_json)
 		return -1;
 
 	pthread_mutex_lock(&g_cfg_mutex);
+	old_cfg = *g_cfg;
 	new_cfg = *g_cfg;
 	rc = stage_params_into_cfg(&new_cfg, param, 1, status_code,
 		response_json);
@@ -1829,96 +1948,50 @@ static int process_restart_set_query(const SetQueryParam *param,
 		return rc > 0 ? 0 : rc;
 	}
 
-	/* Detect a resilience preset change.  stage_params_into_cfg() only
-	 * copied the new preset *name* into new_cfg; the derived
-	 * intra_refresh_* / ref_* / gop_size fields still hold the *old*
-	 * preset's expansion.  Expand the new preset into new_cfg now so
-	 * downstream code (and the diff log below) sees both old and new
-	 * derived state side-by-side.
-	 *
-	 * Phase 0 instrumentation: log the field-level delta produced by
-	 * the preset change.  This is the data we need to decide whether a
-	 * given resilience SET needs the full reinit / reboot path or can
-	 * be applied via lighter machinery (Phase 1+). */
-	if (strcmp(g_cfg->video0.resilience, new_cfg.video0.resilience) != 0) {
-		const VencConfigVideo old_v = g_cfg->video0;
+	/* stage_params_into_cfg() copied only the new preset *name*; expand the
+	 * derived intra_refresh_* / ref_* / gop_size / stab / zoom fields so the
+	 * classifier and /status/GET see the new expansion. */
+	expand_presets_for_diff(&new_cfg, &old_cfg);
 
-		(void)venc_config_apply_resilience_preset(
-			new_cfg.video0.resilience, &new_cfg.video0);
+	action = classify_cfg_transition(&old_cfg, &new_cfg);
 
-		/* Classify the delta:
-		 *
-		 *   ref_* changed     The SVC-T reference pyramid is bound
-		 *                     to the VENC channel at creation and
-		 *                     cannot be reconfigured by any
-		 *                     documented MI SDK call.  Route via
-		 *                     process-level respawn (fork+exec a
-		 *                     fresh waybeam after clean teardown):
-		 *                     a new VENC channel binds the new
-		 *                     pyramid at creation.
-		 *
-		 *   intra/gop only    Honoured by the in-process reinit
-		 *                     path (reload from disk, re-expand
-		 *                     preset, teardown+reconfigure
-		 *                     pipeline).  Same path every other
-		 *                     MUT_RESTART field uses. */
-		if (old_v.ref_base != new_cfg.video0.ref_base ||
-		    old_v.ref_enhance != new_cfg.video0.ref_enhance ||
-		    old_v.ref_pred != new_cfg.video0.ref_pred)
-			needs_respawn = 1;
-		else if (strcmp(g_backend, "star6e") == 0)
-			/* Only Star6E has a live-resilience consumer (the runner's
-			 * star6e_pipeline_apply_resilience_live).  Maruko must keep
-			 * routing to reinit or the change would be silently dropped. */
-			live_resilience = 1;
-
+	if (strcmp(old_cfg.video0.resilience, new_cfg.video0.resilience) != 0)
 		fprintf(stderr,
 			"[waybeam] resilience-diff: '%s' -> '%s'  "
 			"intra=%s->%s ref_base=%u->%u ref_enhance=%u->%u "
 			"ref_pred=%d->%d gop=%.3fs->%.3fs  path=%s\n",
-			old_v.resilience, new_cfg.video0.resilience,
-			old_v.intra_refresh_mode,
+			old_cfg.video0.resilience, new_cfg.video0.resilience,
+			old_cfg.video0.intra_refresh_mode,
 			new_cfg.video0.intra_refresh_mode,
-			(unsigned)old_v.ref_base,
+			(unsigned)old_cfg.video0.ref_base,
 			(unsigned)new_cfg.video0.ref_base,
-			(unsigned)old_v.ref_enhance,
+			(unsigned)old_cfg.video0.ref_enhance,
 			(unsigned)new_cfg.video0.ref_enhance,
-			(int)old_v.ref_pred,
+			(int)old_cfg.video0.ref_pred,
 			(int)new_cfg.video0.ref_pred,
-			old_v.gop_size, new_cfg.video0.gop_size,
-			needs_respawn ? "respawn" : "live-apply");
-	}
+			old_cfg.video0.gop_size, new_cfg.video0.gop_size,
+			cfg_transition_word(action));
 
-	/* Detect a framing preset change.  Like resilience, the staged new_cfg
-	 * holds the new preset *name* but the derived stab_crop_pct /
-	 * stab_recenter_speed / zoom_pct still hold the old expansion.  Re-expand
-	 * now so in-memory /status + GET stay coherent until the respawn reloads
-	 * from disk.  Always a plain restart — no respawn classification needed. */
-	if (strcmp(g_cfg->video0.framing, new_cfg.video0.framing) != 0)
-		(void)venc_config_apply_framing_preset(new_cfg.video0.framing,
-			&new_cfg.video0);
-
-	/* Commit g_cfg in memory and persist to disk for both paths.
-	 * For respawn, the fresh process will reload from disk anyway,
-	 * but committing in-memory keeps /status / GET responses
-	 * coherent with the SET that just succeeded. */
+	/* Commit g_cfg in memory and persist to disk for every path.  A reboot
+	 * relies on disk holding the new config (cold-init reloads it); a respawn
+	 * reloads from disk too; live/no-op keep /status / GET coherent. */
 	*g_cfg = new_cfg;
 	jval = field_to_json_value_from_cfg(&new_cfg, param->field);
 	pthread_mutex_unlock(&g_cfg_mutex);
 	(void)venc_api_save_config_to_disk(&new_cfg);
 
-	/* Route the transition.  Intra/gop-only resilience deltas
-	 * (live_resilience) apply on the running VENC channel via the runner —
-	 * the destroy+rebuild/respawn path storms the MMU (client 0x15) on this
-	 * SoC regardless of process model (see venc_star6e_reinit_fragility), so
-	 * same-mode resilience must NOT rebuild.  Everything else (ref_* / refPred
-	 * deltas and all other MUT_RESTART fields) still drops out of the stream
-	 * loop for the backend's reinit/respawn.  Maruko has no live-resilience
-	 * consumer yet, so it falls through to reinit there too. */
-	if (live_resilience)
-		venc_api_request_live_resilience();
-	else
-		venc_api_request_reinit();
+	/* Route the transition.  XACT_REBOOT (Star6E rebuild-class) persists +
+	 * reboots — the destroy+rebuild/respawn path storms the MMU (client 0x15)
+	 * on this SoC regardless of process model, and cold-init is the only
+	 * storm-free apply (see venc_star6e_reinit_fragility).  XACT_LIVE_RESIL
+	 * applies on the running channel; XACT_REINIT respawns (Maruko / fallback);
+	 * XACT_NOOP does nothing. */
+	switch (action) {
+	case XACT_LIVE_RESIL: venc_api_request_live_resilience(); break;
+	case XACT_REBOOT:     venc_api_request_reboot();          break;
+	case XACT_REINIT:     venc_api_request_reinit();          break;
+	case XACT_NOOP:       /* nothing to apply */              break;
+	}
 
 	if (!jval) {
 		*status_code = 500;
@@ -1928,7 +2001,9 @@ static int process_restart_set_query(const SetQueryParam *param,
 
 	*status_code = 200;
 	rc = make_single_set_success_json(param->key, jval,
-		live_resilience ? 0 : 1 /* reinit_pending */, response_json);
+		action == XACT_REINIT ? 1 : 0 /* reinit_pending */,
+		action == XACT_REBOOT ? 1 : 0 /* reboot */,
+		response_json);
 	free(jval);
 	return rc;
 }
@@ -1986,14 +2061,123 @@ static int process_multi_live_set_query(const char *query, int *status_code,
 		response_json);
 }
 
+/* Classify a single-field SET without applying it: stage into a temp cfg, run
+ * the same classifier the real path uses, and report would:live|reboot|reinit|
+ * noop.  Lets a UI (and the state_assess test suite) ask "will this reboot me?"
+ * before committing — essential now that rebuild-class SETs auto-reboot. */
+static int process_dryrun_set_query(const char *query, int *status_code,
+	char **response_json)
+{
+	char key[128], val[256];
+	const char *canonical_key;
+	const FieldDesc *f;
+	const char *parse_error = NULL;
+	const char *would;
+	char buf[256];
+	int rc, len;
+
+	if (parse_first_query_param(query, key, sizeof(key), val, sizeof(val),
+	    &parse_error) != 0 || !*key) {
+		*status_code = 400;
+		return make_error_json("invalid_request",
+			parse_error ? parse_error :
+			"missing query parameter key=value", response_json);
+	}
+
+	rc = resolve_set_query_field(key, &canonical_key, &f, status_code,
+		response_json);
+	if (rc != 0)
+		return rc > 0 ? 0 : rc;
+
+	if (f->mut == MUT_LIVE) {
+		would = "live";
+	} else {
+		VencConfig old_cfg, new_cfg;
+		SetQueryParam param;
+
+		init_single_set_param(&param, key, canonical_key, val, f);
+		pthread_mutex_lock(&g_cfg_mutex);
+		old_cfg = *g_cfg;
+		new_cfg = *g_cfg;
+		rc = stage_params_into_cfg(&new_cfg, &param, 1, status_code,
+			response_json);
+		if (rc != 0) {
+			pthread_mutex_unlock(&g_cfg_mutex);
+			return rc > 0 ? 0 : rc;
+		}
+		expand_presets_for_diff(&new_cfg, &old_cfg);
+		would = cfg_transition_word(
+			classify_cfg_transition(&old_cfg, &new_cfg));
+		pthread_mutex_unlock(&g_cfg_mutex);
+	}
+
+	len = snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"field\":\"%s\",\"would\":\"%s\","
+		"\"dryrun\":true}}", key, would);
+	if (len >= (int)sizeof(buf))
+		len = (int)sizeof(buf) - 1;
+	*response_json = strdup(buf);
+	*status_code = 200;
+	return *response_json ? 0 : -1;
+}
+
+/* Extract a dryrun flag from the query and copy the remaining params (without
+ * the dryrun token) into out.  Returns 1 when dryrun=1/true/yes (or a bare
+ * "dryrun") is present; dryrun=0/false is treated as absent. */
+static int query_extract_dryrun(const char *query, char *out, size_t out_sz)
+{
+	int dryrun = 0;
+	size_t olen = 0;
+	const char *p = query;
+
+	if (out_sz)
+		out[0] = '\0';
+	if (!query)
+		return 0;
+
+	while (*p) {
+		const char *amp = strchr(p, '&');
+		size_t tok = amp ? (size_t)(amp - p) : strlen(p);
+		int is_key = (tok >= 6 && strncmp(p, "dryrun", 6) == 0 &&
+			      (tok == 6 || p[6] == '='));
+		if (is_key) {
+			const char *v = (tok > 7) ? p + 7 : "1";
+			if (!(strncmp(v, "0", 1) == 0 ||
+			      strncmp(v, "false", 5) == 0))
+				dryrun = 1;
+			/* token stripped from out either way */
+		} else {
+			size_t i;
+			if (olen && olen + 1 < out_sz)
+				out[olen++] = '&';
+			for (i = 0; i < tok && olen + 1 < out_sz; i++)
+				out[olen++] = p[i];
+		}
+		if (!amp)
+			break;
+		p = amp + 1;
+	}
+	if (out_sz)
+		out[olen] = '\0';
+	return dryrun;
+}
+
 static int process_set_query(const char *query, int *status_code,
 	char **response_json)
 {
+	char stripped[512];
+	int dryrun;
+
 	if (!status_code || !response_json)
 		return -1;
 
 	*status_code = 500;
 	*response_json = NULL;
+
+	dryrun = query_extract_dryrun(query, stripped, sizeof(stripped));
+	if (dryrun)
+		return process_dryrun_set_query(stripped, status_code,
+			response_json);
 
 	if (query && strchr(query, '&'))
 		return process_multi_live_set_query(query, status_code,
@@ -2363,14 +2547,22 @@ static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 	snapshot = fresh;
 	pthread_mutex_unlock(&g_cfg_mutex);
 	save_rc = venc_api_save_config_to_disk(&snapshot);
-	/* Reinit always reloads the on-disk config.  On save failure the
-	 * caller sees saved:false in the response and can decide whether to
-	 * retry; reapplying the in-memory defaults silently would diverge
-	 * from disk and confuse the next reload. */
-	venc_api_request_reinit();
-	snprintf(resp, sizeof(resp),
-		"{\"defaults\":true,\"reinit\":true,\"saved\":%s}",
-		save_rc == 0 ? "true" : "false");
+	/* A defaults reset rewrites the whole pipeline (size/codec/framing/…),
+	 * so it is always rebuild-class.  Star6E reboots (the respawn storms the
+	 * MMU; cold-init reloads the now-default disk config); Maruko respawns.
+	 * On save failure the caller sees saved:false and can retry; reapplying
+	 * in-memory defaults silently would diverge from disk. */
+	if (strcmp(g_backend, "star6e") == 0) {
+		venc_api_request_reboot();
+		snprintf(resp, sizeof(resp),
+			"{\"defaults\":true,\"reboot\":true,\"saved\":%s}",
+			save_rc == 0 ? "true" : "false");
+	} else {
+		venc_api_request_reinit();
+		snprintf(resp, sizeof(resp),
+			"{\"defaults\":true,\"reinit\":true,\"saved\":%s}",
+			save_rc == 0 ? "true" : "false");
+	}
 	return httpd_send_ok(fd, resp);
 }
 
@@ -2378,8 +2570,7 @@ static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 {
 	VencConfig fresh;
 	char path[sizeof(g_config_path)];
-	int rebuild = 0, any_change = 0, live_resil = 0;
-	size_t i;
+	CfgTransition action;
 
 	(void)req; (void)ctx;
 
@@ -2390,12 +2581,11 @@ static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 	 *
 	 * Classify the disk-vs-running diff so a bare restart no longer blindly
 	 * rebuilds the VENC channel — the rebuild/respawn storms the MMU on this
-	 * SoC (client 0x15; see venc_star6e_reinit_fragility).  Fast no-rebuild
-	 * path when the only changes are intra/gop-only resilience and/or gopSize
-	 * (both applied live by star6e_pipeline_apply_resilience_live); an
-	 * unchanged config is a no-op.  ANY other changed field (a genuine
-	 * MUT_RESTART field, or a MUT_LIVE field this fast path does not re-apply)
-	 * still respawns — correct, never a silent drop, just not storm-optimal. */
+	 * SoC (client 0x15; see venc_star6e_reinit_fragility).  No-rebuild path
+	 * when the only changes are intra/gop-only resilience and/or gopSize
+	 * (applied live); an unchanged config is a no-op; any rebuild-class change
+	 * reboots on Star6E (cold-init is the only storm-free apply) and respawns
+	 * on Maruko. */
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	snprintf(path, sizeof(path), "%s", g_config_path);
@@ -2414,48 +2604,23 @@ static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 	}
 
 	pthread_mutex_lock(&g_cfg_mutex);
-	for (i = 0; i < FIELD_COUNT; i++) {
-		const FieldDesc *f = &g_fields[i];
-		char *a = field_to_json_value_from_cfg(&fresh, f);
-		char *b = field_to_json_value_from_cfg(g_cfg, f);
-		int changed = (a && b && strcmp(a, b) != 0);
-		free(a);
-		free(b);
-		if (!changed)
-			continue;
-		any_change = 1;
-		/* resilience + gopSize are the live-applicable set; everything else
-		 * (rc_mode, size, framing, bitrate/fps/qp, audio, …) forces a
-		 * rebuild here. */
-		if (strcmp(f->key, "video0.resilience") != 0 &&
-		    strcmp(f->key, "video0.gop_size") != 0)
-			rebuild = 1;
-	}
-
-	/* A resilience change that moves ref_* / refPred needs a new channel (the
-	 * SVC-T pyramid binds at creation); only intra/gop-only deltas go live,
-	 * and only Star6E has the live consumer. */
-	if (!rebuild && any_change) {
-		if (strcmp(g_backend, "star6e") == 0 &&
-		    fresh.video0.ref_base == g_cfg->video0.ref_base &&
-		    fresh.video0.ref_enhance == g_cfg->video0.ref_enhance &&
-		    fresh.video0.ref_pred == g_cfg->video0.ref_pred)
-			live_resil = 1;
-		else
-			rebuild = 1;
-	}
-
+	action = classify_cfg_transition(g_cfg, &fresh);
 	*g_cfg = fresh;   /* commit the reloaded config (in memory only) */
 	pthread_mutex_unlock(&g_cfg_mutex);
 
-	if (rebuild) {
+	switch (action) {
+	case XACT_REBOOT:
+		venc_api_request_reboot();
+		return httpd_send_ok(fd, "{\"reboot\":true}");
+	case XACT_REINIT:
 		venc_api_request_reinit();
 		return httpd_send_ok(fd, "{\"reinit\":true}");
-	}
-	if (live_resil) {
+	case XACT_LIVE_RESIL:
 		venc_api_request_live_resilience();
 		return httpd_send_ok(fd,
 			"{\"reinit\":false,\"applied\":\"resilience\"}");
+	case XACT_NOOP:
+		break;
 	}
 	return httpd_send_ok(fd, "{\"reinit\":false,\"noop\":true}");
 }
