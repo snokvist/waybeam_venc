@@ -1893,23 +1893,25 @@ static int star6e_stab_start(void)
 static void star6e_stab_stop(void)
 {
 	if (g_stab_running) {
-		if (g_stab_hw_mode) {
-			/* Park the detector off port1 (so DisablePort can't race a
-			 * GetBuf), then disable the tap.  port0 stays bound and
-			 * feeding VENC, so the VPE channel never backs up — the
-			 * standard unbind path (state->bound_vpe_venc) and
-			 * star6e_pipeline_stop_vpe() tear port0 down cleanly.  This
-			 * is the whole point of the refactor: no heavy manual drain
-			 * to wedge [vpe0_P0_MAIN] on teardown. */
-			int i;
-			g_stab_pause = 1;
-			for (i = 0; i < 100 && !g_stab_parked; i++)
-				usleep(1000);
-			MI_VPE_DisablePort(0, 1);
-		}
+		/* Stop the detector thread and JOIN it before touching port1.
+		 * In HW detect mode the thread keeps one port1 buffer checked out
+		 * across iterations (prev_handle, the IVE reference frame); on loop
+		 * exit it returns that buffer while the port is still enabled (safe)
+		 * and can start no further IVE read.  Disabling port1 with the
+		 * thread still alive — even "parked" — could free the ring under an
+		 * in-flight IVE read: _MI_SYS_MMU_Callback Status=0x2 ClientId=0x15
+		 * IsWrite=0 stormed the MMU into a hardware-watchdog reset.  The old
+		 * 100ms park-spin was not a real barrier under the every-frame
+		 * "high" detector load (it survived a few respawn cycles, then lost
+		 * the race and reset the board).  pthread_join IS the barrier; only
+		 * then disable the tap.  port0 stays bound feeding VENC throughout,
+		 * so the VPE channel never backs up and there is no heavy manual
+		 * drain to wedge [vpe0_P0_MAIN]. */
 		g_stab_running = 0;
 		pthread_join(g_stab_thread, NULL);
 		memset(&g_stab_thread, 0, sizeof(g_stab_thread));
+		if (g_stab_hw_mode)
+			MI_VPE_DisablePort(0, 1);
 		g_stab_pause = 0;
 		g_stab_parked = 0;
 	}
@@ -3618,8 +3620,30 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * was not started. */
 	star6e_stab_stop();
 
-	/* Unbind VPE→VENC.  Safe now — no concurrent consumers calling
-	 * GetStream, so the kernel unbind won't deadlock. */
+	/* MI teardown order: StopRecvPic each VENC consumer BEFORE unbinding
+	 * its input port.  The previous Star6E order unbound VPE→VENC first and
+	 * only then stopped VENC, leaving the kernel SDK still encoding/flushing
+	 * a buffered frame out of a port userspace had just ripped out — VENC
+	 * (MMU client 0x15) then reads a freed VPE buffer:
+	 * `_MI_SYS_MMU_Callback Status=0x2 IsWrite=0` storms into a hardware
+	 * watchdog reset on the ~2nd rapid respawn (reproduced on master cold
+	 * boot, so it predates the stab/framing work).  Maruko hit the same root
+	 * cause as a page fault in MI_SYS_IMPL_FlushInputPortTasks and was fixed
+	 * to stop-first (S1 bench 2026-05-15, ~14% repro); Star6E was never given
+	 * that fix — see maruko_pipeline_teardown_graph().  StopRecvPic is a soft
+	 * pause and does not deadlock while still bound.  Sequence: StopRecvPic →
+	 * drain output → unbind VPE→VENC → unbind VIF→VPE → destroy VENC →
+	 * stop VPE/VIF/sensor. */
+	if (state->dual)
+		MI_VENC_StopRecvPic(state->dual->channel);
+	MI_VENC_StopRecvPic(state->venc_channel);
+
+	/* Drain the last buffered frames that StopRecvPic let flow out. */
+	drain_venc_channel(state->venc_channel, 150, "ch0");
+	if (state->dual)
+		drain_venc_channel(state->dual->channel, 150, "ch1-post");
+
+	/* Unbind VPE→VENC now that the consumer is stopped. */
 	if (state->dual && state->dual->bound) {
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->dual->port);
 		state->dual->bound = 0;
@@ -3628,16 +3652,6 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 		MI_SYS_UnBindChnPort(&state->vpe_port, &state->venc_port);
 		state->bound_vpe_venc = 0;
 	}
-
-	/* Drain remaining buffered frames after unbind. */
-	drain_venc_channel(state->venc_channel, 150, "ch0");
-	if (state->dual)
-		drain_venc_channel(state->dual->channel, 150, "ch1-post");
-
-	/* StopRecvPic — VPE is unbound, no flush wait needed. */
-	if (state->dual)
-		MI_VENC_StopRecvPic(state->dual->channel);
-	MI_VENC_StopRecvPic(state->venc_channel);
 
 	if (state->bound_vif_vpe) {
 		MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);

@@ -725,7 +725,15 @@ static int star6e_runtime_handle_reinit(int *handled)
 	 * (close their inherited /dev/mi_* fds in the fd-scrub) — otherwise the
 	 * fresh process re-inits VIF to a different mode against the old mode's
 	 * kernel state and wedges vpe0_P0_MAIN.  Same-size respawns leave the
-	 * fds inherited (the deadlock-safe default).  See venc_respawn.c. */
+	 * fds inherited (the deadlock-safe default).  See venc_respawn.c.
+	 *
+	 * NOTE: same-mode respawns still hit a pre-existing MMU read-fault storm
+	 * (MMU client 0x15, IsWrite=0) on the ~2nd consecutive respawn — present
+	 * on master 1f6445f from a cold boot, so it is NOT the stab/framing work.
+	 * Forcing cold-vif on every respawn made it WORSE (the close mid-flight
+	 * triggers the storm immediately and the child dies), so that is not the
+	 * fix.  Root cause is in the MI VPE/VENC teardown ordering and is tracked
+	 * separately. */
 	if (g_runner_ctx &&
 	    (g_runner_ctx->vcfg.video0.width != g_runner_ctx->started_base_w ||
 	     g_runner_ctx->vcfg.video0.height != g_runner_ctx->started_base_h)) {
