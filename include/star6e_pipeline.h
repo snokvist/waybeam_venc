@@ -136,6 +136,14 @@ void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 int star6e_pipeline_stab_panel_anchor(int *out_x, int *out_y);
 
 /** Service custom 3A (AWB/AE) at regular intervals. */
+/** One-shot legacy-AE cold-boot fps re-kick.  Call once ~1.5s after pipeline
+ *  start from the run loop; re-issues MI_SNR_SetFps to force the sensor timing
+ *  register to the configured fps (the init-time kick fires before the ISP bin
+ *  settles and can leave the sensor locked low on a cold boot).  No-op when
+ *  isp.legacy_ae is off (CUS3A uses its own frame-15 kick). */
+void star6e_pipeline_legacy_fps_rekick(const Star6ePipelineState *state,
+	const VencConfig *vcfg);
+
 void star6e_pipeline_cus3a_tick(SdkQuietState *sdk_quiet,
 	struct timespec *ts_last);
 
