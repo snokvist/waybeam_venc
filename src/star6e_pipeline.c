@@ -1893,23 +1893,25 @@ static int star6e_stab_start(void)
 static void star6e_stab_stop(void)
 {
 	if (g_stab_running) {
-		if (g_stab_hw_mode) {
-			/* Park the detector off port1 (so DisablePort can't race a
-			 * GetBuf), then disable the tap.  port0 stays bound and
-			 * feeding VENC, so the VPE channel never backs up — the
-			 * standard unbind path (state->bound_vpe_venc) and
-			 * star6e_pipeline_stop_vpe() tear port0 down cleanly.  This
-			 * is the whole point of the refactor: no heavy manual drain
-			 * to wedge [vpe0_P0_MAIN] on teardown. */
-			int i;
-			g_stab_pause = 1;
-			for (i = 0; i < 100 && !g_stab_parked; i++)
-				usleep(1000);
-			MI_VPE_DisablePort(0, 1);
-		}
+		/* Stop the detector thread and JOIN it before touching port1.
+		 * In HW detect mode the thread keeps one port1 buffer checked out
+		 * across iterations (prev_handle, the IVE reference frame); on loop
+		 * exit it returns that buffer while the port is still enabled (safe)
+		 * and can start no further IVE read.  Disabling port1 with the
+		 * thread still alive — even "parked" — could free the ring under an
+		 * in-flight IVE read: _MI_SYS_MMU_Callback Status=0x2 ClientId=0x15
+		 * IsWrite=0 stormed the MMU into a hardware-watchdog reset.  The old
+		 * 100ms park-spin was not a real barrier under the every-frame
+		 * "high" detector load (it survived a few respawn cycles, then lost
+		 * the race and reset the board).  pthread_join IS the barrier; only
+		 * then disable the tap.  port0 stays bound feeding VENC throughout,
+		 * so the VPE channel never backs up and there is no heavy manual
+		 * drain to wedge [vpe0_P0_MAIN]. */
 		g_stab_running = 0;
 		pthread_join(g_stab_thread, NULL);
 		memset(&g_stab_thread, 0, sizeof(g_stab_thread));
+		if (g_stab_hw_mode)
+			MI_VPE_DisablePort(0, 1);
 		g_stab_pause = 0;
 		g_stab_parked = 0;
 	}
