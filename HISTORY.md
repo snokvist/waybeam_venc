@@ -7,11 +7,19 @@ cleanly on top of the 0.11.0 zoom work (#120) rather than the original
 stabilization branch (#118), which forked before the pan-ramp/AE-meter
 changes landed and could no longer cherry-pick clean.
 
-**Stabilization (opt-in, Star6E only).**  A single `video0.stab` preset
-(`off` | `low` | `medium` | `high`) is the sole user-facing knob —
-resilience-style: it expands into the derived crop fraction + recenter
-time-constant; the granular fields are not part of the JSON schema or HTTP
-API.  Preferred data path (HW-crop): VPE port0 hardware-crops the stab
+**Framing mode — one knob for stabilization and zoom.**  A single
+`video0.framing` preset is the sole user-facing knob for what the VPE crop
+does (resilience-style): `off`, the stabilization presets `low`|`medium`|
+`high` (Star6E only), and the digital-zoom presets `zoom-1.25x`|`zoom-1.50x`|
+`zoom-1.75x`|`zoom-2x` (both backends).  It expands into the derived
+stab crop/recenter or zoom crop fraction — mutually exclusive — and replaces
+the old standalone `stab` and continuous `zoomPct` fields, neither of which
+is part of the JSON schema or HTTP API anymore.  Zoom presets shrink the
+crop + encoded output together (1:1, no SCL upscale; e.g. `zoom-2x` of
+1920×1080 → 960×528).  `zoomX`/`zoomY` remain live and pan the crop in every
+mode.  `video0.framing` is `MUT_RESTART`.
+
+**Stabilization data path (Star6E).**  Preferred path (HW-crop): VPE port0 hardware-crops the stab
 window — `MI_VPE_SetPortCrop` per detection — straight into a VENC **bind**
 (zero-copy, no per-frame blit), while a tiny 256×256 port1 tap feeds
 `MI_IVE_Shift_Detector` for motion estimation.  Decoupling the detector
@@ -31,13 +39,13 @@ snapshots and the debug OSD see the unstabilized frame.  Dual recording
 stab is active (both would consume VPE port0) — it records the stabilized
 ch0 at its bitrate, with a warning.  `video0.stab` is `MUT_RESTART`.
 
-**Interplay with 0.11.0 zoom.**  Stabilization and `zoomPct` are mutually
-exclusive (zoomPct shrinks the VPE port output via SCL crop, which fights
-the manual drain) — when both are set, zoomPct is ignored with a warning.
-`zoomX`/`zoomY` are still honoured: under stabilization they pan the
-stabilized crop window directly via `star6e_stab_set_pan()`; with stab off
-they drive the 0.11.0 pan-ramp path.  `apply_zoom` short-circuits to the
-stab pan when the stab thread is running.
+**Interplay with 0.11.0 zoom.**  Stabilization and zoom are now mutually
+exclusive *by construction* — a `framing` preset is either one or the other,
+so the old "zoomPct ignored while stab on" warning is gone.  `zoomX`/`zoomY`
+are honoured in both modes: under a stab preset they pan the stabilized crop
+via `star6e_stab_set_pan()`; under a zoom preset they drive the 0.11.0
+pan-ramp path.  `apply_zoom` short-circuits to the stab pan when the stab
+thread is running.
 
 **AE meter follows the crop in both modes.**  The zoom-aware AE meter
 (`MI_ISP_CUS3A_SetAECropSize`) now also tracks the stabilized crop window,
