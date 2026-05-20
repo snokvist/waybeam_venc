@@ -2376,14 +2376,88 @@ static int handle_defaults(int fd, const HttpRequest *req, void *ctx)
 
 static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 {
+	VencConfig fresh;
+	char path[sizeof(g_config_path)];
+	int rebuild = 0, any_change = 0, live_resil = 0;
+	size_t i;
+
 	(void)req; (void)ctx;
-	/* /api/v1/restart is pure "reload from disk + reinit" (like SIGHUP).
-	 * We do NOT write the in-memory config back to disk here, so that a
-	 * manual file swap (scp, editor) followed by /api/v1/restart reloads
-	 * exactly what the operator put on disk.  Persistence happens at the
-	 * /api/v1/set level (LIVE and RESTART both now save per set). */
-	venc_api_request_reinit();
-	return httpd_send_ok(fd, "{\"reinit\":true}");
+
+	/* /api/v1/restart reloads the on-disk config (the operator may have
+	 * swapped /etc/venc.json via scp/editor) and applies it.  We do NOT write
+	 * the in-memory config back to disk, so a manual file swap reloads exactly
+	 * what is on disk; persistence happens at the /api/v1/set level.
+	 *
+	 * Classify the disk-vs-running diff so a bare restart no longer blindly
+	 * rebuilds the VENC channel — the rebuild/respawn storms the MMU on this
+	 * SoC (client 0x15; see venc_star6e_reinit_fragility).  Fast no-rebuild
+	 * path when the only changes are intra/gop-only resilience and/or gopSize
+	 * (both applied live by star6e_pipeline_apply_resilience_live); an
+	 * unchanged config is a no-op.  ANY other changed field (a genuine
+	 * MUT_RESTART field, or a MUT_LIVE field this fast path does not re-apply)
+	 * still respawns — correct, never a silent drop, just not storm-optimal. */
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	snprintf(path, sizeof(path), "%s", g_config_path);
+	pthread_mutex_unlock(&g_cfg_mutex);
+
+	if (!g_cfg || path[0] == '\0') {
+		venc_api_request_reinit();
+		return httpd_send_ok(fd, "{\"reinit\":true}");
+	}
+
+	memset(&fresh, 0, sizeof(fresh));
+	if (venc_config_load(path, &fresh) != 0) {
+		/* Can't read/parse disk — fall back to the historical respawn. */
+		venc_api_request_reinit();
+		return httpd_send_ok(fd, "{\"reinit\":true}");
+	}
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	for (i = 0; i < FIELD_COUNT; i++) {
+		const FieldDesc *f = &g_fields[i];
+		char *a = field_to_json_value_from_cfg(&fresh, f);
+		char *b = field_to_json_value_from_cfg(g_cfg, f);
+		int changed = (a && b && strcmp(a, b) != 0);
+		free(a);
+		free(b);
+		if (!changed)
+			continue;
+		any_change = 1;
+		/* resilience + gopSize are the live-applicable set; everything else
+		 * (rc_mode, size, framing, bitrate/fps/qp, audio, …) forces a
+		 * rebuild here. */
+		if (strcmp(f->key, "video0.resilience") != 0 &&
+		    strcmp(f->key, "video0.gop_size") != 0)
+			rebuild = 1;
+	}
+
+	/* A resilience change that moves ref_* / refPred needs a new channel (the
+	 * SVC-T pyramid binds at creation); only intra/gop-only deltas go live,
+	 * and only Star6E has the live consumer. */
+	if (!rebuild && any_change) {
+		if (strcmp(g_backend, "star6e") == 0 &&
+		    fresh.video0.ref_base == g_cfg->video0.ref_base &&
+		    fresh.video0.ref_enhance == g_cfg->video0.ref_enhance &&
+		    fresh.video0.ref_pred == g_cfg->video0.ref_pred)
+			live_resil = 1;
+		else
+			rebuild = 1;
+	}
+
+	*g_cfg = fresh;   /* commit the reloaded config (in memory only) */
+	pthread_mutex_unlock(&g_cfg_mutex);
+
+	if (rebuild) {
+		venc_api_request_reinit();
+		return httpd_send_ok(fd, "{\"reinit\":true}");
+	}
+	if (live_resil) {
+		venc_api_request_live_resilience();
+		return httpd_send_ok(fd,
+			"{\"reinit\":false,\"applied\":\"resilience\"}");
+	}
+	return httpd_send_ok(fd, "{\"reinit\":false,\"noop\":true}");
 }
 
 static int handle_idr(int fd, const HttpRequest *req, void *ctx)
