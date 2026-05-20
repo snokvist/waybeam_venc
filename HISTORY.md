@@ -12,8 +12,11 @@ port0, runs `MI_IVE_Shift_Detector` on a centre Y patch to measure
 inter-frame motion, accumulates the offset (clipped to half the dead
 border), and `MI_SYS_BufBlitPa`-crops a shifted window into VENC ch0's
 input.  VPE→VENC is *not* bound on this path.  Only the live ch0 stream
-is stabilized; dual ch1 recording, JPEG snapshots, and the debug OSD see
-the unstabilized full frame.  Controlled by two new `video0` fields:
+is stabilized; JPEG snapshots and the debug OSD see the unstabilized full
+frame.  Dual recording (`record.mode` dual/dual-stream) is mutually
+exclusive with stabilization — both would consume VPE port0 — and is
+skipped with a warning while stab is active.  Controlled by two new
+`video0` fields:
 `stabCropPct` (0 = off, 50..100 = crop %) and `stabRecenterSpeed`
 (exponential-decay recenter time constant in frames; 0 = stick to patch).
 Both are `MUT_RESTART` — the encoded resolution shrinks to
