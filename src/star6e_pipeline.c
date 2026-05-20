@@ -1258,7 +1258,6 @@ static void *star6e_stab_thread_main(void *arg)
 {
 	MI_S32 ret;
 	MI_S32 fd = -1;
-	StabSysBufInfo_t prev_buf;
 	StabSysBufHandle_t prev_handle = 0;
 	StabIveImage_t prev_img;
 	int have_prev = 0;
@@ -1272,7 +1271,6 @@ static void *star6e_stab_thread_main(void *arg)
 
 	(void)arg;
 	memset(&prev_ts, 0, sizeof(prev_ts));
-	memset(&prev_buf, 0, sizeof(prev_buf));
 	memset(&prev_img, 0, sizeof(prev_img));
 	memset(&dx, 0, sizeof(dx));
 	memset(&dy, 0, sizeof(dy));
@@ -1280,8 +1278,11 @@ static void *star6e_stab_thread_main(void *arg)
 	if (star6e_stab_alloc_ive_image(&dx, 1, 1,
 	    STAB_E_IVE_IMAGE_TYPE_S8C1) != 0 ||
 	    star6e_stab_alloc_ive_image(&dy, 1, 1,
-	    STAB_E_IVE_IMAGE_TYPE_S8C1) != 0)
+	    STAB_E_IVE_IMAGE_TYPE_S8C1) != 0) {
+		fprintf(stderr, "[waybeam] ERROR: stab IVE result alloc failed — "
+			"thread exiting, VENC ch0 will not receive frames\n");
 		goto out;
+	}
 
 	if (g_stab_sys_get_fd)
 		ret = g_stab_sys_get_fd(&g_stab_vpe_port, &fd);
@@ -1344,7 +1345,6 @@ static void *star6e_stab_thread_main(void *arg)
 			if (ret != 0 && (dbg_frame++ % 60) == 0)
 				fprintf(stderr, "[waybeam] stab first venc send "
 					"failed ret=0x%x\n", ret);
-			prev_buf = curr_buf;
 			prev_handle = curr_handle;
 			prev_img = curr_img;
 			prev_ts = curr_ts;
@@ -1420,7 +1420,6 @@ static void *star6e_stab_thread_main(void *arg)
 				"ret=0x%x\n", ret);
 		if (prev_handle)
 			g_stab_sys_out_put_buf(prev_handle);
-		prev_buf = curr_buf;
 		prev_handle = curr_handle;
 		prev_img = curr_img;
 		prev_ts = curr_ts;
@@ -3418,6 +3417,17 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 
 	if (!state || !mode)
 		return -1;
+
+	/* Stabilization owns VPE port0 via a manual GetBuf drain; a dual VENC
+	 * bind on the same source port would contend with that drain (and dual
+	 * would inherit the crop-overridden image dims).  The two are mutually
+	 * exclusive — skip dual and keep the stabilized main stream. */
+	if (g_stab_running) {
+		fprintf(stderr, "[waybeam] WARNING: dual recording disabled while "
+			"image stabilization is active (video0.stab_crop_pct); they "
+			"cannot share VPE port0\n");
+		return 0;
+	}
 
 	sensor_fps = state->sensor.mode.maxFps;
 	if (sensor_fps == 0) sensor_fps = 30;
