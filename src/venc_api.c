@@ -392,6 +392,10 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
 	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
+	/* Image stabilization on VPE — encoded resolution changes when toggled,
+	 * so the whole pipeline must restart. */
+	FIELD(video0, stab_crop_pct,       FT_UINT, MUT_RESTART),
+	FIELD(video0, stab_recenter_speed, FT_UINT, MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -447,6 +451,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
+	{ "video0.stabCropPct", "video0.stab_crop_pct" },
+	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -668,6 +674,11 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
 			return "zoom_y must be in range [0.0, 1.0]";
 	}
+	if (strcmp(key, "video0.stab_crop_pct") == 0) {
+		uint32_t v = cfg->video0.stab_crop_pct;
+		if (v != 0 && (v < 50 || v > 100))
+			return "stab_crop_pct must be 0 (off) or in range [50, 100]";
+	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
@@ -743,6 +754,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.zoom_pct",
 		"video0.zoom_x",
 		"video0.zoom_y",
+		"video0.stab_crop_pct",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
