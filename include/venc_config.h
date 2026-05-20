@@ -116,30 +116,34 @@ typedef struct {
 	 * fall back to "off".  See apply_resilience_preset() in
 	 * src/venc_config.c for the canonical table. */
 	char resilience[16];
-	/* Approach-C digital zoom: zoom_pct shrinks BOTH the input crop and
-	 * the encoded output dim — SCL runs 1:1, no upscale, no bandwidth
-	 * pressure.  The receiver sees the smaller resolution in SPS/PPS.
-	 * 0 = off (full image), 0.25..1.0 = crop fraction (parser clamps
-	 * below 0.25 — receivers that ignore mid-stream SPS changes render
-	 * deeper zoom invisibly).  pct change requires reinit (encoder size
-	 * change); x/y pan is live. */
+	/* Framing mode — the single user-facing knob for what the VPE crop does
+	 * (replaces the old standalone stab/zoom fields).  Recognised values:
+	 *   "off"                              full image, no crop manipulation
+	 *   "low" | "medium" | "high"          digital image stabilization
+	 *                                      (Star6E only; no-op on Maruko)
+	 *   "zoom-1.25x" | "zoom-1.50x" |      pure digital zoom (no stab) on
+	 *   "zoom-1.75x" | "zoom-2x"           both backends; zoom_x/y pan live
+	 * Each preset expands at load time via apply_framing_preset() into the
+	 * derived stab_crop_pct + stab_recenter_speed (stab presets) or zoom_pct
+	 * (zoom presets); the two are mutually exclusive by construction.
+	 * Unknown values fall back to "off".  Requires restart. */
+	char framing[16];
+	/* Derived from the `framing` preset only — NOT part of the JSON schema or
+	 * HTTP API.  Written exclusively by apply_framing_preset() at load time.
+	 * Do not parse from JSON, do not register in g_fields[].
+	 *
+	 * zoom_pct (Approach-C): shrinks BOTH the input crop and the encoded
+	 * output dim — SCL 1:1, no upscale, no bandwidth pressure; the receiver
+	 * sees the smaller resolution in SPS/PPS.  0 = off, 0.25..1.0 = crop
+	 * fraction.  zoom_x/y pan is live (MUT_LIVE below). */
 	double zoom_pct;
-	double zoom_x;             /* crop centre x, 0..1 */
-	double zoom_y;             /* crop centre y, 0..1 */
-	/* Digital image stabilization on VPE (Star6E only) — sole user-facing
-	 * knob.  Recognised values: "off", "low", "medium", "high".  Each
-	 * preset expands into the derived stab_crop_pct + stab_recenter_speed
-	 * fields below via apply_stab_preset() at load time; unknown values
-	 * fall back to "off".  When enabled the source is clamped to <=1920x1080
-	 * (preserve aspect) to avoid the high-res fps regression, then the
-	 * encoded resolution shrinks to (src_w * cropPct) x (src_h * cropPct),
-	 * reported in SPS/PPS.  Affects ch0 only; dual ch1, JPEG snapshot, and
-	 * debug OSD see the unstabilized frame.  Requires restart. */
-	char stab[16];
-	/* Derived from the `stab` preset only.  Not part of the JSON schema or
-	 * HTTP API — written exclusively by apply_stab_preset() at load time.
-	 * Do not parse from JSON, do not register in g_fields[].  Pipeline code
-	 * reads these to drive the VPE crop window + recenter decay. */
+	double zoom_x;             /* crop centre x, 0..1 (live pan) */
+	double zoom_y;             /* crop centre y, 0..1 (live pan) */
+	/* Stabilization expansion (Star6E).  When a stab preset is active the
+	 * source is clamped to <=1920x1080 (preserve aspect) to avoid the
+	 * high-res fps regression, then the encoded resolution shrinks to
+	 * (src_w * cropPct) x (src_h * cropPct).  Affects ch0 only; dual ch1,
+	 * JPEG snapshot, and debug OSD see the unstabilized frame. */
 	uint32_t stab_crop_pct;       /* 0 = off, 50..100 = crop % */
 	uint32_t stab_recenter_speed; /* 0 = stick to patch, >0 = recenter
 	                               * time-constant tau in frames */
@@ -274,11 +278,13 @@ int venc_config_save(const char *path, const VencConfig *cfg);
  * not recognised (caller should warn / fall back to "off"). */
 int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v);
 
-/* Expand a stabilization preset name ("off"|"low"|"medium"|"high") into the
- * derived stab_crop_pct + stab_recenter_speed fields of `v`.  Returns 0 on
+/* Expand a framing preset name ("off" | "low"|"medium"|"high" stab presets |
+ * "zoom-1.25x"|"zoom-1.50x"|"zoom-1.75x"|"zoom-2x" zoom presets) into the
+ * derived stab_crop_pct + stab_recenter_speed and/or zoom_pct fields of `v`
+ * (the stab and zoom expansions are mutually exclusive).  Returns 0 on
  * success, or -1 if `name` is not recognised (caller should fall back to
- * "off").  See apply_stab_preset() in src/venc_config.c for the table. */
-int venc_config_apply_stab_preset(const char *name, VencConfigVideo *v);
+ * "off").  See apply_framing_preset() in src/venc_config.c for the table. */
+int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v);
 
 #ifdef __cplusplus
 }
