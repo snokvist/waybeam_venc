@@ -392,10 +392,10 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, zoom_pct,    FT_DOUBLE, MUT_RESTART),
 	FIELD(video0, zoom_x,      FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, zoom_y,      FT_DOUBLE, MUT_LIVE),
-	/* Image stabilization on VPE — encoded resolution changes when toggled,
-	 * so the whole pipeline must restart. */
-	FIELD(video0, stab_crop_pct,       FT_UINT, MUT_RESTART),
-	FIELD(video0, stab_recenter_speed, FT_UINT, MUT_RESTART),
+	/* Image stabilization preset — sole user-facing knob; expands into the
+	 * derived stab_crop_pct + stab_recenter_speed.  Encoded resolution
+	 * changes when toggled, so the whole pipeline must restart. */
+	FIELD(video0, stab,                FT_STRING, MUT_RESTART),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -451,8 +451,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.zoomPct", "video0.zoom_pct" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
-	{ "video0.stabCropPct", "video0.stab_crop_pct" },
-	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -674,10 +672,10 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
 			return "zoom_y must be in range [0.0, 1.0]";
 	}
-	if (strcmp(key, "video0.stab_crop_pct") == 0) {
-		uint32_t v = cfg->video0.stab_crop_pct;
-		if (v != 0 && (v < 50 || v > 100))
-			return "stab_crop_pct must be 0 (off) or in range [50, 100]";
+	if (strcmp(key, "video0.stab") == 0) {
+		VencConfigVideo probe;
+		if (venc_config_apply_stab_preset(cfg->video0.stab, &probe) != 0)
+			return "stab must be one of: off, low, medium, high";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
@@ -754,7 +752,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.zoom_pct",
 		"video0.zoom_x",
 		"video0.zoom_y",
-		"video0.stab_crop_pct",
+		"video0.stab",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
@@ -1872,6 +1870,15 @@ static int process_restart_set_query(const SetQueryParam *param,
 			old_v.gop_size, new_cfg.video0.gop_size,
 			needs_respawn ? "respawn" : "live-reinit");
 	}
+
+	/* Detect a stabilization preset change.  Like resilience, the staged
+	 * new_cfg holds the new preset *name* but the derived stab_crop_pct /
+	 * stab_recenter_speed still hold the old expansion.  Re-expand now so
+	 * in-memory /status + GET stay coherent until the respawn reloads from
+	 * disk.  Always a plain restart — no respawn classification needed. */
+	if (strcmp(g_cfg->video0.stab, new_cfg.video0.stab) != 0)
+		(void)venc_config_apply_stab_preset(new_cfg.video0.stab,
+			&new_cfg.video0);
 
 	/* Commit g_cfg in memory and persist to disk for both paths.
 	 * For respawn, the fresh process will reload from disk anyway,

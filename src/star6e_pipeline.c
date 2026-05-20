@@ -550,7 +550,8 @@ static void star6e_pipeline_stop_vpe(void)
  *
  * VPE → VENC is NOT bound on this path.  Dual ch1, JPEG snapshot, and the
  * debug OSD still see the unstabilized full port0 frame — only VENC ch0
- * gets the stabilized crop.  Configured by video0.stab_crop_pct (0 = off).
+ * gets the stabilized crop.  Configured by the video0.stab preset
+ * (off|low|medium|high), which expands into the derived stab_crop_pct.
  *
  * Local types and dlsym-resolved symbols mirror the working standalone
  * star.c sample; pulling SigmaStar mi_sys.h / mi_ive.h here would collide
@@ -3693,18 +3694,38 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	state->image_width = pconf.image_width;
 	state->image_height = pconf.image_height;
 
-	/* Image stabilization (Approach A): VPE port0 stays at full image dim;
-	 * a private thread drains port0, runs IVE shift detection, and BufBlits
-	 * a shifted crop into VENC ch0's input port.  VENC ch0 is created at the
-	 * crop dim.  zoomPct is incompatible (it shrinks the VPE port output via
-	 * SCL crop, fighting the manual drain path); zoomX/zoomY ARE consumed —
-	 * they pick the crop center, so the stabilized stream pans live within
-	 * the source frame.  When stab is off, the pan-ramp thread owns x/y. */
+	/* Image stabilization: driven by the video0.stab preset (off|low|medium|
+	 * high), which expands into the derived crop % + recenter time-constant.
+	 * Preferred path (HW-crop): VPE port0 hardware-crops the stab window into
+	 * a VENC bind; a tiny port1 tap feeds IVE shift detection.  Legacy
+	 * manual-drain+blit is the automatic fallback (see star6e_stab_setup_ports).
+	 * VENC ch0 is created at the crop dim.  zoomPct is incompatible; zoomX/
+	 * zoomY ARE consumed — they pick the crop center, so the stabilized stream
+	 * pans live.  When stab is off, the pan-ramp thread owns x/y. */
 	if (star6e_stab_enabled(vcfg)) {
 		if (vcfg->video0.zoom_pct > 0.0)
-			fprintf(stderr, "[waybeam] WARNING: video0.stab_crop_pct "
-				"in use; ignoring video0.zoom_pct (use stab_crop_pct "
-				"to set crop size); zoom_x/zoom_y are honored as pan\n");
+			fprintf(stderr, "[waybeam] WARNING: video0.stab '%s' in use; "
+				"ignoring video0.zoom_pct; zoom_x/zoom_y are honored as "
+				"pan\n", vcfg->video0.stab);
+		/* Clamp the stab source to <=1920x1080 (preserve aspect, even-
+		 * aligned) to avoid the high-res fps regression: above 1080p the
+		 * VPE+VENC path cannot sustain 60/90/120 fps with stab on.  At
+		 * <=1080p configs this is a no-op. */
+		if (pconf.image_width > 1920 || pconf.image_height > 1080) {
+			uint32_t sw = pconf.image_width, sh = pconf.image_height;
+			uint64_t rw = (uint64_t)1920 * 1000 / sw;
+			uint64_t rh = (uint64_t)1080 * 1000 / sh;
+			uint64_t r = rw < rh ? rw : rh;
+			uint32_t nw = (uint32_t)((uint64_t)sw * r / 1000) & ~1u;
+			uint32_t nh = (uint32_t)((uint64_t)sh * r / 1000) & ~1u;
+			if (nw < 2) nw = 2;
+			if (nh < 2) nh = 2;
+			fprintf(stderr, "[waybeam] WARNING: video0.stab '%s': source "
+				"%ux%u exceeds 1920x1080; clamping to %ux%u to preserve "
+				"fps\n", vcfg->video0.stab, sw, sh, nw, nh);
+			pconf.image_width = nw;
+			pconf.image_height = nh;
+		}
 		star6e_stab_configure(pconf.image_width, pconf.image_height,
 			vcfg->video0.stab_crop_pct,
 			vcfg->video0.stab_recenter_speed,
@@ -3794,7 +3815,7 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 	if (g_stab_running) {
 		fprintf(stderr, "[waybeam] WARNING: dual recording downgraded to "
 			"single-channel while image stabilization is active "
-			"(video0.stab_crop_pct): no separate ch1 — recording the "
+			"(video0.stab): no separate ch1 — recording the "
 			"stabilized main stream (ch0) at its bitrate, not "
 			"record.bitrate\n");
 		return 0;

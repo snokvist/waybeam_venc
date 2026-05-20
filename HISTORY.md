@@ -7,20 +7,29 @@ cleanly on top of the 0.11.0 zoom work (#120) rather than the original
 stabilization branch (#118), which forked before the pan-ramp/AE-meter
 changes landed and could no longer cherry-pick clean.
 
-**Stabilization (opt-in, Star6E only).**  A dedicated thread drains VPE
-port0, runs `MI_IVE_Shift_Detector` on a centre Y patch to measure
-inter-frame motion, accumulates the offset (clipped to half the dead
-border), and `MI_SYS_BufBlitPa`-crops a shifted window into VENC ch0's
-input.  VPE→VENC is *not* bound on this path.  Only the live ch0 stream
-is stabilized; JPEG snapshots and the debug OSD see the unstabilized full
-frame.  Dual recording (`record.mode` dual/dual-stream) is mutually
-exclusive with stabilization — both would consume VPE port0 — and is
-skipped with a warning while stab is active.  Controlled by two new
-`video0` fields:
-`stabCropPct` (0 = off, 50..100 = crop %) and `stabRecenterSpeed`
-(exponential-decay recenter time constant in frames; 0 = stick to patch).
-Both are `MUT_RESTART` — the encoded resolution shrinks to
-`image * pct`, reported in SPS/PPS.
+**Stabilization (opt-in, Star6E only).**  A single `video0.stab` preset
+(`off` | `low` | `medium` | `high`) is the sole user-facing knob —
+resilience-style: it expands into the derived crop fraction + recenter
+time-constant; the granular fields are not part of the JSON schema or HTTP
+API.  Preferred data path (HW-crop): VPE port0 hardware-crops the stab
+window — `MI_VPE_SetPortCrop` per detection — straight into a VENC **bind**
+(zero-copy, no per-frame blit), while a tiny 256×256 port1 tap feeds
+`MI_IVE_Shift_Detector` for motion estimation.  Decoupling the detector
+from the stream lets ch0 run at full sensor rate (90/120 fps at 1080p
+confirmed).  The original single-port manual-drain + `MI_SYS_BufBlitPa`
+path is retained as an **automatic fallback** if a BSP rejects the
+simultaneous port1.  Binding port0→VENC also fixes the long-standing
+teardown wedge (the legacy un-drained full-res port0 queue that wedged
+`[vpe0_P0_MAIN]` into D-state on restart).  Return-to-center decays the
+offset *vector* in a float accumulator → a straight diagonal back to
+center with no per-axis rounding tail.  When enabled the source is clamped
+to ≤1920×1080 (preserve aspect) to avoid the high-res fps regression; the
+encoded resolution then shrinks to the crop fraction of the (clamped)
+source, reported in SPS/PPS.  Only the live ch0 stream is stabilized; JPEG
+snapshots and the debug OSD see the unstabilized frame.  Dual recording
+(`record.mode` dual/dual-stream) is downgraded to single-channel while
+stab is active (both would consume VPE port0) — it records the stabilized
+ch0 at its bitrate, with a warning.  `video0.stab` is `MUT_RESTART`.
 
 **Interplay with 0.11.0 zoom.**  Stabilization and `zoomPct` are mutually
 exclusive (zoomPct shrinks the VPE port output via SCL crop, which fights

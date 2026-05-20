@@ -126,15 +126,23 @@ typedef struct {
 	double zoom_pct;
 	double zoom_x;             /* crop centre x, 0..1 */
 	double zoom_y;             /* crop centre y, 0..1 */
-	/* Digital image stabilization on VPE (Star6E only).  Manual VPE
-	 * port0 drain + IVE shift detection + BufBlit shifted crop into
-	 * VENC ch0 input.  Affects ch0 only; dual ch1, JPEG snapshot, and
-	 * debug OSD continue to see the unstabilized full port0 frame.
-	 * Encoded resolution shrinks to (image_w * pct) x (image_h * pct),
-	 * which is reported in SPS/PPS.  Requires restart. */
+	/* Digital image stabilization on VPE (Star6E only) — sole user-facing
+	 * knob.  Recognised values: "off", "low", "medium", "high".  Each
+	 * preset expands into the derived stab_crop_pct + stab_recenter_speed
+	 * fields below via apply_stab_preset() at load time; unknown values
+	 * fall back to "off".  When enabled the source is clamped to <=1920x1080
+	 * (preserve aspect) to avoid the high-res fps regression, then the
+	 * encoded resolution shrinks to (src_w * cropPct) x (src_h * cropPct),
+	 * reported in SPS/PPS.  Affects ch0 only; dual ch1, JPEG snapshot, and
+	 * debug OSD see the unstabilized frame.  Requires restart. */
+	char stab[16];
+	/* Derived from the `stab` preset only.  Not part of the JSON schema or
+	 * HTTP API — written exclusively by apply_stab_preset() at load time.
+	 * Do not parse from JSON, do not register in g_fields[].  Pipeline code
+	 * reads these to drive the VPE crop window + recenter decay. */
 	uint32_t stab_crop_pct;       /* 0 = off, 50..100 = crop % */
-	uint32_t stab_recenter_speed; /* 0 = stick to patch, >0 = pixels/sec
-	                               * drift of accumulated offset toward 0 */
+	uint32_t stab_recenter_speed; /* 0 = stick to patch, >0 = recenter
+	                               * time-constant tau in frames */
 } VencConfigVideo;
 
 typedef struct {
@@ -265,6 +273,12 @@ int venc_config_save(const char *path, const VencConfig *cfg);
  * Returns 0 on success ("off" or recognised preset), or -1 if `name` is
  * not recognised (caller should warn / fall back to "off"). */
 int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v);
+
+/* Expand a stabilization preset name ("off"|"low"|"medium"|"high") into the
+ * derived stab_crop_pct + stab_recenter_speed fields of `v`.  Returns 0 on
+ * success, or -1 if `name` is not recognised (caller should fall back to
+ * "off").  See apply_stab_preset() in src/venc_config.c for the table. */
+int venc_config_apply_stab_preset(const char *name, VencConfigVideo *v);
 
 #ifdef __cplusplus
 }
