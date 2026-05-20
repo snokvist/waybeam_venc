@@ -1,5 +1,49 @@
 # History
 
+## [0.12.0] - 2026-05-20
+
+Digital image stabilization (DIS) on the Star6E VPE pipeline, re-grafted
+cleanly on top of the 0.11.0 zoom work (#120) rather than the original
+stabilization branch (#118), which forked before the pan-ramp/AE-meter
+changes landed and could no longer cherry-pick clean.
+
+**Stabilization (opt-in, Star6E only).**  A dedicated thread drains VPE
+port0, runs `MI_IVE_Shift_Detector` on a centre Y patch to measure
+inter-frame motion, accumulates the offset (clipped to half the dead
+border), and `MI_SYS_BufBlitPa`-crops a shifted window into VENC ch0's
+input.  VPE→VENC is *not* bound on this path.  Only the live ch0 stream
+is stabilized; dual ch1 recording, JPEG snapshots, and the debug OSD see
+the unstabilized full frame.  Controlled by two new `video0` fields:
+`stabCropPct` (0 = off, 50..100 = crop %) and `stabRecenterSpeed`
+(exponential-decay recenter time constant in frames; 0 = stick to patch).
+Both are `MUT_RESTART` — the encoded resolution shrinks to
+`image * pct`, reported in SPS/PPS.
+
+**Interplay with 0.11.0 zoom.**  Stabilization and `zoomPct` are mutually
+exclusive (zoomPct shrinks the VPE port output via SCL crop, which fights
+the manual drain) — when both are set, zoomPct is ignored with a warning.
+`zoomX`/`zoomY` are still honoured: under stabilization they pan the
+stabilized crop window directly via `star6e_stab_set_pan()`; with stab off
+they drive the 0.11.0 pan-ramp + AE-meter path unchanged.  `apply_zoom`
+short-circuits to the stab pan when the stab thread is running.
+
+**Debug OSD under stabilization.**  The OSD attaches at the full source
+dim (port0 is never cropped on the stab path) and its stats panel offset
+tracks the live crop window per-frame via
+`star6e_pipeline_stab_panel_anchor()`, so the panel stays put in the
+encoded view as corrections shift the crop.
+
+**IMU-gyro readiness.**  The motion estimate is purely optical today, but
+the design leaves a clean seam for gyro fusion: the existing BMI270 driver
+now routes its frame-synced samples into a shared `ImuRing` (replacing the
+discard stub), and the per-frame estimate lives in
+`star6e_stab_estimate_shift()` with `star6e_stab_gyro_window()` supplying
+the frame-aligned angular rates for the interval.  Adding gyro-assisted
+stabilization is then just the math: integrate yaw/pitch to pixels via the
+lens focal length and fuse with the optical shift.  The gyro window is read
+and surfaced in the periodic stab diagnostic so the plumbing and
+frame-sync are live, not speculative.
+
 ## [0.11.0] - 2026-05-19
 
 Star6E zoom improvements lifted from the DIVP/stabilization branch
