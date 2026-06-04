@@ -358,13 +358,28 @@ Majestic-oriented clients.
 ### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_recenter_speed`, `video0.stab_smooth_pct`, `video0.stab_still_frames`, `video0.stab_edge_pct`, `video0.stab_motion_thresh`
 
 - `video0.framing`: string preset — the single knob for what the VPE crop does.
-  - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
-    `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` | `zoom-4x` (digital
-    zoom, both backends).
+  - Values: `off` | `stab` (crop+shrink image stabilization, Star6E only) |
+    `stab-fill` (fixed-zoom "floating image" stabilization, Star6E only) |
+    `zoom-1.25x` | `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` |
+    `zoom-4x` (digital zoom, both backends).
   - Mutability: `restart_required` (changes encoded resolution / pipeline).
-  - The preset expands internally into the zoom crop fraction (zoom presets) or
-    the stabilization crop/recenter (`stab`); the two are mutually exclusive.
-    There is no settable continuous `zoom_pct` — use a zoom preset.
+  - The preset expands internally into the zoom crop fraction (zoom presets)
+    or the stabilization crop/recenter (`stab`, `stab-fill`); these are
+    mutually exclusive. There is no settable continuous `zoom_pct` — use a
+    zoom preset.
+  - `stab` vs `stab-fill`: `stab` clamps the source to ≤1920×1080 and shrinks
+    the encode to `src × cropPct` (the receiver sees a smaller resolution).
+    `stab-fill` instead requires an **oversampled** sensor mode (e.g. 2560×1920
+    feeding a 1920×1080 encode): VPE ingests the full sensor frame and port0
+    SCL-downscales it to the configured encode size, then the detector thread
+    composes each VENC input by black-filling the four exposed strips
+    (`MI_SYS_BufFillPa`) and blitting the in-bounds source content at a
+    shifted sub-rect (`MI_SYS_BufBlitPa`). The content scale never changes —
+    no zoom — and the exposed edge is proportional to the shift. `stabCropPct`
+    sets the max shift / border budget (`max_off = src × (100−pct)/200`;
+    pct 80 → up to ~10% border).
+  - Both stab presets share the `stab_*` feel knobs below; `stabCropPct` is
+    meaningful under both.
 - `video0.stab_crop_pct`, `video0.stab_recenter_speed`: uint, mutability
   `restart_required`. Aliases `video0.stabCropPct`, `video0.stabRecenterSpeed`.
   Advanced overrides of the `stab` preset's derived crop/recenter — read
@@ -378,10 +393,12 @@ Majestic-oriented clients.
 - `video0.stab_smooth_pct`, `video0.stab_still_frames`, `video0.stab_edge_pct`,
   `video0.stab_motion_thresh`: uint, mutability `restart_required`. Aliases
   `video0.stabSmoothPct`, `video0.stabStillFrames`, `video0.stabEdgePct`,
-  `video0.stabMotionThresh`. Advanced "feel" knobs of the `stab` preset, same
-  scoping as crop/recenter above (read after preset expansion, framing=stab
-  only, reset on re-selecting the preset). These tune the motion response so a
-  user can dial in the optimal feel:
+  `video0.stabMotionThresh`. Advanced "feel" knobs of the stabilization
+  presets, read after preset expansion and honored under `framing=stab` and
+  `framing=stab-fill` (the accumulator is mode-agnostic), reset on
+  re-selecting the preset. These tune the motion response so a user can
+  dial in the optimal feel (under `stab-fill`, how fast the black border
+  grows/recedes):
   - `stab_smooth_pct`: `0` = preset default (30); else `5..100`. EMA low-pass on
     the applied crop offset, as a percentage. Lower = smoother but more lag;
     `100` = no smoothing (snappiest, most shake-through). This is the primary
@@ -1302,7 +1319,7 @@ divergence is listed.  As of `contract_version: 0.10.1`:
 | `/api/v1/idr/stats` | yes | yes | Identical schema; values reflect each backend's IDR rate-limit. |
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
-| `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
+| `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` and `stab-fill` presets are Star6E-only (no-op on Maruko; `stab-fill` needs an oversampled sensor mode); `zoom_x/y` are live pan controls (ignored under stabilization). |
 | `isp.aeEngine` ("sdk" / "custom") | applied (legacy_ae mapping) | applied (ae_mode mapping) | Unified AE selector landed in 0.10.13.  `sdk` → SDK firmware AE on both backends.  `custom` → cus3a userspace AE; on Maruko this installs the no-op adaptor + 15 Hz supervisory thread (~24 % CPU saving at 120 fps). |
 
 ## Change Log (Contract)

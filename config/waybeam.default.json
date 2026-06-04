@@ -41,7 +41,9 @@
     "stabSmoothPct": 0,
     "stabStillFrames": 0,
     "stabEdgePct": 0,
-    "stabMotionThresh": 0
+    "stabMotionThresh": 0,
+    "stabKalmanQ": 0.03,
+    "stabKalmanR": 2.0
   },
   "outgoing": {
     "enabled": false,

@@ -76,6 +76,19 @@ typedef struct {
 	 * which dispatches to the per-backend venc_jpeg_backend_set_quality
 	 * hook (Get→modify→Set on the existing MJPEG channel). */
 	int (*apply_snapshot_quality)(uint32_t q);
+	/* Live-update the stab-fill Kalman tuning (video0.stab_kalman_q /
+	 * stab_kalman_r).  Pure scalar swap inside the detector tick — no
+	 * pipeline reconfigure.  Inert when framing!=stab-fill (writes are
+	 * stored and picked up on next stab-fill start).  Returns 0 on
+	 * success, -1 on SDK error.  NULL when the backend has no stab path. */
+	int (*apply_kalman)(double q, double r);
+	/* Toggle the stab-fill IVE bypass (video0.pause_stab).  When paused,
+	 * the detector still drains port0 and runs the CPU compose, but skips
+	 * the IVE shift estimation and emits acc=(0,0).  Saves ~15 ms/tick on
+	 * single-core SoCs so the encoder can hit sensor rate while the
+	 * user has shake compensation off.  Returns 0 on success, -1 on SDK
+	 * error.  NULL when the backend has no stab path. */
+	int (*apply_pause_stab)(bool paused);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

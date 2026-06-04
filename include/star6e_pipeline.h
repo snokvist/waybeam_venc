@@ -125,6 +125,24 @@ void star6e_pipeline_vpe_scl_preset_shutdown(void);
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y);
 
+/** Live-update the stab-fill Kalman tuning (process noise q,
+ *  measurement noise r).  Stored under a small mutex; the detector
+ *  thread re-reads them once per detect tick, so a write is picked up
+ *  on the next tick with no pipeline reconfigure.  Inert when
+ *  framing!=stab-fill (values are stored and applied on next start). */
+void star6e_pipeline_set_kalman(double q, double r);
+
+/** Toggle the stab-fill compose path (video0.pause_stab).  When true
+ *  the detector + blit threads are stopped and port0 is hardware-bound
+ *  straight to VENC (zero-copy, full sensor rate, no shake compensation).
+ *  When false, port0 is unbound and the detector + blit threads come
+ *  back up (returns to stab-fill compose).  Each toggle costs ~20–30 ms
+ *  but the steady-state benefit is +15-20 fps + lower latency.  Returns
+ *  0 on success, -1 if any SDK call in the transition failed (the
+ *  pipeline is then restored to the detector-running path so the stream
+ *  stays up).  Inert under framing!=stab-fill (returns -1, no-op). */
+int star6e_pipeline_set_pause_stab(bool paused);
+
 void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 
 /** When image stabilization is on, return the current crop-window

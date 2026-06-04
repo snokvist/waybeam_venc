@@ -133,6 +133,29 @@ ssh root@192.168.1.13 "killall waybeam"
 - [ ] Device stays responsive (SSH works) after each restart.
 - **Expect:** no D-state hang, no kernel faults across restarts. **Result (HW-crop refactor):** PASS — 5/5 consecutive `S95waybeam restart` cycles clean (uptime continuous, no watchdog reboot). Root cause of the old wedge: the legacy single-port path made the stab thread the ONLY consumer of full-res VPE port0, and stopping it before unbinding VIF→VPE left the producer filling an un-drained queue → `[vpe0_P0_MAIN]` D-state. The HW-crop refactor binds port0→VENC (consumed by hardware, standard teardown) and only manually drains a tiny port1 tap, disabled via a quiesce handshake. **Prior result (legacy path, retained for history):** PARTIAL FAIL — intermittent teardown wedge. New-binary restart tally this session: T1 (off→80) clean; T4 (80→80+dual) WEDGE; cycle A (80+dual→0) clean; cycle B (0→80) clean; cycle C (80→0, plain toggle) WEDGE. Both wedges left `[vpe0_P0_MAIN]` in D-state, drove load avg up while CPU stayed mostly idle, made the SoC unreachable (~80s), then a watchdog/`panic=20` reset recovered to a healthy stab-correct boot every time. No venc/MI oops or hung-task survives the reset to inspect (reset wipes the ring). The only fault in post-boot dmesg is `DEBUG_LOCKS_WARN_ON(in_interrupt())` from the **8812eu wifi driver** (`_halmac_mutex_lock` ← `usb_recv_tasklet`) — unrelated to stab. Net: the wedge is the known venc teardown-fragility class (see [[venc_teardown_regression]] / [[venc_star6e_reinit_fragility]]), not introduced by this PR, but stab restarts do hit it. Device always recovered; never needed a physical power cycle.
 
+### T7 — `framing=stab-fill` fixed-zoom + black-border stabilization
+- [ ] Oversampled sensor mode active (imx335 2560×1920@60); 16:9 encode
+      (`json_cli -s .video0.size '"1920x1080"'`), `stabCropPct` 80 (default).
+- [ ] `json_cli -s .video0.framing '"stab-fill"'`, restart.
+- [ ] `grep 'stab-fill: manual-drain mode' /tmp/waybeam.log` → engages with
+      `precrop 2560x1920, encode 1920x1080, max_off 256x192` (pct 80).
+- [ ] **Rest = full frame, no border, no zoom:** static bench → full 1920×1080.
+- [ ] **Border grows with motion, scale constant:** shake/pan on X → a black bar
+      appears on one edge proportional to the shift (256px shift → ~192px bar);
+      the *content scale never changes* (no zoom-in). Border recedes when steady.
+- [ ] **Kalman trajectory feel:** slow camera pans pass through (no fight),
+      fast shakes are held still; no slow drift back to center after a long
+      hold (Kalman has no recenter).
+- [ ] **Threaded blit:** with `system.verbose=true`, `grep 'stab time:'
+      /tmp/waybeam.log` shows `ive=Xus send=Yus (mode=fill)` and no
+      `stab-fill queue blit failed` warnings.
+- [ ] Teardown: toggle `stab-fill`→`off`→`stab-fill` ×3, dmesg clean, SSH
+      responsive.
+- [ ] `stabCropPct` sweep: 90 (≤5% border) and 70 (≤15% border) change the max
+      bar width as expected.
+- **Expect:** constant scale, proportional black border on shift, full frame at
+  rest, stable VPE, clean teardown.
+
 ## Watch-list (areas with no host-side coverage)
 
 - `star6e_stab_reapply_vpe_port` uses `EnablePort` without a prior

@@ -1,12 +1,20 @@
 # EIS Integration Plan — Star6E (SSC338Q / Infinity6E)
 
-> **Status (0.8.0): historical reference.** The EIS module described in
+> **Status: historical reference.** The standalone EIS module described in
 > "Phase B: Crop-Based EIS" was removed in 0.8.0 — see HISTORY for
 > the rationale (worked in only one validated config; not worth the
-> shipped maintenance surface). This document is retained for the
-> Phase C LDC-warp design notes, which remain valid and would be the
-> starting point for any future stabilization work. The IMU module
-> (Phase A) is also retained, compiled but disabled by default.
+> shipped maintenance surface). The shipping stabilization now lives in
+> `src/star6e_pipeline.c` as the `framing` presets: `stab` (crop+shrink)
+> and `stab-fill` (fixed-zoom "floating image": full sensor SCL-downscaled
+> to the configured encode, then a window inside that encode buffer is
+> shifted by the IVE accumulator with the exposed edge black-filled — CPU
+> compose via `MI_SYS_BufFillPa` strips + `MI_SYS_BufBlitPa` content;
+> trajectory smoothed with a Kalman filter ported from
+> `ejo_wfb_stabilizer.py`, and the blit runs in a dedicated thread so it
+> overlaps with the IVE detect on dual-core SoCs). This document is
+> retained for the Phase C LDC-warp design notes, which remain valid and would
+> be the starting point for any future rotation-compensating work. The IMU
+> module (Phase A) is also retained, compiled but disabled by default.
 
 ## Investigation Findings
 

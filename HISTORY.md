@@ -1,5 +1,153 @@
 # History
 
+## [0.13.0] - 2026-06-03
+
+Improvements to the existing `stab-fill` preset (Star6E): the per-detect
+trajectory is now Kalman-smoothed instead of EMA-smoothed, the CPU compose
+is strip-only (BufFillPa + BufBlitPa) instead of full-buffer memset + blit,
+and the BufBlitPa runs on its own thread to overlap with the next IVE
+detect.  Geometry is unchanged at the user level: the IVE accumulator still
+shifts a window inside the fixed encoder frame with black around the
+exposed edge, bounded by `stabCropPct`.
+
+**Kalman trajectory smoothing** (ported from the wfb-stabilizer Python
+reference, `ejo_wfb_stabilizer.py`).  Replaces the EMA + gated-recenter
+logic for fill mode only.  Per axis:
+
+```
+P_predict = P_estimate + Q          (Q = 0.03 = processVar)
+K         = P_predict / (P_predict + R)   (R = 2.0 = measVar)
+X_estimate += K * (facc - X_estimate)
+P_estimate  = (1 - K) * P_predict
+acc = round(facc - X_estimate)      (high-pass compensation)
+```
+
+Slow camera pans pass through (Kalman tracks → compensation ≈ 0 → output
+follows the pan).  Fast shake leaves `X_estimate` behind → compensation ≈
+`facc` → output stays still.  Steady-state gain ≈ 0.11 — equivalent to a
+~0.5 Hz first-order cutoff at 30 Hz detect rate, matching what the Python
+reference targets for drone shake.  No EMA, no recenter, no `still_frames`
+gate under fill mode; `stabCropPct` still bounds the visible bar.
+
+**Strip-only CPU compose.**  Each VENC input buffer is now composed by:
+1. `MI_SYS_BufFillPa` painting Y=16/UV=128 on the four exposed strips (top,
+   bottom, left, right) only — not the whole buffer.  Pre-replicated 32-bit
+   fill constants (`0x10101010` / `0x80808080`) — `BufFillPa` writes 32-bit
+   words and an unreplicated byte would tile as e.g. `0x10,0,0,0` → green.
+2. `MI_SYS_BufBlitPa` placing the in-bounds source rect at the matching
+   sub-rect of the VENC input (one call per NV12 plane; no scaling).
+
+This replaces the previous full-buffer `memset` + `flush_inv_cache` + blit
+in `star6e_stab_send_shifted_frame_to_venc` — the strips are the only
+region not overwritten by the blit, so painting the rest was wasted
+bandwidth.  Sign convention is unchanged: `off_x > 0` → src starts at
+`+off_x`, dst at `0` → content moves left, right bar black; symmetric on
+the other axis.
+
+**Threaded blit (single-core: small win; dual-core: meaningful).**  IVE is
+CPU-bound (~15 ms mean, scene-dependent); `BufBlitPa` is memory-bandwidth-
+bound (~9 ms for 1920×1080 NV12).  Different SoC resources → can overlap.
+A new dedicated blit thread consumes a single-slot queue (mutex + 2
+condvars); the detector copies Y centre into one of two `sw_detect[]`
+IVE-image slots (384×384 each, posix-aligned), re-points `curr_img` at the
+sw copy, then queues `(buf, handle, acc)` for the blit thread.  Handle
+ownership transfers through the slot — the blit thread `put_buf`s after
+the blit, so the port0 buffer is released as soon as its bytes are
+consumed (no extra latency).  Detector continues to the next IVE detect
+while the blit runs.  Falls back to inline blit if the thread spawn fails.
+
+**Per-detect timing instrumentation** gated on `system.verbose`.
+`[waybeam] stab time: ive=Xus send=Yus (mode=...)` once every 30 detect
+ticks; in fill mode `send=` is the blit + push (queue handoff in threaded
+mode).  Used on the bench to size the IVE vs blit split.
+
+**Geometry change inside the existing `stab-fill` path.**  The 0.12.0
+`stab-fill` clamped its source to ≤1080p and emitted at the sensor's
+native aspect (the same path as the regular `stab`).  This release instead
+ingests the full sensor frame and SCL-downscales it to the configured
+encode resolution on port0 — so the output stays at the user's configured
+size (e.g. 1920×1080 from a 2560×1920 sensor) with no aspect surprises.
+The detector measures motion in image domain; the compose shifts a window
+inside the encoder frame and black-fills the exposed edge as before.
+
+`video0.framing` is `MUT_RESTART`.  No-op on Maruko.
+
+## [0.14.0] - 2026-05-29
+
+Variable/elastic stabilization: a new `video0.framing` preset `stab-var`
+(Star6E only), building on the 0.13.0 `stab-crop` HW-crop engine.
+
+**Elastic crop.**  Where `stab-crop` slides a fixed-size window inside the
+sensor oversample, `stab-var` makes the window *elastic*: it is the largest
+encode-aspect window that fits the sensor at rest (effective zoom 1.0×, full
+FOV, no wasted margin) and shrinks only as much as the detected motion
+demands.  VPE always downscales the window to the configured encode, so the
+effective zoom rises with shake (up to ≈ `sensor_w/encode_w`, e.g. 1.33×) and
+relaxes back to 1.0× as the camera settles (driven by the existing recenter).
+The shrink is driven per axis (the window must fit the sensor once offset by
+the accumulator).
+
+**Reuses the stab-crop engine.**  `stab-var` is `stab-crop` plus an elastic
+crop: it sets `stab_full_res` (full-sensor precrop, no clamp, port0→VENC
+bind, optional port1 detector tap, accumulator/recenter/EMA, MMU-safe
+teardown — all unchanged) and a new `stab_variable` flag that switches the
+per-frame crop math to `star6e_stab_apply_port_crop_vz()` (integer-only,
+variable size + position).  The existing `max_off = (sensor−encode)/2`
+accumulator clamp already yields the correct shift/zoom limits.
+
+**No distortion / no letterbox.**  The elastic crop keeps the *encode* aspect
+(not the sensor aspect), so VPE downscales it uniformly to the configured
+encode.  A 16:9 encode on a 4:3 sensor works directly — at rest the crop is
+the full-width 2560×1440 window scaled to 1920×1080 (fills the frame, no
+black bars), shrinking toward 1920×1080 as motion grows.  The encode is left
+at whatever the user configured; no aspect snapping.
+
+**Degrade.**  With no oversample margin, or if the BSP can't open the
+detector tap, `stab-var` keeps the centered crop and disables the detector —
+the stream stays up, uncorrected — same as `stab-crop`.
+
+The `stab_*` feel knobs apply to all three stab presets (they also shape how
+fast the `stab-var` zoom pulses in and relaxes); `stabCropPct` is inert under
+`stab-var`.  `video0.framing` remains `MUT_RESTART`.  No-op on Maruko.
+
+**Note:** on-device validation pending — `stab-var` resizes the VPE SCL
+window every frame (no prior mode does), so the variable-SCL stability and
+the detector loop under changing zoom must be confirmed on the bench (T8).
+
+## [0.13.0] - 2026-05-28
+
+Full-resolution hardware-crop stabilization: a new `video0.framing` preset
+`stab-crop` (Star6E only).
+
+**`stab-crop` vs `stab`.**  The existing `stab` preset clamps the source to
+≤1920×1080 and shrinks the encoded output to `src × cropPct`, so the receiver
+sees a smaller resolution.  `stab-crop` instead targets an **oversampled**
+sensor mode (e.g. imx335 2560×1920 feeding a 1920×1080 encode): VPE ingests
+the full sensor frame and port0 1:1-crops the encode window from it, so the
+encode stays at full resolution with no scaling and no resolution loss.  The
+stabilization dead-border is the sensor surplus — margin = `(sensor −
+encode)/2` per axis (320×420 for the example above), versus `stab`'s
+crop-fraction border.
+
+**Implementation reuses the proven HW-crop engine.**  `stab-crop` drives the
+same `star6e_stab_*` detector/IVE/teardown machinery as `stab`'s HW path,
+configured with `src = pre = full precrop` and an explicit full-resolution
+`enc`, so the image→precrop mapping is the identity and `MI_VPE_SetPortCrop`
+is a pure 1:1 crop.  The precrop is forced to the full (non-aspect) sensor
+frame so the moving encode window provides both the aspect correction and the
+stabilization headroom.  The ≤1080p source clamp is skipped.
+
+**Graceful degrade (no abort).**  If the sensor has no oversample margin, or
+the BSP cannot open the simultaneous port1 detector tap, `stab-crop` keeps
+port0 bound to VENC with a centered 1:1 crop and disables the detector — the
+stream stays up at full resolution, uncorrected, rather than aborting startup
+or distorting via a non-1:1 scale.
+
+The `stab_*` feel knobs (`stabRecenterSpeed`/`stabSmoothPct`/`stabStillFrames`/
+`stabEdgePct`/`stabMotionThresh`) are mode-agnostic and apply to both `stab`
+and `stab-crop`; `stabCropPct` is inert under `stab-crop`.  `video0.framing`
+remains `MUT_RESTART`.  No-op on Maruko.
+
 ## [0.12.0] - 2026-05-20
 
 Digital image stabilization (DIS) on the Star6E VPE pipeline, re-grafted

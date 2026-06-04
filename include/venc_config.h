@@ -119,14 +119,23 @@ typedef struct {
 	/* Framing mode — the single user-facing knob for what the VPE crop does
 	 * (replaces the old standalone stab/zoom fields).  Recognised values:
 	 *   "off"                              full image, no crop manipulation
-	 *   "low" | "medium" | "high"          digital image stabilization
+	 *   "stab"                             digital image stabilization, crop +
+	 *                                      shrink (Star6E only; no-op on Maruko)
+	 *   "stab-fill"                        fixed-zoom "floating image" stab —
+	 *                                      content scale is CONSTANT; the
+	 *                                      stabilizer accumulator shifts a
+	 *                                      window inside the fixed encoder
+	 *                                      output and the exposed edge is
+	 *                                      black-filled (CPU compose via
+	 *                                      BufFillPa + BufBlitPa).  stabCropPct
+	 *                                      sets the max shift / border budget.
 	 *                                      (Star6E only; no-op on Maruko)
 	 *   "zoom-1.25x" | "zoom-1.50x" |      pure digital zoom (no stab) on
-	 *   "zoom-1.75x" | "zoom-2x"           both backends; zoom_x/y pan live
+	 *   "zoom-1.75x" | "zoom-2x" | ...     both backends; zoom_x/y pan live
 	 * Each preset expands at load time via apply_framing_preset() into the
 	 * derived stab_crop_pct + stab_recenter_speed (stab presets) or zoom_pct
-	 * (zoom presets); the two are mutually exclusive by construction.
-	 * Unknown values fall back to "off".  Requires restart. */
+	 * (zoom presets); these are mutually exclusive by construction.  Unknown
+	 * values fall back to "off".  Requires restart. */
 	char framing[16];
 	/* Derived from the `framing` preset only — NOT part of the JSON schema or
 	 * HTTP API.  Written exclusively by apply_framing_preset() at load time.
@@ -139,11 +148,13 @@ typedef struct {
 	double zoom_pct;
 	double zoom_x;             /* crop centre x, 0..1 (live pan) */
 	double zoom_y;             /* crop centre y, 0..1 (live pan) */
-	/* Stabilization expansion (Star6E).  When a stab preset is active the
+	/* Stabilization expansion (Star6E).  When the "stab" preset is active the
 	 * source is clamped to <=1920x1080 (preserve aspect) to avoid the
 	 * high-res fps regression, then the encoded resolution shrinks to
-	 * (src_w * cropPct) x (src_h * cropPct).  Affects ch0 only; dual ch1,
-	 * JPEG snapshot, and debug OSD see the unstabilized frame. */
+	 * (src_w * cropPct) x (src_h * cropPct).  Under "stab-fill" the encode
+	 * stays at the configured size and the same cropPct bounds the max
+	 * shift / black-border budget.  Affects ch0 only; dual ch1, JPEG snapshot,
+	 * and debug OSD see the unstabilized frame. */
 	uint32_t stab_crop_pct;       /* 0 = off, 50..100 = crop % */
 	uint32_t stab_recenter_speed; /* 0 = stick to patch, >0 = recenter
 	                               * time-constant tau in frames */
@@ -163,6 +174,34 @@ typedef struct {
 	uint32_t stab_motion_thresh;  /* |inter-frame shift| (px) counted as
 	                               * "moving" — re-arms the stillness timer
 	                               * (0..16; higher = less twitchy). */
+	/* Kalman tuning for "stab-fill" — MUT_LIVE (per-tick scalar maths in
+	 * the detector, no buffer/port reconfigure needed).  Inert under
+	 * framing!=stab-fill (the "stab" preset uses EMA, not Kalman).
+	 *
+	 * stab_kalman_q (process noise / processVar): higher = trust the
+	 *   measurement more = X_estimate follows the camera quickly = less
+	 *   stabilization, lower lag on intentional pans.  Lower = stronger
+	 *   stabilization, more lag on pans.
+	 * stab_kalman_r (measurement noise / measVar): higher = distrust the
+	 *   measurement = X_estimate updates slowly = more stabilization.
+	 *
+	 * Steady-state Kalman gain K ≈ sqrt(Q/R).  Default Q=0.03, R=2.0 →
+	 * K≈0.11 ≈ 0.5 Hz first-order cutoff at 30 Hz detect (matches the
+	 * wfb-stabilizer Python reference). */
+	double stab_kalman_q;
+	double stab_kalman_r;
+	/* Runtime stab-fill bypass (MUT_LIVE).  Set true via
+	 * /api/v1/set?pauseStab=true to stop the detector + blit threads
+	 * and HW-bind port0 straight to VENC (zero-copy, full sensor rate).
+	 * Set false to reverse: unbind port0, respawn the detector + blit
+	 * threads, return to stab-fill compose.  Each toggle costs ~20–30 ms
+	 * (one dropped frame) but the steady-state benefit is +15-20 fps
+	 * plus a frame of latency reduction.
+	 *
+	 * Not persisted: skipped by load/render/cJSON so it is never written
+	 * to /etc/waybeam.json and always boots false (the pipeline always
+	 * comes up in stab-fill compose mode when framing=stab-fill). */
+	bool pause_stab;
 } VencConfigVideo;
 
 typedef struct {
