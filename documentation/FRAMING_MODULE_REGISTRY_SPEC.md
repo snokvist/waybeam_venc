@@ -155,6 +155,10 @@ typedef struct FramingModule {
 	void (*apply_ae_crop)(void);
 	void (*set_pan)(double x, double y);          /* optional */
 	int  (*set_live)(const char *key, const char *val); /* optional: kalman/pause */
+	/* Geometry/state the pipeline reads back (discovered during impl — the
+	 * pipeline sizes VENC and gates pan-lock/teardown on these): */
+	int  (*active)(void);                          /* detector running? */
+	int  (*encode_dims)(uint32_t *w, uint32_t *h); /* 1 + dims if module overrides encode res, else 0 */
 } FramingModule;
 
 const FramingModule *star6e_framing_select(const VencConfig *);
@@ -308,17 +312,24 @@ one `HISTORY.md` entry for the PR (squash any intermediate version churn — see
 **Versioning Policy**). Each commit must `make verify` clean on its own so the
 branch stays bisectable.
 
-Commit order:
+Commit order (**simplify-then-extract**, per review — the pipeline reads stab
+geometry/mode flags, so collapsing to a single HW mode *before* extraction
+yields a minimal module interface):
 
-1. **Registry + compile flag (behavior-neutral move).** Move master `stab`
-   into `src/star6e_framing_stab.c` behind the vtable + `STAB` flag. No
-   behavior change on the HW-crop path. ~1,100-line shrink.
-2. **Legacy-drain removal** (D9, §3.6). Drop the manual-drain fallback + dead
-   code; static-crop degrade on port1 failure. To keep this commit
-   `-Werror`-clean before the stab-fill caller arrives, the retained blit
-   symbols (§3.6) land already wired into commit 3's incoming code, or their
-   loads are guarded — sequence 2→3 with no gap.
-3. **Port stab-fill** (Deliverable 2). Second preset, software-ramp `pauseStab`
+1. **Legacy removal / single-mode collapse, in-place** (D9, §3.6). In
+   `star6e_pipeline.c`, drop the legacy manual-drain, `g_stab_hw_mode` and all
+   its branches, `panel_anchor` (dead in HW mode), the OSD legacy branch, and
+   the legacy-only dlsym symbols. Static-crop degrade on port1-tap failure via
+   a `g_stab_tap_active` flag (port0→VENC still bound; detector simply not
+   started). Behavior change confined to the unreachable-on-current-HW port1
+   failure path. ~400-line shrink, no new files.
+2. **Extract + compile flag (behavior-neutral move).** Move the now
+   single-mode stab into `src/star6e_framing_stab.c` behind the `FramingModule`
+   vtable + `STAB` flag. The module exposes geometry/state back to the pipeline
+   via `active()` + `encode_dims()` (§3.2). No behavior change.
+3. **Port stab-fill** (Deliverable 2). Second preset; re-introduces the
+   fill/blit/Kalman machinery it needs (commit 1 removed the legacy users of
+   those symbols, so there is no dead-symbol window). Software-ramp `pauseStab`
    (D13), Kalman folded (D14); new `stab-fill` framing preset + `pauseStab`
    field plumbing.
 4. **Data-driven field schema** (Deliverable 3). `FieldDesc.ui` + registry +
