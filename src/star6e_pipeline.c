@@ -993,10 +993,10 @@ static void star6e_pan_ramp_stop(void)
  * VENC, which needs reinit), so the live path only handles x/y.  pct is
  * accepted just to short-circuit when zoom is off (rect dim == image dim).
  * Updates the *target*; the ramp thread tweens `current` toward it. */
-/* Live stab-fill bypass toggle.  Routed to the active framing module's
- * set_live hook so the pipeline stays agnostic of the preset's semantics.
- * No-op (returns -1) when no module is selected (framing off / STAB=0) or the
- * active module does not handle pauseStab (the HW-crop "stab" preset). */
+/* Live stab pause toggle (framing=stab and framing=stab-fill).  Routed to the
+ * active framing module's set_live hook so the pipeline stays agnostic of the
+ * preset's semantics.  No-op (returns -1) when no stab module is selected
+ * (framing off / zoom / STAB=0). */
 int star6e_pipeline_set_pause_stab(bool paused)
 {
 	if (g_framing && g_framing->set_live)

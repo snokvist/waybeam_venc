@@ -1177,6 +1177,28 @@ static int test_capabilities_emits_ui(void)
 	/* A core field is still present (with mutability) and carries no ui. */
 	CHECK("cap has core field",
 		strstr(response, "\"video0.bitrate\"") != NULL);
+	/* Persisted stab knobs now carry data-driven ui (Stabilization section)
+	 * with a number control + range, so the whole group renders without a
+	 * static SECTIONS row.  Verify against the stab_crop_pct entry. */
+	{
+		const char *p = strstr(response, "\"video0.stab_crop_pct\"");
+		CHECK("cap has stab_crop_pct", p != NULL);
+		if (p) {
+			/* Confine the checks to this field's object (its ui block ends
+			 * at the first '}' after p) so a match can't leak in from a
+			 * neighbouring entry. */
+			const char *end = strchr(p, '}');
+			const char *g = strstr(p, "\"group\":\"Stabilization\"");
+			const char *c = strstr(p, "\"control\":\"number\"");
+			const char *m = strstr(p, "\"max\":100");
+			CHECK("cap stab_crop_pct ui group",
+				end && g && g < end);
+			CHECK("cap stab_crop_pct number control",
+				end && c && c < end);
+			CHECK("cap stab_crop_pct range",
+				end && m && m < end);
+		}
+	}
 	return failures;
 }
 

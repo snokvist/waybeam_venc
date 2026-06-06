@@ -328,13 +328,54 @@ typedef struct {
 	  offsetof(VencConfig, section.member), \
 	  sizeof(((VencConfig*)0)->section.member), (uiptr) }
 
-/* UI descriptor for video0.pause_stab — the live stab-fill bypass.  Rendered
- * as a toggle in a "Stabilization" group purely from capabilities (the field
- * is runtime-only / not in /api/v1/config, so it has no static SECTIONS row). */
+/* UI descriptors for the Stabilization section.  These carry data-driven UI
+ * metadata so the dashboard renders the whole group from /api/v1/capabilities
+ * with no static SECTIONS rows — adding/retuning a stab knob needs no
+ * dashboard.html edit / webui-blob rebuild.  Ranges mirror the validators in
+ * validate_field(); 0 = "use preset default" where noted.  group = the
+ * collapsible section title the renderer buckets them under. */
+static const FieldUi ui_stab_crop_pct = {
+	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
+	"Kept-frame percentage for framing=stab / stab-fill. 0 = preset default "
+	"(80, API only); 60..100 = explicit crop %. Smaller = bigger dead border "
+	"= more room to absorb motion but more zoomed-in. Requires restart."
+};
+static const FieldUi ui_stab_recenter_speed = {
+	"Stabilization", "Recenter speed", "number", 0, 3600, 5, NULL,
+	"How fast the stabilized window glides back to centre after motion "
+	"(decay time-constant in frames). 0 = stick (never recenters); higher = "
+	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart."
+};
+static const FieldUi ui_stab_smooth_pct = {
+	"Stabilization", "Smoothing %", "number", 5, 100, 1, NULL,
+	"EMA low-pass on the applied offset. 0 = preset default (API only); "
+	"5..100 = explicit. Lower = smoother but laggier. Requires restart."
+};
+static const FieldUi ui_stab_still_frames = {
+	"Stabilization", "Still frames", "number", 0, 600, 1, NULL,
+	"Frames of stillness before the view counts as settled (then recenters). "
+	"Higher = view stays locked longer after a bump. Requires restart."
+};
+static const FieldUi ui_stab_edge_pct = {
+	"Stabilization", "Edge stick %", "number", 50, 100, 1, NULL,
+	"% of the dead-border the offset may use before forced recenter. 0 = "
+	"preset default (API only); 50..100 = explicit. Higher = sticks harder "
+	"to the edge before reclaiming margin. Requires restart."
+};
+static const FieldUi ui_stab_motion_thresh = {
+	"Stabilization", "Motion threshold", "number", 0, 16, 1, NULL,
+	"|inter-frame shift| (px) counted as motion for stillness detection. "
+	"Higher = less twitchy. Requires restart."
+};
+
+/* UI descriptor for video0.pause_stab — the live stab pause.  Rendered as a
+ * toggle in the "Stabilization" group purely from capabilities (the field is
+ * runtime-only / not in /api/v1/config, so it has no static SECTIONS row). */
 static const FieldUi ui_pause_stab = {
 	"Stabilization", "Pause stab", "toggle", 0, 0, 0, NULL,
-	"Live bypass for framing=stab-fill: glide the floating image back to "
-	"centre (software ramp, no rebind). No effect in other framing modes."
+	"Live pause for framing=stab and stab-fill: glide the stabilized window / "
+	"floating image back to centre (software ramp, no rebind). No effect under "
+	"framing=off or zoom."
 };
 
 static const FieldDesc g_fields[] = {
@@ -425,21 +466,21 @@ static const FieldDesc g_fields[] = {
 	 * stab_crop_pct/recenter or zoom_pct.  Encoded resolution changes when
 	 * toggled, so the whole pipeline must restart. */
 	FIELD(video0, framing,             FT_STRING, MUT_RESTART),
-	/* Advanced stab tuning — override the "stab" preset's derived crop %
-	 * (0 or 50..100) and recenter speed (0 = stick to patch, higher = slower
-	 * glide back to center).  Set framing=stab first; these refine it.  Inert
-	 * under off/zoom.  Restart-required (crop changes encode resolution). */
-	FIELD(video0, stab_crop_pct,       FT_UINT,   MUT_RESTART),
-	FIELD(video0, stab_recenter_speed, FT_UINT,   MUT_RESTART),
-	/* Advanced "stab" feel knobs — refine the preset's smoothness/lock/edge
-	 * behavior.  Set framing=stab first; inert under off/zoom.  All restart. */
-	FIELD(video0, stab_smooth_pct,     FT_UINT,   MUT_RESTART),
-	FIELD(video0, stab_still_frames,   FT_UINT,   MUT_RESTART),
-	FIELD(video0, stab_edge_pct,       FT_UINT,   MUT_RESTART),
-	FIELD(video0, stab_motion_thresh,  FT_UINT,   MUT_RESTART),
-	/* Runtime stab-fill bypass (D13 software ramp) — MUT_LIVE, not persisted.
-	 * Carries UI metadata so the dashboard renders it data-driven (no static
-	 * SECTIONS row; it isn't in /api/v1/config). */
+	/* Stabilization knobs — override the stab/stab-fill preset's derived crop %
+	 * (0 or 60..100) and recenter speed (0 = stick to patch, higher = slower
+	 * glide back to center), plus the feel knobs (smoothness/lock/edge).  Set
+	 * framing=stab|stab-fill first; inert under off/zoom.  Restart-required
+	 * (crop changes encode resolution).  All carry FIELD_UI metadata so the
+	 * dashboard renders the whole "Stabilization" group data-driven. */
+	FIELD_UI(video0, stab_crop_pct,       FT_UINT, MUT_RESTART, &ui_stab_crop_pct),
+	FIELD_UI(video0, stab_recenter_speed, FT_UINT, MUT_RESTART, &ui_stab_recenter_speed),
+	FIELD_UI(video0, stab_smooth_pct,     FT_UINT, MUT_RESTART, &ui_stab_smooth_pct),
+	FIELD_UI(video0, stab_still_frames,   FT_UINT, MUT_RESTART, &ui_stab_still_frames),
+	FIELD_UI(video0, stab_edge_pct,       FT_UINT, MUT_RESTART, &ui_stab_edge_pct),
+	FIELD_UI(video0, stab_motion_thresh,  FT_UINT, MUT_RESTART, &ui_stab_motion_thresh),
+	/* Runtime stab pause (D13 software ramp) — MUT_LIVE, not persisted.  Carries
+	 * UI metadata so the dashboard renders it data-driven (no static SECTIONS
+	 * row; it isn't in /api/v1/config). */
 	FIELD_UI(video0, pause_stab,       FT_BOOL,   MUT_LIVE, &ui_pause_stab),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };

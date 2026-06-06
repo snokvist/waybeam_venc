@@ -1,5 +1,30 @@
 # History
 
+## [0.14.0] - 2026-06-06
+
+Live stab pause for the HW-crop `stab` preset + a fully data-driven
+**Stabilization** WebUI section.
+
+**`pauseStab` now works on `framing=stab`, not just `stab-fill`.**  The D13
+software-ramp pause was previously gated to the fill path (its `set_live` hook
+was wired only on the `stab-fill` module; toggling it under `framing=stab`
+returned `-1` → a WebUI error toast).  The pause branch is now mode-agnostic in
+the detector: when paused it undoes the tick's measurement and decays the
+trajectory toward centre, so HW-crop glides the crop window home (via the smooth
+low-pass → `apply_port_crop`) and fill glides the floating image home — same
+software ramp, no HW rebind on either.  `set_live` is wired on both stab
+vtables; `star6e_stab_set_paused` now guards on `g_stab_running` (any stab
+detector) instead of `g_stab_fill_mode`.
+
+**Stabilization section is now data-driven.**  The six persisted stab knobs
+(`stabCropPct`, `stabRecenterSpeed`, `stabSmoothPct`, `stabStillFrames`,
+`stabEdgePct`, `stabMotionThresh`) carry `FIELD_UI` metadata and were removed
+from the static Video section; together with the runtime-only `pauseStab` they
+render as one collapsible **Stabilization** group from `/api/v1/capabilities`
+— no per-field `dashboard.html` edit or webui-blob rebuild.  The four advanced
+feel knobs (smooth/still/edge/motion), previously API-only, now have WebUI
+controls.  Ranges mirror the API validators; `0 = preset default` where noted.
+
 ## [0.13.0] - 2026-06-06
 
 Framing-module refactor + the `stab-fill` floating-image stabilization preset

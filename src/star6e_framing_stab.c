@@ -1371,6 +1371,49 @@ static void *star6e_stab_thread_main(void *arg)
 				max_x = star6e_stab_max_off_x();
 				max_y = star6e_stab_max_off_y();
 
+				/* Software pause (D13), mode-agnostic: glide the applied
+				 * offset to centre via the recenter ramp — no HW rebind, no
+				 * thread teardown.  Undo this tick's measurement so facc
+				 * decays instead of re-accumulating, then shrink facc + the
+				 * Kalman estimate by (tau-1)/tau toward 0.  HW-crop emits the
+				 * low-passed decayed offset to the port crop (window glides
+				 * home); fill emits facc−estimate (image glides home).
+				 * Applies to BOTH framing=stab and framing=stab-fill. */
+				if (g_stab_paused) {
+					uint32_t tau = g_stab_recenter_period ?
+						g_stab_recenter_period : 30;
+					double scale;
+					if (tau < 2) tau = 2;
+					scale = (double)(tau - 1) / (double)tau;
+					facc_x -= meas_dx;
+					facc_y -= meas_dy;
+					facc_x *= scale;
+					facc_y *= scale;
+					g_stab_kalman_x_est *= scale;  /* no-op when HW (unused) */
+					g_stab_kalman_y_est *= scale;
+					if (fabs(facc_x) < 0.5) facc_x = 0.0;
+					if (fabs(facc_y) < 0.5) facc_y = 0.0;
+					if (g_stab_fill_mode) {
+						acc_x = (int)lround(facc_x - g_stab_kalman_x_est);
+						acc_y = (int)lround(facc_y - g_stab_kalman_y_est);
+						smooth_x = facc_x - g_stab_kalman_x_est;
+						smooth_y = facc_y - g_stab_kalman_y_est;
+					} else {
+						smooth_x += g_stab_smooth_alpha *
+							(facc_x - smooth_x);
+						smooth_y += g_stab_smooth_alpha *
+							(facc_y - smooth_y);
+						acc_x = (int)lround(smooth_x);
+						acc_y = (int)lround(smooth_y);
+					}
+					if (acc_x < -max_x) acc_x = -max_x;
+					if (acc_x >  max_x) acc_x =  max_x;
+					if (acc_y < -max_y) acc_y = -max_y;
+					if (acc_y >  max_y) acc_y =  max_y;
+					still_frames = 0;
+					goto fill_emit;
+				}
+
 				if (g_stab_fill_mode) {
 					/* stab-fill: Kalman-smoothed trajectory (ported from
 					 * the wfb-stabilizer Python reference).  Compensation
@@ -1381,37 +1424,16 @@ static void *star6e_stab_thread_main(void *arg)
 					 * clamped to the border budget.  No EMA, no recenter:
 					 * the Kalman subsumes both.  Q/R are folded preset
 					 * constants (D14), read directly (never written). */
-					if (g_stab_paused) {
-						/* Software pause (D13): glide the applied offset to
-						 * centre via the recenter ramp — no HW rebind, no
-						 * thread teardown.  Undo this tick's measurement so
-						 * facc decays instead of re-accumulating, then shrink
-						 * facc + the estimate by (tau-1)/tau toward 0. */
-						uint32_t tau = g_stab_recenter_period ?
-							g_stab_recenter_period : 30;
-						double scale;
-						if (tau < 2) tau = 2;
-						scale = (double)(tau - 1) / (double)tau;
-						facc_x -= meas_dx;
-						facc_y -= meas_dy;
-						facc_x *= scale;
-						facc_y *= scale;
-						g_stab_kalman_x_est *= scale;
-						g_stab_kalman_y_est *= scale;
-						if (fabs(facc_x) < 0.5) facc_x = 0.0;
-						if (fabs(facc_y) < 0.5) facc_y = 0.0;
-					} else {
-						double pp_x = g_stab_kalman_x_p + g_stab_kalman_q;
-						double k_x  = pp_x / (pp_x + g_stab_kalman_r);
-						double pp_y = g_stab_kalman_y_p + g_stab_kalman_q;
-						double k_y  = pp_y / (pp_y + g_stab_kalman_r);
-						g_stab_kalman_x_est +=
-							k_x * (facc_x - g_stab_kalman_x_est);
-						g_stab_kalman_x_p = (1.0 - k_x) * pp_x;
-						g_stab_kalman_y_est +=
-							k_y * (facc_y - g_stab_kalman_y_est);
-						g_stab_kalman_y_p = (1.0 - k_y) * pp_y;
-					}
+					double pp_x = g_stab_kalman_x_p + g_stab_kalman_q;
+					double k_x  = pp_x / (pp_x + g_stab_kalman_r);
+					double pp_y = g_stab_kalman_y_p + g_stab_kalman_q;
+					double k_y  = pp_y / (pp_y + g_stab_kalman_r);
+					g_stab_kalman_x_est +=
+						k_x * (facc_x - g_stab_kalman_x_est);
+					g_stab_kalman_x_p = (1.0 - k_x) * pp_x;
+					g_stab_kalman_y_est +=
+						k_y * (facc_y - g_stab_kalman_y_est);
+					g_stab_kalman_y_p = (1.0 - k_y) * pp_y;
 					acc_x = (int)lround(facc_x - g_stab_kalman_x_est);
 					acc_y = (int)lround(facc_y - g_stab_kalman_y_est);
 					if (acc_x < -max_x) acc_x = -max_x;
@@ -1926,24 +1948,26 @@ static int star6e_stab_fill_enabled(const VencConfig *vcfg)
 		strcmp(vcfg->video0.framing, "stab-fill") == 0;
 }
 
-/* stab-fill live bypass (D13 software ramp).  Returns 0 if applied, -1 if the
- * active preset is not stab-fill (the detector glides the offset to centre on
- * the next tick — no HW rebind). */
+/* Stab live bypass (D13 software ramp), mode-agnostic.  Returns 0 if applied,
+ * -1 if no stab detector is running (the detector glides the offset to centre
+ * on the next tick — no HW rebind).  Works for both framing=stab (the crop
+ * window glides home) and framing=stab-fill (the floating image glides home). */
 static int star6e_stab_set_paused(int paused)
 {
-	if (!g_stab_fill_mode)
+	if (!g_stab_running)
 		return -1;
 	pthread_mutex_lock(&g_stab_path_lock);
 	g_stab_paused = paused ? 1 : 0;
 	pthread_mutex_unlock(&g_stab_path_lock);
-	fprintf(stderr, "[waybeam] stab-fill: %s (software ramp)\n",
+	fprintf(stderr, "[waybeam] stab%s: %s (software ramp)\n",
+		g_stab_fill_mode ? "-fill" : "",
 		paused ? "PAUSED — gliding to centre" : "RESUMED — compose active");
 	return 0;
 }
 
-/* Vtable set_live for the stab-fill preset.  Carries the live pauseStab toggle
+/* Vtable set_live for both stab presets.  Carries the live pauseStab toggle
  * from the API layer without the pipeline knowing its semantics. */
-static int star6e_stab_fill_set_live(const char *key, const char *val)
+static int star6e_stab_set_live(const char *key, const char *val)
 {
 	if (!key)
 		return -1;
@@ -2089,12 +2113,12 @@ const FramingModule star6e_framing_stab = {
 	.apply_ae_crop = star6e_stab_apply_ae_crop,
 	.set_pan       = star6e_stab_set_pan,
 	.active        = star6e_stab_active,
-	.set_live      = NULL,
+	.set_live      = star6e_stab_set_live,
 };
 
-/* "stab-fill" shares setup_ports/start/stop/apply_ae_crop with "stab" — those
- * branch internally on g_stab_fill_mode (set by this preset's prepare).  It
- * adds set_live for the live pauseStab toggle (D13 software ramp). */
+/* "stab-fill" shares setup_ports/start/stop/apply_ae_crop/set_live with "stab" —
+ * those branch internally on g_stab_fill_mode (set by this preset's prepare).
+ * Both presets carry the live pauseStab toggle (D13 software ramp). */
 const FramingModule star6e_framing_stab_fill = {
 	.preset_name   = "stab-fill",
 	.enabled       = star6e_stab_fill_enabled,
@@ -2105,5 +2129,5 @@ const FramingModule star6e_framing_stab_fill = {
 	.apply_ae_crop = star6e_stab_apply_ae_crop,
 	.set_pan       = star6e_stab_set_pan,
 	.active        = star6e_stab_active,
-	.set_live      = star6e_stab_fill_set_live,
+	.set_live      = star6e_stab_set_live,
 };

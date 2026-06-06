@@ -155,11 +155,18 @@ Response `200`:
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
       "fpv.roi_qp": { "mutability": "live", "supported": true },
+      "video0.stab_crop_pct": {
+        "mutability": "restart_required", "supported": true,
+        "ui": {
+          "group": "Stabilization", "label": "Stab crop %", "control": "number",
+          "min": 60, "max": 100, "step": 1, "tooltip": "Kept-frame percentage ..."
+        }
+      },
       "video0.pause_stab": {
         "mutability": "live", "supported": true,
         "ui": {
           "group": "Stabilization", "label": "Pause stab", "control": "toggle",
-          "tooltip": "Live bypass for framing=stab-fill ..."
+          "tooltip": "Live pause for framing=stab and stab-fill ..."
         }
       }
     }
@@ -177,8 +184,11 @@ edit or webui-blob rebuild is needed to surface a new module field.  Keys:
 `group` (collapsible section title), `label`, `control`
 (`toggle`|`number`|`select`|`text`), `min`/`max`/`step` (for `number`),
 `options` (array, for `select`), `tooltip`.  Fields without `ui` use the
-dashboard's static schema.  `video0.pause_stab` (the live stab-fill bypass,
-runtime-only — not in `/api/v1/config`) is surfaced this way.
+dashboard's static schema.  The entire **Stabilization** section is data-driven:
+the six persisted `video0.stab_*` knobs (`stab_crop_pct`, `stab_recenter_speed`,
+`stab_smooth_pct`, `stab_still_frames`, `stab_edge_pct`, `stab_motion_thresh`)
+plus the runtime-only `video0.pause_stab` (the live stab pause — not in
+`/api/v1/config`) are all surfaced this way.
 
 ### `GET /api/v1/config.json`
 
@@ -380,9 +390,10 @@ Majestic-oriented clients.
     `zoom-1.25x` | `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` |
     `zoom-4x` (digital zoom, both backends).
   - Mutability: `restart_required` (changes encoded resolution / pipeline).
-- `video0.pauseStab`: bool, live (`stab-fill` only) — glide the floating image
-  back to centre (software ramp, no rebind).  Runtime-only: not persisted,
-  always boots `false`.  No effect in other framing modes.
+- `video0.pauseStab`: bool, live (`stab` **and** `stab-fill`) — glide the
+  stabilized window (`stab`: HW crop) / floating image (`stab-fill`) back to
+  centre via a software ramp, no rebind.  Runtime-only: not persisted, always
+  boots `false`.  No effect under `framing=off` or zoom.
 - `video0.stabCropPct`: the stab crop / shift budget; clamped to **[60, 100]**
   for a stab preset (a smaller value is rejected by the API and floored on
   load).
