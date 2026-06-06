@@ -125,15 +125,14 @@ void star6e_pipeline_vpe_scl_preset_shutdown(void);
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y);
 
-void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
+/** Toggle the stab-fill compose bypass (video0.pauseStab).  Software-only
+ *  (D13): when paused the detector glides the applied offset back to centre
+ *  via the recenter ramp and the compose feeds the unshifted full frame — no
+ *  HW rebind, no thread teardown.  Routed to the active framing module's
+ *  set_live hook.  Returns 0 on success, -1 when framing!=stab-fill (no-op). */
+int star6e_pipeline_set_pause_stab(bool paused);
 
-/** When image stabilization is on, return the current crop-window
- *  origin in VPE port coordinates (top-left corner of what becomes
- *  the encoded view).  Returns 1 with origin filled; 0 if stab is off
- *  (origin left untouched).  Used by the OSD draw cycle to anchor
- *  the stats panel inside the encoded view as the stab thread shifts
- *  the crop window. */
-int star6e_pipeline_stab_panel_anchor(int *out_x, int *out_y);
+void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 
 /** Service custom 3A (AWB/AE) at regular intervals. */
 /** One-shot legacy-AE cold-boot fps re-kick.  Call once ~1.5s after pipeline

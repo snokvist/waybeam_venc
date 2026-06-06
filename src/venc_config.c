@@ -187,6 +187,10 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->video0.framing, sizeof(cfg->video0.framing), "off");
 	(void)venc_config_apply_framing_preset("off", &cfg->video0);
 
+	/* Runtime-only "stab-fill" bypass — always boots false; not parsed or
+	 * serialized (a fresh stab-fill run always comes up composing). */
+	cfg->video0.pause_stab = false;
+
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
 	 * snapshot at the same resolution as the live stream. */
@@ -436,12 +440,10 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	struct framing_preset {
 		const char *name;
 		uint32_t crop_pct;  /* stab kept fraction; 0 = no stab */
-		uint32_t recenter;  /* stab recenter tau (frames); 0 = stick */
+		uint32_t recenter;  /* pauseStab glide rate (frames); 0 = default */
 		double zoom_pct;    /* Approach-C zoom crop fraction; 0 = no zoom */
-		uint32_t smooth_pct;    /* stab EMA smoothing %; 0 = n/a */
-		uint32_t still_frames;  /* stab recenter cooldown frames */
-		uint32_t edge_pct;      /* stab edge-stick %; 0 = n/a */
-		uint32_t motion_thresh; /* stab motion threshold px */
+		double kalman_q;    /* stab Kalman process noise / pan response */
+		double kalman_r;    /* stab Kalman measurement noise / smoothness */
 	};
 	/* Framing preset table.  A preset is EITHER the stabilization preset
 	 * ("stab": crop_pct/recenter set, zoom_pct 0) OR a zoom preset (zoom_pct
@@ -461,7 +463,8 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	 *   preset       cropPct  tau   zoom_pct   effect
 	 *   ──────────────────────────────────────────────────────────────
 	 *   off          0        0     0.00       full image
-	 *   stab         80       180   0.00       image stabilization
+	 *   stab         80       180   0.00       image stabilization (crop+shrink)
+	 *   stab-fill    80       180   0.00       floating image + black border
 	 *   zoom-1.25x   0        0     0.80       1.25x digital zoom
 	 *   zoom-1.50x   0        0     0.6667     1.50x digital zoom
 	 *   zoom-1.75x   0        0     0.5714     1.75x digital zoom
@@ -474,14 +477,15 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	 * smaller frame (1080p: 3x->640x352, 4x->480x256, both >=256 floor).
 	 */
 	static const struct framing_preset table[] = {
-		{ "off",        0,  0,    0.0,    0,  0,  0,  0 },
-		{ "stab",       80, 180,  0.0,    30, 60, 88, 1 },
-		{ "zoom-1.25x", 0,  0,    0.80,   0,  0,  0,  0 },
-		{ "zoom-1.50x", 0,  0,    0.6667, 0,  0,  0,  0 },
-		{ "zoom-1.75x", 0,  0,    0.5714, 0,  0,  0,  0 },
-		{ "zoom-2x",    0,  0,    0.50,   0,  0,  0,  0 },
-		{ "zoom-3x",    0,  0,    0.3333, 0,  0,  0,  0 },
-		{ "zoom-4x",    0,  0,    0.25,   0,  0,  0,  0 },
+		{ "off",        0,  0,    0.0,    0.0,  0.0 },
+		{ "stab",       80, 180,  0.0,    0.03, 2.0 },
+		{ "stab-fill",  80, 180,  0.0,    0.03, 2.0 },
+		{ "zoom-1.25x", 0,  0,    0.80,   0.0,  0.0 },
+		{ "zoom-1.50x", 0,  0,    0.6667, 0.0,  0.0 },
+		{ "zoom-1.75x", 0,  0,    0.5714, 0.0,  0.0 },
+		{ "zoom-2x",    0,  0,    0.50,   0.0,  0.0 },
+		{ "zoom-3x",    0,  0,    0.3333, 0.0,  0.0 },
+		{ "zoom-4x",    0,  0,    0.25,   0.0,  0.0 },
 	};
 
 	const char *want = (!name || !*name) ? "off" : name;
@@ -491,10 +495,8 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 		v->stab_crop_pct = table[i].crop_pct;
 		v->stab_recenter_speed = table[i].recenter;
 		v->zoom_pct = table[i].zoom_pct;
-		v->stab_smooth_pct = table[i].smooth_pct;
-		v->stab_still_frames = table[i].still_frames;
-		v->stab_edge_pct = table[i].edge_pct;
-		v->stab_motion_thresh = table[i].motion_thresh;
+		v->stab_kalman_q = table[i].kalman_q;
+		v->stab_kalman_r = table[i].kalman_r;
 		return 0;
 	}
 	return -1;
@@ -582,27 +584,37 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 			safe_strcpy(v->framing, sizeof(v->framing), "off");
 			(void)venc_config_apply_framing_preset("off", v);
 		}
-		/* Advanced overrides of the stab preset's derived crop/recenter.
-		 * Read AFTER the preset expansion so an explicit value wins; absent
-		 * keys keep the preset default (so a plain framing="stab" still gets
-		 * 80/180).  These belong to the "stab" preset, so honor them ONLY
-		 * when framing=="stab" — under off/zoom the preset's cleared 0/0 must
-		 * stand.  Otherwise a stale stabCropPct left over from a prior stab
-		 * session silently re-enables stabilization at framing=off, because
-		 * star6e_stab_enabled() keys solely on stab_crop_pct (>=50). */
-		if (strcmp(v->framing, "stab") == 0) {
+		/* Advanced overrides of the stab presets' derived feel knobs.  Read
+		 * AFTER the preset expansion so an explicit value wins; absent keys
+		 * keep the preset default (so a plain framing="stab" still gets
+		 * 80/180).  Honored ONLY under the stab presets — under off/zoom the
+		 * preset's cleared 0/0 must stand, else a stale stabCropPct left over
+		 * from a prior stab session silently re-enables stabilization at
+		 * framing=off (star6e_stab_*_enabled() key on stab_crop_pct).  Both
+		 * "stab" and "stab-fill" share these: stabCropPct is the crop+shrink
+		 * border for "stab" and the max-shift / black-border budget for
+		 * "stab-fill". */
+		if (strcmp(v->framing, "stab") == 0 ||
+		    strcmp(v->framing, "stab-fill") == 0) {
 			v->stab_crop_pct = (uint32_t)json_get_int(obj, "stabCropPct",
 				(int)v->stab_crop_pct);
 			v->stab_recenter_speed = (uint32_t)json_get_int(obj,
 				"stabRecenterSpeed", (int)v->stab_recenter_speed);
-			v->stab_smooth_pct = (uint32_t)json_get_int(obj,
-				"stabSmoothPct", (int)v->stab_smooth_pct);
-			v->stab_still_frames = (uint32_t)json_get_int(obj,
-				"stabStillFrames", (int)v->stab_still_frames);
-			v->stab_edge_pct = (uint32_t)json_get_int(obj,
-				"stabEdgePct", (int)v->stab_edge_pct);
-			v->stab_motion_thresh = (uint32_t)json_get_int(obj,
-				"stabMotionThresh", (int)v->stab_motion_thresh);
+			v->stab_kalman_q = json_get_double(obj,
+				"stabKalmanQ", v->stab_kalman_q);
+			v->stab_kalman_r = json_get_double(obj,
+				"stabKalmanR", v->stab_kalman_r);
+			/* Harden stab_crop_pct to [60, 100] for the active stab preset.
+			 * A stab preset must have a usable crop budget; clamping here
+			 * also self-heals a stale stabCropPct (e.g. a 0 saved while
+			 * framing=off, then framing re-set via json_cli string-only)
+			 * that would otherwise override the preset's 80 down to 0 and
+			 * silently disable stabilization (star6e_stab_*_enabled() key on
+			 * stab_crop_pct >= 50 → fall through to the unstabilized bind). */
+			if (v->stab_crop_pct < 60)
+				v->stab_crop_pct = 60;
+			if (v->stab_crop_pct > 100)
+				v->stab_crop_pct = 100;
 		}
 	}
 }
@@ -1158,10 +1170,8 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "framing",           cfg->video0.framing,             0);
 	pp_field_uint(p,   2, "stabCropPct",       cfg->video0.stab_crop_pct,       0);
 	pp_field_uint(p,   2, "stabRecenterSpeed", cfg->video0.stab_recenter_speed, 0);
-	pp_field_uint(p,   2, "stabSmoothPct",     cfg->video0.stab_smooth_pct,     0);
-	pp_field_uint(p,   2, "stabStillFrames",   cfg->video0.stab_still_frames,   0);
-	pp_field_uint(p,   2, "stabEdgePct",       cfg->video0.stab_edge_pct,       0);
-	pp_field_uint(p,   2, "stabMotionThresh",  cfg->video0.stab_motion_thresh,  1);
+	pp_field_double(p, 2, "stabKalmanQ",       cfg->video0.stab_kalman_q,       0);
+	pp_field_double(p, 2, "stabKalmanR",       cfg->video0.stab_kalman_r,       1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1349,13 +1359,10 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "stabCropPct", cfg->video0.stab_crop_pct);
 		cJSON_AddNumberToObject(vid, "stabRecenterSpeed",
 			cfg->video0.stab_recenter_speed);
-		cJSON_AddNumberToObject(vid, "stabSmoothPct",
-			cfg->video0.stab_smooth_pct);
-		cJSON_AddNumberToObject(vid, "stabStillFrames",
-			cfg->video0.stab_still_frames);
-		cJSON_AddNumberToObject(vid, "stabEdgePct", cfg->video0.stab_edge_pct);
-		cJSON_AddNumberToObject(vid, "stabMotionThresh",
-			cfg->video0.stab_motion_thresh);
+		cJSON_AddNumberToObject(vid, "stabKalmanQ",
+			cfg->video0.stab_kalman_q);
+		cJSON_AddNumberToObject(vid, "stabKalmanR",
+			cfg->video0.stab_kalman_r);
 	}
 
 	/* outgoing */

@@ -154,7 +154,21 @@ Response `200`:
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
-      "fpv.roi_qp": { "mutability": "live", "supported": true }
+      "fpv.roi_qp": { "mutability": "live", "supported": true },
+      "video0.stab_crop_pct": {
+        "mutability": "restart_required", "supported": true,
+        "ui": {
+          "group": "Stabilization", "label": "Stab crop %", "control": "number",
+          "min": 60, "max": 100, "step": 1, "tooltip": "Kept-frame percentage ..."
+        }
+      },
+      "video0.pause_stab": {
+        "mutability": "live", "supported": true,
+        "ui": {
+          "group": "Stabilization", "label": "Pause stab", "control": "toggle",
+          "tooltip": "Live pause for framing=stab and stab-fill ..."
+        }
+      }
     }
   }
 }
@@ -163,6 +177,17 @@ Response `200`:
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
 scene detection, intra refresh, and digital zoom fields.
+
+A field MAY carry an optional `ui` object (data-driven field schema): when
+present the dashboard renders a control for it generically — no `dashboard.html`
+edit or webui-blob rebuild is needed to surface a new module field.  Keys:
+`group` (collapsible section title), `label`, `control`
+(`toggle`|`number`|`select`|`text`), `min`/`max`/`step` (for `number`),
+`options` (array, for `select`), `tooltip`.  Fields without `ui` use the
+dashboard's static schema.  The entire **Stabilization** section is data-driven:
+the four persisted `video0.stab_*` knobs (`stab_crop_pct`, `stab_kalman_q`,
+`stab_kalman_r`, `stab_recenter_speed`) plus the runtime-only `video0.pause_stab`
+(the live stab pause — not in `/api/v1/config`) are all surfaced this way.
 
 ### `GET /api/v1/config.json`
 
@@ -355,46 +380,47 @@ Majestic-oriented clients.
 - Alias: `video0.qpDelta`
 - Semantics: adjusts I-frame QP relative to P-frame; negative values lower I-frame QP (higher quality keyframes), positive values raise it.
 
-### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_recenter_speed`, `video0.stab_smooth_pct`, `video0.stab_still_frames`, `video0.stab_edge_pct`, `video0.stab_motion_thresh`
+### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`, `video0.stab_recenter_speed`
 
 - `video0.framing`: string preset — the single knob for what the VPE crop does.
-  - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
-    `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` | `zoom-4x` (digital
-    zoom, both backends).
+  - Values: `off` | `stab` (image stabilization, crop+shrink, Star6E only) |
+    `stab-fill` (image stabilization, floating image on a black border, Star6E
+    only; encode stays full-res, `stabCropPct` sets the shift/border budget) |
+    `zoom-1.25x` | `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` |
+    `zoom-4x` (digital zoom, both backends).
   - Mutability: `restart_required` (changes encoded resolution / pipeline).
+- `video0.pauseStab`: bool, live (`stab` **and** `stab-fill`) — glide the
+  stabilized window (`stab`: HW crop) / floating image (`stab-fill`) back to
+  centre via a software ramp, no rebind.  Runtime-only: not persisted, always
+  boots `false`.  No effect under `framing=off` or zoom.
+- `video0.stabCropPct`: the stab crop / shift budget; clamped to **[60, 100]**
+  for a stab preset (a smaller value is rejected by the API and floored on
+  load).
   - The preset expands internally into the zoom crop fraction (zoom presets) or
     the stabilization crop/recenter (`stab`); the two are mutually exclusive.
     There is no settable continuous `zoom_pct` — use a zoom preset.
-- `video0.stab_crop_pct`, `video0.stab_recenter_speed`: uint, mutability
-  `restart_required`. Aliases `video0.stabCropPct`, `video0.stabRecenterSpeed`.
-  Advanced overrides of the `stab` preset's derived crop/recenter — read
-  *after* preset expansion so an explicit value wins, while a plain
-  `framing=stab` keeps the 80/180 default. Re-selecting `framing=stab` resets
-  them, so set framing first. Inert under `off`/`zoom-*`.
-  - `stab_crop_pct`: `0` = preset default (80); else `50..100` kept-frame %.
-    Smaller % = larger dead border = more motion headroom, tighter frame.
-  - `stab_recenter_speed`: `0..3600`. `0` = stick (no recenter, drifts to
-    border — demo only); higher = slower glide back to center (default 180).
-- `video0.stab_smooth_pct`, `video0.stab_still_frames`, `video0.stab_edge_pct`,
-  `video0.stab_motion_thresh`: uint, mutability `restart_required`. Aliases
-  `video0.stabSmoothPct`, `video0.stabStillFrames`, `video0.stabEdgePct`,
-  `video0.stabMotionThresh`. Advanced "feel" knobs of the `stab` preset, same
-  scoping as crop/recenter above (read after preset expansion, framing=stab
-  only, reset on re-selecting the preset). These tune the motion response so a
-  user can dial in the optimal feel:
-  - `stab_smooth_pct`: `0` = preset default (30); else `5..100`. EMA low-pass on
-    the applied crop offset, as a percentage. Lower = smoother but more lag;
-    `100` = no smoothing (snappiest, most shake-through). This is the primary
-    judder/smoothness control.
-  - `stab_still_frames`: `0..600` (default 60). Frames of stillness after a
-    disturbance before the view starts gliding back to center. Higher = stays
-    locked longer; `0` = recenter as soon as motion stops.
-  - `stab_edge_pct`: `0` = preset default (88); else `50..100`. How far into the
-    dead-border the offset may travel during a sustained pan before margin is
-    reclaimed. Higher = sticks harder near the edge before leaking.
-  - `stab_motion_thresh`: `0..16` (default 1). Inter-frame shift in pixels
-    counted as "moving" (re-arms the stillness timer). Higher = less twitchy,
-    treats small jitter as still.
+- `video0.stab_crop_pct`, `video0.stab_kalman_q`, `video0.stab_kalman_r`,
+  `video0.stab_recenter_speed`: mutability `restart_required`. Aliases
+  `video0.stabCropPct`, `video0.stabKalmanQ`, `video0.stabKalmanR`,
+  `video0.stabRecenterSpeed`. Tuning for the shared Kalman stabilization control
+  law — read *after* preset expansion so an explicit value wins, while a plain
+  `framing=stab`/`stab-fill` keeps the preset defaults. Re-selecting the preset
+  resets them, so set framing first. Inert under `off`/`zoom-*`. **Both presets
+  use the same law, so identical values give identical behaviour.**
+  - `stab_crop_pct`: uint. `0` = preset default (80); else `60..100` kept-frame %
+    (`stab`) / shift+border budget (`stab-fill`). Clamped to **[60, 100]** for an
+    active stab preset (smaller is rejected by the API and floored on load).
+    Smaller % = larger dead border = more motion headroom, tighter/more-bordered
+    frame.
+  - `stab_kalman_q`: double, `0.001..1.0` (default 0.03). Process noise / **pan
+    response** — higher = the view follows slow pans sooner (weaker hold); lower
+    = holds tighter and more locked. The estimate eases the offset back to centre
+    on its own (no separate recenter).
+  - `stab_kalman_r`: double, `0.1..50.0` (default 2.0). Measurement noise /
+    **smoothness** — higher = smoother but laggier; lower = snappier, more jitter
+    passes through. Primary feel knob.
+  - `stab_recenter_speed`: uint, `0..3600`. Only the `pauseStab` glide-home rate
+    (`0` = default ramp); inert during normal stabilization.
 - `video0.zoom_x`, `video0.zoom_y`: double, `0.0..1.0`, mutability `live`.
   Aliases `video0.zoomX`, `video0.zoomY`.
 - Semantics: digital zoom uses a 1:1 crop — the crop window and encoded output

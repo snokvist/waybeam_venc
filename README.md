@@ -293,7 +293,8 @@ omitted fields keep their compiled-in defaults.
   Scene-change-triggered IDR (`sceneThreshold`,
   `sceneHoldoff`) is Star6E-only. Intra-refresh is both backends. The
   `framing` knob expands to either digital zoom (both backends) or image
-  stabilization (Star6E only).
+  stabilization (`stab` HW-crop / `stab-fill` floating-image, Star6E only;
+  live `pauseStab`).
 - **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
   stream mode (`rtp` / `compact`), payload sizing, optional dedicated
   audio + sidecar UDP ports.
@@ -381,6 +382,15 @@ and support status. Support is backend-specific; for example, Star6E
 reports `video0.scene_threshold` / `video0.scene_holdoff` as supported,
 while Maruko reports them as unsupported. Use this to discover which
 fields can be changed at runtime.
+
+A field MAY also carry an optional `ui` object (data-driven field schema):
+`group` (collapsible section title), `label`, `control`
+(`toggle`/`number`/`select`/`text`), `min`/`max`/`step` (for `number`),
+`options` (for `select`), and `tooltip`. The dashboard renders a control
+from this generically, so a module field reaches the WebUI with no
+`dashboard.html` edit or webui-blob rebuild. The entire **Stabilization**
+section is built this way (the six `video0.stab_*` knobs plus the
+runtime-only `video0.pause_stab`).
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/capabilities
@@ -617,15 +627,14 @@ cleanly; the key is silently ignored.
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
 | `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
-| `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
+| `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
 | `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
-| `video0.stab_crop_pct` | uint | restart | Advanced: override `stab` kept-frame % (`0` = preset default 80, else `50..100`) |
-| `video0.stab_recenter_speed` | uint | restart | Advanced: override `stab` recenter speed (`0` = stick, higher = slower; preset default 180) |
-| `video0.stab_smooth_pct` | uint | restart | Advanced: `stab` output smoothing % (`0` = preset default 30, else `5..100`; lower = smoother but laggier, `100` = none) |
-| `video0.stab_still_frames` | uint | restart | Advanced: `stab` frames of stillness before recenter starts (`0..600`; higher = stays locked longer; preset default 60) |
-| `video0.stab_edge_pct` | uint | restart | Advanced: `stab` % of dead-border used before margin is reclaimed during a pan (`0` = preset default 88, else `50..100`) |
-| `video0.stab_motion_thresh` | uint | restart | Advanced: `stab` px shift counted as "moving" (`0..16`; higher = less twitchy; preset default 1) |
+| `video0.stab_crop_pct` | uint | restart | Override `stab`/`stab-fill` kept-frame / border budget (`0` = preset default 80, else `60..100`) |
+| `video0.stab_kalman_q` | double | restart | Pan response (Kalman process noise), shared by `stab`/`stab-fill` (`0.001..1.0`; higher = follows pans sooner / weaker hold; preset default 0.03) |
+| `video0.stab_kalman_r` | double | restart | Smoothness (Kalman measurement noise), shared by `stab`/`stab-fill` (`0.1..50.0`; higher = smoother but laggier; preset default 2.0) |
+| `video0.stab_recenter_speed` | uint | restart | `pauseStab` glide-home rate in frames (`0..3600`, `0` = default ramp). Inert during normal stabilization — the Kalman recentres |
+| `video0.pause_stab` | bool | live | Live pause for `stab`/`stab-fill` — glides the stabilized window / floating image back to centre (software ramp, no rebind). Runtime-only (not persisted); boots `false`. No effect under `off`/`zoom-*` |
 
 #### Framing: Stabilization & Digital Zoom
 
@@ -638,6 +647,7 @@ is a named preset (restart-required); the underlying crop fraction is
 |-----------|--------|-------------------|----------|
 | `off` | Full image | 1920×1080 | both |
 | `stab` | Image stabilization (centered 80% crop) | 1536×864 | Star6E only |
+| `stab-fill` | Image stabilization (floating image on a black border) | 1920×1080 | Star6E only |
 | `zoom-1.25x` | 1.25× digital zoom | 1536×864 | both |
 | `zoom-1.50x` | 1.50× digital zoom | 1280×720 | both |
 | `zoom-1.75x` | 1.75× digital zoom | 1088×608 | both |
@@ -653,73 +663,78 @@ smaller resolution in SPS/PPS (the encode dims above are 16-px aligned with a
 there is no upscale, the deep 3×/4× crops are **not** bound by the SCL ~2×
 upscale ceiling.
 
-**Stabilization** (`stab`, Star6E only) holds a centered 80% crop and shifts
-it per frame to cancel motion (recenter τ 180 frames, EMA-smoothed output).
-It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode.
+Both stabilization presets run the **same control law** — a Kalman trajectory
+smoother — so identical settings give identical feel. The only difference is how
+the stabilized offset is applied:
 
-Six **advanced tuning** knobs refine the `stab` preset (all restart-required;
-all inert under `off`/`zoom-*`; re-selecting `framing=stab` resets every one to
-its preset default, so **set `framing=stab` first, then the overrides**). They
-fall into three groups:
+**Stabilization** (`stab`, Star6E only) holds a centered 80% crop and shifts the
+**hardware crop window** per frame to cancel motion. It is always centered —
+`zoom_x`/`zoom_y` are ignored. Encode is HW-cropped, so the stream resolution
+shrinks (1536×864 @1080p) — a fps cost applies (~60→40 on imx335).
 
-*Headroom* — how much room the crop has to absorb motion:
-- `stab_crop_pct` — kept-frame %. `0` keeps the preset default (80). Smaller
-  (e.g. `60`) = bigger dead border = more motion the crop can cancel, at the
-  cost of a tighter, lower-resolution frame.
+**Stabilization, fill variant** (`stab-fill`, Star6E only) keeps the **full
+encode resolution** (1920×1080) and composes a *floating* stabilized image on a
+black border: it SCL-downscales the full sensor frame and shifts a window inside
+it, filling the exposed edges with black. The trade is fps for full resolution.
 
-*Smoothness* — how the correction feels:
-- `stab_smooth_pct` — EMA low-pass on the applied offset, as a %. `0` keeps the
-  preset default (30). **This is the primary feel knob.** Lower = smoother but
-  laggier (the frame trails your real motion); higher = snappier but more jitter
-  passes through; `100` = no smoothing.
+**Live pause** (`pauseStab`, `stab` *and* `stab-fill`) freezes stabilization
+without a pipeline restart: it glides the stabilized window (`stab`) / floating
+image (`stab-fill`) back to centre via a software ramp — no HW rebind. It is
+runtime-only (not persisted, always boots `false`) and a no-op under `off`/`zoom-*`:
 
-*Lock & return* — how it behaves after a disturbance and during a deliberate pan:
-- `stab_recenter_speed` — how fast the crop glides back to center (decay τ in
-  frames). `0` = **stick** (never recenters — strongest visible effect, but
-  drifts to the border and saturates in real use). Higher = slower, gentler
-  return; `180` is the production default.
-- `stab_still_frames` — frames of stillness after motion before the return
-  starts (`0..600`, default 60). Higher = the view stays locked longer after a
-  bump; `0` = start returning the instant motion stops.
-- `stab_edge_pct` — during a *sustained* pan, the % of the dead-border the offset
-  may use before margin is reclaimed (`0` = default 88, else `50..100`). Higher =
-  sticks harder toward the edge before letting go.
-- `stab_motion_thresh` — inter-frame shift (px) that counts as "moving" and
-  re-arms the stillness timer (`0..16`, default 1). Higher = less twitchy, treats
-  small vibration as still.
+```bash
+curl "http://<device>/api/v1/set?video0.pauseStab=1"   # freeze (glide to centre)
+curl "http://<device>/api/v1/set?video0.pauseStab=0"   # resume
+```
 
-##### Calibrating `stab` to taste
+Three **tuning** knobs shape the stabilization (all restart-required; all inert
+under `off`/`zoom-*`; shared identically by `stab` and `stab-fill`; re-selecting
+the preset resets them to the defaults, so **set `framing` first, then the
+overrides**):
 
-Work one group at a time and watch the `stab tick` line in the log (printed every
-120 frames) — it is the calibration instrument:
+- `stab_crop_pct` — **headroom**. Kept-frame % (`stab`) / shift+border budget
+  (`stab-fill`). `0` keeps the preset default (80). Smaller (e.g. `60`) = bigger
+  dead border = more motion absorbed, at the cost of a tighter / more-bordered
+  frame.
+- `stab_kalman_q` — **pan response** (Kalman process noise, default `0.03`,
+  range `0.001..1.0`). Higher = the view follows slow pans sooner (weaker hold);
+  lower = holds tighter and more locked. The estimate eases the offset back to
+  centre on its own — there is no separate recenter knob.
+- `stab_kalman_r` — **smoothness** (Kalman measurement noise, default `2.0`,
+  range `0.1..50.0`). **The primary feel knob.** Higher = smoother but laggier
+  (the frame trails your real motion); lower = snappier but more jitter passes
+  through.
+
+(`stab_recenter_speed` only sets the `pauseStab` glide-home rate; during normal
+stabilization the Kalman handles recentering.)
+
+##### Calibrating to taste
+
+Watch the `stab tick` line in the log (printed every 120 frames):
 
 ```
-stab tick 600: meas=(82,83) acc=(-206,31) max=(288,216) pan=(500,500) still=0 ...
+stab tick 600: meas=(82,83) acc=(-206,31) max=(288,216) pan=(500,500) kalman(q=0.0300,r=2.00) paused=0 ...
 ```
-- `meas` = motion estimate this detect · `acc` = the crop offset being applied ·
-  `max` = the dead-border limit (= half the cropped-away pixels) · `still` =
-  stillness counter (counts up to `stab_still_frames`, resets to 0 on motion).
+- `meas` = motion estimate this detect · `acc` = the offset being applied ·
+  `max` = the border budget (= half the cropped-away pixels) · `kalman` = the
+  active q/r.
 
 Recommended order:
 
 1. **Headroom first.** Shake the camera the way it will really move. If `acc`
    sits pinned near `±max` and clips, you're saturating — lower `stab_crop_pct`
-   (e.g. 80 → 70 → 60) until `acc` has room. If motion is gentle and you want
-   max FOV/sharpness, keep 80.
-2. **Then smoothness.** If the output looks jittery/shaky (or `acc` jumps around
-   erratically frame-to-frame), *lower* `stab_smooth_pct` (30 → 20 → 15). If it
-   feels floaty and lags your real movement, *raise* it (30 → 50 → 70).
-3. **Then lock & return.** If the view creeps back to center too eagerly after
-   you stop, raise `stab_still_frames` (60 → 120 → 180) and/or `stab_recenter_speed`
-   (slower glide). If it drifts to the edge and won't come home, lower
-   `stab_recenter_speed`. If a deliberate pan jumps when it reaches the border,
-   raise `stab_edge_pct`.
-4. **Twitchiness last.** If tiny vibration keeps resetting `still` to 0 (it
-   rarely reaches the ceiling), raise `stab_motion_thresh` to 2–3.
+   (80 → 70 → 60) until `acc` has room. If motion is gentle and you want max
+   FOV/sharpness, keep 80.
+2. **Then smoothness (R).** If the output looks jittery/shaky, *raise*
+   `stab_kalman_r` (2 → 4 → 8). If it feels floaty and lags your real movement,
+   *lower* it (2 → 1 → 0.5).
+3. **Then hold vs pan (Q).** If a deliberate pan feels sticky/rubber-banded,
+   *raise* `stab_kalman_q` (0.03 → 0.06 → 0.1) so the view follows sooner. If the
+   view drifts during slow movement, *lower* it (0.03 → 0.015) to hold tighter.
 
 The active values are echoed once at start so you can confirm each change:
 ```
-[waybeam] stab: src=1440x1080 out=864x648 crop=60% recenter=20 (0=stick) smooth=0.15 still=120 edge=88% thresh=1
+[waybeam] stab: src=1440x1080 out=864x648 crop=60% kalman(q=0.0300,r=2.00) pauseGlide=180
 ```
 
 Examples (each `set` is restart-required; the daemon respawns to apply):
@@ -728,15 +743,15 @@ Examples (each `set` is restart-required; the daemon respawns to apply):
 # Production stab (all knobs at preset defaults).
 curl "http://<device>/api/v1/set?video0.framing=stab"
 
-# Smoother, locked-longer feel: heavier low-pass + longer hold.
-curl "http://<device>/api/v1/set?video0.stabSmoothPct=15&video0.stabStillFrames=180"
+# Smoother, more locked feel: heavier measurement filtering + tighter hold.
+# (Restart-required fields must be set ONE per request — the daemon respawns
+# between them, so wait for each to come back before the next.)
+curl "http://<device>/api/v1/set?video0.stabKalmanR=6"
+curl "http://<device>/api/v1/set?video0.stabKalmanQ=0.02"
 
-# More motion headroom (tighter crop) with a quick, gentle recenter.
-curl "http://<device>/api/v1/set?video0.stabCropPct=60&video0.stabRecenterSpeed=60"
-
-# Demo: stick to the patch (no recenter) — strongest visible effect, drifts to
-# the border (not for real-world use).
-curl "http://<device>/api/v1/set?video0.stabRecenterSpeed=0"
+# Looser, follows pans sooner; more motion headroom (tighter crop).
+curl "http://<device>/api/v1/set?video0.stabKalmanQ=0.08"
+curl "http://<device>/api/v1/set?video0.stabCropPct=60"
 ```
 
 **Panning** applies to the `zoom-*` modes only and is live (`zoom_x`,
