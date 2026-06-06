@@ -943,19 +943,9 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		static unsigned int osd_fps;
 		struct timespec osd_now;
 
-		/* When image stabilization is on, the OSD canvas is at full
-		 * VPE port dim but the encoded view is the centered crop.
-		 * Track the crop origin every frame so the panel stays
-		 * stationary in the encoded view as stab corrections shift
-		 * the crop window in port coords. */
-		{
-			int anchor_x;
-			int anchor_y;
-			if (star6e_pipeline_stab_panel_anchor(&anchor_x, &anchor_y))
-				debug_osd_set_panel_offset(ps->debug_osd,
-					anchor_x, anchor_y);
-		}
-
+			/* HW-crop stab outputs the cropped encoded dim on port0, so the
+			 * OSD canvas is 1:1 with the encoded frame (static) — no
+			 * per-frame panel-offset tracking needed. */
 		debug_osd_begin_frame(ps->debug_osd);
 		debug_osd_sample_cpu(ps->debug_osd);
 

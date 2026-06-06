@@ -710,14 +710,6 @@ typedef MI_S32 (*stab_sys_close_fd_fn_t)(MI_S32 fd);
 typedef MI_S32 (*stab_sys_out_get_buf_fn_t)(MI_SYS_ChnPort_t *port,
 	StabSysBufInfo_t *buf, StabSysBufHandle_t *handle);
 typedef MI_S32 (*stab_sys_out_put_buf_fn_t)(StabSysBufHandle_t handle);
-typedef MI_S32 (*stab_sys_in_get_buf_fn_t)(MI_SYS_ChnPort_t *port,
-	StabSysBufConf_t *conf, StabSysBufInfo_t *buf,
-	StabSysBufHandle_t *handle, MI_S32 timeout_ms);
-typedef MI_S32 (*stab_sys_in_put_buf_fn_t)(StabSysBufHandle_t handle,
-	StabSysBufInfo_t *buf, MI_BOOL drop);
-typedef MI_S32 (*stab_sys_blit_pa_fn_t)(StabSysFrameData_t *dst,
-	StabSysWindowRect_t *dst_rect, StabSysFrameData_t *src,
-	StabSysWindowRect_t *src_rect);
 typedef MI_S32 (*stab_sys_flush_inv_cache_fn_t)(void *vir, MI_U32 size);
 typedef MI_S32 (*stab_sys_va2pa_fn_t)(void *vir, STAB_MI_PHY *phy);
 
@@ -786,9 +778,6 @@ static stab_sys_get_fd_fn_t g_stab_sys_get_fd;
 static stab_sys_close_fd_fn_t g_stab_sys_close_fd;
 static stab_sys_out_get_buf_fn_t g_stab_sys_out_get_buf;
 static stab_sys_out_put_buf_fn_t g_stab_sys_out_put_buf;
-static stab_sys_in_get_buf_fn_t g_stab_sys_in_get_buf;
-static stab_sys_in_put_buf_fn_t g_stab_sys_in_put_buf;
-static stab_sys_blit_pa_fn_t g_stab_sys_blit_pa;
 static stab_sys_flush_inv_cache_fn_t g_stab_sys_flush_inv_cache;
 static stab_sys_va2pa_fn_t g_stab_sys_va2pa;
 
@@ -801,17 +790,16 @@ static void *g_stab_ive_lib;
 
 static pthread_t g_stab_thread;
 static volatile int g_stab_running;
-/* Stabilization data path:
- *   HW (g_stab_hw_mode=1): VPE port0 hardware-crops the stab window straight
- *     to VENC (zero-copy bind); a tiny port1 256x256 tap feeds the detector.
- *     The detector thread updates port0's SetPortCrop rect per detect.  No
- *     per-frame BufBlitPa, and port0 tears down via the standard bound path.
- *   Legacy (g_stab_hw_mode=0): the historic single-port manual drain — port0
- *     full-frame, detector + per-frame BufBlitPa crop into VENC input.  Used
- *     only as a fallback when this BSP rejects a simultaneous port1.
- * g_stab_pause/parked are a quiesce handshake so teardown can disable port1
- * while the detector is guaranteed not inside an MI_SYS call. */
-static volatile int g_stab_hw_mode;
+/* Stabilization data path (single HW-crop mode): VPE port0 hardware-crops the
+ * stab window straight to VENC (zero-copy bind); a tiny port1 256x256 tap feeds
+ * the detector, which updates port0's SetPortCrop rect per detect.  No
+ * per-frame BufBlitPa; port0 tears down via the standard bound path.
+ *   g_stab_tap_active=1 when the port1 detector tap came up and the detector
+ *   thread runs.  If the BSP rejects the tap, port0 still binds to VENC
+ *   (static centre crop, no shake compensation) and the detector is skipped.
+ *   g_stab_pause/parked are a quiesce handshake so teardown can disable port1
+ *   while the detector is guaranteed not inside an MI_SYS call. */
+static volatile int g_stab_tap_active;
 static volatile int g_stab_pause;
 static volatile int g_stab_parked;
 static pthread_mutex_t g_stab_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -843,7 +831,6 @@ static volatile int g_stab_off_y;
 static volatile int g_stab_pan_x_mil = 500;
 static volatile int g_stab_pan_y_mil = 500;
 static MI_SYS_ChnPort_t g_stab_vpe_port;
-static MI_SYS_ChnPort_t g_stab_venc_port;
 
 /* ── Gyro motion source (IMU-assisted stabilization seam) ────────────────
  * The BMI270 driver (imu_bmi270.c) already runs frame-synced; when
@@ -862,9 +849,7 @@ static int star6e_stab_load_sys_extra_symbols(void)
 	void *h;
 
 	if (g_stab_sys_out_get_buf && g_stab_sys_out_put_buf &&
-	    g_stab_sys_in_get_buf && g_stab_sys_in_put_buf &&
-	    g_stab_sys_blit_pa && g_stab_sys_flush_inv_cache &&
-	    g_stab_sys_va2pa)
+	    g_stab_sys_flush_inv_cache && g_stab_sys_va2pa)
 		return 0;
 
 	h = dlopen("libmi_sys.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -877,20 +862,12 @@ static int star6e_stab_load_sys_extra_symbols(void)
 		"MI_SYS_ChnOutputPortGetBuf");
 	g_stab_sys_out_put_buf = (stab_sys_out_put_buf_fn_t)dlsym(h,
 		"MI_SYS_ChnOutputPortPutBuf");
-	g_stab_sys_in_get_buf = (stab_sys_in_get_buf_fn_t)dlsym(h,
-		"MI_SYS_ChnInputPortGetBuf");
-	g_stab_sys_in_put_buf = (stab_sys_in_put_buf_fn_t)dlsym(h,
-		"MI_SYS_ChnInputPortPutBuf");
-	g_stab_sys_blit_pa = (stab_sys_blit_pa_fn_t)dlsym(h,
-		"MI_SYS_BufBlitPa");
 	g_stab_sys_flush_inv_cache = (stab_sys_flush_inv_cache_fn_t)dlsym(h,
 		"MI_SYS_FlushInvCache");
 	g_stab_sys_va2pa = (stab_sys_va2pa_fn_t)dlsym(h, "MI_SYS_Va2Pa");
 
 	return (g_stab_sys_out_get_buf && g_stab_sys_out_put_buf &&
-		g_stab_sys_in_get_buf && g_stab_sys_in_put_buf &&
-		g_stab_sys_blit_pa && g_stab_sys_flush_inv_cache &&
-		g_stab_sys_va2pa) ? 0 : -1;
+		g_stab_sys_flush_inv_cache && g_stab_sys_va2pa) ? 0 : -1;
 }
 
 static uint64_t star6e_stab_pts_us(void)
@@ -999,51 +976,6 @@ static void star6e_stab_set_pan(double pan_x, double pan_y)
 	star6e_stab_apply_ae_crop();
 }
 
-int star6e_pipeline_stab_panel_anchor(int *out_x, int *out_y)
-{
-	int off_x;
-	int off_y;
-	int pan_x;
-	int pan_y;
-	int center_x;
-	int center_y;
-	int src_x;
-	int src_y;
-	int max_x;
-	int max_y;
-
-	if (!g_stab_running || g_stab_enc_w == 0 || g_stab_enc_h == 0)
-		return 0;
-	/* HW-crop mode: the OSD is 1:1 on the post-crop port0 output (static),
-	 * so there is no pre-crop anchor to track — behave like non-stab. */
-	if (g_stab_hw_mode)
-		return 0;
-	if (!out_x || !out_y)
-		return 0;
-
-	pthread_mutex_lock(&g_stab_lock);
-	off_x = g_stab_off_x;
-	off_y = g_stab_off_y;
-	pthread_mutex_unlock(&g_stab_lock);
-
-	pan_x = g_stab_pan_x_mil;
-	pan_y = g_stab_pan_y_mil;
-	center_x = (int)((g_stab_src_w * (uint32_t)pan_x) / 1000u);
-	center_y = (int)((g_stab_src_h * (uint32_t)pan_y) / 1000u);
-	src_x = center_x - (int)g_stab_enc_w / 2 + off_x;
-	src_y = center_y - (int)g_stab_enc_h / 2 + off_y;
-	max_x = (int)(g_stab_src_w - g_stab_enc_w);
-	max_y = (int)(g_stab_src_h - g_stab_enc_h);
-	if (src_x < 0) src_x = 0;
-	if (src_x > max_x) src_x = max_x;
-	if (src_y < 0) src_y = 0;
-	if (src_y > max_y) src_y = max_y;
-
-	*out_x = src_x;
-	*out_y = src_y;
-	return 1;
-}
-
 static int star6e_stab_max_off_x(void)
 {
 	return (int)((g_stab_src_w - g_stab_enc_w) / 2u);
@@ -1065,11 +997,10 @@ static int star6e_stab_img_to_pre_y(int v)
 	return (int)((int64_t)v * (int64_t)g_stab_pre_h / (int64_t)g_stab_src_h);
 }
 
-/* HW-crop mode output: program VPE port0's SetPortCrop to the stab window
- * (enc_w x enc_h positioned at pan-center + accumulated shake offset).  This
- * is the hardware-SCL equivalent of the legacy per-frame BufBlitPa.  The
- * window is computed in image domain (identical to the legacy blit's src_x/
- * src_y math, so the accumulator/feel is unchanged) and then scaled into the
+/* HW-crop output: program VPE port0's SetPortCrop to the stab window
+ * (enc_w x enc_h positioned at pan-center + accumulated shake offset).  The
+ * window is computed in image domain (src_x/src_y math drives the
+ * accumulator/feel) and then scaled into the
  * VPE INPUT (precrop) domain, because MI_VPE_SetPortCrop crops the channel
  * input — the SCL then scales that window down to the encoded port output,
  * the same downscale ratio the non-stab full-frame path uses.  x/y/w/h
@@ -1124,109 +1055,6 @@ static void star6e_stab_apply_port_crop(int acc_x, int acc_y)
 	}
 }
 
-static STAB_MI_PHY star6e_stab_uv_pa(const StabSysFrameData_t *f, uint32_t h)
-{
-	if (f->phyAddr[1])
-		return f->phyAddr[1];
-	return f->phyAddr[0] + (STAB_MI_PHY)f->u32Stride[0] * h;
-}
-
-static int star6e_stab_blit_nv12_crop(StabSysFrameData_t *dst,
-	const StabSysFrameData_t *src, int src_x, int src_y,
-	int width, int height)
-{
-	StabSysFrameData_t src_y_frame;
-	StabSysFrameData_t dst_y_frame;
-	StabSysFrameData_t src_uv_frame;
-	StabSysFrameData_t dst_uv_frame;
-	StabSysWindowRect_t src_y_rect;
-	StabSysWindowRect_t dst_y_rect;
-	StabSysWindowRect_t src_uv_rect;
-	StabSysWindowRect_t dst_uv_rect;
-	STAB_MI_PHY src_uv_pa;
-	STAB_MI_PHY dst_uv_pa;
-	int src_y_stride;
-	int dst_y_stride;
-	int src_uv_stride;
-	int dst_uv_stride;
-	MI_S32 ret;
-
-	if (!dst || !src || !dst->phyAddr[0] || !src->phyAddr[0])
-		return -1;
-
-	src_x &= ~1;
-	src_y &= ~1;
-	width &= ~1;
-	height &= ~1;
-
-	if (src_x < 0) src_x = 0;
-	if (src_y < 0) src_y = 0;
-	if (src_x + width > (int)g_stab_src_w)
-		src_x = (int)g_stab_src_w - width;
-	if (src_y + height > (int)g_stab_src_h)
-		src_y = (int)g_stab_src_h - height;
-
-	src_y_stride = (int)src->u32Stride[0];
-	dst_y_stride = (int)dst->u32Stride[0];
-	src_uv_stride = src->u32Stride[1] ? (int)src->u32Stride[1] : src_y_stride;
-	dst_uv_stride = dst->u32Stride[1] ? (int)dst->u32Stride[1] : dst_y_stride;
-	src_uv_pa = star6e_stab_uv_pa(src, g_stab_src_h);
-	dst_uv_pa = star6e_stab_uv_pa(dst, g_stab_enc_h);
-	if (!src_uv_pa || !dst_uv_pa)
-		return -1;
-
-	memset(&src_y_frame, 0, sizeof(src_y_frame));
-	memset(&dst_y_frame, 0, sizeof(dst_y_frame));
-	memset(&src_y_rect, 0, sizeof(src_y_rect));
-	memset(&dst_y_rect, 0, sizeof(dst_y_rect));
-
-	src_y_frame.ePixelFormat = STAB_E_PIXEL_FRAME_I8;
-	src_y_frame.phyAddr[0] = src->phyAddr[0];
-	src_y_frame.u16Width = (MI_U16)g_stab_src_w;
-	src_y_frame.u16Height = (MI_U16)g_stab_src_h;
-	src_y_frame.u32Stride[0] = src_y_stride;
-	dst_y_frame.ePixelFormat = STAB_E_PIXEL_FRAME_I8;
-	dst_y_frame.phyAddr[0] = dst->phyAddr[0];
-	dst_y_frame.u16Width = (MI_U16)g_stab_enc_w;
-	dst_y_frame.u16Height = (MI_U16)g_stab_enc_h;
-	dst_y_frame.u32Stride[0] = dst_y_stride;
-	src_y_rect.u16X = (MI_U16)src_x;
-	src_y_rect.u16Y = (MI_U16)src_y;
-	src_y_rect.u16Width = (MI_U16)width;
-	src_y_rect.u16Height = (MI_U16)height;
-	dst_y_rect.u16Width = (MI_U16)width;
-	dst_y_rect.u16Height = (MI_U16)height;
-
-	ret = g_stab_sys_blit_pa(&dst_y_frame, &dst_y_rect,
-		&src_y_frame, &src_y_rect);
-	if (ret != 0)
-		return ret;
-
-	memset(&src_uv_frame, 0, sizeof(src_uv_frame));
-	memset(&dst_uv_frame, 0, sizeof(dst_uv_frame));
-	memset(&src_uv_rect, 0, sizeof(src_uv_rect));
-	memset(&dst_uv_rect, 0, sizeof(dst_uv_rect));
-
-	src_uv_frame.ePixelFormat = STAB_E_PIXEL_FRAME_I8;
-	src_uv_frame.phyAddr[0] = src_uv_pa;
-	src_uv_frame.u16Width = (MI_U16)g_stab_src_w;
-	src_uv_frame.u16Height = (MI_U16)(g_stab_src_h / 2u);
-	src_uv_frame.u32Stride[0] = src_uv_stride;
-	dst_uv_frame.ePixelFormat = STAB_E_PIXEL_FRAME_I8;
-	dst_uv_frame.phyAddr[0] = dst_uv_pa;
-	dst_uv_frame.u16Width = (MI_U16)g_stab_enc_w;
-	dst_uv_frame.u16Height = (MI_U16)(g_stab_enc_h / 2u);
-	dst_uv_frame.u32Stride[0] = dst_uv_stride;
-	src_uv_rect.u16X = (MI_U16)src_x;
-	src_uv_rect.u16Y = (MI_U16)(src_y / 2);
-	src_uv_rect.u16Width = (MI_U16)width;
-	src_uv_rect.u16Height = (MI_U16)(height / 2);
-	dst_uv_rect.u16Width = (MI_U16)width;
-	dst_uv_rect.u16Height = (MI_U16)(height / 2);
-
-	return g_stab_sys_blit_pa(&dst_uv_frame, &dst_uv_rect,
-		&src_uv_frame, &src_uv_rect);
-}
 
 static int star6e_stab_make_center_y_crop(StabIveImage_t *image,
 	const StabSysBufInfo_t *buf, int crop_w, int crop_h)
@@ -1292,68 +1120,6 @@ static int star6e_stab_alloc_ive_image(StabIveImage_t *image,
 	return 0;
 }
 
-static int star6e_stab_send_frame_to_venc(const StabSysBufInfo_t *src_buf)
-{
-	StabSysBufConf_t conf;
-	StabSysBufInfo_t venc_buf;
-	StabSysBufHandle_t venc_handle = 0;
-	int off_x;
-	int off_y;
-	int max_x;
-	int max_y;
-	int src_x;
-	int src_y;
-	MI_S32 ret;
-
-	memset(&conf, 0, sizeof(conf));
-	conf.eBufType = STAB_E_BUFDATA_FRAME;
-	conf.u64TargetPts = star6e_stab_pts_us();
-	conf.stFrameCfg.eFormat = I6_PIXFMT_YUV420SP;
-	conf.stFrameCfg.eFrameScanMode = STAB_E_FRAME_SCAN_MODE_PROGRESSIVE;
-	conf.stFrameCfg.u16Width = (MI_U16)g_stab_enc_w;
-	conf.stFrameCfg.u16Height = (MI_U16)g_stab_enc_h;
-
-	memset(&venc_buf, 0, sizeof(venc_buf));
-	ret = g_stab_sys_in_get_buf(&g_stab_venc_port, &conf,
-		&venc_buf, &venc_handle, 20);
-	if (ret != 0)
-		return ret;
-
-	pthread_mutex_lock(&g_stab_lock);
-	off_x = g_stab_off_x;
-	off_y = g_stab_off_y;
-	pthread_mutex_unlock(&g_stab_lock);
-
-	/* User pan + stab shake-correction.  The crop window center is placed
-	 * at (pan_x, pan_y) parts-per-thousand of the source frame; the IVE
-	 * shift accumulator then shifts the window further to cancel camera
-	 * motion.  Asymmetric clamps follow naturally from clipping src_x /
-	 * src_y into [0, src - enc]: when the user pans hard toward an edge,
-	 * stab loses headroom on that side first. */
-	{
-		int pan_x = g_stab_pan_x_mil;
-		int pan_y = g_stab_pan_y_mil;
-		int center_x = (int)((g_stab_src_w * (uint32_t)pan_x) / 1000u);
-		int center_y = (int)((g_stab_src_h * (uint32_t)pan_y) / 1000u);
-		src_x = center_x - (int)g_stab_enc_w / 2 + off_x;
-		src_y = center_y - (int)g_stab_enc_h / 2 + off_y;
-		max_x = (int)(g_stab_src_w - g_stab_enc_w);
-		max_y = (int)(g_stab_src_h - g_stab_enc_h);
-		if (src_x < 0) src_x = 0;
-		if (src_x > max_x) src_x = max_x;
-		if (src_y < 0) src_y = 0;
-		if (src_y > max_y) src_y = max_y;
-	}
-	ret = star6e_stab_blit_nv12_crop(&venc_buf.stFrameData,
-		&src_buf->stFrameData, src_x, src_y,
-		(int)g_stab_enc_w, (int)g_stab_enc_h);
-	if (ret != 0) {
-		g_stab_sys_in_put_buf(venc_handle, &venc_buf, true);
-		return ret;
-	}
-
-	return g_stab_sys_in_put_buf(venc_handle, &venc_buf, false);
-}
 
 /* Read the gyro samples captured during the frame interval [t0, t1] from the
  * shared IMU ring (CLOCK_MONOTONIC domain).  Returns the sample count and,
@@ -1550,15 +1316,8 @@ static void *star6e_stab_thread_main(void *arg)
 		clock_gettime(CLOCK_MONOTONIC, &curr_ts);
 
 		if (!have_prev) {
-			/* HW mode: VENC is hardware-fed from port0; the detector tap
-			 * (port1) only seeds the reference frame here.  Legacy mode:
-			 * push the first frame into VENC's input. */
-			if (!g_stab_hw_mode) {
-				ret = star6e_stab_send_frame_to_venc(&curr_buf);
-				if (ret != 0 && (dbg_frame++ % 60) == 0)
-					fprintf(stderr, "[waybeam] stab first venc send "
-						"failed ret=0x%x\n", ret);
-			}
+			/* VENC is hardware-fed from port0; the detector tap (port1)
+			 * only seeds the reference frame here. */
 			prev_handle = curr_handle;
 			prev_img = curr_img;
 			prev_ts = curr_ts;
@@ -1665,33 +1424,18 @@ static void *star6e_stab_thread_main(void *arg)
 						"ret=0x%x\n", (unsigned)ret);
 			}
 
-			/* Emit the new offset, then rotate prev to this frame.
-			 * HW mode: reprogram port0's hardware crop (VENC is fed by
-			 * the bind).  Legacy mode: BufBlitPa the crop into VENC. */
-			if (g_stab_hw_mode) {
-				star6e_stab_apply_port_crop(acc_x, acc_y);
-			} else {
-				ret = star6e_stab_send_frame_to_venc(&curr_buf);
-				if (ret != 0 && (dbg_frame % 60) == 0)
-					fprintf(stderr, "[waybeam] stab venc send failed "
-						"ret=0x%x\n", ret);
-			}
+			/* Emit the new offset by reprogramming port0's hardware crop
+			 * (VENC is fed by the bind), then rotate prev to this frame. */
+			star6e_stab_apply_port_crop(acc_x, acc_y);
 			if (prev_handle)
 				g_stab_sys_out_put_buf(prev_handle);
 			prev_handle = curr_handle;
 			prev_img = curr_img;
 			prev_ts = curr_ts;
 		} else {
-			/* Skipped-detect frame.  HW mode: nothing to emit (port0
-			 * holds the last crop, VENC is hardware-fed).  Legacy mode:
-			 * re-output with the current accumulator.  Keep prev as the
-			 * last detected frame so the next detect spans the interval. */
-			if (!g_stab_hw_mode) {
-				ret = star6e_stab_send_frame_to_venc(&curr_buf);
-				if (ret != 0 && (dbg_frame % 60) == 0)
-					fprintf(stderr, "[waybeam] stab venc send failed "
-						"ret=0x%x\n", ret);
-			}
+			/* Skipped-detect frame: nothing to emit (port0 holds the last
+			 * crop, VENC is hardware-fed).  Keep prev as the last detected
+			 * frame so the next detect spans the interval. */
 			g_stab_sys_out_put_buf(curr_handle);
 		}
 	}
@@ -1706,59 +1450,19 @@ out:
 	return NULL;
 }
 
-/* Post-bind VPE port0 reapply.  When stab is enabled, port0 stays at the
- * full src dim (NV12, no scale); standalone DIS code re-sets the port
- * AFTER the VIF→VPE bind and bumps the output queue depth so the manual
- * drain thread keeps up.  Do NOT DisablePort first — on Star6E that can
- * leave port0 in a Pixel-MAX / 0×0 state when no VPE→VENC bind exists. */
-static int star6e_stab_reapply_vpe_port(uint32_t src_w, uint32_t src_h)
-{
-	MI_VPE_PortAttr_t port = {0};
-	MI_SYS_ChnPort_t vpe0 = {
-		.module = I6_SYS_MOD_VPE, .device = 0, .channel = 0, .port = 0 };
-	MI_S32 ret;
 
-	port.output.width = src_w;
-	port.output.height = src_h;
-	port.pixFmt = I6_PIXFMT_YUV420SP;
-	port.compress = I6_COMPR_NONE;
-
-	ret = MI_VPE_SetPortMode(0, 0, &port);
-	if (ret != 0) {
-		fprintf(stderr, "[waybeam] ERROR: stab VPE SetPortMode %ux%u "
-			"failed %d\n", src_w, src_h, (int)ret);
-		return ret;
-	}
-	ret = MI_VPE_EnablePort(0, 0);
-	if (ret != 0) {
-		fprintf(stderr, "[waybeam] ERROR: stab VPE EnablePort failed "
-			"%d\n", (int)ret);
-		return ret;
-	}
-	ret = MI_SYS_SetChnOutputPortDepth(&vpe0, 4, 8);
-	if (ret != 0) {
-		fprintf(stderr, "[waybeam] ERROR: stab SetChnOutputPortDepth "
-			"failed %d\n", (int)ret);
-		return ret;
-	}
-	return 0;
-}
-
-/* Set up VPE output ports for stabilization and choose the data path.
+/* Set up VPE output ports for stabilization (single HW-crop path).
  *
- * Preferred (HW-crop): port0 outputs the encoded dim and is hardware-bound to
- * VENC ch0; the detector reads a tiny port1 256x256 centre tap.  Each detect
- * reprograms port0's SetPortCrop — no software blit, and port0 tears down via
- * the standard bound-port path (state->bound_vpe_venc=1).  Sets
- * g_stab_hw_mode=1, g_stab_vpe_port=port1.
+ * port0 outputs the encoded dim and is hardware-bound to VENC ch0; the
+ * detector reads a tiny port1 256x256 centre tap and reprograms port0's
+ * SetPortCrop per detect (no software blit; port0 tears down via the standard
+ * bound-port path, state->bound_vpe_venc=1).  Sets g_stab_tap_active=1,
+ * g_stab_vpe_port=port1.
  *
- * Fallback (legacy blit): if this BSP rejects a simultaneous port1, port0 is
- * reverted to full-src and manually drained + BufBlitPa'd into VENC's input
- * (the historic path).  Sets g_stab_hw_mode=0, g_stab_vpe_port=port0,
- * state->bound_vpe_venc=0.
- *
- * Returns 0 on success (either path) with the mode globals set, <0 on a hard
- * failure the caller must abort on. */
+ * If this BSP rejects the port1 tap, port0 is still bound to VENC and held at
+ * a static centre crop (g_stab_tap_active=0, no detector, no shake
+ * compensation) — the stream stays up at the configured framing.  Returns 0 on
+ * success, <0 only on a hard port0/bind failure the caller must abort on. */
 static int star6e_stab_setup_ports(Star6ePipelineState *state,
 	uint32_t bind_src_fps, uint32_t bind_dst_fps)
 {
@@ -1769,10 +1473,10 @@ static int star6e_stab_setup_ports(Star6ePipelineState *state,
 		.module = I6_SYS_MOD_VPE, .device = 0, .channel = 0, .port = 1 };
 	i6_common_rect rect;
 	int port1_enabled = 0;
+	int tap_ok;
 	MI_S32 ret;
 
-	g_stab_hw_mode = 0;
-	g_stab_venc_port = state->venc_port;
+	g_stab_tap_active = 0;
 	state->bound_vpe_venc = 0;
 
 	/* VPE channel input (precrop) dim — the SetPortCrop coordinate domain.
@@ -1835,44 +1539,40 @@ static int star6e_stab_setup_ports(Star6ePipelineState *state,
 		rect.height = (unsigned short)dh;
 		ret = MI_VPE_SetPortCrop(0, 1, &rect);
 	}
-	if (ret == 0) {
-		MI_SYS_SetChnOutputPortDepth(&vpe1, 2, 4);
-		ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
-			bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
-		if (ret == 0) {
-			MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
-			state->bound_vpe_venc = 1;
-			g_stab_vpe_port = vpe1;   /* detector drains port1 */
-			g_stab_hw_mode = 1;
-			/* Centre the initial crop window now that port0 is bound
-			 * (only after committing to HW mode, so a fallback never
-			 * leaves a stray crop on port0). */
-			star6e_stab_apply_port_crop(0, 0);
-			fprintf(stderr, "[waybeam] stab: HW-crop mode "
-				"(port0->VENC bind, port1 %dx%d detector tap)\n",
-				STAB_SHIFT_CROP_W, STAB_SHIFT_CROP_H);
-			return 0;
-		}
-		fprintf(stderr, "[waybeam] WARNING: stab port0->VENC bind "
-			"failed %d; falling back to legacy blit\n", (int)ret);
-	} else {
-		fprintf(stderr, "[waybeam] WARNING: stab port1 tap unavailable "
-			"(%d); falling back to legacy blit\n", (int)ret);
-	}
+	tap_ok = (ret == 0 && port1_enabled);
 
-	/* Fallback: tear down the tap and revert port0 to a full-src manual
-	 * drain.  reapply re-SetPortModes/EnablePorts port0 (double EnablePort
-	 * is the same pattern the original channel-start+reapply flow used). */
-	if (port1_enabled)
-		MI_VPE_DisablePort(0, 1);
-	ret = star6e_stab_reapply_vpe_port(g_stab_src_w, g_stab_src_h);
-	if (ret != 0)
+	/* Bind port0 -> VENC zero-copy regardless of the tap: the stabilized (or,
+	 * if the tap is unavailable, static centre) crop is fed by this bind. */
+	ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
+		bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
+	if (ret != 0) {
+		fprintf(stderr, "[waybeam] ERROR: stab port0->VENC bind failed "
+			"%d\n", (int)ret);
+		if (port1_enabled)
+			MI_VPE_DisablePort(0, 1);
 		return ret;
-	g_stab_vpe_port = vpe0;
-	g_stab_hw_mode = 0;
-	state->bound_vpe_venc = 0;
-	fprintf(stderr, "[waybeam] stab: legacy blit mode "
-		"(port0 full-src manual drain)\n");
+	}
+	MI_SYS_SetChnOutputPortDepth(&state->venc_port, 1, 3);
+	state->bound_vpe_venc = 1;
+	star6e_stab_apply_port_crop(0, 0);   /* centre the initial crop window */
+
+	if (tap_ok) {
+		MI_SYS_SetChnOutputPortDepth(&vpe1, 2, 4);
+		g_stab_vpe_port = vpe1;          /* detector drains port1 */
+		g_stab_tap_active = 1;
+		fprintf(stderr, "[waybeam] stab: HW-crop mode (port0->VENC bind, "
+			"port1 %dx%d detector tap)\n",
+			STAB_SHIFT_CROP_W, STAB_SHIFT_CROP_H);
+	} else {
+		/* No detector tap on this BSP: keep the bound static centre crop,
+		 * no shake compensation (never the legacy manual drain). */
+		if (port1_enabled)
+			MI_VPE_DisablePort(0, 1);
+		g_stab_vpe_port = vpe0;
+		g_stab_tap_active = 0;
+		fprintf(stderr, "[waybeam] WARNING: stab port1 tap unavailable "
+			"(%d); static centre crop, no stabilization\n", (int)ret);
+	}
 	return 0;
 }
 
@@ -1882,6 +1582,14 @@ static int star6e_stab_start(void)
 
 	g_stab_pause = 0;
 	g_stab_parked = 0;
+
+	/* Degrade path: port0 is bound at a static centre crop, no port1 tap —
+	 * run no detector thread. */
+	if (!g_stab_tap_active) {
+		fprintf(stderr, "[waybeam] stab: detector disabled "
+			"(static centre crop, no shake compensation)\n");
+		return 0;
+	}
 
 	if (star6e_stab_load_sys_extra_symbols() != 0) {
 		fprintf(stderr, "[waybeam] ERROR: stab cannot resolve required "
@@ -1963,7 +1671,7 @@ static void star6e_stab_stop(void)
 		g_stab_running = 0;
 		pthread_join(g_stab_thread, NULL);
 		memset(&g_stab_thread, 0, sizeof(g_stab_thread));
-		if (g_stab_hw_mode)
+		if (g_stab_tap_active)
 			MI_VPE_DisablePort(0, 1);
 		g_stab_pause = 0;
 		g_stab_parked = 0;
@@ -1976,7 +1684,7 @@ static void star6e_stab_stop(void)
 		dlclose(g_stab_ive_lib);
 		g_stab_ive_lib = NULL;
 	}
-	g_stab_hw_mode = 0;
+	g_stab_tap_active = 0;
 }
 
 static int star6e_stab_enabled(const VencConfig *vcfg)
@@ -3364,11 +3072,12 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 		ret = star6e_stab_start();
 		if (ret != 0) {
-			if (g_stab_hw_mode && state->bound_vpe_venc) {
+			if (state->bound_vpe_venc) {
 				MI_SYS_UnBindChnPort(&state->vpe_port,
 					&state->venc_port);
 				state->bound_vpe_venc = 0;
-				MI_VPE_DisablePort(0, 1);
+				if (g_stab_tap_active)
+					MI_VPE_DisablePort(0, 1);
 			}
 			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
 			state->bound_vif_vpe = 0;
@@ -3511,22 +3220,12 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * attaches at the VPE port output (post-SCL crop), so the canvas is
 	 * already 1:1 with the encoded frame and needs no zoom-time offset.
 	 * HW-crop stab is no different: port0 outputs the cropped encoded dim,
-	 * so the OSD is static 1:1 like the non-stab/zoom path.  ONLY the
-	 * legacy blit fallback attaches at the full source dim (port0 is
-	 * uncropped there) — seed the panel offset to the static centre-crop
-	 * origin, then star6e_runtime tracks the live crop window per-frame via
-	 * star6e_pipeline_stab_panel_anchor(). */
+	 * so the OSD is static 1:1 like the non-stab/zoom path. */
 	if (vcfg->debug.show_osd) {
-		int legacy_stab = star6e_stab_enabled(vcfg) && !g_stab_hw_mode;
-		uint32_t osd_w = legacy_stab ? g_stab_src_w : state->image_width;
-		uint32_t osd_h = legacy_stab ? g_stab_src_h : state->image_height;
-		state->debug_osd = debug_osd_create(osd_w, osd_h, &state->vpe_port);
+		state->debug_osd = debug_osd_create(state->image_width,
+			state->image_height, &state->vpe_port);
 		if (!state->debug_osd) {
 			fprintf(stderr, "WARNING: debug OSD requested but MI_RGN unavailable\n");
-		} else if (legacy_stab) {
-			int off_x = (int)((g_stab_src_w - g_stab_enc_w) / 2u);
-			int off_y = (int)((g_stab_src_h - g_stab_enc_h) / 2u);
-			debug_osd_set_panel_offset(state->debug_osd, off_x, off_y);
 		}
 	}
 
@@ -3664,14 +3363,11 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * source.  Idempotent; safe even if init was skipped or failed. */
 	venc_jpeg_shutdown();
 
-	/* Stop the stabilization drain thread.  In HW-crop mode this parks
-	 * the detector, disables the tiny port1 tap, and joins the thread;
-	 * port0 stays a normal VPE→VENC bind torn down by the standard unbind
-	 * path below (state->bound_vpe_venc set).  In the legacy blit-fallback
-	 * mode the thread is port0's only consumer, so this path inherits the
-	 * historic teardown fragility (recovered by the watchdog) — that mode
-	 * only runs when port1 is unsupported.  Idempotent: no-op when stab
-	 * was not started. */
+	/* Stop the stabilization detector thread: park the detector, disable the
+	 * tiny port1 tap, and join the thread; port0 stays a normal VPE→VENC bind
+	 * torn down by the standard unbind path below (state->bound_vpe_venc set).
+	 * Idempotent: no-op when stab was not started (incl. the static-crop
+	 * degrade with no detector). */
 	star6e_stab_stop();
 
 	/* MI teardown order: StopRecvPic each VENC consumer BEFORE unbinding
@@ -3787,10 +3483,11 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * exclusive, so exactly one branch below runs.
 	 *
 	 * Stab path (HW-crop): VPE port0 hardware-crops the stab window into a
-	 * VENC bind; a tiny port1 tap feeds IVE shift detection.  Legacy
-	 * manual-drain+blit is the automatic fallback (see star6e_stab_setup_ports).
-	 * VENC ch0 is created at the crop dim.  zoomX/zoomY pick the crop center so
-	 * the stabilized stream pans live.  Zoom path: the pan-ramp thread owns
+	 * VENC bind; a tiny port1 tap feeds IVE shift detection.  If the BSP
+	 * rejects the tap, port0 stays bound at a static centre crop (no
+	 * detector).  VENC ch0 is created at the crop dim.  zoomX/zoomY pick the
+	 * crop center so the stabilized stream pans live.  Zoom path: the pan-ramp
+	 * thread owns
 	 * x/y at the configured zoom_pct.  When framing is off, zoom_pct is 0 and
 	 * the pan-ramp runs at full image. */
 	if (star6e_stab_enabled(vcfg)) {

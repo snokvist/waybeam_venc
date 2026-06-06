@@ -127,14 +127,6 @@ int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 
 void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 
-/** When image stabilization is on, return the current crop-window
- *  origin in VPE port coordinates (top-left corner of what becomes
- *  the encoded view).  Returns 1 with origin filled; 0 if stab is off
- *  (origin left untouched).  Used by the OSD draw cycle to anchor
- *  the stats panel inside the encoded view as the stab thread shifts
- *  the crop window. */
-int star6e_pipeline_stab_panel_anchor(int *out_x, int *out_y);
-
 /** Service custom 3A (AWB/AE) at regular intervals. */
 /** One-shot legacy-AE cold-boot fps re-kick.  Call once ~1.5s after pipeline
  *  start from the run loop; re-issues MI_SNR_SetFps to force the sensor timing
