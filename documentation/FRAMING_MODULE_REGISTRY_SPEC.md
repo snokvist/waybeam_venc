@@ -239,7 +239,7 @@ imx335 bench — fps, recenter feel, clean teardown (no MMU faults).
 - **D12 — `stab` and `stab-fill` are distinct presets, both kept.** Per the PR
   #136 review: HW-crop shrink (high-fps, ≤1080p clamp) vs constant-scale
   floating image (black border, ~43 fps). Neither replaces the other.
-- **D13 — `pauseStab` = software ramp, drop the live HW-bind.** ⚠️ confirm.
+- **D13 — `pauseStab` = software ramp, drop the live HW-bind.** ✅ confirmed.
   Per the PR #136 review, replace the `MI_VENC_StopRecvPic` +
   `BindChnPort2`/`UnBind` live rebind (the maneuver that wedged the SoC) with a
   software flag in the detector that ramps the applied offset to 0 via the
@@ -300,31 +300,45 @@ clean teardown. Document results in `STABILIZATION_TEST_PLAN.md` (T7).
   renderer edit); `tests/test_venc_api.c` asserts the `ui` block + accessor
   counts; manual dashboard check.
 
-## 6. Sequencing, versioning, and PRs
+## 6. Sequencing, versioning, and commits
 
-Four PRs (Deliverable 4 deferred), each one `VERSION` bump + `HISTORY.md` entry:
+**One PR**, landing Deliverables 1–3 as a sequence of self-contained,
+individually-verified commits (Deliverable 4 deferred). One `VERSION` bump +
+one `HISTORY.md` entry for the PR (squash any intermediate version churn — see
+**Versioning Policy**). Each commit must `make verify` clean on its own so the
+branch stays bisectable.
 
-1. **PR A — registry + compile flag + legacy removal** (Deliverable 1). Two
-   commits (behavior-neutral move; legacy drop). ~1,200-line shrink.
-2. **PR B — port stab-fill into the module** (Deliverable 2). Adds the second
-   preset, software-ramp `pauseStab` (D13), Kalman folded (D14). Lands close
-   after A so the retained blit symbols (§3.6) gain their caller.
-3. **PR C — data-driven field schema** (Deliverable 3). Blob-free module UI.
-4. **PR D — generic params-map config** (Deliverable 4, optional/deferred):
-   move plugin config to `video0.framingParams` KV to drop the struct/printer/
-   `default.json` touch. Trades type-safety + the byte-exact layout test; adopt
-   only if a real multi-module ecosystem appears.
+Commit order:
 
-Docs updated in the implementing PRs: `HTTP_API_CONTRACT.md` (capabilities `ui`,
+1. **Registry + compile flag (behavior-neutral move).** Move master `stab`
+   into `src/star6e_framing_stab.c` behind the vtable + `STAB` flag. No
+   behavior change on the HW-crop path. ~1,100-line shrink.
+2. **Legacy-drain removal** (D9, §3.6). Drop the manual-drain fallback + dead
+   code; static-crop degrade on port1 failure. To keep this commit
+   `-Werror`-clean before the stab-fill caller arrives, the retained blit
+   symbols (§3.6) land already wired into commit 3's incoming code, or their
+   loads are guarded — sequence 2→3 with no gap.
+3. **Port stab-fill** (Deliverable 2). Second preset, software-ramp `pauseStab`
+   (D13), Kalman folded (D14); new `stab-fill` framing preset + `pauseStab`
+   field plumbing.
+4. **Data-driven field schema** (Deliverable 3). `FieldDesc.ui` + registry +
+   `/api/v1/capabilities` `ui` block + generic renderer → blob-free module UI.
+
+Deliverable 4 (generic params-map config: move plugin config to
+`video0.framingParams` KV to drop the struct/printer/`default.json` touch)
+remains a separate future PR — it trades type-safety + the byte-exact layout
+test and is adopted only if a real multi-module ecosystem appears.
+
+Docs updated within the PR: `HTTP_API_CONTRACT.md` (capabilities `ui`,
 `pauseStab`), `STABILIZATION_TEST_PLAN.md` (stab-fill + D9 degrade),
 `AGENTS.md` Config/WebUI/API rules (dynamic path + `STAB` flag), and this file's
 status → IMPLEMENTED.
 
 ## 7. Risks & open questions
 
-1. **D13 pauseStab simplification (confirm).** Replacing the live HW-bind with
-   the software ramp loses the paused 58-fps reclaim but removes the
-   board-wedge maneuver. Matches the PR #136 review; confirm before porting.
+1. **D13 pauseStab simplification (confirmed).** Replacing the live HW-bind
+   with the software ramp loses the paused 58-fps reclaim but removes the
+   board-wedge maneuver. Matches the PR #136 review.
 2. **stab-fill port reconciliation (D11).** Divergent bases mean the port is
    hand-reconciled, not a merge. Risk: subtle geometry/teardown differences
    between master's stab helpers and PR #136's. Mitigation: port behind the same
