@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1706,6 +1707,32 @@ static int star6e_stab_start(void)
 		if (pthread_create(&g_stab_blit_thread, NULL,
 		    star6e_stab_blit_thread_main, NULL) == 0) {
 			g_stab_blit_active = 1;
+			/* Under stab-fill the blit thread composes the output
+			 * frame and feeds it to VENC, so it sits on the
+			 * frame-delivery critical path alongside the encoder
+			 * thread.  Give it the same elevated SCHED_FIFO priority
+			 * (VENC_RT_PRIO, default 50, clamped 1..80; see
+			 * star6e_runner_run) so it is not preempted mid-compose
+			 * by SCHED_OTHER work — otherwise the scheduling jitter
+			 * the encoder fix removes would re-enter via this stage. */
+			{
+				int rt_prio = 50;
+				const char *env = getenv("VENC_RT_PRIO");
+				if (env && *env) {
+					int v = atoi(env);
+					if (v < 1)
+						v = 1;
+					else if (v > 80)
+						v = 80;
+					rt_prio = v;
+				}
+				struct sched_param sp;
+				sp.sched_priority = rt_prio;
+				if (pthread_setschedparam(g_stab_blit_thread,
+				    SCHED_FIFO, &sp) != 0)
+					fprintf(stderr, "[waybeam] note: stab-fill "
+						"blit RT priority unavailable\n");
+			}
 			fprintf(stderr, "[waybeam] stab-fill: blit thread spawned "
 				"(IVE/blit pipelined)\n");
 		} else {
