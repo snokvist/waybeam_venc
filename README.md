@@ -744,10 +744,14 @@ Examples (each `set` is restart-required; the daemon respawns to apply):
 curl "http://<device>/api/v1/set?video0.framing=stab"
 
 # Smoother, more locked feel: heavier measurement filtering + tighter hold.
-curl "http://<device>/api/v1/set?video0.stabKalmanR=6&video0.stabKalmanQ=0.02"
+# (Restart-required fields must be set ONE per request — the daemon respawns
+# between them, so wait for each to come back before the next.)
+curl "http://<device>/api/v1/set?video0.stabKalmanR=6"
+curl "http://<device>/api/v1/set?video0.stabKalmanQ=0.02"
 
 # Looser, follows pans sooner; more motion headroom (tighter crop).
-curl "http://<device>/api/v1/set?video0.stabKalmanQ=0.08&video0.stabCropPct=60"
+curl "http://<device>/api/v1/set?video0.stabKalmanQ=0.08"
+curl "http://<device>/api/v1/set?video0.stabCropPct=60"
 ```
 
 **Panning** applies to the `zoom-*` modes only and is live (`zoom_x`,
