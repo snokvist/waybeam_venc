@@ -1001,6 +1001,19 @@ static int test_framing_preset_restart(void)
 		g_api_cb_state.apply_zoom_calls == 0);
 	venc_api_clear_reinit();
 
+	/* stab-fill is a valid stab preset (MUT_RESTART); the preset derives a
+	 * crop budget clamped to [60,100]. */
+	CHECK("framing stab-fill rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.framing=stab-fill", &status, response,
+			sizeof(response)) == 0);
+	CHECK("framing stab-fill status", status == 200);
+	CHECK("framing stab-fill cfg",
+		strcmp(cfg.video0.framing, "stab-fill") == 0);
+	CHECK("framing stab-fill crop budget",
+		cfg.video0.stab_crop_pct >= 60 && cfg.video0.stab_crop_pct <= 100);
+	venc_api_clear_reinit();
+
 	/* Invalid framing preset is rejected. */
 	CHECK("framing reject rc",
 		apply_set_query_http(&cfg, "star6e", &cb,
@@ -1009,7 +1022,8 @@ static int test_framing_preset_restart(void)
 	CHECK("framing reject status", status == 409);
 	CHECK("framing reject error",
 		strstr(response, "framing must be one of") != NULL);
-	CHECK("framing reject unchanged", strcmp(cfg.video0.framing, "zoom-2x") == 0);
+	CHECK("framing reject unchanged",
+		strcmp(cfg.video0.framing, "stab-fill") == 0);
 
 	return failures;
 }
@@ -1103,6 +1117,69 @@ static int test_live_set_isp_bin_no_callback_returns_501(void)
 	return failures;
 }
 
+/* /api/v1/capabilities emits the data-driven `ui` block for fields that carry
+ * UI metadata (video0.pause_stab), so the dashboard can render a control with
+ * no static SECTIONS entry.  Core fields stay ui-less. */
+static int test_capabilities_emits_ui(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0, fd;
+	char response[16384];
+	char request[256];
+	size_t sent = 0, req_len;
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+
+	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+		CHECK("cap register", 0);
+		return failures;
+	}
+	if (ensure_api_test_server() != 0) {
+		CHECK("cap server", 0);
+		return failures;
+	}
+	fd = connect_api_test_socket();
+	CHECK("cap connect", fd >= 0);
+	if (fd < 0)
+		return failures;
+
+	req_len = (size_t)snprintf(request, sizeof(request),
+		"GET /api/v1/capabilities HTTP/1.0\r\n"
+		"Host: 127.0.0.1\r\n"
+		"\r\n");
+	while (sent < req_len) {
+		ssize_t n = write(fd, request + sent, req_len - sent);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			close(fd);
+			CHECK("cap write", 0);
+			return failures;
+		}
+		sent += (size_t)n;
+	}
+	shutdown(fd, SHUT_WR);
+	CHECK("cap read",
+		read_http_response(fd, &status, response, sizeof(response)) == 0);
+	close(fd);
+
+	CHECK("cap status", status == 200);
+	CHECK("cap has pause_stab",
+		strstr(response, "\"video0.pause_stab\"") != NULL);
+	CHECK("cap pause_stab ui block", strstr(response, "\"ui\"") != NULL);
+	CHECK("cap pause_stab group",
+		strstr(response, "\"group\":\"Stabilization\"") != NULL);
+	CHECK("cap pause_stab control",
+		strstr(response, "\"control\":\"toggle\"") != NULL);
+	/* A core field is still present (with mutability) and carries no ui. */
+	CHECK("cap has core field",
+		strstr(response, "\"video0.bitrate\"") != NULL);
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -1133,6 +1210,7 @@ int test_venc_api(void)
 	failures += test_single_set_url_decodes_outgoing_server();
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
+	failures += test_capabilities_emits_ui();
 	stop_api_test_server();
 	return failures;
 }

@@ -294,18 +294,48 @@ void venc_api_fill_record_status(VencRecordStatus *out)
 typedef enum { MUT_LIVE, MUT_RESTART } Mutability;
 typedef enum { FT_BOOL, FT_INT, FT_UINT, FT_UINT8, FT_UINT16, FT_DOUBLE, FT_FLOAT, FT_STRING, FT_SIZE } FieldType;
 
+/* Optional UI metadata for a field.  When present (FieldDesc.ui != NULL) it is
+ * emitted in /api/v1/capabilities so the dashboard can render a control for the
+ * field WITHOUT a hardcoded SECTIONS entry — i.e. a module field becomes
+ * WebUI-visible with no dashboard.html edit / webui-blob rebuild.  Core fields
+ * keep ui = NULL and use the dashboard's static SECTIONS path. */
+typedef struct {
+	const char *group;          /* collapsible section title */
+	const char *label;          /* human label; NULL = derive from key tail */
+	const char *control;        /* "toggle" | "number" | "select" | "text" */
+	double min, max, step;      /* "number" range (0/0/0 = unset) */
+	const char *const *options; /* NULL-terminated list for "select", else NULL */
+	const char *tooltip;
+} FieldUi;
+
 typedef struct {
 	const char *key;          /* dot-separated JSON path, e.g. "video0.bitrate" */
 	FieldType type;
 	Mutability mut;
 	size_t offset;            /* offsetof into VencConfig */
 	size_t size;              /* sizeof the field (for strings) */
+	const FieldUi *ui;        /* optional data-driven UI metadata (NULL = core) */
 } FieldDesc;
 
 #define FIELD(section, member, ft, m) \
 	{ #section "." #member, ft, m, \
 	  offsetof(VencConfig, section.member), \
-	  sizeof(((VencConfig*)0)->section.member) }
+	  sizeof(((VencConfig*)0)->section.member), NULL }
+
+/* Like FIELD but carries data-driven UI metadata (see FieldUi). */
+#define FIELD_UI(section, member, ft, m, uiptr) \
+	{ #section "." #member, ft, m, \
+	  offsetof(VencConfig, section.member), \
+	  sizeof(((VencConfig*)0)->section.member), (uiptr) }
+
+/* UI descriptor for video0.pause_stab — the live stab-fill bypass.  Rendered
+ * as a toggle in a "Stabilization" group purely from capabilities (the field
+ * is runtime-only / not in /api/v1/config, so it has no static SECTIONS row). */
+static const FieldUi ui_pause_stab = {
+	"Stabilization", "Pause stab", "toggle", 0, 0, 0, NULL,
+	"Live bypass for framing=stab-fill: glide the floating image back to "
+	"centre (software ramp, no rebind). No effect in other framing modes."
+};
 
 static const FieldDesc g_fields[] = {
 	FIELD(system, web_port,        FT_UINT16, MUT_RESTART),
@@ -328,7 +358,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, fps,             FT_UINT,   MUT_LIVE),
 	{ "video0.size", FT_SIZE, MUT_RESTART,
 	  offsetof(VencConfig, video0.width),
-	  sizeof(uint32_t) * 2 },  /* covers width + height */
+	  sizeof(uint32_t) * 2, NULL },  /* covers width + height */
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
@@ -407,8 +437,10 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, stab_still_frames,   FT_UINT,   MUT_RESTART),
 	FIELD(video0, stab_edge_pct,       FT_UINT,   MUT_RESTART),
 	FIELD(video0, stab_motion_thresh,  FT_UINT,   MUT_RESTART),
-	/* Runtime stab-fill bypass (D13 software ramp) — MUT_LIVE, not persisted. */
-	FIELD(video0, pause_stab,          FT_BOOL,   MUT_LIVE),
+	/* Runtime stab-fill bypass (D13 software ramp) — MUT_LIVE, not persisted.
+	 * Carries UI metadata so the dashboard renders it data-driven (no static
+	 * SECTIONS row; it isn't in /api/v1/config). */
+	FIELD_UI(video0, pause_stab,       FT_BOOL,   MUT_LIVE, &ui_pause_stab),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -2113,6 +2145,27 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 		cJSON_AddBoolToObject(entry, "supported",
 			venc_api_field_supported_for_backend(g_backend,
 				g_fields[i].key));
+		/* Data-driven UI metadata (opt-in per field).  The dashboard
+		 * renders a control from this when present, so a module field is
+		 * WebUI-visible with no dashboard.html edit / blob rebuild. */
+		if (g_fields[i].ui) {
+			const FieldUi *u = g_fields[i].ui;
+			cJSON *ui = cJSON_AddObjectToObject(entry, "ui");
+			if (u->group)   cJSON_AddStringToObject(ui, "group", u->group);
+			if (u->label)   cJSON_AddStringToObject(ui, "label", u->label);
+			if (u->control) cJSON_AddStringToObject(ui, "control", u->control);
+			if (u->tooltip) cJSON_AddStringToObject(ui, "tooltip", u->tooltip);
+			if (u->control && strcmp(u->control, "number") == 0) {
+				cJSON_AddNumberToObject(ui, "min", u->min);
+				cJSON_AddNumberToObject(ui, "max", u->max);
+				cJSON_AddNumberToObject(ui, "step", u->step);
+			}
+			if (u->options) {
+				cJSON *arr = cJSON_AddArrayToObject(ui, "options");
+				for (const char *const *o = u->options; *o; o++)
+					cJSON_AddItemToArray(arr, cJSON_CreateString(*o));
+			}
+		}
 	}
 	char *str = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
