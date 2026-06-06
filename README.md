@@ -293,7 +293,8 @@ omitted fields keep their compiled-in defaults.
   Scene-change-triggered IDR (`sceneThreshold`,
   `sceneHoldoff`) is Star6E-only. Intra-refresh is both backends. The
   `framing` knob expands to either digital zoom (both backends) or image
-  stabilization (Star6E only).
+  stabilization (`stab` HW-crop / `stab-fill` floating-image, Star6E only;
+  live `pauseStab`).
 - **`outgoing`** — destination URI (`udp://`, `unix://`, `shm://`),
   stream mode (`rtp` / `compact`), payload sizing, optional dedicated
   audio + sidecar UDP ports.
@@ -381,6 +382,15 @@ and support status. Support is backend-specific; for example, Star6E
 reports `video0.scene_threshold` / `video0.scene_holdoff` as supported,
 while Maruko reports them as unsupported. Use this to discover which
 fields can be changed at runtime.
+
+A field MAY also carry an optional `ui` object (data-driven field schema):
+`group` (collapsible section title), `label`, `control`
+(`toggle`/`number`/`select`/`text`), `min`/`max`/`step` (for `number`),
+`options` (for `select`), and `tooltip`. The dashboard renders a control
+from this generically, so a module field reaches the WebUI with no
+`dashboard.html` edit or webui-blob rebuild. The entire **Stabilization**
+section is built this way (the six `video0.stab_*` knobs plus the
+runtime-only `video0.pause_stab`).
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/capabilities
@@ -617,15 +627,16 @@ cleanly; the key is silently ignored.
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | Relative I/P QP delta (-12..12) |
 | `video0.frame_lost` | bool | restart | Enable frame-lost safety net |
-| `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
+| `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
 | `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
-| `video0.stab_crop_pct` | uint | restart | Advanced: override `stab` kept-frame % (`0` = preset default 80, else `50..100`) |
-| `video0.stab_recenter_speed` | uint | restart | Advanced: override `stab` recenter speed (`0` = stick, higher = slower; preset default 180) |
+| `video0.stab_crop_pct` | uint | restart | Advanced: override `stab`/`stab-fill` kept-frame % (`0` = preset default 80, else `60..100`) |
+| `video0.stab_recenter_speed` | uint | restart | Advanced: override `stab` recenter speed (`0` = stick, higher = slower; preset default 180). In `stab-fill` the Kalman handles recentering; this only sets the `pauseStab` glide-home rate |
 | `video0.stab_smooth_pct` | uint | restart | Advanced: `stab` output smoothing % (`0` = preset default 30, else `5..100`; lower = smoother but laggier, `100` = none) |
 | `video0.stab_still_frames` | uint | restart | Advanced: `stab` frames of stillness before recenter starts (`0..600`; higher = stays locked longer; preset default 60) |
 | `video0.stab_edge_pct` | uint | restart | Advanced: `stab` % of dead-border used before margin is reclaimed during a pan (`0` = preset default 88, else `50..100`) |
 | `video0.stab_motion_thresh` | uint | restart | Advanced: `stab` px shift counted as "moving" (`0..16`; higher = less twitchy; preset default 1) |
+| `video0.pause_stab` | bool | live | Live pause for `stab`/`stab-fill` — glides the stabilized window / floating image back to centre (software ramp, no rebind). Runtime-only (not persisted); boots `false`. No effect under `off`/`zoom-*` |
 
 #### Framing: Stabilization & Digital Zoom
 
@@ -638,6 +649,7 @@ is a named preset (restart-required); the underlying crop fraction is
 |-----------|--------|-------------------|----------|
 | `off` | Full image | 1920×1080 | both |
 | `stab` | Image stabilization (centered 80% crop) | 1536×864 | Star6E only |
+| `stab-fill` | Image stabilization (floating image on a black border) | 1920×1080 | Star6E only |
 | `zoom-1.25x` | 1.25× digital zoom | 1536×864 | both |
 | `zoom-1.50x` | 1.50× digital zoom | 1280×720 | both |
 | `zoom-1.75x` | 1.75× digital zoom | 1088×608 | both |
@@ -655,12 +667,33 @@ upscale ceiling.
 
 **Stabilization** (`stab`, Star6E only) holds a centered 80% crop and shifts
 it per frame to cancel motion (recenter τ 180 frames, EMA-smoothed output).
-It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode.
+It is always centered — `zoom_x`/`zoom_y` are ignored in `stab` mode. Encode is
+HW-cropped, so the stream resolution shrinks (1536×864 @1080p) — a fps cost
+applies (~60→40 on imx335).
+
+**Stabilization, fill variant** (`stab-fill`, Star6E only) keeps the **full
+encode resolution** (1920×1080) and instead composes a *floating* stabilized
+image on a black border: it SCL-downscales the full sensor frame and shifts a
+window inside it, filling the exposed edges with black. The motion path is
+Kalman-smoothed (the trajectory filter subsumes the EMA/recenter logic), so of
+the advanced knobs below only `stab_crop_pct` (here the shift/border budget)
+applies — `stab_smooth_pct`/`still_frames`/`edge_pct`/`motion_thresh` are
+inert in this mode. The trade is fps for full resolution.
+
+**Live pause** (`pauseStab`, `stab` *and* `stab-fill`) freezes stabilization
+without a pipeline restart: it glides the stabilized window (`stab`) / floating
+image (`stab-fill`) back to centre via a software ramp — no HW rebind. It is
+runtime-only (not persisted, always boots `false`) and a no-op under `off`/`zoom-*`:
+
+```bash
+curl "http://<device>/api/v1/set?video0.pauseStab=1"   # freeze (glide to centre)
+curl "http://<device>/api/v1/set?video0.pauseStab=0"   # resume
+```
 
 Six **advanced tuning** knobs refine the `stab` preset (all restart-required;
-all inert under `off`/`zoom-*`; re-selecting `framing=stab` resets every one to
-its preset default, so **set `framing=stab` first, then the overrides**). They
-fall into three groups:
+all inert under `off`/`zoom-*`, and all but `stab_crop_pct` inert under
+`stab-fill`; re-selecting `framing=stab` resets every one to its preset default,
+so **set `framing=stab` first, then the overrides**). They fall into three groups:
 
 *Headroom* — how much room the crop has to absorb motion:
 - `stab_crop_pct` — kept-frame %. `0` keeps the preset default (80). Smaller
