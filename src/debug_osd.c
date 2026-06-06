@@ -359,6 +359,7 @@ DebugOsdState *debug_osd_create(uint32_t frame_w, uint32_t frame_h,
 		RGN_MODID_VPE, 0, 0, 0);
 }
 
+
 void debug_osd_destroy(DebugOsdState *osd)
 {
 	if (!osd) return;

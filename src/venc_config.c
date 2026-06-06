@@ -187,6 +187,10 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->video0.framing, sizeof(cfg->video0.framing), "off");
 	(void)venc_config_apply_framing_preset("off", &cfg->video0);
 
+	/* Runtime-only "stab-fill" bypass — always boots false; not parsed or
+	 * serialized (a fresh stab-fill run always comes up composing). */
+	cfg->video0.pause_stab = false;
+
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
 	 * snapshot at the same resolution as the live stream. */
@@ -461,7 +465,8 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	 *   preset       cropPct  tau   zoom_pct   effect
 	 *   ──────────────────────────────────────────────────────────────
 	 *   off          0        0     0.00       full image
-	 *   stab         80       180   0.00       image stabilization
+	 *   stab         80       180   0.00       image stabilization (crop+shrink)
+	 *   stab-fill    80       180   0.00       floating image + black border
 	 *   zoom-1.25x   0        0     0.80       1.25x digital zoom
 	 *   zoom-1.50x   0        0     0.6667     1.50x digital zoom
 	 *   zoom-1.75x   0        0     0.5714     1.75x digital zoom
@@ -476,6 +481,7 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	static const struct framing_preset table[] = {
 		{ "off",        0,  0,    0.0,    0,  0,  0,  0 },
 		{ "stab",       80, 180,  0.0,    30, 60, 88, 1 },
+		{ "stab-fill",  80, 180,  0.0,    30, 60, 88, 1 },
 		{ "zoom-1.25x", 0,  0,    0.80,   0,  0,  0,  0 },
 		{ "zoom-1.50x", 0,  0,    0.6667, 0,  0,  0,  0 },
 		{ "zoom-1.75x", 0,  0,    0.5714, 0,  0,  0,  0 },
@@ -582,15 +588,18 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 			safe_strcpy(v->framing, sizeof(v->framing), "off");
 			(void)venc_config_apply_framing_preset("off", v);
 		}
-		/* Advanced overrides of the stab preset's derived crop/recenter.
-		 * Read AFTER the preset expansion so an explicit value wins; absent
-		 * keys keep the preset default (so a plain framing="stab" still gets
-		 * 80/180).  These belong to the "stab" preset, so honor them ONLY
-		 * when framing=="stab" — under off/zoom the preset's cleared 0/0 must
-		 * stand.  Otherwise a stale stabCropPct left over from a prior stab
-		 * session silently re-enables stabilization at framing=off, because
-		 * star6e_stab_enabled() keys solely on stab_crop_pct (>=50). */
-		if (strcmp(v->framing, "stab") == 0) {
+		/* Advanced overrides of the stab presets' derived feel knobs.  Read
+		 * AFTER the preset expansion so an explicit value wins; absent keys
+		 * keep the preset default (so a plain framing="stab" still gets
+		 * 80/180).  Honored ONLY under the stab presets — under off/zoom the
+		 * preset's cleared 0/0 must stand, else a stale stabCropPct left over
+		 * from a prior stab session silently re-enables stabilization at
+		 * framing=off (star6e_stab_*_enabled() key on stab_crop_pct).  Both
+		 * "stab" and "stab-fill" share these: stabCropPct is the crop+shrink
+		 * border for "stab" and the max-shift / black-border budget for
+		 * "stab-fill". */
+		if (strcmp(v->framing, "stab") == 0 ||
+		    strcmp(v->framing, "stab-fill") == 0) {
 			v->stab_crop_pct = (uint32_t)json_get_int(obj, "stabCropPct",
 				(int)v->stab_crop_pct);
 			v->stab_recenter_speed = (uint32_t)json_get_int(obj,

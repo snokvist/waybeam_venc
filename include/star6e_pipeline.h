@@ -125,6 +125,19 @@ void star6e_pipeline_vpe_scl_preset_shutdown(void);
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y);
 
+/** Toggle the stab-fill compose bypass (video0.pauseStab).  Software-only
+ *  (D13): when paused the detector glides the applied offset back to centre
+ *  via the recenter ramp and the compose feeds the unshifted full frame — no
+ *  HW rebind, no thread teardown.  Routed to the active framing module's
+ *  set_live hook.  Returns 0 on success, -1 when framing!=stab-fill (no-op). */
+int star6e_pipeline_set_pause_stab(bool paused);
+
+/** Active framing module's OSD anchor offset.  Returns 1 and writes the live
+ *  encode-domain compose offset (stab-fill) so the OSD draw cycle can
+ *  counter-shift the panel to stay screen-fixed; returns 0 when the OSD is
+ *  already 1:1 with the encoded frame (HW-crop stab / zoom / off). */
+int star6e_pipeline_osd_anchor(int *off_x, int *off_y);
+
 void star6e_pipeline_zoom_status(Star6eZoomStatus *out);
 
 /** Service custom 3A (AWB/AE) at regular intervals. */

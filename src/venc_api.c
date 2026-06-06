@@ -407,6 +407,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, stab_still_frames,   FT_UINT,   MUT_RESTART),
 	FIELD(video0, stab_edge_pct,       FT_UINT,   MUT_RESTART),
 	FIELD(video0, stab_motion_thresh,  FT_UINT,   MUT_RESTART),
+	/* Runtime stab-fill bypass (D13 software ramp) — MUT_LIVE, not persisted. */
+	FIELD(video0, pause_stab,          FT_BOOL,   MUT_LIVE),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 };
 
@@ -467,6 +469,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.stabStillFrames", "video0.stab_still_frames" },
 	{ "video0.stabEdgePct", "video0.stab_edge_pct" },
 	{ "video0.stabMotionThresh", "video0.stab_motion_thresh" },
+	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -684,7 +687,7 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	if (strcmp(key, "video0.framing") == 0) {
 		VencConfigVideo probe;
 		if (venc_config_apply_framing_preset(cfg->video0.framing, &probe) != 0)
-			return "framing must be one of: off, stab, "
+			return "framing must be one of: off, stab, stab-fill, "
 				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x, "
 				"zoom-3x, zoom-4x";
 	}
@@ -928,6 +931,7 @@ typedef enum {
 	LIVE_GROUP_ZOOM,
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
+	LIVE_GROUP_PAUSE_STAB,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1095,6 +1099,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_ISP_BIN;
 	if (strcmp(canonical_key, "snapshot.quality") == 0)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
+	if (strcmp(canonical_key, "video0.pause_stab") == 0)
+		return LIVE_GROUP_PAUSE_STAB;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1128,6 +1134,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "isp.sensor_bin";
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		return "snapshot.quality";
+	case LIVE_GROUP_PAUSE_STAB:
+		return "video0.pauseStab";
 	default:
 		return "unknown";
 	}
@@ -1282,6 +1290,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_isp_bin != NULL;
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		return g_cb->apply_snapshot_quality != NULL;
+	case LIVE_GROUP_PAUSE_STAB:
+		return g_cb->apply_pause_stab != NULL;
 	default:
 		return 0;
 	}
@@ -1353,6 +1363,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		dst->snapshot.quality = src->snapshot.quality;
+		break;
+	case LIVE_GROUP_PAUSE_STAB:
+		dst->video0.pause_stab = src->video0.pause_stab;
 		break;
 	default:
 		break;
@@ -1456,6 +1469,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_isp_bin(cfg->isp.sensor_bin);
 	case LIVE_GROUP_SNAPSHOT_QUALITY:
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
+	case LIVE_GROUP_PAUSE_STAB:
+		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
 	default:
 		return -2;
 	}

@@ -83,6 +83,7 @@ void star6e_framing_register_builtins(void)
 		return;   /* idempotent */
 #if HAVE_FRAMING_STAB
 	star6e_framing_register(&star6e_framing_stab);
+	star6e_framing_register(&star6e_framing_stab_fill);
 #endif
 }
 
@@ -992,6 +993,24 @@ static void star6e_pan_ramp_stop(void)
  * VENC, which needs reinit), so the live path only handles x/y.  pct is
  * accepted just to short-circuit when zoom is off (rect dim == image dim).
  * Updates the *target*; the ramp thread tweens `current` toward it. */
+/* Live stab-fill bypass toggle.  Routed to the active framing module's
+ * set_live hook so the pipeline stays agnostic of the preset's semantics.
+ * No-op (returns -1) when no module is selected (framing off / STAB=0) or the
+ * active module does not handle pauseStab (the HW-crop "stab" preset). */
+int star6e_pipeline_set_pause_stab(bool paused)
+{
+	if (g_framing && g_framing->set_live)
+		return g_framing->set_live("pause", paused ? "1" : "0");
+	return -1;
+}
+
+int star6e_pipeline_osd_anchor(int *off_x, int *off_y)
+{
+	if (g_framing && g_framing->osd_anchor)
+		return g_framing->osd_anchor(off_x, off_y);
+	return 0;
+}
+
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y)
 {
@@ -2096,7 +2115,21 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * attaches at the VPE port output (post-SCL crop), so the canvas is
 	 * already 1:1 with the encoded frame and needs no zoom-time offset.
 	 * HW-crop stab is no different: port0 outputs the cropped encoded dim,
-	 * so the OSD is static 1:1 like the non-stab/zoom path. */
+	 * so the OSD is static 1:1 like the non-stab/zoom path.
+	 *
+	 * stab-fill (D16) manually drains VPE port0 and composes a
+	 * shifted/black-bordered frame into the VENC input, so the OSD (which
+	 * RGN composites on port0) slides with the stabilized content.  RGN
+	 * attach on VENC does NOT composite on this BSP (manual-fed VENC input
+	 * bypasses the overlay stage), so the OSD stays on port0 and the draw
+	 * cycle counter-shifts the panel by the live fill offset
+	 * (star6e_runtime.c → star6e_pipeline_osd_anchor).  KNOWN LIMITATION:
+	 * the counter-shift is a best-effort approximation — the OSD draw and
+	 * the compose run on unsynchronized cadences and a corner panel clips
+	 * off-canvas at large offsets, so under heavy stab-fill motion the panel
+	 * can jitter or briefly drop.  Acceptable for a diagnostic overlay (off
+	 * by default); a screen-fixed OSD needs software compositing onto the
+	 * composed output (tracked follow-up). */
 	if (vcfg->debug.show_osd) {
 		state->debug_osd = debug_osd_create(state->image_width,
 			state->image_height, &state->vpe_port);

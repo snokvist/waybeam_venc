@@ -19,6 +19,19 @@ read this section first, then §4 / §5 / §6 for the remaining work.
 | `25ad07e` | `refactor(star6e): drop legacy manual-drain stab path; single HW-crop mode` | merged to branch |
 | `00d7482` | `chore: regenerate venc_webui.c (gzip OS-byte normalization)` | merged to branch |
 | `738b49a` | `refactor(star6e): extract stab into a FramingModule behind a STAB flag` | merged to branch |
+| commit 3 | `feat(star6e): port stab-fill as a second FramingModule (+pauseStab)` | **on branch, device-validated (imx335) — see STABILIZATION_TEST_PLAN T7** |
+
+Commit 3 status: stab-fill ported as a second registered `FramingModule` sharing
+the detector/geometry/IVE with `stab`; full-frame encode + black-border float,
+Kalman trajectory smoother (D14 folded constants), software-ramp `pauseStab`
+(D13, no HW rebind), `stab-fill` framing preset + `pauseStab` MUT_LIVE field.
+Device-verified at 60 fps with clean teardown and no MMU faults.  **D16 resolved
+as a documented caveat** (see below): RGN-on-VENC does not composite with
+manual-fed VENC input on this BSP, so the OSD stays on VPE port0 with a
+best-effort draw-cycle counter-shift; a screen-fixed OSD needs software
+compositing onto the composed output (deferred follow-up).  Dashboard/webui UI
+for `pauseStab` + the `stab-fill` framing option is deferred to commit 4 (the
+data-driven schema) — the field works via the HTTP API today.
 
 Net effect: stabilization is now one file (`src/star6e_framing_stab.c`, ~1,240
 lines) behind the `FramingModule` vtable (`include/star6e_framing.h`), gated by

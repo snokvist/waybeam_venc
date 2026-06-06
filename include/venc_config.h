@@ -163,6 +163,13 @@ typedef struct {
 	uint32_t stab_motion_thresh;  /* |inter-frame shift| (px) counted as
 	                               * "moving" — re-arms the stillness timer
 	                               * (0..16; higher = less twitchy). */
+	/* Runtime "stab-fill" bypass (MUT_LIVE).  Set true via
+	 * /api/v1/set?pauseStab=true to glide the floating image back to centre
+	 * (software ramp — no HW rebind); false resumes shake compensation.
+	 * Not persisted: skipped by load/render/cJSON, so it always boots false
+	 * and is never written to /etc/waybeam.json.  Inert unless
+	 * framing=="stab-fill" (Star6E only). */
+	bool pause_stab;
 } VencConfigVideo;
 
 typedef struct {

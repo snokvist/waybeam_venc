@@ -31,6 +31,13 @@ typedef struct FramingModule {
 	void (*set_pan)(double x, double y);              /* optional (NULL ok) */
 	int  (*active)(void);                             /* detector running? */
 	int  (*set_live)(const char *key, const char *val); /* optional live tuning */
+
+	/* Optional (NULL ok).  For manual-compose presets whose OSD sits on the
+	 * pre-compose source (stab-fill): return 1 and the live encode-domain
+	 * offset the compose applies, so the OSD draw cycle can counter-shift the
+	 * panel and keep it screen-fixed.  Return 0 (or be NULL) when the OSD is
+	 * already 1:1 with the encoded frame (HW-crop "stab", zoom, off). */
+	int  (*osd_anchor)(int *off_x, int *off_y);
 } FramingModule;
 
 /* Append a module to the registry (called from register_builtins). */
