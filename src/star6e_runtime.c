@@ -1087,19 +1087,43 @@ static int star6e_runner_run(void *opaque)
 	clock_gettime(CLOCK_MONOTONIC, &cus3a_ts_last);
 	clock_gettime(CLOCK_MONOTONIC, &run_start);
 
-	/* Pin encoder to CPU 0 with minimum RT priority.  Reduces
-	 * scheduling jitter from ISP/audio/httpd threads.  Silent
-	 * fallback if unprivileged or single-core. */
+	/* Pin encoder to CPU 0 and run the GetStream->packetize->send path at
+	 * an elevated SCHED_FIFO priority.  At the previous minimum priority (1)
+	 * this thread was preempted mid-frame by other userspace RT threads
+	 * (audio capture / IMU, also FIFO/1) and SCHED_OTHER work, surfacing as
+	 * a periodic ~one-frame RTP delivery stall (a single idle gap on the
+	 * wire, no catch-up burst).  The SDK pipeline kernel threads run at
+	 * SCHED_RR/98 and MUST keep outranking us — we depend on them to produce
+	 * frames — so the priority is clamped well below 98 (audio testing also
+	 * found ~90 made timing worse, likely priority inversion).
+	 *
+	 * Tunable for on-device A/B without a rebuild via the VENC_RT_PRIO env
+	 * var (clamped 1..80); VENC_RT_PRIO=1 reproduces the old behaviour.
+	 * Silent fallback if unprivileged or single-core. */
 	{
 		unsigned long mask = 1UL;  /* CPU 0 */
 		syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask);
 
+		int rt_prio = 50;
+		const char *env = getenv("VENC_RT_PRIO");
+		if (env && *env) {
+			int v = atoi(env);
+			if (v < 1)
+				v = 1;
+			else if (v > 80)
+				v = 80;
+			rt_prio = v;
+		}
+
 		struct sched_param sp;
-		sp.sched_priority = 1;
+		sp.sched_priority = rt_prio;
 		if (pthread_setschedparam(pthread_self(), SCHED_FIFO,
 		    &sp) != 0)
 			printf("> note: RT priority not available"
 				" (run as root)\n");
+		else
+			printf("> encoder thread: SCHED_FIFO prio %d,"
+				" pinned CPU0\n", rt_prio);
 	}
 
 	while (g_running) {
