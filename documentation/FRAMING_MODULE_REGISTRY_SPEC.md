@@ -1,8 +1,106 @@
 # Spec: Framing-Module Registry + stab-fill Port + Data-Driven Field Schema
 
-Status: **DRAFT — awaiting review.** No code yet.
+Status: **IN PROGRESS** — Deliverable 1 (commits 1–2) landed & approved.
+Awaiting on-device validation of commits 1–2 before Deliverable 2 (the
+stab-fill port).
 Scope: Star6E backend (stabilization is Star6E-only).
-Author workflow: Phase 1 (Spec). Do not implement until approved.
+Branch: `claude/pr-136-stabilization-review-rh6Qz` (single PR, ordered commits).
+
+## 0. Status & Handoff — RESUME HERE
+
+This section is the live handoff. HW confirmation of commits 1–2 happens in a
+separate session; porting resumes after. A fresh Claude Code session should
+read this section first, then §4 / §5 / §6 for the remaining work.
+
+### 0.1 What is done (on the branch)
+
+| Commit | Subject | State |
+|---|---|---|
+| `25ad07e` | `refactor(star6e): drop legacy manual-drain stab path; single HW-crop mode` | merged to branch |
+| `00d7482` | `chore: regenerate venc_webui.c (gzip OS-byte normalization)` | merged to branch |
+| `738b49a` | `refactor(star6e): extract stab into a FramingModule behind a STAB flag` | merged to branch |
+
+Net effect: stabilization is now one file (`src/star6e_framing_stab.c`, ~1,240
+lines) behind the `FramingModule` vtable (`include/star6e_framing.h`), gated by
+the `STAB` Makefile flag (default 1). `star6e_pipeline.c` shed ~1,560 lines
+across the two refactors. The legacy single-thread manual-drain path is gone;
+on port1-tap failure the pipeline degrades to a bound static centre crop (D9).
+
+New files: `include/star6e_framing.h`, `include/star6e_framing_host.h`,
+`include/star6e_framing_stab.h`, `src/star6e_framing_stab.c`.
+
+### 0.2 Verification done in-container (no hardware)
+
+- `make verify` green (both backends, `STAB=1`), `make build SOC_BUILD=star6e
+  STAB=0` green (module excluded, no undefined symbols), 1624/1624 unit tests
+  pass. Unit tests do NOT exercise the Star6E pipeline, so the real-time path
+  is only proven on-device.
+
+### 0.3 Gate before resuming — bench-validate commits 1–2
+
+Commits 1–2 restructured the real-time VPE→VENC path (prepare/encode-dim
+handoff, IMU-ring accessor, start-failure teardown via `stop()`). Validate on
+the imx335 bench (`root@192.168.1.13`) before stacking the stab-fill port:
+
+```bash
+git checkout claude/pr-136-stabilization-review-rh6Qz
+make build SOC_BUILD=star6e
+scripts/star6e_direct_deploy.sh cycle
+
+# 1) framing=stab streams, HW-crop log line, fps unchanged
+ssh root@192.168.1.13 "json_cli -s .video0.framing '\"stab\"' -i /etc/waybeam.json; json_cli -s .system.verbose true -i /etc/waybeam.json"
+ssh root@192.168.1.13 "killall waybeam; sleep 1; nohup waybeam > /tmp/waybeam.log 2>&1 &"; sleep 12
+ssh root@192.168.1.13 "grep -E 'stab: HW-crop mode|stab tick' /tmp/waybeam.log | head; wget -q -O- http://127.0.0.1/api/v1/fps/live"
+
+# 2) clean teardown/respawn — toggle framing off<->stab, dmesg must stay clean
+ssh root@192.168.1.13 "dmesg -c >/dev/null"
+ssh root@192.168.1.13 "wget -q -O- 'http://127.0.0.1/api/v1/set?video0.framing=off'; sleep 2; wget -q -O- http://127.0.0.1/api/v1/restart; sleep 10"
+ssh root@192.168.1.13 "wget -q -O- 'http://127.0.0.1/api/v1/set?video0.framing=stab'; sleep 2; wget -q -O- http://127.0.0.1/api/v1/restart; sleep 12"
+ssh root@192.168.1.13 "dmesg | grep -iE 'mmu|fault|vpe0_P0|watchdog|timeout' || echo 'dmesg clean'"
+```
+
+PASS criteria: HW-crop log line present, fps == pre-refactor, recenter feel
+unchanged, `dmesg clean`, stream recovers after each restart. Record results
+in `documentation/STABILIZATION_TEST_PLAN.md`. If a regression appears, it is
+in commits 1–2 (the move) — diagnose there before porting.
+
+### 0.4 Resume plan (after bench PASS)
+
+Execute in order, each commit `make verify`-clean on its own (see §6):
+
+1. **Commit 3 — port stab-fill** (Deliverable 2, §4). Reference source: PR #136
+   head `8382744` (`mcp__github__pull_request_read get_diff` pn 136). Port the
+   fill-compose + threaded blit + Kalman onto the master base inside
+   `src/star6e_framing_stab.c` as a SECOND `FramingModule` ("stab-fill"). Apply
+   D11–D14 + the OSD decision D16 (§4.5). Re-introduce only the MI_SYS symbols
+   the compose needs (BufFillPa/BufBlitPa/in_get_buf/in_put_buf — commit 1
+   removed them as legacy; they return here as stab-fill's). Add the
+   `stab-fill` framing preset (`venc_config.c` table) and the `pauseStab` field
+   across all config/API/(webui — but see commit 4) layers.
+2. **Commit 4 — data-driven field schema** (Deliverable 3, §5). Confirmed IN by
+   the owner. Makes `pauseStab` (and future module fields) render with no webui
+   blob rebuild. If commit 4 lands before/with commit 3's field, add `pauseStab`
+   via the dynamic path; otherwise add it the 5-layer way and migrate.
+3. **Commit 5 — VERSION + HISTORY + docs.** One `VERSION` bump for the whole
+   PR; `HISTORY.md` entry; update `HTTP_API_CONTRACT.md` (capabilities `ui`,
+   `pauseStab`), `STABILIZATION_TEST_PLAN.md`, `AGENTS.md` (STAB flag + dynamic
+   field path). Flip this file's status to IMPLEMENTED.
+
+Each of commits 3 needs its own bench pass (stab-fill floating-image look,
+~43 fps, live `pauseStab` glide, clean teardown).
+
+### 0.5 Corrections discovered during implementation (supersede earlier text)
+
+- **Legacy-only MI_SYS symbols are `in_get_buf`/`in_put_buf`/`blit_pa` ONLY.**
+  `va2pa` (IVE result alloc) and `flush_inv_cache` (IVE shift, line ~1433) are
+  HW-path and were KEPT. §3.6's earlier inventory was corrected in commit 1.
+- **`star6e_pipeline_stab_panel_anchor` was deleted** in commit 1 (dead in
+  HW-only mode: it returned 0 when `g_stab_hw_mode`). stab-fill is a
+  manual-compose mode where the anchor is NOT trivially dead — see D16.
+- **Interface gained `prepare()` + `active()`** beyond the original sketch: the
+  pipeline reads stab encode-dims and running-state, so the module exposes
+  geometry back via `prepare()` (configure + 1080p clamp, returns enc dims) and
+  `active()` (detector running, for pan-lock + dual-rec guard).
 
 ## 1. Motivation
 
@@ -258,6 +356,29 @@ imx335 bench — fps, recenter feel, clean teardown (no MMU faults).
   `stabKalmanQ/R` as fields initially. Deliverable 3 makes exposing them later a
   blob-free, one-line change if community demand appears. `pauseStab` stays a
   live field (`set_live`).
+- **D16 — Resolve OSD handling for stab-fill (open; decide on the bench).**
+  Verified against PR #136: tipoman9 added **no** OSD code — zero new
+  `debug_osd_*` calls; `star6e_runtime.c` (the OSD draw cycle) is untouched; the
+  `panel_anchor` mentions in the diff are git hunk-context labels, not edits.
+  But this matters for the port: HW `stab` is zero-copy (OSD sits 1:1 on the
+  post-crop port0 output, so commit 1 correctly deleted `panel_anchor` as
+  dead-in-HW). **`stab-fill` is a manual-compose mode** (drains port0, fill+blit
+  into a fresh VENC input buffer), like the old legacy blit — so the OSD is
+  attached at the VPE port0 output (pre-compose, full encode dim) while VENC is
+  fed the *shifted, black-bordered* composed buffer. Two outcomes to check on
+  the bench and then implement:
+  - **(a)** If the RGN/OSD composites onto port0 output and that buffer is what
+    the blit copies from, the OSD shifts with the content / lands in the wrong
+    place → restore a fill-mode anchor: re-add a `panel_anchor`-style hook (now
+    via the vtable, e.g. `int (*osd_anchor)(int*,int*)`) and the gated
+    `star6e_runtime.c` caller, returning the live fill offset so the panel stays
+    put in the encoded view.
+  - **(b)** If the compose lands the OSD 1:1 on the encoded frame (or OSD is
+    simply not composited on the manual path), no anchor is needed — document it
+    and leave `panel_anchor` gone.
+  Do NOT silently ship stab-fill without resolving this; pick (a) or (b) from
+  observed bench behavior. Any OSD hook stays inside the existing
+  `if (vcfg->debug.show_osd)` gate.
 
 ### 4.2 Config plumbing (new `stab-fill` preset)
 
