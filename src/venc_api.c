@@ -347,7 +347,7 @@ static const FieldUi ui_stab_recenter_speed = {
 	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart."
 };
 static const FieldUi ui_stab_kalman_q = {
-	"Stabilization", "Pan response (Q)", "number", 0.005, 1.0, 0.005, NULL,
+	"Stabilization", "Pan response (Q)", "number", 0.001, 1.0, 0.005, NULL,
 	"Kalman process noise — how fast the view follows slow pans. Higher = "
 	"tracks pans sooner / weaker hold; lower = holds tighter, more locked. "
 	"Shared by stab + stab-fill. Default 0.03. Requires restart."

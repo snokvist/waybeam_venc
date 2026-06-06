@@ -295,7 +295,6 @@ static volatile int g_stab_fill_mode;
 static volatile int g_stab_detector_enabled = 1;
 static volatile int g_stab_pause;
 static volatile int g_stab_parked;
-static pthread_mutex_t g_stab_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_stab_src_w;     /* image (port0-output) domain — detector + */
 static uint32_t g_stab_src_h;     /* accumulator + recenter all use this dim   */
 static uint32_t g_stab_enc_w;
@@ -324,8 +323,6 @@ static double g_stab_kalman_r = STAB_KALMAN_R_DEFAULT;
  * teardown, no MMU storm.  Flipped via set_live under g_stab_path_lock. */
 static pthread_mutex_t g_stab_path_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int    g_stab_paused;
-static volatile int g_stab_off_x;
-static volatile int g_stab_off_y;
 /* User-controlled pan center as parts-per-thousand of (src_w, src_h).
  * 500/500 = exact center.  Updated live via star6e_stab_set_pan() so
  * the existing zoomX/zoomY HTTP controls steer the stabilized framing
@@ -474,11 +471,6 @@ static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 	g_stab_recenter_period = recenter_speed;
 	g_stab_pan_x_mil = star6e_stab_pan_clamp_mil(pan_x);
 	g_stab_pan_y_mil = star6e_stab_pan_clamp_mil(pan_y);
-
-	pthread_mutex_lock(&g_stab_lock);
-	g_stab_off_x = 0;
-	g_stab_off_y = 0;
-	pthread_mutex_unlock(&g_stab_lock);
 
 	/* Reset Kalman state (matches the Python "count == 0" init: X=0, P=1). */
 	g_stab_kalman_x_est = 0.0;
@@ -1354,7 +1346,7 @@ static void *star6e_stab_thread_main(void *arg)
 					 * via the recenter ramp — undo this tick's measurement so
 					 * facc decays instead of re-accumulating, then shrink facc
 					 * + the estimate by (tau-1)/tau toward 0.  No HW rebind /
-					 * teardown.  g_stab_recenter_speed sets the glide rate. */
+					 * teardown.  g_stab_recenter_period sets the glide rate. */
 					uint32_t tau = g_stab_recenter_period ?
 						g_stab_recenter_period : 30;
 					double scale;
@@ -1384,10 +1376,6 @@ static void *star6e_stab_thread_main(void *arg)
 				if (acc_x >  max_x) acc_x =  max_x;
 				if (acc_y < -max_y) acc_y = -max_y;
 				if (acc_y >  max_y) acc_y =  max_y;
-				pthread_mutex_lock(&g_stab_lock);
-				g_stab_off_x = acc_x;
-				g_stab_off_y = acc_y;
-				pthread_mutex_unlock(&g_stab_lock);
 				dbg_frame++;
 				if ((dbg_frame % 120) == 0)
 					fprintf(stderr, "[waybeam] stab tick %d: meas=(%d,%d) "

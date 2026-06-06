@@ -152,12 +152,16 @@ typedef struct {
 	 * "stab-fill" (MUT_RESTART, scoped to the stab presets; inert under
 	 * off/zoom).  Derive from the preset default unless explicitly overridden;
 	 * see apply_framing_preset(). */
-	double stab_kalman_q;         /* process noise / pan response (0.0001..5;
-	                               * higher = follows pans faster / weaker hold;
-	                               * preset default 0.03). */
-	double stab_kalman_r;         /* measurement noise / smoothness (0.01..200;
-	                               * higher = smoother but laggier; preset
-	                               * default 2.0). */
+	double stab_kalman_q;         /* process noise / pan response. Supported
+	                               * (API-validated) range 0.001..1.0; higher =
+	                               * follows pans faster / weaker hold; preset
+	                               * default 0.03.  (Loader clamp-fallback bound
+	                               * is wider, 0.0001..5, for hand-edited files.) */
+	double stab_kalman_r;         /* measurement noise / smoothness. Supported
+	                               * (API-validated) range 0.1..50.0; higher =
+	                               * smoother but laggier; preset default 2.0.
+	                               * (Loader clamp-fallback bound is wider,
+	                               * 0.01..200.) */
 	/* Runtime "stab-fill" bypass (MUT_LIVE).  Set true via
 	 * /api/v1/set?pauseStab=true to glide the floating image back to centre
 	 * (software ramp — no HW rebind); false resumes shake compensation.
