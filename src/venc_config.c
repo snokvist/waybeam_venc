@@ -612,6 +612,17 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 				"stabEdgePct", (int)v->stab_edge_pct);
 			v->stab_motion_thresh = (uint32_t)json_get_int(obj,
 				"stabMotionThresh", (int)v->stab_motion_thresh);
+			/* Harden stab_crop_pct to [60, 100] for the active stab preset.
+			 * A stab preset must have a usable crop budget; clamping here
+			 * also self-heals a stale stabCropPct (e.g. a 0 saved while
+			 * framing=off, then framing re-set via json_cli string-only)
+			 * that would otherwise override the preset's 80 down to 0 and
+			 * silently disable stabilization (star6e_stab_*_enabled() key on
+			 * stab_crop_pct >= 50 → fall through to the unstabilized bind). */
+			if (v->stab_crop_pct < 60)
+				v->stab_crop_pct = 60;
+			if (v->stab_crop_pct > 100)
+				v->stab_crop_pct = 100;
 		}
 	}
 }

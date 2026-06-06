@@ -946,15 +946,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			/* HW-crop stab outputs the cropped encoded dim on port0, so the
 			 * OSD canvas is 1:1 with the encoded frame (static) — no
 			 * per-frame panel-offset tracking needed. */
-		/* stab-fill (D16): the OSD composites on VPE port0, which the
-		 * manual compose shifts by the live fill offset — counter-shift the
-		 * panel so it stays screen-fixed in the encoded frame.  Returns 0
-		 * (offset cleared) for HW-crop stab / zoom / off, which are 1:1. */
-		{
-			int anchor_x = 0, anchor_y = 0;
-			(void)star6e_pipeline_osd_anchor(&anchor_x, &anchor_y);
-			debug_osd_set_panel_offset(ps->debug_osd, anchor_x, anchor_y);
-		}
 		debug_osd_begin_frame(ps->debug_osd);
 		debug_osd_sample_cpu(ps->debug_osd);
 

@@ -693,8 +693,10 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	}
 	if (strcmp(key, "video0.stab_crop_pct") == 0) {
 		uint32_t v = cfg->video0.stab_crop_pct;
-		if (v != 0 && (v < 50 || v > 100))
-			return "stab_crop_pct must be 0 (off) or in range [50, 100]";
+		/* Floor 60: below it the kept window is too small (huge border /
+		 * upscale) for usable stabilization on either preset. */
+		if (v != 0 && (v < 60 || v > 100))
+			return "stab_crop_pct must be 0 (off) or in range [60, 100]";
 	}
 	if (strcmp(key, "video0.stab_recenter_speed") == 0) {
 		if (cfg->video0.stab_recenter_speed > 3600)

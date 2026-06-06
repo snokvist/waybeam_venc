@@ -25,13 +25,18 @@ Commit 3 status: stab-fill ported as a second registered `FramingModule` sharing
 the detector/geometry/IVE with `stab`; full-frame encode + black-border float,
 Kalman trajectory smoother (D14 folded constants), software-ramp `pauseStab`
 (D13, no HW rebind), `stab-fill` framing preset + `pauseStab` MUT_LIVE field.
-Device-verified at 60 fps with clean teardown and no MMU faults.  **D16 resolved
-as a documented caveat** (see below): RGN-on-VENC does not composite with
-manual-fed VENC input on this BSP, so the OSD stays on VPE port0 with a
-best-effort draw-cycle counter-shift; a screen-fixed OSD needs software
-compositing onto the composed output (deferred follow-up).  Dashboard/webui UI
-for `pauseStab` + the `stab-fill` framing option is deferred to commit 4 (the
-data-driven schema) — the field works via the HTTP API today.
+Device-verified at 60 fps with clean teardown and no MMU faults.  **D16 resolved:**
+the venc debug OSD reverts to plain VPE (it rides the stabilized content under
+stab-fill — a documented cosmetic limit of this vehicle-local dev overlay).
+RGN-on-VENC does not composite with manual-fed input on this BSP; a VPE
+counter-shift was lag-prone; RGN-on-SCL works but shares the single global
+`MI_RGN` device with **waybeam_hub's `osd_render`** (mutually exclusive —
+`MI_RGN_Init` fails for the second).  The production static OSD is waybeam_hub
+(SCL, post-shift, device-verified static); venc debugOSD and hub OSD are run
+one-or-the-other.  Also hardened `stabCropPct` to [60,100] (load+API+module),
+self-healing a stale 0 that silently disabled stabilization.  Dashboard/webui
+UI for `pauseStab` + the `stab-fill` framing option is deferred to commit 4
+(the data-driven schema) — the field works via the HTTP API today.
 
 Net effect: stabilization is now one file (`src/star6e_framing_stab.c`, ~1,240
 lines) behind the `FramingModule` vtable (`include/star6e_framing.h`), gated by

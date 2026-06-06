@@ -1004,13 +1004,6 @@ int star6e_pipeline_set_pause_stab(bool paused)
 	return -1;
 }
 
-int star6e_pipeline_osd_anchor(int *off_x, int *off_y)
-{
-	if (g_framing && g_framing->osd_anchor)
-		return g_framing->osd_anchor(off_x, off_y);
-	return 0;
-}
-
 int star6e_pipeline_apply_zoom(Star6ePipelineState *state,
 	double pct, double x, double y)
 {
@@ -2111,25 +2104,18 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		}
 	}
 
-	/* Debug OSD.  Canvas dim is the encoded frame dim; on Star6E RGN
-	 * attaches at the VPE port output (post-SCL crop), so the canvas is
-	 * already 1:1 with the encoded frame and needs no zoom-time offset.
-	 * HW-crop stab is no different: port0 outputs the cropped encoded dim,
-	 * so the OSD is static 1:1 like the non-stab/zoom path.
+	/* Debug OSD.  Canvas dim is the encoded frame dim; on Star6E RGN attaches
+	 * at the VPE port output (post-SCL crop), so the canvas is 1:1 with the
+	 * encoded frame.  HW-crop stab is no different (port0 outputs the cropped
+	 * encoded dim).  Vehicle-local diagnostic only.
 	 *
-	 * stab-fill (D16) manually drains VPE port0 and composes a
-	 * shifted/black-bordered frame into the VENC input, so the OSD (which
-	 * RGN composites on port0) slides with the stabilized content.  RGN
-	 * attach on VENC does NOT composite on this BSP (manual-fed VENC input
-	 * bypasses the overlay stage), so the OSD stays on port0 and the draw
-	 * cycle counter-shifts the panel by the live fill offset
-	 * (star6e_runtime.c → star6e_pipeline_osd_anchor).  KNOWN LIMITATION:
-	 * the counter-shift is a best-effort approximation — the OSD draw and
-	 * the compose run on unsynchronized cadences and a corner panel clips
-	 * off-canvas at large offsets, so under heavy stab-fill motion the panel
-	 * can jitter or briefly drop.  Acceptable for a diagnostic overlay (off
-	 * by default); a screen-fixed OSD needs software compositing onto the
-	 * composed output (tracked follow-up). */
+	 * D16 note: under framing=stab-fill the OSD rides the stabilized content
+	 * (it composites on VPE port0, before the manual-drain compose shifts the
+	 * frame) — a known cosmetic limitation of this dev overlay.  For a
+	 * screen-fixed OSD on the stabilized stream use waybeam_hub's osd_render,
+	 * which composites at the SCL stage (post-shift).  The two share MI_RGN
+	 * (a single global RGN device), so they are mutually exclusive — run one
+	 * or the other, not both. */
 	if (vcfg->debug.show_osd) {
 		state->debug_osd = debug_osd_create(state->image_width,
 			state->image_height, &state->vpe_port);

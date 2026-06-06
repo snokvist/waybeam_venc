@@ -465,6 +465,10 @@ static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 	double pan_x, double pan_y, uint32_t smooth_pct, uint32_t still_frames,
 	uint32_t edge_pct, uint32_t motion_thresh)
 {
+	/* Effective crop budget is always [60, 100] — config load already clamps,
+	 * but guard the math here too (hand-edited config / future callers). */
+	if (crop_pct < 60) crop_pct = 60;
+	if (crop_pct > 100) crop_pct = 100;
 	g_stab_src_w = src_w & ~1u;
 	g_stab_src_h = src_h & ~1u;
 	g_stab_crop_percent = crop_pct;
@@ -2000,25 +2004,6 @@ static int star6e_stab_active(void)
 	return g_stab_running;
 }
 
-/* OSD anchor for stab-fill: the debug OSD composites on VPE port0 (the
- * pre-compose source), so the manual compose shifts it by the applied offset.
- * Report that offset so the OSD draw cycle counter-shifts the panel and it
- * lands screen-fixed in the encoded frame.  Returns 0 when the detector isn't
- * running (offset is 0 anyway). */
-static int star6e_stab_fill_osd_anchor(int *off_x, int *off_y)
-{
-	int ax, ay;
-	if (!g_stab_running)
-		return 0;
-	pthread_mutex_lock(&g_stab_lock);
-	ax = g_stab_off_x;
-	ay = g_stab_off_y;
-	pthread_mutex_unlock(&g_stab_lock);
-	if (off_x) *off_x = ax;
-	if (off_y) *off_y = ay;
-	return 1;
-}
-
 /* Compute stabilization geometry from vcfg and the source dims; clamp the
  * source to <=1920x1080 (above it the VPE+VENC path cannot sustain 60/90/120
  * fps with stab on) and return the encode dims the pipeline sizes VENC to.
@@ -2105,7 +2090,6 @@ const FramingModule star6e_framing_stab = {
 	.set_pan       = star6e_stab_set_pan,
 	.active        = star6e_stab_active,
 	.set_live      = NULL,
-	.osd_anchor    = NULL,   /* HW-crop OSD is 1:1 with the encoded frame */
 };
 
 /* "stab-fill" shares setup_ports/start/stop/apply_ae_crop with "stab" — those
@@ -2122,5 +2106,4 @@ const FramingModule star6e_framing_stab_fill = {
 	.set_pan       = star6e_stab_set_pan,
 	.active        = star6e_stab_active,
 	.set_live      = star6e_stab_fill_set_live,
-	.osd_anchor    = star6e_stab_fill_osd_anchor,
 };
