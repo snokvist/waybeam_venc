@@ -215,42 +215,25 @@ typedef MI_S32 (*stab_ive_shift_fn_t)(StabIveHandle_t handle,
  * 128 box, 2-level pyramid) fits 60fps every frame.  Bump only as a last
  * resort; it trades stabilization quality for fps. */
 #define STAB_DETECT_EVERY   1
-/* Return-to-center policy (see the recenter block in the stab thread).
- * Unconditional decay fights live stabilization, so gate it:
- *  - MOTION_THRESH: |inter-frame shift| (px) above which the camera counts
- *    as actively moving — re-arms the stillness timer.
- *  - STILL_FRAMES: consecutive sub-threshold frames before the offset
- *    decays fully back to center (the "cooldown").
- *  - EDGE_PCT: while still moving, only give margin back on an axis once
- *    its offset passes this % of the dead-border, so corrections in the
- *    central zone are never eroded (no fight); during sustained motion the
- *    offset settles near the edge instead of being pinned/saturated. */
-#define STAB_MOTION_THRESH         1
-/* "Lock the scene stiffer" tuning: hold the stabilized crop longer before
- * leaking back to center.  STILL_FRAMES is the post-motion cooldown (frames
- * of stillness before the settled-recenter starts) — longer = the view stays
- * locked after a disturbance instead of creeping back.  EDGE_PCT is how much
- * of the ±border the offset may use during sustained motion before margin is
- * given back — higher = sticks harder (closer to saturation) before leaking.
- * The leak RATE itself is the per-preset recenter_speed (venc_config.c). */
-#define STAB_RECENTER_STILL_FRAMES 60
-#define STAB_RECENTER_EDGE_PCT     88
-/* Final EMA low-pass on the applied crop offset (per frame, DETECT_EVERY=1).
- * applied += ALPHA * (target - applied).  Lower = smoother but more lag.
- * 0.30 ≈ 3-frame time constant (~33ms @90fps): kills the per-frame judder
- * that the raw offset magnifies at the geometry extremes (low/high) while
- * the lag stays imperceptible for the "locked scene" feel. */
-#define STAB_OUTPUT_SMOOTH_ALPHA   0.30
 
-/* Kalman filter constants for the "stab-fill" trajectory smoother, ported from
- * the reference Python stabilizer (processVar / measVar).  The filter smooths
- * the cumulative position estimate; the applied compensation is the high-pass
- * component (facc − X_estimate) so slow camera pans pass through unchanged while
- * fast shake is removed.  Per the PR #136 review (D14) these are baked into the
- * preset — known-good values, not exposed as user knobs.  Deliverable 3's
- * data-driven schema can surface them blob-free later if demand appears. */
+/* Kalman trajectory smoother — the SINGLE control law for both "stab" and
+ * "stab-fill" (ported from the reference Python stabilizer, processVar /
+ * measVar).  The filter smooths the cumulative position estimate; the applied
+ * compensation is the high-pass component (facc − X_estimate) so slow camera
+ * pans pass through unchanged while fast shake is removed, and the estimate
+ * eases the offset back to centre on its own (no separate EMA / gated
+ * recenter).  Q (process noise / pan response) and R (measurement noise /
+ * smoothness) are exposed as config knobs (video0.stab_kalman_q / _r); these
+ * are the defaults the presets seed and the fallback if a hand-edited config
+ * supplies an out-of-range value. */
 #define STAB_KALMAN_Q_DEFAULT  0.03   /* matches Python processVar */
 #define STAB_KALMAN_R_DEFAULT  2.0    /* matches Python measVar */
+/* Sane bounds for a hand-edited config (the HTTP validator enforces tighter
+ * UI ranges; configure() falls back to the defaults outside these). */
+#define STAB_KALMAN_Q_MIN  0.0001
+#define STAB_KALMAN_Q_MAX  5.0
+#define STAB_KALMAN_R_MIN  0.01
+#define STAB_KALMAN_R_MAX  200.0
 
 static stab_sys_get_fd_fn_t g_stab_sys_get_fd;
 static stab_sys_close_fd_fn_t g_stab_sys_close_fd;
@@ -324,18 +307,11 @@ static uint32_t g_stab_enc_h;
 static uint32_t g_stab_pre_w;
 static uint32_t g_stab_pre_h;
 static uint32_t g_stab_crop_percent;
-static uint32_t g_stab_recenter_period;   /* frames between 1-pixel leak; 0=off */
-/* Advanced "stab" feel knobs, set from VencConfig in star6e_stab_configure()
- * (MUT_RESTART, so fixed for the lifetime of a stab run).  Initialized to the
- * STAB_* compile-time defaults as a fallback if configure is bypassed. */
-static double g_stab_smooth_alpha = STAB_OUTPUT_SMOOTH_ALPHA;
-static int g_stab_still_frames_max = STAB_RECENTER_STILL_FRAMES;
-static int g_stab_edge_pct = STAB_RECENTER_EDGE_PCT;
-static int g_stab_motion_thresh = STAB_MOTION_THRESH;
-/* Kalman state for stab-fill — smoothed cumulative position (X_estimate) and
- * its uncertainty (P_estimate), one per axis.  Reset in star6e_stab_configure.
- * Q/R are folded preset constants (D14), so they need no lock — never written
- * after init.  The "stab" preset uses the EMA above, not the Kalman. */
+static uint32_t g_stab_recenter_period;   /* pauseStab glide rate (frames); 0=default */
+/* Kalman state — smoothed cumulative position (X_estimate) and its uncertainty
+ * (P_estimate), one per axis.  Reset in star6e_stab_configure.  Q/R are set
+ * from config there (MUT_RESTART, fixed for the run) so they need no lock —
+ * never written after init.  Both "stab" and "stab-fill" use this filter. */
 static double g_stab_kalman_x_est;
 static double g_stab_kalman_x_p = 1.0;
 static double g_stab_kalman_y_est;
@@ -462,8 +438,7 @@ static int star6e_stab_pan_clamp_mil(double v)
 static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 	uint32_t crop_pct, uint32_t enc_w, uint32_t enc_h,
 	uint32_t recenter_speed, uint32_t venc_fps,
-	double pan_x, double pan_y, uint32_t smooth_pct, uint32_t still_frames,
-	uint32_t edge_pct, uint32_t motion_thresh)
+	double pan_x, double pan_y, double kalman_q, double kalman_r)
 {
 	/* Effective crop budget is always [60, 100] — config load already clamps,
 	 * but guard the math here too (hand-edited config / future callers). */
@@ -482,27 +457,19 @@ static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 			crop_pct, &g_stab_enc_w, &g_stab_enc_h);
 	}
 
-	/* Advanced feel knobs.  Each accepts a sentinel/out-of-range value and
-	 * falls back to the compile-time default, so a hand-edited config (which
-	 * bypasses the HTTP validator) can never freeze or destabilize the loop:
-	 *  - smooth_pct 0 or <5/>100  → default EMA alpha (smoother = lower).
-	 *  - still_frames clamped to <=600 (0 = recenter as soon as settled).
-	 *  - edge_pct 0 or <50/>100   → default edge-stick.
-	 *  - motion_thresh clamped to <=16 (0 = any motion re-arms stillness). */
-	g_stab_smooth_alpha = (smooth_pct >= 5 && smooth_pct <= 100) ?
-		(double)smooth_pct / 100.0 : STAB_OUTPUT_SMOOTH_ALPHA;
-	g_stab_still_frames_max = (still_frames <= 600) ?
-		(int)still_frames : 600;
-	g_stab_edge_pct = (edge_pct >= 50 && edge_pct <= 100) ?
-		(int)edge_pct : STAB_RECENTER_EDGE_PCT;
-	g_stab_motion_thresh = (motion_thresh <= 16) ? (int)motion_thresh : 16;
+	/* Kalman tuning knobs (q = process noise / pan response, r = measurement
+	 * noise / smoothness).  Each falls back to the compile-time default when
+	 * out of sane bounds, so a hand-edited config (which bypasses the HTTP
+	 * validator) can never freeze or destabilize the loop (q→0 stops tracking,
+	 * r→0 cancels all compensation). */
+	g_stab_kalman_q = (kalman_q >= STAB_KALMAN_Q_MIN &&
+		kalman_q <= STAB_KALMAN_Q_MAX) ? kalman_q : STAB_KALMAN_Q_DEFAULT;
+	g_stab_kalman_r = (kalman_r >= STAB_KALMAN_R_MIN &&
+		kalman_r <= STAB_KALMAN_R_MAX) ? kalman_r : STAB_KALMAN_R_DEFAULT;
 
-	/* recenter_speed is "frames between 1-pixel leak":
-	 * 0 = no leak (stick to current patch),
-	 * lower = faster recenter (user feedback: "Lower the second number
-	 * faster crop recenter, 0 is no recenter"). venc_fps is passed for
-	 * future "pixels/sec" remapping; currently the value IS the period
-	 * in frames so the knob stays direct + deterministic. */
+	/* recenter_speed now only sets the pauseStab glide-home rate (frames):
+	 * 0 = default ~30-frame ramp, lower = faster glide.  During normal
+	 * stabilization the Kalman handles recentering, so this is inert. */
 	(void)venc_fps;
 	g_stab_recenter_period = recenter_speed;
 	g_stab_pan_x_mil = star6e_stab_pan_clamp_mil(pan_x);
@@ -1193,15 +1160,12 @@ static void *star6e_stab_thread_main(void *arg)
 	 * can carry per-frame jitter (detector noise, 2-px crop quantization);
 	 * applied raw it shows as judder, and the geometry magnifies it
 	 * differently per preset (low: small motion vs quantization; high: large
-	 * upscale) so only the mid preset looked smooth.  EMA-smoothing the
-	 * offset before the crop equalises that — see STAB_OUTPUT_SMOOTH_ALPHA. */
-	double smooth_x = 0.0;
-	double smooth_y = 0.0;
+	 * upscale) so only the mid preset looked smooth.  The Kalman trajectory
+	 * filter (applied below) absorbs that jitter — no separate EMA needed. */
 	int acc_x = 0;
 	int acc_y = 0;
 	int dbg_frame = 0;
 	int loop_n = 0;            /* drained frames since have_prev; gates detect */
-	int still_frames = g_stab_still_frames_max;  /* recenter cooldown; start settled */
 	StabIveImage_t dx;
 	StabIveImage_t dy;
 	struct timespec prev_ts;
@@ -1371,15 +1335,26 @@ static void *star6e_stab_thread_main(void *arg)
 				max_x = star6e_stab_max_off_x();
 				max_y = star6e_stab_max_off_y();
 
-				/* Software pause (D13), mode-agnostic: glide the applied
-				 * offset to centre via the recenter ramp — no HW rebind, no
-				 * thread teardown.  Undo this tick's measurement so facc
-				 * decays instead of re-accumulating, then shrink facc + the
-				 * Kalman estimate by (tau-1)/tau toward 0.  HW-crop emits the
-				 * low-passed decayed offset to the port crop (window glides
-				 * home); fill emits facc−estimate (image glides home).
-				 * Applies to BOTH framing=stab and framing=stab-fill. */
+				/* Unified trajectory smoother (Kalman) for BOTH "stab" and
+				 * "stab-fill" — same control law, so identical settings give
+				 * identical return-to-centre feel; the only per-preset
+				 * difference is the emit step below (HW crop reprogram vs
+				 * software compose).  The applied compensation is the
+				 * high-pass component (facc − X_estimate): fast shake is
+				 * removed, slow pans pass through, and the estimate eases the
+				 * offset back to centre on its own — no separate EMA / gated
+				 * recenter (the Kalman subsumes both).  facc is NOT clamped
+				 * (the filter is recursive on the trajectory; clamping creates
+				 * artifacts) — only the final acc is clamped to the border
+				 * budget.  Q (g_stab_kalman_q, pan response) and R
+				 * (g_stab_kalman_r, smoothness) come from config (MUT_RESTART,
+				 * fixed for the run), read directly (never written). */
 				if (g_stab_paused) {
+					/* Software pause (D13): glide the applied offset to centre
+					 * via the recenter ramp — undo this tick's measurement so
+					 * facc decays instead of re-accumulating, then shrink facc
+					 * + the estimate by (tau-1)/tau toward 0.  No HW rebind /
+					 * teardown.  g_stab_recenter_speed sets the glide rate. */
 					uint32_t tau = g_stab_recenter_period ?
 						g_stab_recenter_period : 30;
 					double scale;
@@ -1389,120 +1364,26 @@ static void *star6e_stab_thread_main(void *arg)
 					facc_y -= meas_dy;
 					facc_x *= scale;
 					facc_y *= scale;
-					g_stab_kalman_x_est *= scale;  /* no-op when HW (unused) */
+					g_stab_kalman_x_est *= scale;
 					g_stab_kalman_y_est *= scale;
 					if (fabs(facc_x) < 0.5) facc_x = 0.0;
 					if (fabs(facc_y) < 0.5) facc_y = 0.0;
-					if (g_stab_fill_mode) {
-						acc_x = (int)lround(facc_x - g_stab_kalman_x_est);
-						acc_y = (int)lround(facc_y - g_stab_kalman_y_est);
-						smooth_x = facc_x - g_stab_kalman_x_est;
-						smooth_y = facc_y - g_stab_kalman_y_est;
-					} else {
-						smooth_x += g_stab_smooth_alpha *
-							(facc_x - smooth_x);
-						smooth_y += g_stab_smooth_alpha *
-							(facc_y - smooth_y);
-						acc_x = (int)lround(smooth_x);
-						acc_y = (int)lround(smooth_y);
-					}
-					if (acc_x < -max_x) acc_x = -max_x;
-					if (acc_x >  max_x) acc_x =  max_x;
-					if (acc_y < -max_y) acc_y = -max_y;
-					if (acc_y >  max_y) acc_y =  max_y;
-					still_frames = 0;
-					goto fill_emit;
-				}
-
-				if (g_stab_fill_mode) {
-					/* stab-fill: Kalman-smoothed trajectory (ported from
-					 * the wfb-stabilizer Python reference).  Compensation
-					 * is the high-pass component (facc − X_estimate): slow
-					 * pans pass through, fast shake is removed.  facc is NOT
-					 * clamped (the Kalman is recursive on the trajectory;
-					 * clamping creates artifacts) — only the final acc is
-					 * clamped to the border budget.  No EMA, no recenter:
-					 * the Kalman subsumes both.  Q/R are folded preset
-					 * constants (D14), read directly (never written). */
+				} else {
 					double pp_x = g_stab_kalman_x_p + g_stab_kalman_q;
 					double k_x  = pp_x / (pp_x + g_stab_kalman_r);
 					double pp_y = g_stab_kalman_y_p + g_stab_kalman_q;
 					double k_y  = pp_y / (pp_y + g_stab_kalman_r);
-					g_stab_kalman_x_est +=
-						k_x * (facc_x - g_stab_kalman_x_est);
+					g_stab_kalman_x_est += k_x * (facc_x - g_stab_kalman_x_est);
 					g_stab_kalman_x_p = (1.0 - k_x) * pp_x;
-					g_stab_kalman_y_est +=
-						k_y * (facc_y - g_stab_kalman_y_est);
+					g_stab_kalman_y_est += k_y * (facc_y - g_stab_kalman_y_est);
 					g_stab_kalman_y_p = (1.0 - k_y) * pp_y;
-					acc_x = (int)lround(facc_x - g_stab_kalman_x_est);
-					acc_y = (int)lround(facc_y - g_stab_kalman_y_est);
-					if (acc_x < -max_x) acc_x = -max_x;
-					if (acc_x >  max_x) acc_x =  max_x;
-					if (acc_y < -max_y) acc_y = -max_y;
-					if (acc_y >  max_y) acc_y =  max_y;
-					smooth_x = facc_x - g_stab_kalman_x_est;
-					smooth_y = facc_y - g_stab_kalman_y_est;
-					still_frames = 0;
-					goto fill_emit;
 				}
-
-				if (facc_x < -max_x) facc_x = -max_x;
-				if (facc_x >  max_x) facc_x =  max_x;
-				if (facc_y < -max_y) facc_y = -max_y;
-				if (facc_y >  max_y) facc_y =  max_y;
-
-				/* Gated return-to-center.  Recenter when the camera has
-				 * settled (still for STILL_FRAMES), or while moving once the
-				 * offset has pushed past EDGE_PCT of the dead-border on
-				 * either axis (reclaim margin near saturation) — leaving the
-				 * central zone untouched so it doesn't fight live
-				 * stabilization.  When recentering, decay the (acc_x, acc_y)
-				 * VECTOR's magnitude by (tau-1)/tau with its direction held
-				 * constant, so both axes shrink proportionally and reach
-				 * center together along a straight diagonal.  (Per-axis decay
-				 * truncates the shorter axis to zero first, leaving a visible
-				 * axis-aligned tail.)  nmag<1 snaps both axes to 0 together. */
-				if (g_stab_recenter_period > 0) {
-					uint32_t tau = g_stab_recenter_period;
-					int settled;
-					int edge_x = (max_x * g_stab_edge_pct) / 100;
-					int edge_y = (max_y * g_stab_edge_pct) / 100;
-					int do_recenter;
-					if (tau < 2) tau = 2;
-
-					if (abs(meas_dx) > g_stab_motion_thresh ||
-					    abs(meas_dy) > g_stab_motion_thresh)
-						still_frames = 0;
-					else if (still_frames < g_stab_still_frames_max)
-						still_frames++;
-					settled = (still_frames >= g_stab_still_frames_max);
-
-					do_recenter = settled ||
-						facc_x > edge_x || facc_x < -edge_x ||
-						facc_y > edge_y || facc_y < -edge_y;
-					if (do_recenter) {
-						/* Scale both axes by the same factor → direction
-						 * held, straight diagonal to center.  Float math
-						 * keeps the proportion exact at sub-pixel
-						 * magnitudes; snap both to 0 together once the
-						 * whole vector is under half a pixel. */
-						double scale = (double)(tau - 1) / (double)tau;
-						facc_x *= scale;
-						facc_y *= scale;
-						if (fabs(facc_x) < 0.5 && fabs(facc_y) < 0.5) {
-							facc_x = 0.0;
-							facc_y = 0.0;
-						}
-					}
-				}
-
-				/* Low-pass the offset before it reaches the crop so
-				 * per-frame jitter doesn't judder the output. */
-				smooth_x += g_stab_smooth_alpha * (facc_x - smooth_x);
-				smooth_y += g_stab_smooth_alpha * (facc_y - smooth_y);
-				acc_x = (int)lround(smooth_x);
-				acc_y = (int)lround(smooth_y);
-			fill_emit:
+				acc_x = (int)lround(facc_x - g_stab_kalman_x_est);
+				acc_y = (int)lround(facc_y - g_stab_kalman_y_est);
+				if (acc_x < -max_x) acc_x = -max_x;
+				if (acc_x >  max_x) acc_x =  max_x;
+				if (acc_y < -max_y) acc_y = -max_y;
+				if (acc_y >  max_y) acc_y =  max_y;
 				pthread_mutex_lock(&g_stab_lock);
 				g_stab_off_x = acc_x;
 				g_stab_off_y = acc_y;
@@ -1510,11 +1391,13 @@ static void *star6e_stab_thread_main(void *arg)
 				dbg_frame++;
 				if ((dbg_frame % 120) == 0)
 					fprintf(stderr, "[waybeam] stab tick %d: meas=(%d,%d) "
-						"acc=(%d,%d) max=(%d,%d) pan=(%d,%d) still=%d "
+						"acc=(%d,%d) max=(%d,%d) pan=(%d,%d) "
+						"kalman(q=%.4f,r=%.2f) paused=%d "
 						"gyro_n=%u gyro=(%.3f,%.3f,%.3f)\n",
 						dbg_frame, meas_dx, meas_dy,
 						acc_x, acc_y, max_x, max_y,
-						g_stab_pan_x_mil, g_stab_pan_y_mil, still_frames,
+						g_stab_pan_x_mil, g_stab_pan_y_mil,
+						g_stab_kalman_q, g_stab_kalman_r, g_stab_paused,
 						gyro_n, gyro_x, gyro_y, gyro_z);
 			} else {
 				if ((dbg_frame++ % 120) == 0)
@@ -1863,11 +1746,10 @@ static int star6e_stab_start(void)
 	}
 
 	fprintf(stderr, "[waybeam] stab: src=%ux%u out=%ux%u crop=%u%% "
-		"recenter=%u (0=stick) smooth=%.2f still=%d edge=%d%% thresh=%d\n",
+		"kalman(q=%.4f,r=%.2f) pauseGlide=%u\n",
 		g_stab_src_w, g_stab_src_h,
 		g_stab_enc_w, g_stab_enc_h, g_stab_crop_percent,
-		g_stab_recenter_period, g_stab_smooth_alpha, g_stab_still_frames_max,
-		g_stab_edge_pct, g_stab_motion_thresh);
+		g_stab_kalman_q, g_stab_kalman_r, g_stab_recenter_period);
 	return 0;
 }
 
@@ -2056,10 +1938,8 @@ static int star6e_stab_prepare(const VencConfig *vcfg, uint32_t src_w,
 		vcfg->video0.stab_recenter_speed,
 		vcfg->video0.fps,
 		0.5, 0.5,
-		vcfg->video0.stab_smooth_pct,
-		vcfg->video0.stab_still_frames,
-		vcfg->video0.stab_edge_pct,
-		vcfg->video0.stab_motion_thresh);
+		vcfg->video0.stab_kalman_q,
+		vcfg->video0.stab_kalman_r);
 	*enc_w = g_stab_enc_w;
 	*enc_h = g_stab_enc_h;
 	return 0;
@@ -2093,10 +1973,8 @@ static int star6e_stab_fill_prepare(const VencConfig *vcfg, uint32_t src_w,
 		vcfg->video0.stab_recenter_speed,
 		vcfg->video0.fps,
 		0.5, 0.5,
-		vcfg->video0.stab_smooth_pct,
-		vcfg->video0.stab_still_frames,
-		vcfg->video0.stab_edge_pct,
-		vcfg->video0.stab_motion_thresh);
+		vcfg->video0.stab_kalman_q,
+		vcfg->video0.stab_kalman_r);
 	g_stab_fill_mode = 1;           /* opt in after configure cleared it */
 	*enc_w = g_stab_enc_w;
 	*enc_h = g_stab_enc_h;

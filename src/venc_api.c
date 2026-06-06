@@ -346,26 +346,17 @@ static const FieldUi ui_stab_recenter_speed = {
 	"(decay time-constant in frames). 0 = stick (never recenters); higher = "
 	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart."
 };
-static const FieldUi ui_stab_smooth_pct = {
-	"Stabilization", "Smoothing %", "number", 5, 100, 1, NULL,
-	"EMA low-pass on the applied offset. 0 = preset default (API only); "
-	"5..100 = explicit. Lower = smoother but laggier. Requires restart."
+static const FieldUi ui_stab_kalman_q = {
+	"Stabilization", "Pan response (Q)", "number", 0.005, 1.0, 0.005, NULL,
+	"Kalman process noise — how fast the view follows slow pans. Higher = "
+	"tracks pans sooner / weaker hold; lower = holds tighter, more locked. "
+	"Shared by stab + stab-fill. Default 0.03. Requires restart."
 };
-static const FieldUi ui_stab_still_frames = {
-	"Stabilization", "Still frames", "number", 0, 600, 1, NULL,
-	"Frames of stillness before the view counts as settled (then recenters). "
-	"Higher = view stays locked longer after a bump. Requires restart."
-};
-static const FieldUi ui_stab_edge_pct = {
-	"Stabilization", "Edge stick %", "number", 50, 100, 1, NULL,
-	"% of the dead-border the offset may use before forced recenter. 0 = "
-	"preset default (API only); 50..100 = explicit. Higher = sticks harder "
-	"to the edge before reclaiming margin. Requires restart."
-};
-static const FieldUi ui_stab_motion_thresh = {
-	"Stabilization", "Motion threshold", "number", 0, 16, 1, NULL,
-	"|inter-frame shift| (px) counted as motion for stillness detection. "
-	"Higher = less twitchy. Requires restart."
+static const FieldUi ui_stab_kalman_r = {
+	"Stabilization", "Smoothness (R)", "number", 0.1, 50.0, 0.1, NULL,
+	"Kalman measurement noise — output smoothness. Higher = smoother but "
+	"laggier; lower = snappier, more jitter passes through. Shared by stab + "
+	"stab-fill. Default 2.0. Requires restart."
 };
 
 /* UI descriptor for video0.pause_stab — the live stab pause.  Rendered as a
@@ -466,18 +457,16 @@ static const FieldDesc g_fields[] = {
 	 * stab_crop_pct/recenter or zoom_pct.  Encoded resolution changes when
 	 * toggled, so the whole pipeline must restart. */
 	FIELD(video0, framing,             FT_STRING, MUT_RESTART),
-	/* Stabilization knobs — override the stab/stab-fill preset's derived crop %
-	 * (0 or 60..100) and recenter speed (0 = stick to patch, higher = slower
-	 * glide back to center), plus the feel knobs (smoothness/lock/edge).  Set
-	 * framing=stab|stab-fill first; inert under off/zoom.  Restart-required
-	 * (crop changes encode resolution).  All carry FIELD_UI metadata so the
-	 * dashboard renders the whole "Stabilization" group data-driven. */
-	FIELD_UI(video0, stab_crop_pct,       FT_UINT, MUT_RESTART, &ui_stab_crop_pct),
-	FIELD_UI(video0, stab_recenter_speed, FT_UINT, MUT_RESTART, &ui_stab_recenter_speed),
-	FIELD_UI(video0, stab_smooth_pct,     FT_UINT, MUT_RESTART, &ui_stab_smooth_pct),
-	FIELD_UI(video0, stab_still_frames,   FT_UINT, MUT_RESTART, &ui_stab_still_frames),
-	FIELD_UI(video0, stab_edge_pct,       FT_UINT, MUT_RESTART, &ui_stab_edge_pct),
-	FIELD_UI(video0, stab_motion_thresh,  FT_UINT, MUT_RESTART, &ui_stab_motion_thresh),
+	/* Stabilization knobs — shared by stab + stab-fill (one Kalman control law).
+	 * crop_pct = kept-frame/border budget (0 or 60..100); recenter_speed = the
+	 * pauseStab glide-home rate; kalman_q/r = the pan-response / smoothness of
+	 * the trajectory filter.  Set framing=stab|stab-fill first; inert under
+	 * off/zoom.  Restart-required.  All carry FIELD_UI metadata so the dashboard
+	 * renders the whole "Stabilization" group data-driven. */
+	FIELD_UI(video0, stab_crop_pct,       FT_UINT,   MUT_RESTART, &ui_stab_crop_pct),
+	FIELD_UI(video0, stab_kalman_q,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_q),
+	FIELD_UI(video0, stab_kalman_r,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_r),
+	FIELD_UI(video0, stab_recenter_speed, FT_UINT,   MUT_RESTART, &ui_stab_recenter_speed),
 	/* Runtime stab pause (D13 software ramp) — MUT_LIVE, not persisted.  Carries
 	 * UI metadata so the dashboard renders it data-driven (no static SECTIONS
 	 * row; it isn't in /api/v1/config). */
@@ -538,10 +527,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },
 	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
-	{ "video0.stabSmoothPct", "video0.stab_smooth_pct" },
-	{ "video0.stabStillFrames", "video0.stab_still_frames" },
-	{ "video0.stabEdgePct", "video0.stab_edge_pct" },
-	{ "video0.stabMotionThresh", "video0.stab_motion_thresh" },
+	{ "video0.stabKalmanQ", "video0.stab_kalman_q" },
+	{ "video0.stabKalmanR", "video0.stab_kalman_r" },
 	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
@@ -774,29 +761,19 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	if (strcmp(key, "video0.stab_recenter_speed") == 0) {
 		if (cfg->video0.stab_recenter_speed > 3600)
 			return "stab_recenter_speed must be in range [0, 3600] "
-				"(0 = stick, higher = slower recenter)";
+				"(pauseStab glide rate; 0 = default ramp)";
 	}
-	if (strcmp(key, "video0.stab_smooth_pct") == 0) {
-		uint32_t v = cfg->video0.stab_smooth_pct;
-		if (v != 0 && (v < 5 || v > 100))
-			return "stab_smooth_pct must be 0 (preset default) or in "
-				"range [5, 100] (lower = smoother but laggier)";
+	if (strcmp(key, "video0.stab_kalman_q") == 0) {
+		double v = cfg->video0.stab_kalman_q;
+		if (v < 0.001 || v > 1.0)
+			return "stab_kalman_q must be in range [0.001, 1.0] "
+				"(pan response; higher = follows pans faster)";
 	}
-	if (strcmp(key, "video0.stab_still_frames") == 0) {
-		if (cfg->video0.stab_still_frames > 600)
-			return "stab_still_frames must be in range [0, 600] "
-				"(higher = view stays locked longer after a bump)";
-	}
-	if (strcmp(key, "video0.stab_edge_pct") == 0) {
-		uint32_t v = cfg->video0.stab_edge_pct;
-		if (v != 0 && (v < 50 || v > 100))
-			return "stab_edge_pct must be 0 (preset default) or in "
-				"range [50, 100] (higher = sticks harder to edge)";
-	}
-	if (strcmp(key, "video0.stab_motion_thresh") == 0) {
-		if (cfg->video0.stab_motion_thresh > 16)
-			return "stab_motion_thresh must be in range [0, 16] "
-				"(higher = less twitchy stillness detection)";
+	if (strcmp(key, "video0.stab_kalman_r") == 0) {
+		double v = cfg->video0.stab_kalman_r;
+		if (v < 0.1 || v > 50.0)
+			return "stab_kalman_r must be in range [0.1, 50.0] "
+				"(smoothness; higher = smoother but laggier)";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)

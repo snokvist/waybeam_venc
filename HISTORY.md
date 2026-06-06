@@ -1,5 +1,33 @@
 # History
 
+## [0.15.0] - 2026-06-06
+
+Unified stabilization control law — `stab` and `stab-fill` now behave
+identically, and the feel knobs were replaced with the Kalman Q/R.
+
+**`stab` adopts the `stab-fill` Kalman trajectory smoother.**  Previously the two
+presets ran different control laws — `stab` used an EMA + gated return-to-centre
+(driven by `stabSmoothPct`/`StillFrames`/`EdgePct`/`MotionThresh`), `stab-fill`
+used a Kalman trajectory filter — so identical settings produced different
+return-to-centre behaviour.  The detector now runs ONE law (the Kalman) for both;
+the only per-preset difference is the emit step (HW crop reprogram vs software
+compose).  Same settings → same feel.
+
+**Feel knobs replaced by the Kalman tuning.**  The four inert-after-unification
+knobs (`stabSmoothPct`, `stabStillFrames`, `stabEdgePct`, `stabMotionThresh`)
+were removed and replaced with the two knobs the Kalman law actually exposes,
+shared by both presets:
+- `stabKalmanQ` (FT_DOUBLE, default 0.03, range `0.001..1.0`) — pan response
+  (process noise): higher = follows pans sooner / weaker hold.
+- `stabKalmanR` (FT_DOUBLE, default 2.0, range `0.1..50.0`) — smoothness
+  (measurement noise): higher = smoother but laggier.
+
+`stabRecenterSpeed` is retained but now only sets the `pauseStab` glide-home
+rate (the Kalman recentres during normal operation).  Schema migration is
+graceful: old `stab*` keys in a saved config are ignored on load; absent
+`stabKalman*` keys take the preset defaults.  Both new fields render in the
+data-driven Stabilization WebUI section.
+
 ## [0.14.0] - 2026-06-06
 
 Live stab pause for the HW-crop `stab` preset + a fully data-driven
