@@ -1,5 +1,58 @@
 # History
 
+## [0.13.0] - 2026-06-06
+
+Framing-module refactor + the `stab-fill` floating-image stabilization preset
+(PR #136 reworked onto master), plus a data-driven field schema so module
+fields reach the WebUI without a dashboard rebuild.
+
+**Stabilization is now a registered `FramingModule` (Star6E).**  All `stab`
+code moved out of `star6e_pipeline.c` into `src/star6e_framing_stab.c` behind a
+`FramingModule` vtable, gated by a `STAB` build flag (default 1; `make build
+STAB=0` excludes the module entirely — no stab code linked, `framing` falls to
+`off`).  The legacy single-thread manual-drain fallback is gone; on port1-tap
+failure the HW-crop path degrades to a bound static centre crop.  Behavior of
+`framing="stab"` is unchanged (bench-verified on imx335).
+
+**New preset `framing="stab-fill"` — floating image on a black border.**  A
+second registered module sharing the IVE detector/geometry/Kalman with `stab`.
+Instead of HW-cropping, it SCL-downscales the full sensor frame to the encode
+size (no shrink) and the manual-drain compose shifts a window inside it,
+black-filling the exposed edge (`BufFillPa` strips + `BufBlitPa` content) on a
+threaded blit worker decoupled from IVE via a 2-slot ring.  `stabCropPct` sets
+the max shift / black-border budget.  A Kalman trajectory smoother (folded
+preset constants) replaces the `stab` EMA.  Device-verified 60 fps on imx335.
+
+**Live `video0.pauseStab` (stab-fill only).**  Software ramp: glides the
+applied offset back to centre via the recenter decay — no `MI_VENC_StopRecvPic`
+/ `BindChnPort2` live rebind (the maneuver that wedged the SoC), no thread
+teardown.  `MUT_LIVE`, not persisted; routed module-side through the
+`FramingModule` set_live hook.
+
+**`stabCropPct` hardened to [60,100]** for stab presets (API validator floor
+50→60, plus load-time + module clamp).  Self-heals a stale `stabCropPct=0`
+(saved while `framing=off`, then framing re-set via a string-only edit) that
+previously overrode the preset default and silently disabled stabilization.
+
+**Data-driven field schema.**  `FieldDesc` gains an optional `ui` descriptor
+(group/label/control/range/options/tooltip); `/api/v1/capabilities` emits a
+per-field `ui` block when present, and the dashboard renders those fields
+generically — a module field is WebUI-visible with no `dashboard.html` edit or
+webui-blob rebuild.  `pauseStab` ships via this path; `stab-fill` added to the
+framing dropdown.  Core fields keep the static dashboard schema unchanged.
+
+**OSD note (Star6E).**  The venc debug OSD composites on VPE port0 (pre-stab),
+so under stab-fill it rides the content — a known cosmetic limit of this
+vehicle-local dev overlay (off by default).  For a screen-fixed OSD on the
+stabilized stream use waybeam_hub's `osd_render` (composites at the SCL stage,
+post-shift).  The two share the single global `MI_RGN` device and are mutually
+exclusive — run one or the other.
+
+**Tooling.**  `tools/build_webui.py` now pins the gzip OS header byte so the
+embedded blob is byte-identical regardless of the builder's Python version
+(CPython 3.11+ changed it from 0x03 to 0xff), fixing `make webui-check` /
+`make verify` on modern Python.
+
 ## [0.12.0] - 2026-05-20
 
 Digital image stabilization (DIS) on the Star6E VPE pipeline, re-grafted

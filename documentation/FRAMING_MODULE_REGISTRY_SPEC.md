@@ -1,8 +1,13 @@
 # Spec: Framing-Module Registry + stab-fill Port + Data-Driven Field Schema
 
-Status: **IN PROGRESS** — Deliverable 1 (commits 1–2) landed & approved.
-Awaiting on-device validation of commits 1–2 before Deliverable 2 (the
-stab-fill port).
+Status: **IMPLEMENTED** (v0.13.0) — Deliverables 1–3 landed and device-validated
+on imx335: FramingModule registry + STAB flag (commits 1–2), stab-fill port +
+pauseStab (commit 3), data-driven field schema (commit 4), plus stabCropPct
+hardening and the gzip-tooling fix.  Deliverable 4 (generic params-map config)
+remains a deferred future PR (§6.4).  D16 OSD resolved: venc debug OSD stays on
+plain VPE (rides content under stab-fill — dev-only); the production static OSD
+is waybeam_hub's `osd_render` (SCL, post-shift), mutually exclusive with the
+venc debug OSD (shared MI_RGN).
 Scope: Star6E backend (stabilization is Star6E-only).
 Branch: `claude/pr-136-stabilization-review-rh6Qz` (single PR, ordered commits).
 

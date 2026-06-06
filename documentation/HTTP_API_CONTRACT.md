@@ -154,7 +154,14 @@ Response `200`:
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
-      "fpv.roi_qp": { "mutability": "live", "supported": true }
+      "fpv.roi_qp": { "mutability": "live", "supported": true },
+      "video0.pause_stab": {
+        "mutability": "live", "supported": true,
+        "ui": {
+          "group": "Stabilization", "label": "Pause stab", "control": "toggle",
+          "tooltip": "Live bypass for framing=stab-fill ..."
+        }
+      }
     }
   }
 }
@@ -163,6 +170,15 @@ Response `200`:
 
 `supported` is backend-specific. Current Star6E and Maruko builds both expose
 scene detection, intra refresh, and digital zoom fields.
+
+A field MAY carry an optional `ui` object (data-driven field schema): when
+present the dashboard renders a control for it generically — no `dashboard.html`
+edit or webui-blob rebuild is needed to surface a new module field.  Keys:
+`group` (collapsible section title), `label`, `control`
+(`toggle`|`number`|`select`|`text`), `min`/`max`/`step` (for `number`),
+`options` (array, for `select`), `tooltip`.  Fields without `ui` use the
+dashboard's static schema.  `video0.pause_stab` (the live stab-fill bypass,
+runtime-only — not in `/api/v1/config`) is surfaced this way.
 
 ### `GET /api/v1/config.json`
 
@@ -358,10 +374,18 @@ Majestic-oriented clients.
 ### `video0.framing`, `video0.zoom_x`, `video0.zoom_y`, `video0.stab_crop_pct`, `video0.stab_recenter_speed`, `video0.stab_smooth_pct`, `video0.stab_still_frames`, `video0.stab_edge_pct`, `video0.stab_motion_thresh`
 
 - `video0.framing`: string preset — the single knob for what the VPE crop does.
-  - Values: `off` | `stab` (image stabilization, Star6E only) | `zoom-1.25x` |
-    `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` | `zoom-4x` (digital
-    zoom, both backends).
+  - Values: `off` | `stab` (image stabilization, crop+shrink, Star6E only) |
+    `stab-fill` (image stabilization, floating image on a black border, Star6E
+    only; encode stays full-res, `stabCropPct` sets the shift/border budget) |
+    `zoom-1.25x` | `zoom-1.50x` | `zoom-1.75x` | `zoom-2x` | `zoom-3x` |
+    `zoom-4x` (digital zoom, both backends).
   - Mutability: `restart_required` (changes encoded resolution / pipeline).
+- `video0.pauseStab`: bool, live (`stab-fill` only) — glide the floating image
+  back to centre (software ramp, no rebind).  Runtime-only: not persisted,
+  always boots `false`.  No effect in other framing modes.
+- `video0.stabCropPct`: the stab crop / shift budget; clamped to **[60, 100]**
+  for a stab preset (a smaller value is rejected by the API and floored on
+  load).
   - The preset expands internally into the zoom crop fraction (zoom presets) or
     the stabilization crop/recenter (`stab`); the two are mutually exclusive.
     There is no settable continuous `zoom_pct` — use a zoom preset.
