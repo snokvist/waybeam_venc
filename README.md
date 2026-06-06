@@ -812,6 +812,27 @@ Typical usage:
   controller needs per-frame `frame_type`, `complexity`, `scene_change`,
   `idr_inserted`, and `frames_since_idr` telemetry on the sidecar.
 
+#### Encoder thread priority (Star6E)
+
+The Star6E encode path — `MI_VENC_GetStream` → RTP packetize → `sendto`, plus
+the `stab-fill` blit/compose thread — runs on `SCHED_FIFO` priority **50**,
+pinned to CPU 0. At the previous minimum RT priority (`1`) these threads were
+occasionally preempted mid-frame by other userspace RT threads and
+`SCHED_OTHER` work, producing a periodic ~one-frame RTP delivery stall (a
+single idle gap on the wire — no frame loss, FPS unaffected). Priority 50 sits
+above those peers but well below the SDK pipeline kernel threads
+(`SCHED_RR/98`), which must keep producing the frames we consume.
+
+Override without a rebuild via the `VENC_RT_PRIO` environment variable
+(clamped `1..80`); `VENC_RT_PRIO=1` restores the old minimum-priority
+behaviour. Requires root (silent fallback otherwise).
+
+A *separate* jitter source — a large I-frame whose serialization exceeds one
+frame interval on a constrained uplink (e.g. 50 Mbps on a 100 Mbps link) — is
+not a scheduling issue and is unaffected by this priority; mitigate it with a
+[resilience preset](#resilience-preset-star6e--maruko) (intra-refresh) or a
+lower bitrate.
+
 #### Resilience preset (Star6E + Maruko)
 
 A single field picks an error-resilience profile.  Intra-refresh
