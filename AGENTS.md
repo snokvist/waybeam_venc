@@ -447,6 +447,8 @@ Read these before working on related areas:
 | Precrop / aspect ratio | `documentation/PRECROP_ASPECT_RATIO.md` |
 | SigmaStar SDK reference | `documentation/PROC_MI_MODULES_REFERENCE.md` |
 | Crash log / incidents | `documentation/CRASH_LOG.md` |
+| In-process reinit test (respawn A/B) | `documentation/INPROC_REINIT_TEST_PLAN.md` |
+| In-process reinit on-device handoff | `documentation/INPROC_REINIT_HANDOFF.md` |
 | Target agent design (future) | `documentation/TARGET_AGENT_ARCHITECTURE.md` |
 | SD card recording | `documentation/SD_CARD_RECORDING.md` |
 | Coding conventions | `documentation/CONVENTIONS.md` |
