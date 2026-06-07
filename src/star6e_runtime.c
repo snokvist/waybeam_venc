@@ -27,6 +27,7 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -196,6 +197,14 @@ typedef struct {
 } Star6eRunnerContext;
 
 static void install_signal_handlers(void);
+static void star6e_runner_pipeline_teardown(Star6eRunnerContext *ctx);
+static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx);
+
+/* Seconds the in-process-reinit deadline watchdog waits before sysrq-b.
+ * Generous: a cold pipeline_start (sensor unlock, ISP bin load, ISP
+ * readiness polls) dominates and can run several seconds even with MI_SYS
+ * already up. */
+#define STAR6E_INPROC_REINIT_DEADLINE_SEC 30
 
 /* Write VPE SCL clock preset before forced exit.  Uses only
  * async-signal-safe syscalls (open/write/close). */
@@ -707,6 +716,108 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
  * handler.  Bench-validated against 12 consecutive cross-mode
  * sensor SIGHUPs (rounds 0→1→2→3 ×3) with no degradation. */
 
+/* VENC_INPROC_REINIT experiment switch — read once, cached.  When set, a
+ * MUT_RESTART reinit rebuilds the pipeline in place (static PID) instead of
+ * fork+exec respawn.  See documentation/INPROC_REINIT_TEST_PLAN.md. */
+static int star6e_runtime_inproc_reinit_enabled(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		const char *env = getenv("VENC_INPROC_REINIT");
+		cached = (env && env[0] && env[0] != '0') ? 1 : 0;
+	}
+	return cached;
+}
+
+/* Fork a deadline watchdog for the in-process reinit window.  A plain
+ * alarm()+_exit cannot escape an uninterruptible kernel D-state (the reason
+ * the shutdown path also forks a watchdog), so this child sysrq-b's the box
+ * if the parent has not killed it by the deadline.  Returns the child pid,
+ * or -1 on fork failure (caller proceeds without the safety net). */
+static pid_t star6e_inproc_reinit_watchdog_fork(void)
+{
+	pid_t wd = fork();
+	if (wd != 0)
+		return wd;  /* parent (or -1); child continues below */
+
+	(void)prctl(PR_SET_NAME, VENC_COMM_REINIT_WD, 0, 0, 0);
+	close(STDOUT_FILENO);
+	sleep(STAR6E_INPROC_REINIT_DEADLINE_SEC);
+	{
+		static const char m[] =
+			"[reinit-wd] in-process reinit hung, sysrq reboot\n";
+		int fd;
+		(void)write(STDERR_FILENO, m, sizeof(m) - 1);
+		fd = open("/proc/sysrq-trigger", O_WRONLY);
+		if (fd >= 0) {
+			(void)write(fd, "b", 1);
+			close(fd);
+		}
+	}
+	_exit(0);
+}
+
+/* In-process pipeline rebuild (VENC_INPROC_REINIT experiment).  Tears the
+ * pipeline down and rebuilds it WITHOUT exiting the process or cycling
+ * MI_SYS — the PID stays static across the reinit.  Returns 0 on success;
+ * on failure the run loop propagates the error and the process exits
+ * (S95waybeam does NOT auto-restart — the test harness must notice the
+ * daemon went down).  See documentation/INPROC_REINIT_TEST_PLAN.md. */
+static int star6e_runtime_inproc_reinit(Star6eRunnerContext *ctx)
+{
+	pid_t wd;
+	int ret;
+
+	printf("> In-process reinit: rebuilding pipeline, static PID %d\n",
+		(int)getpid());
+	fflush(stdout);
+
+	wd = star6e_inproc_reinit_watchdog_fork();
+
+	venc_httpd_pause();
+	star6e_runner_pipeline_teardown(ctx);
+
+	/* Reload config from disk so the MUT_RESTART field that triggered the
+	 * reinit takes effect (mirrors the cold-start config load). */
+	venc_config_defaults(&ctx->vcfg);
+	ret = venc_config_load(VENC_CONFIG_DEFAULT_PATH, &ctx->vcfg);
+	if (ret != 0)
+		fprintf(stderr,
+			"WARNING: in-process reinit config reload failed (%d), "
+			"reusing in-memory config\n", ret);
+
+	ret = star6e_pipeline_start(&ctx->ps, &ctx->vcfg, &g_sdk_quiet);
+	if (ret != 0) {
+		fprintf(stderr,
+			"ERROR: in-process reinit pipeline_start failed (%d)\n",
+			ret);
+		goto out;
+	}
+	ctx->pipeline_started = 1;
+	ctx->started_base_w = ctx->vcfg.video0.width;
+	ctx->started_base_h = ctx->vcfg.video0.height;
+
+	ret = star6e_runtime_apply_startup_controls(ctx);
+	if (ret != 0) {
+		fprintf(stderr,
+			"ERROR: in-process reinit apply_startup_controls "
+			"failed (%d)\n", ret);
+		goto out;
+	}
+
+	venc_httpd_resume();
+	printf("> In-process reinit complete, PID %d unchanged\n",
+		(int)getpid());
+	fflush(stdout);
+
+out:
+	if (wd > 0) {
+		kill(wd, SIGKILL);
+		waitpid(wd, NULL, 0);
+	}
+	return ret;
+}
+
 static int star6e_runtime_handle_reinit(int *handled)
 {
 	*handled = 0;
@@ -715,6 +826,13 @@ static int star6e_runtime_handle_reinit(int *handled)
 		return 0;
 	*handled = 1;
 	venc_api_clear_reinit();
+
+	if (star6e_runtime_inproc_reinit_enabled()) {
+		printf("> Reinit requested: in-process pipeline rebuild "
+			"(static PID, VENC_INPROC_REINIT experiment)\n");
+		fflush(stdout);
+		return star6e_runtime_inproc_reinit(g_runner_ctx);
+	}
 
 	printf("> Reinit requested: cold restart via fork+exec on shutdown\n");
 	fflush(stdout);
@@ -1169,6 +1287,31 @@ static int star6e_runner_run(void *opaque)
 	return 0;
 }
 
+/* Pipeline-level teardown shared by the full process-exit teardown and the
+ * experimental in-process reinit path.  Tears the pipeline down to (but not
+ * including) the MI_SYS / mi_deinit / httpd level — those stay process-
+ * lifetime so an in-process reinit never cycles MI_SYS (the second
+ * MI_SYS_Init in the same PID is the confirmed-broken path; see
+ * documentation/SIGHUP_REINIT.md).  Mirrors the cus3a stop→pipeline_stop→
+ * cus3a join ordering required by the 3A thread's ISP dependency. */
+static void star6e_runner_pipeline_teardown(Star6eRunnerContext *ctx)
+{
+	star6e_cus3a_request_stop();
+
+	if (ctx->pipeline_started) {
+		star6e_iq_cleanup();
+		star6e_controls_reset();
+		star6e_pipeline_stop(&ctx->ps);
+		ctx->pipeline_started = 0;
+	}
+
+	star6e_cus3a_join();
+
+	star6e_recorder_stop(&ctx->ps.recorder);
+	star6e_ts_recorder_stop(&ctx->ps.ts_recorder);
+	audio_ring_destroy(&ctx->ps.audio_ring);
+}
+
 static void star6e_runner_teardown(void *opaque)
 {
 	Star6eRunnerContext *ctx = opaque;
@@ -1245,28 +1388,11 @@ static void star6e_runner_teardown(void *opaque)
 	 * during the window receive 503.  No resume — the process is exiting
 	 * (SIGHUP fork+exec parent, or normal shutdown). */
 	venc_httpd_pause();
-	star6e_cus3a_request_stop();
 
-	/* Pipeline stop MUST happen before recorder stop.  The recording
-	 * thread runs inside pipeline_stop() and needs the ts_recorder fd
-	 * open until StopRecvPic completes.  The thread skips SD writes
-	 * when g_running==0 (already set by the signal handler). */
-	if (ctx->pipeline_started) {
-		star6e_iq_cleanup();
-		star6e_controls_reset();
-		star6e_pipeline_stop(&ctx->ps);
-		ctx->pipeline_started = 0;
-	}
+	/* Pipeline teardown (cus3a stop → pipeline_stop → cus3a join →
+	 * recorder/audio stop).  Shared with the in-process reinit path. */
+	star6e_runner_pipeline_teardown(ctx);
 
-	/* Now safe to join the 3A thread — pipeline is stopped so ISP
-	 * calls will return errors and the thread will exit. */
-	star6e_cus3a_join();
-
-	/* Safe to close files now — recording thread has been joined
-	 * inside pipeline_stop(). */
-	star6e_recorder_stop(&ctx->ps.recorder);
-	star6e_ts_recorder_stop(&ctx->ps.ts_recorder);
-	audio_ring_destroy(&ctx->ps.audio_ring);
 	if (ctx->httpd_started) {
 		venc_httpd_stop();
 		ctx->httpd_started = 0;

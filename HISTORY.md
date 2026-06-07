@@ -1,5 +1,33 @@
 # History
 
+## [0.17.0] - 2026-06-07
+
+Experimental in-process reinit path (Star6E), gated behind
+`VENC_INPROC_REINIT` — a test harness for whether the post-fd-cleanup SoC
+state survives a static-PID pipeline rebuild, or whether the fork+exec
+respawn is still required.
+
+**Default behaviour is unchanged.**  With the env var unset, a `MUT_RESTART`
+reinit still forks+execs a fresh process (new PID) exactly as before.  Set
+`VENC_INPROC_REINIT=1` in the daemon environment to instead rebuild the
+pipeline in place: `star6e_runtime_handle_reinit()` tears the pipeline down
+and back up inside the run loop (`star6e_pipeline_stop` → reload
+`/etc/waybeam.json` → `star6e_pipeline_start` → re-apply startup controls)
+without exiting the process or cycling `MI_SYS` — so the PID stays static
+across every API call.
+
+A deadline watchdog fork (`waybeam-rwd`) sysrq-b's the box if an in-process
+rebuild wedges in a kernel D-state (the same safety model as the shutdown
+watchdog).  An in-process reinit *failure* returns non-zero and exits the
+process; note S95waybeam does not auto-restart, so the daemon goes down —
+the test harness must detect that.  The shared
+`star6e_runner_pipeline_teardown()` helper keeps the in-process and
+full-shutdown teardown orderings from drifting.
+
+The validation matrix (same-mode storm, cross-mode rotation, fd/RSS soak)
+lives in `documentation/INPROC_REINIT_TEST_PLAN.md`.  Star6E only; Maruko
+keeps respawn unconditionally per the backend-split policy.
+
 ## [0.16.0] - 2026-06-06
 
 Sensor-level image orientation — `image.flip` and `image.mirror` now work
