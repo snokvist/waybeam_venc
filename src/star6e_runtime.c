@@ -695,17 +695,26 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	return 0;
 }
 
-/* In-process MI_SYS_Exit + MI_SYS_Init does NOT yield a clean kernel
- * state on Star6E — the SigmaStar driver retains "already_inited" flags
- * tied to the PID, so a second MI_SYS_Init in the same process trips
- * MI_DEVICE_Open hangs and VIF "layout type 2 bindmode 4 not sync err"
- * after one or two cycles.  Empirically verified on imx335 @ 192.168.1.13.
+/* Same-PID (in-process) pipeline reinit does NOT work on Star6E — the
+ * reliable cold restart is a *new PID* via fork+exec.  This was retested
+ * exhaustively on imx335 @ 192.168.1.13 (2026-06-07) and confirmed at the
+ * SigmaStar I6E driver level — see
+ * documentation/STAR6E_SINGLE_PID_REINIT_FINDINGS.md for the full evidence.
  *
- * The only reliable cold restart is a *new PID*.  The fork+exec
- * machinery lives in src/venc_respawn.c (shared with Maruko); the
- * Star6E runtime just calls venc_respawn_request() in its reinit
- * handler.  Bench-validated against 12 consecutive cross-mode
- * sensor SIGHUPs (rounds 0→1→2→3 ×3) with no degradation. */
+ * Note the historical reason recorded here was partly OUTDATED: a second
+ * MI_SYS_Init in the same PID no longer hangs MI_DEVICE_Open (that mode is
+ * gone).  But resetting MI_SYS, the /dev/mi_vif+vpe fds, AND the MI vendor
+ * lib globals (dlclose+dlopen) in one process is STILL insufficient — the
+ * VIF/VPE/ISP channel state the rebuild needs is pinned to the task in the
+ * kernel driver and only released by execv (fresh address space + fd
+ * context, same PID slot).  Symptom of an in-process rebuild: ISP readiness
+ * timeout + CmdLoadBinFile -1 + VIF "layout type 2 bindmode 4 not sync err"
+ * → no frames.
+ *
+ * The fork+exec machinery lives in src/venc_respawn.c (shared with Maruko);
+ * the Star6E runtime just calls venc_respawn_request() in its reinit
+ * handler.  Bench-validated against 12 consecutive cross-mode sensor
+ * SIGHUPs (rounds 0→1→2→3 ×3) with no degradation. */
 
 static int star6e_runtime_handle_reinit(int *handled)
 {
