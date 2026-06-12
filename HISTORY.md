@@ -1,5 +1,36 @@
 # History
 
+## [0.17.0] - 2026-06-12
+
+Dropped HEVC RTP Aggregation Packets (AP, NAL type 48) entirely — the wire
+output is now single-NAL + FU-A only, on both backends.
+
+**Why.** AP is valid RFC 7798, but it bought waybeam almost nothing in the
+FPV profile and actively hurt resilience. In single-slice H.265 the picture
+is one large VCL NAL that goes out as FU-A regardless; the only NALs small
+enough to aggregate were the VPS/SPS/PPS triplet on each IDR. Bundling those
+three into one packet means a single lost datagram takes out the entire
+parameter set and renders the whole GOP undecodable — the worst thing to
+aggregate on a lossy RF link. It also broke receivers that only implement
+the universally-supported single-NAL + FU-A subset (e.g. majestic-tuned RTP
+depacketizers), which forwarded the type-48 packets as corrupt video. The
+benefit was ~2 fewer packets per keyframe; the cost was interop failures and
+reduced loss tolerance. Net negative for this use case, so it's gone rather
+than gated behind a config flag.
+
+**What changed.**
+- `hevc_rtp` no longer has an `HevcApBuilder`. `hevc_rtp_send_nal()` and
+  `hevc_rtp_prepend_param_sets()` drop their aggregation-builder argument;
+  each NAL is emitted immediately as a single-NAL packet or FU-A fragments.
+  VPS/SPS/PPS are now prepended as separate packets on IDR (majestic-style).
+- `HevcRtpStats` loses `ap_packets` / `ap_nals`; the `[pktzr]` verbose line
+  is now `nals N | rtp N | fill N B | single N | fu N` on both backends.
+- `h26x_util_hevc_get_layer_id()` / `h26x_util_hevc_get_tid_plus1()` removed —
+  their only consumer was the deleted AP-header builder.
+- `test_hevc_rtp` and `test_star6e_hevc_rtp` rewritten to assert that **no
+  type-48 packet is ever emitted** (VPS+SPS+PPS+IDR now arrive as four
+  separate datagrams), plus the existing single/FU-A/marker-bit coverage.
+
 ## [0.16.0] - 2026-06-06
 
 Sensor-level image orientation — `image.flip` and `image.mirror` now work
