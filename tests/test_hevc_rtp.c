@@ -232,6 +232,46 @@ static int test_hevc_rtp_mixed_small_then_large(void)
 	return failures;
 }
 
+/* TRAIL_N (type 0) NALs are the refPred droppability marker — the rewritten
+ * header byte is 0x00, so verify the leading-zero NAL survives both wire
+ * shapes: verbatim in a single-NAL packet, and as type 0 in the FU header. */
+static int test_hevc_rtp_trail_n_type_preserved(void)
+{
+	static const uint8_t small_trail_n[] = { 0x00, 0x01, 0x55, 0x66 };
+	static uint8_t big_trail_n[3000];
+	CaptureCtx capture = {0};
+	HevcRtpStats stats = {0};
+	RtpPacketizerState rtp = { .seq = 0x700, .timestamp = 0x7000,
+		.ssrc = 0x4321, .payload_type = 97 };
+	size_t i;
+	size_t total;
+	int failures = 0;
+
+	big_trail_n[0] = 0x00;	/* TRAIL_N: type=0, layer_msb=0 */
+	big_trail_n[1] = 0x01;	/* layer_lsb=0, tid_plus1=1 */
+	for (i = 2; i < sizeof(big_trail_n); ++i)
+		big_trail_n[i] = (uint8_t)(i & 0xFF);
+
+	total = hevc_rtp_send_nal(small_trail_n, sizeof(small_trail_n), &rtp,
+		capture_write, &capture, 0, 1400, &stats);
+	CHECK("hevc_rtp trail_n single verbatim",
+		capture.count == 1 && total == sizeof(small_trail_n) &&
+		capture.packets[0].payload[0] == 0x00 &&
+		capture.packets[0].payload[1] == 0x01);
+
+	total = hevc_rtp_send_nal(big_trail_n, sizeof(big_trail_n), &rtp,
+		capture_write, &capture, 1, 1400, &stats);
+	CHECK("hevc_rtp trail_n fu total", total == sizeof(big_trail_n));
+	CHECK("hevc_rtp trail_n fu indicator type 49",
+		capture.count >= 3 && pkt_nal_type(&capture.packets[1]) == 49);
+	CHECK("hevc_rtp trail_n fu carries type 0",
+		capture.count >= 3 &&
+		(capture.packets[1].payload[2] & 0x3F) == 0 &&
+		(capture.packets[capture.count - 1].payload[2] & 0x3F) == 0);
+	CHECK("hevc_rtp trail_n no type-48", no_aggregation_packets(&capture));
+	return failures;
+}
+
 /* Passing stats=NULL must be safe at every entry point. */
 static int test_hevc_rtp_null_stats(void)
 {
@@ -293,6 +333,7 @@ int test_hevc_rtp(void)
 	failures += test_hevc_rtp_fallback_to_fu();
 	failures += test_hevc_rtp_prepend_separate_param_sets_on_idr();
 	failures += test_hevc_rtp_mixed_small_then_large();
+	failures += test_hevc_rtp_trail_n_type_preserved();
 	failures += test_hevc_rtp_null_stats();
 	failures += test_hevc_rtp_single_marker_on_last();
 	return failures;
