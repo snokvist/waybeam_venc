@@ -25,6 +25,8 @@ than gated behind a config flag.
   VPS/SPS/PPS are now prepended as separate packets on IDR (majestic-style).
 - `HevcRtpStats` loses `ap_packets` / `ap_nals`; the `[pktzr]` verbose line
   is now `nals N | rtp N | fill N B | single N | fu N` on both backends.
+- `h26x_util_hevc_get_layer_id()` / `h26x_util_hevc_get_tid_plus1()` removed —
+  their only consumer was the deleted AP-header builder.
 - `test_hevc_rtp` and `test_star6e_hevc_rtp` rewritten to assert that **no
   type-48 packet is ever emitted** (VPS+SPS+PPS+IDR now arrive as four
   separate datagrams), plus the existing single/FU-A/marker-bit coverage.

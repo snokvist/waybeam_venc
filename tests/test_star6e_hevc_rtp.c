@@ -106,9 +106,11 @@ static int test_star6e_hevc_rtp_sends_idr_with_separate_param_sets(void)
 	CHECK("star6e hevc rtp state advanced",
 		rtp.seq == 0x1238 && rtp.timestamp == 0x01020EBc);
 
-	/* Drain all four datagrams; verify none is a type-48 AP packet and the
-	 * last one carries the marker bit. */
-	for (;;) {
+	/* Drain the four expected datagrams; verify none is a type-48 AP
+	 * packet and the last one carries the marker bit.  All packets were
+	 * sent synchronously by send_frame, so a non-blocking probe is enough
+	 * to assert no extra datagram follows. */
+	while (datagrams < 4) {
 		ssize_t received = recv(recv_socket, buf, sizeof(buf), 0);
 
 		if (received < 12)
@@ -120,6 +122,8 @@ static int test_star6e_hevc_rtp_sends_idr_with_separate_param_sets(void)
 			saw_aggregation = 1;
 	}
 	CHECK("star6e hevc rtp four datagrams", datagrams == 4);
+	CHECK("star6e hevc rtp no extra datagram",
+		recv(recv_socket, buf, sizeof(buf), MSG_DONTWAIT) < 0);
 	CHECK("star6e hevc rtp total bytes",
 		total_received == (size_t)(4 * 12) + stats.rtp_payload_bytes);
 	CHECK("star6e hevc rtp no aggregation packet", saw_aggregation == 0);
