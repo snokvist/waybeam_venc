@@ -8,7 +8,24 @@ place — HEVC output is single-NAL + FU-A only (commit `9cad65e`, #142), the
 runtime already rewrites droppable enhancement frames to `TRAIL_N` and keeps
 reference frames as `TRAIL_R` (README → refPred notes), and the RTP packetizer
 already sets the marker bit on the last packet of every access unit
-(`src/rtp_packetizer.c`).
+(`src/rtp_packetizer.c:92`).
+
+**Transport facts (verified in-repo):**
+- **Default `rtp` stream mode** (`src/rtp_packetizer.c`): full RTP, marker set
+  on the AU's last packet (`:92`, `:25`). FEC_CLOSE-on-marker is **confirmed**
+  for this mode — and it is the default and recommended mode for this feature.
+- **`compact` stream mode** (`src/star6e_output.c`): a *separate* egress that
+  does **not** go through the RTP packetizer — `send_compact_frame()` hands raw
+  NAL data to `send_compact_packet()`, whose small-NAL branch `sendto()`s it
+  as-is. Its on-wire framing (and whether an RTP marker is present at all) was
+  **not** confirmed here. ⚠️ Do not assume the `rtp`-transport peek parses
+  compact output correctly; treat compact as out-of-scope pending its own
+  verification, and run this feature with the default `rtp` mode.
+- **No Annex-B / start-code egress** and **no AUDs ever emitted** (start codes
+  are stripped before packetization; HEVC type 35 / H.264 type 9 never appear).
+
+This spec's frame-boundary signal therefore keys on the **RTP marker** of the
+default `rtp` stream mode.
 
 ---
 
@@ -188,8 +205,16 @@ DROP.
 the config always carries the frame-boundary signal rule (§6, *Frame-boundary
 FEC close*), derived from `transport`:
 - `rtp` → `BYTE_MASK{anchor=DATAGRAM, off=1, mask=0x80, val=0x80}` → `FEC_CLOSE`
-  (the RTP marker bit).
-- `annexb` → `NAL_TYPE{AUD}` → `FEC_CLOSE` (access-unit delimiter).
+  (the RTP marker bit). **Verified against waybeam:** the RTP packetizer sets
+  the marker on the last packet of every access unit
+  (`src/rtp_packetizer.c:92`, `:25`).
+- `annexb` → `NAL_TYPE{AUD}` → `FEC_CLOSE` **only if the producer emits access-
+  unit delimiters.** ⚠️ waybeam does **not** — it emits no AUDs (HEVC type 35 /
+  H.264 type 9 never appear) and has no Annex-B / start-code egress mode at all
+  (RTP is the only video egress; start codes are stripped before packetization).
+  So for waybeam there is no `annexb` path; the seed is meaningful only for a
+  third-party producer that emits AUDs. Absent a usable seed, the port relies on
+  the `-T` fallback (§6).
 
 It is not part of any profile and cannot be configured away.
 
