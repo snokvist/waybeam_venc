@@ -10,22 +10,12 @@ reference frames as `TRAIL_R` (README → refPred notes), and the RTP packetizer
 already sets the marker bit on the last packet of every access unit
 (`src/rtp_packetizer.c:92`).
 
-**Transport facts (verified in-repo):**
-- **Default `rtp` stream mode** (`src/rtp_packetizer.c`): full RTP, marker set
-  on the AU's last packet (`:92`, `:25`). FEC_CLOSE-on-marker is **confirmed**
-  for this mode — and it is the default and recommended mode for this feature.
-- **`compact` stream mode** (`src/star6e_output.c`): a *separate* egress that
-  does **not** go through the RTP packetizer — `send_compact_frame()` hands raw
-  NAL data to `send_compact_packet()`, whose small-NAL branch `sendto()`s it
-  as-is. Its on-wire framing (and whether an RTP marker is present at all) was
-  **not** confirmed here. ⚠️ Do not assume the `rtp`-transport peek parses
-  compact output correctly; treat compact as out-of-scope pending its own
-  verification, and run this feature with the default `rtp` mode.
-- **No Annex-B / start-code egress** and **no AUDs ever emitted** (start codes
-  are stripped before packetization; HEVC type 35 / H.264 type 9 never appear).
-
-This spec's frame-boundary signal therefore keys on the **RTP marker** of the
-default `rtp` stream mode.
+**Transport (verified in-repo, scoped):** this spec targets waybeam's default
+`rtp` stream mode (`src/rtp_packetizer.c`), which sets the RTP marker on each
+access unit's last packet (`:92`, `:25`) — the frame-boundary signal keys on
+that marker. The `compact` stream mode is **not used and is out of scope**
+(scoped out by design decision). waybeam emits **no AUDs** and has **no
+Annex-B / start-code egress**, so RTP is the only transport considered.
 
 ---
 
@@ -160,7 +150,6 @@ typedef struct {
 typedef struct {
     bool            enabled;       /* master pipeline toggle (live) */
     bool            drop_enabled;  /* arm DROP-action rules (live) */
-    uint8_t         transport;     /* 0=RTP, 1=Annex-B (raw) */
     uint8_t         base_mcs;      /* mirror of the configured MCS */
     peek_rule_t     rules[PEEK_MAX_RULES];
     uint8_t         n_rules;
@@ -193,9 +182,9 @@ that the mechanism is universal.
 | `idr+refpred` | PROTECT param sets `Δ2`; PROTECT IDR/CRA + `TRAIL_R` `Δ1`; DROP `TRAIL_N` |
 
 HEVC NAL types referenced (`nuh_type`): `TRAIL_N=0`, `TRAIL_R=1`,
-`IDR_W_RADL=19`, `IDR_N_LP=20`, `CRA=21`, `VPS=32`, `SPS=33`, `PPS=34`,
-`AUD=35`. H.264 equivalents (`nal_unit_type`): IDR `=5`, SPS `=7`, PPS `=8`,
-AUD `=9` (no temporal-layer marking; `idr` profile only).
+`IDR_W_RADL=19`, `IDR_N_LP=20`, `CRA=21`, `VPS=32`, `SPS=33`, `PPS=34`.
+H.264 equivalents (`nal_unit_type`): IDR `=5`, SPS `=7`, PPS `=8`
+(no temporal-layer marking; `idr` profile only).
 
 `type_mask` for `idr` (HEVC) = bits {19,20,21} (IDR/CRA) and a second rule
 with bits {32,33,34} (param sets). `refpred` = bit {1} PROTECT and bit {0}
@@ -203,20 +192,11 @@ DROP.
 
 **Mandatory signal seed (independent of profile, including `off`-but-enabled):**
 the config always carries the frame-boundary signal rule (§6, *Frame-boundary
-FEC close*), derived from `transport`:
-- `rtp` → `BYTE_MASK{anchor=DATAGRAM, off=1, mask=0x80, val=0x80}` → `FEC_CLOSE`
-  (the RTP marker bit). **Verified against waybeam:** the RTP packetizer sets
-  the marker on the last packet of every access unit
-  (`src/rtp_packetizer.c:92`, `:25`).
-- `annexb` → `NAL_TYPE{AUD}` → `FEC_CLOSE` **only if the producer emits access-
-  unit delimiters.** ⚠️ waybeam does **not** — it emits no AUDs (HEVC type 35 /
-  H.264 type 9 never appear) and has no Annex-B / start-code egress mode at all
-  (RTP is the only video egress; start codes are stripped before packetization).
-  So for waybeam there is no `annexb` path; the seed is meaningful only for a
-  third-party producer that emits AUDs. Absent a usable seed, the port relies on
-  the `-T` fallback (§6).
-
-It is not part of any profile and cannot be configured away.
+FEC close*): `BYTE_MASK{anchor=DATAGRAM, off=1, mask=0x80, val=0x80}` →
+`FEC_CLOSE` (the RTP marker bit). **Verified against waybeam:** the RTP
+packetizer sets the marker on the last packet of every access unit
+(`src/rtp_packetizer.c:92`, `:25`). It is not part of any profile and cannot be
+configured away.
 
 ---
 
@@ -228,7 +208,7 @@ and a signal set:
 ```
 peek(payload, len, cfg) -> {action, signals}:
     if not cfg.enabled: return {PASS, 0}
-    nal  = locate_payload(payload, len, cfg)     # RTP-header skip, or Annex-B start code
+    nal  = locate_payload(payload, len)          # skip the RTP header
     t    = nal_type(nal, len-(nal-payload), cfg) # HEVC/H.264 + FU-A indirection
     action = PASS
     for r in cfg.rules[0..n_rules):              # first match wins
@@ -247,10 +227,9 @@ match(m, payload, len, nal, t):
         return i < len and (payload[i] & m.u.byte.mask) == m.u.byte.val
 ```
 
-`locate_payload()` for RTP: require `len ≥ 12`; `off = 12 + 4*(payload[0]&0x0F)`;
+`locate_payload()` (RTP): require `len ≥ 12`; `off = 12 + 4*(payload[0]&0x0F)`;
 if `payload[0]&0x10` (extension) add `4 + 4*be16(payload+off+2)`; fail-open to
-the datagram start if anything is short. For Annex-B, skip the `00 00 01` /
-`00 00 00 01` start code.
+the datagram start if anything is short.
 
 `nal_type()` extraction:
 - **HEVC:** need ≥2 bytes. `t = (nal[0] >> 1) & 0x3F`. If `t == 49` (FU),
@@ -344,13 +323,12 @@ mis-protect on a malformed peek.
 ### 7.1 Startup args (`wfb_tx`)
 ```
 --peek-profile {off|idr|refpred|idr+refpred}   # default: off
---peek-transport {rtp|annexb}                  # default: rtp (also picks the FEC_CLOSE rule)
 --peek-rule <proto>:<action>:<types>[:Δ<n>]    # repeatable; granular action override
         # e.g. --peek-rule hevc:protect:idr,cra:Δ1
         #      --peek-rule hevc:drop:trail_n
 ```
-A profile seeds the action table; `--peek-rule` entries append/override.
-`--peek-transport` selects the mandatory frame-boundary signal rule (§4).
+A profile seeds the action table; `--peek-rule` entries append/override. The
+mandatory frame-boundary signal rule (§4) is always seeded (RTP marker).
 
 ### 7.2 Runtime (`wfb_tx_cmd` → control port)
 Two new command IDs, parsed in the `tx.cpp` control switch alongside
@@ -392,8 +370,8 @@ degrades cleanly. Existing `CMD_SET_RADIO`/`CMD_SET_FEC` are untouched.
 
 | File | Change |
 |------|--------|
-| `src/peek.hpp` (new) | Table types (§3), profile + `--peek-rule` parsing, transport→signal seeding, `peek()`. |
-| `src/peek.cpp` (new) | RTP/Annex-B locate, `nal_type()`, generic byte matcher, action + signal eval. Self-contained, host-testable. |
+| `src/peek.hpp` (new) | Table types (§3), profile + `--peek-rule` parsing, mandatory RTP-marker signal seeding, `peek()`. |
+| `src/peek.cpp` (new) | RTP-header locate, `nal_type()`, generic byte matcher, action + signal eval. Self-contained, host-testable. |
 | `src/tx.cpp` | `send_packet()`: call `peek()`; early-return on armed DROP; stash action in `block_action[]`; on a transmitted packet with `FEC_CLOSE`, flush the block (FEC-only) after enqueue. `inject_packet()`: pick radiotap header by action/level. Init: build per-MCS header set. Control switch: `CMD_SET_PEEK`/`CMD_GET_PEEK`. Arg parse: `--peek-*`. |
 | `src/tx_cmd.c` / `src/tx_cmd.h` | New verbs + `cmd_peek_req_t` + `CMD_*_PEEK` ids. |
 | `Makefile` / `CMakeLists` | Add `peek.cpp`; add a `test_peek` host unit. |
@@ -453,6 +431,8 @@ No change to `rx.cpp`, the FEC core, the wire/crypto format, or waybeam.
 - **Protection below the MCS floor.** At MCS0 only FEC/retransmit helps.
 - **waybeam / encoder changes.** None.
 - **`wfb_rx` changes.** None (mixed-MCS is self-describing).
+- **`compact` stream mode & non-RTP transports.** Out of scope — `compact` is
+  unused, and RTP is waybeam's only video egress. The peek assumes RTP framing.
 
 ---
 
