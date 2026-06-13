@@ -198,11 +198,26 @@ mis-protect on a malformed peek.
   select `iovec[0]` = the header for `clamp(base_mcs − mcs_delta, 0)`.
 - **MCS floor:** if `base_mcs − mcs_delta < 0`, clamp to 0 and log once. At
   MCS0 PROTECT is a no-op (graceful, finite).
-- **Parity packets** (a FEC block can mix protect levels): inject parity at
-  the **most robust level present among the block's data fragments**. Rationale:
-  recovery symbols should survive at least as well as the most important data
-  they protect. (Alternative — parity at base — is cheaper on airtime; make it
-  a build/// config switch, default = most-robust.)
+- **Parity packets — Option A (decided):** inject parity at the **most robust
+  level present among the block's data fragments**. Parity symbols are the
+  recovery substitutes for the data they protect, so they must survive at least
+  as well as the most important fragment in the block.
+  - **Why this is near-free here:** `fec_timeout` (`-T`) is an *idle/inter-packet*
+    timer — `fec_close_ts` resets to `now + fec_timeout` on every received
+    datagram, so a block stays open only while packets keep arriving sub-timeout,
+    then closes after ~`fec_timeout` ms of silence (or earlier on reaching `k`).
+    Video egress is bursty per frame with inter-frame gaps of ~8–16 ms
+    (120–60 fps) ≫ a 2–4 ms `-T`, so **each frame closes its own FEC block** →
+    blocks are effectively **single-class** and parity simply matches that class.
+    No mostly-enhancement block is ever forced to robust parity; the mixed-block
+    airtime cost evaporates.
+  - **Residual mixes, both handled by A:** (i) param sets (Δ2) bundled with their
+    IDR (Δ1) in one access unit share a block — A picks the deepest (Δ2);
+    (ii) an IDR larger than `k` packets spills into a second block — still all
+    IDR class. There is no protect-vs-`PASS` mix within a single frame.
+  - **Dependency:** holds while the inter-frame gap > `fec_timeout`. Keep `-T`
+    well below the frame period (2–4 ms is safe through 120 fps). Option B
+    (parity at base MCS) is therefore unnecessary and omitted.
 
 ### DROP (live shedding)
 - If `action == DROP` **and** `cfg.drop_enabled`, return from `send_packet()`
@@ -291,7 +306,8 @@ No change to `rx.cpp`, the FEC core, the wire/crypto format, or waybeam.
 - **Fail-open peek:** any short/un-parseable packet → `PASS`. Never drop or
   mis-rate on ambiguity.
 - **MCS floor:** `Δ` clamped at MCS0.
-- **Mixed-block parity:** protect at most-robust level in block (§6).
+- **Mixed-block parity:** Option A (most-robust-in-block); effectively
+  single-class under `-T` 2–4 ms since each frame closes its own block (§6).
 - **Drop atomicity:** per-AU classification consistency guarantees all-or-none
   per frame.
 - **Non-video ports:** peek is opt-in per `wfb_tx` instance; a port carrying
