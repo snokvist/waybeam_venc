@@ -1,14 +1,21 @@
 # wfb_tx NAL-Aware Link Protection — Implementation Spec
 
-**Status:** Phase 1 spec (design, pre-implementation).
+**Status:** Phase 1 spec (design, pre-implementation). All cited wfb-ng symbols
+(`init_radiotap_header`, the `cmd_req_t`/`cmd_id` protocol with IDs 1–4 in use,
+`send_packet`/`send_block_fragment`/`inject_packet`/`set_mark`,
+`WFB_PACKET_DATA`/`WFB_PACKET_FEC_ONLY`, getopt `-T/-Q/-P/-C/-M`, the
+`fec_close_ts` idle timer) were verified against `svpcom/wfb-ng` master;
+waybeam refs were verified in this repo.
 **Target codebase:** `wfb-ng` (`svpcom/wfb-ng`, `src/`). This is the
 companion-sender contract; the encoder side already satisfies it.
 **waybeam changes required:** none. The in-band NAL contract is already in
 place — HEVC output is single-NAL + FU-A only (commit `9cad65e`, #142), the
-runtime already rewrites droppable enhancement frames to `TRAIL_N` and keeps
-reference frames as `TRAIL_R` (README → refPred notes), and the RTP packetizer
-already sets the marker bit on the last packet of every access unit
-(`src/rtp_packetizer.c:92`).
+runtime already rewrites droppable enhancement frames to `TRAIL_N` (type 0)
+and keeps reference frames as `TRAIL_R` (type 1) when the SDK marks them
+`ENHANCE_P_NOTFORREF` and refPred is on (`ref_base > 0`) —
+`src/star6e_runtime.c:84-86,819-830`, Maruko mirror
+`src/maruko_pipeline.c:3270-3378` — and the RTP packetizer already sets the
+marker bit on the last packet of every access unit (`src/rtp_packetizer.c:92`).
 
 **Transport (verified in-repo, scoped):** this spec targets waybeam's default
 `rtp` stream mode (`src/rtp_packetizer.c`), which sets the RTP marker on each
@@ -89,7 +96,9 @@ about RTP is hard-wired into it.
 ## 3. The match table (the struct)
 
 ```c
-/* src/peek.hpp — data-only, control-protocol serialisable */
+/* src/peek.hpp — peek_cfg_t is internal wfb_tx state; the rule structs are
+ * plain data so a future CMD_SET_PEEK_RULE can carry them over the control
+ * protocol. The runtime toggles ride cmd_set_peek (§7.2), not the whole cfg. */
 
 /* ---- generic matcher, shared by action rules and signal rules ---- */
 typedef enum {
@@ -202,8 +211,9 @@ configured away.
 
 ## 5. Classification (the peek)
 
-Runs in `send_packet()` on the plaintext datagram, returning a transmit action
-and a signal set:
+Runs in `data_source()` at ingestion — right after `recvmsg`, before the
+`t->send_packet(buf, rsize, WFB_PACKET_DATA)` call — returning a transmit
+action and a signal set:
 
 ```
 peek(payload, len, cfg) -> {action, signals}:
@@ -248,19 +258,27 @@ mis-protect on a malformed peek.
 ## 6. Actions & signals
 
 ### PROTECT (per-packet MCS)
-- At init, prebuild a small set of radiotap headers — one per distinct MCS in
-  use (`base`, `base−1`, `base−2`, …). Each is the existing
-  `init_radiotap_header()` output with a different `header[MCS_IDX_OFF]`.
-- Thread the per-fragment action from `send_packet()` to `inject_packet()`
-  alongside the block buffer (a parallel `uint8_t block_action[RS_N]`,
-  mirroring how `set_mark()` already carries per-fragment TX state). At inject,
-  select `iovec[0]` = the header for `clamp(base_mcs − mcs_delta, 0)`.
+- At init, prebuild a small set of `radiotap_header_t` — one per MCS level in
+  use — by calling `init_radiotap_header(stbc, ldpc, short_gi, bandwidth, mcs,
+  vht_mode, vht_nss)` once for each `mcs ∈ {base, base−1, …}`. MCS is a
+  constructor argument; there is **no** byte-poke (the real `radiotap_header_t`
+  has no `MCS_IDX_OFF` — `init_radiotap_header` builds the bytes, so the
+  resulting `.header` vectors simply differ).
+- Select per packet at inject. `RawSocketTransmitter::inject_packet()` already
+  emits `iovec[0] = {&radiotap_header.header[0], radiotap_header.header.size()}`;
+  point that at the prebuilt header for the fragment's level. Carry the level
+  the way `set_mark(uint32_t)` already carries per-fragment TX state — set it on
+  the transmitter immediately before `send_packet()`, so the data fragment
+  injects at its level.
 - **MCS floor:** if `base_mcs − mcs_delta < 0`, clamp to 0 and log once. At
   MCS0 PROTECT is a no-op (graceful, finite).
 - **Parity packets — Option A (decided):** inject parity at the **most robust
   level present among the block's data fragments**. Parity symbols are the
   recovery substitutes for the data they protect, so they must survive at least
-  as well as the most important fragment in the block.
+  as well as the most important fragment in the block. *Mechanism:* the
+  transmitter records the running max level of the open block; the FEC fragments
+  emitted at close (`fragment_idx` from `fec_k` to `fec_n`) all inject at that
+  max.
   - **Why this is near-free here:** the mandatory `FEC_CLOSE` signal closes the
     block at every access-unit boundary (below), so **each frame is its own FEC
     block** → blocks are **single-class by construction** and parity simply
@@ -297,9 +315,9 @@ mis-protect on a malformed peek.
   transmitted frame already closed on its own marker.
 
 ### DROP (live shedding)
-- If `action == DROP` **and** `cfg.drop_enabled`, return from `send_packet()`
-  **before** the datagram is copied into the FEC block (and before signal
-  handling). The frame never enters the stream.
+- If `action == DROP` **and** `cfg.drop_enabled`, `data_source()` **skips the
+  `send_packet()` call** for that datagram (and skips signal handling). The
+  frame never enters the FEC block or the stream.
 - Because classification is consistent per access unit (§5), **all** fragments
   of a dropped NAL are dropped — no half-transmitted frames.
 - No IDR-on-resume handshake is needed (unlike the PR's transport-layer
@@ -331,18 +349,30 @@ A profile seeds the action table; `--peek-rule` entries append/override. The
 mandatory frame-boundary signal rule (§4) is always seeded (RTP marker).
 
 ### 7.2 Runtime (`wfb_tx_cmd` → control port)
-Two new command IDs, parsed in the `tx.cpp` control switch alongside
-`CMD_SET_RADIO`/`CMD_SET_FEC`:
+The control protocol is a single `cmd_req_t { uint32_t req_id; uint8_t cmd_id;
+union u {…}; }` over a localhost UDP socket, switched on `cmd_id` in `tx.cpp`
+(existing IDs: `CMD_SET_FEC=1`, `CMD_SET_RADIO=2`, `CMD_GET_FEC=3`,
+`CMD_GET_RADIO=4`). Add two IDs in the next free slots plus a union arm on each
+of `cmd_req_t` / `cmd_resp_t`:
 
 ```c
-/* src/tx_cmd.h */
-#define CMD_SET_PEEK 0x10
-#define CMD_GET_PEEK 0x11
+/* src/tx_cmd.h — extend the existing protocol (do not add a parallel struct) */
+#define CMD_SET_PEEK 5
+#define CMD_GET_PEEK 6
 
-typedef struct {                 /* payload of CMD_SET_PEEK */
-    uint8_t enabled;             /* 0/1, 0xFF = leave unchanged */
-    uint8_t drop_enabled;        /* 0/1, 0xFF = leave unchanged */
-} cmd_peek_req_t;
+/* new arm inside cmd_req_t's union u */
+struct {
+    uint8_t enabled;       /* 0/1, 0xFF = leave unchanged */
+    uint8_t drop_enabled;  /* 0/1, 0xFF = leave unchanged */
+} cmd_set_peek;
+
+/* new arm inside cmd_resp_t's union u (for CMD_GET_PEEK) */
+struct {
+    uint8_t enabled;
+    uint8_t drop_enabled;
+    uint8_t n_rules;       /* action rules */
+    uint8_t n_sig_rules;
+} cmd_get_peek;
 ```
 
 `wfb_tx_cmd` verbs:
@@ -372,8 +402,8 @@ degrades cleanly. Existing `CMD_SET_RADIO`/`CMD_SET_FEC` are untouched.
 |------|--------|
 | `src/peek.hpp` (new) | Table types (§3), profile + `--peek-rule` parsing, mandatory RTP-marker signal seeding, `peek()`. |
 | `src/peek.cpp` (new) | RTP-header locate, `nal_type()`, generic byte matcher, action + signal eval. Self-contained, host-testable. |
-| `src/tx.cpp` | `send_packet()`: call `peek()`; early-return on armed DROP; stash action in `block_action[]`; on a transmitted packet with `FEC_CLOSE`, flush the block (FEC-only) after enqueue. `inject_packet()`: pick radiotap header by action/level. Init: build per-MCS header set. Control switch: `CMD_SET_PEEK`/`CMD_GET_PEEK`. Arg parse: `--peek-*`. |
-| `src/tx_cmd.c` / `src/tx_cmd.h` | New verbs + `cmd_peek_req_t` + `CMD_*_PEEK` ids. |
+| `src/tx.cpp` | `data_source()`: call `peek()` after `recvmsg`; on armed DROP skip `send_packet()`; else set the per-packet MCS level, then `send_packet(buf, rsize, WFB_PACKET_DATA)`; on a transmitted packet with `FEC_CLOSE` issue `send_packet(NULL, 0, WFB_PACKET_FEC_ONLY)` and reset `fec_close_ts`. `RawSocketTransmitter`: prebuilt per-MCS `radiotap_header_t` set + running block-max level; `inject_packet()` selects the header for `iovec[0]`. Control switch: `CMD_SET_PEEK`/`CMD_GET_PEEK`. Arg parse: `--peek-*`. |
+| `src/tx_cmd.c` / `src/tx_cmd.h` | New `peek` verbs; `cmd_set_peek` / `cmd_get_peek` union arms; `CMD_SET_PEEK=5` / `CMD_GET_PEEK=6`. |
 | `Makefile` / `CMakeLists` | Add `peek.cpp`; add a `test_peek` host unit. |
 
 No change to `rx.cpp`, the FEC core, the wire/crypto format, or waybeam.
