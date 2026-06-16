@@ -1,3 +1,12 @@
+/*
+ * mdns_beacon — announce-only mDNS device beacon for waybeam_venc.
+ *
+ * The multicast socket setup and announce/query-response pattern follow
+ * OpenIPC herald (MIT license), the compact mDNS/DNS-SD stack for the
+ * OpenIPC project:
+ *   https://github.com/OpenIPC/firmware/tree/master/general/package/herald
+ */
+
 #include "mdns_beacon.h"
 
 #include "mdns_wire.h"
@@ -118,39 +127,22 @@ int mdns_beacon_build_packet(uint8_t *buf, int buf_size,
 	pos = np;
 	answers++;
 
-	/* TXT — stable identity / endpoints only (RFC 6763 §6) */
+	/* TXT — deliberately minimal (RFC 6763 §6).  The service type already
+	 * says "waybeam encoder on an OpenIPC camera"; we add only the waybeam
+	 * version, the wire-schema proto, and the sidecar subscribe port.
+	 * Backend/codec/hub-presence are left for the consumer to probe. */
 	char proto_pair[16]   = "";
-	char name_pair[80]    = "";
-	char backend_pair[32] = "";
-	char model_pair[40]   = "";
-	char codec_pair[24]   = "";
 	char version_pair[40] = "";
-	char web_pair[24]     = "";
 	char sidecar_pair[28] = "";
 
 	snprintf(proto_pair, sizeof(proto_pair), "proto=%d", MDNS_WIRE_VERSION);
-	snprintf(name_pair, sizeof(name_pair), "name=%s", hostname);
-	snprintf(backend_pair, sizeof(backend_pair), "backend=%s",
-		p->backend[0] ? p->backend : "unknown");
-	snprintf(codec_pair, sizeof(codec_pair), "codec=%s",
-		p->codec[0] ? p->codec : "h265");
 	snprintf(version_pair, sizeof(version_pair), "version=%s",
 		p->version[0] ? p->version : "unknown");
-	snprintf(web_pair, sizeof(web_pair), "web_port=%u",
-		(unsigned)p->web_port);
 
-	const char *pairs[10];
+	const char *pairs[4];
 	int n = 0;
 	pairs[n++] = proto_pair;
-	pairs[n++] = name_pair;
-	pairs[n++] = backend_pair;
-	if (p->model[0]) {
-		snprintf(model_pair, sizeof(model_pair), "model=%s", p->model);
-		pairs[n++] = model_pair;
-	}
-	pairs[n++] = codec_pair;
 	pairs[n++] = version_pair;
-	pairs[n++] = web_pair;
 	if (p->sidecar_port) {
 		snprintf(sidecar_pair, sizeof(sidecar_pair), "sidecar_port=%u",
 			(unsigned)p->sidecar_port);
@@ -412,8 +404,7 @@ int mdns_beacon_start(MdnsBeacon *b, const MdnsBeaconParams *p)
 	return 0;
 }
 
-void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path,
-	const char *backend_name)
+void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path)
 {
 	VencConfig cfg;
 	venc_config_defaults(&cfg);
@@ -427,12 +418,6 @@ void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path,
 		cfg.discovery.service_type[0] ? cfg.discovery.service_type
 			: "_waybeam-venc._tcp");
 	copy_str(p.name, sizeof(p.name), cfg.discovery.name);
-	copy_str(p.backend, sizeof(p.backend), backend_name ? backend_name : "");
-	if (backend_name && strcmp(backend_name, "star6e") == 0)
-		snprintf(p.model, sizeof(p.model), "infinity6e");
-	else if (backend_name && strcmp(backend_name, "maruko") == 0)
-		snprintf(p.model, sizeof(p.model), "infinity6c");
-	snprintf(p.codec, sizeof(p.codec), "h265");
 	snprintf(p.version, sizeof(p.version), "%s", VENC_VERSION);
 	p.web_port = cfg.system.web_port;
 	p.sidecar_port = cfg.outgoing.sidecar_port;

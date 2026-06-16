@@ -14,11 +14,19 @@ multicast goodbye) before any SIGHUP-respawn exec. It responds to PTR queries
 for its own service type and re-announces periodically; it does **not**
 discover peers or feed any trust layer. The RFC 6762/6763 wire codec lives in
 `src/mdns_wire.c` (`MDNS_WIRE_VERSION 1`) — the source of truth that
-waybeam-hub will vendor; keep both in sync.
+waybeam-hub will vendor; keep both in sync. The wire codec and multicast
+socket handling are derived from
+[OpenIPC herald](https://github.com/OpenIPC/firmware/tree/master/general/package/herald)
+(MIT), the compact mDNS/DNS-SD stack for the OpenIPC project.
 
-TXT records carry **stable identity/endpoints only** — `proto`, `name`,
-`backend`, `model`, `codec`, `version`, `web_port`, `sidecar_port` — never
-live state (bitrate/fps/mode), which consumers pull from the HTTP API. New
+TXT is kept **deliberately minimal**: the service type `_waybeam-venc._tcp`
+is itself the recognition signal ("an OpenIPC camera running the waybeam
+encoder"), so TXT carries only `proto` (wire-schema version), `version`
+(waybeam version), and `sidecar_port` (the venc-direct subscribe path). The
+hostname/IP/port travel in the standard SRV/A/instance records; live state
+(bitrate/fps/mode) is never advertised. Backend/SoC, codec, and hub presence
+are left for the consumer to **probe** over the HTTP API — discovery
+announces an always-true device fact, capabilities are queried on demand. New
 `discovery` config section (`enabled` default true, `serviceType`, `name`);
 empty `name` falls back to the system hostname. The beacon is inert when
 disabled, when no usable interface exists, or if the socket can't bind — it

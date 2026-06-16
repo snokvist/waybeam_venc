@@ -1,3 +1,12 @@
+/*
+ * mdns_wire — pure DNS-SD / mDNS wire-format codec (RFC 6762 / RFC 6763).
+ *
+ * The DNS wire helpers here are derived from OpenIPC herald (MIT license),
+ * the compact mDNS/DNS-SD stack for the OpenIPC project, via waybeam-hub's
+ * mod_mdns:
+ *   https://github.com/OpenIPC/firmware/tree/master/general/package/herald
+ */
+
 #include "mdns_wire.h"
 
 #include <string.h>

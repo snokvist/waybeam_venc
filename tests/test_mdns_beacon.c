@@ -64,9 +64,6 @@ static MdnsBeaconParams sample_params(void)
 	memset(&p, 0, sizeof(p));
 	p.enabled = true;
 	snprintf(p.service_type, sizeof(p.service_type), "_waybeam-venc._tcp");
-	snprintf(p.backend, sizeof(p.backend), "star6e");
-	snprintf(p.model, sizeof(p.model), "infinity6e");
-	snprintf(p.codec, sizeof(p.codec), "h265");
 	snprintf(p.version, sizeof(p.version), "0.17.1");
 	p.web_port = 80;
 	p.sidecar_port = 5602;
@@ -91,9 +88,7 @@ static int test_build_packet_records(void)
 	CHECK("build_answer_count", an == 4);  /* PTR + SRV + TXT + 1 A */
 
 	bool ptr_ok = false, srv_ok = false, a_ok = false;
-	bool txt_backend = false, txt_web = false, txt_sidecar = false;
-	bool txt_proto = false, txt_codec = false, txt_model = false;
-	bool txt_version = false, txt_name = false;
+	bool txt_proto = false, txt_version = false, txt_sidecar = false;
 
 	int pos = 12;
 	for (uint16_t i = 0; i < an; i++) {
@@ -123,18 +118,8 @@ static int test_build_packet_records(void)
 			char v[64] = "";
 			txt_proto = mdns_txt_get_value(rd, rl, "proto", v, sizeof(v)) &&
 				strcmp(v, "1") == 0;
-			txt_name = mdns_txt_get_value(rd, rl, "name", v, sizeof(v)) &&
-				strcmp(v, "cam0") == 0;
-			txt_backend = mdns_txt_get_value(rd, rl, "backend", v, sizeof(v)) &&
-				strcmp(v, "star6e") == 0;
-			txt_model = mdns_txt_get_value(rd, rl, "model", v, sizeof(v)) &&
-				strcmp(v, "infinity6e") == 0;
-			txt_codec = mdns_txt_get_value(rd, rl, "codec", v, sizeof(v)) &&
-				strcmp(v, "h265") == 0;
 			txt_version = mdns_txt_get_value(rd, rl, "version", v, sizeof(v)) &&
 				strcmp(v, "0.17.1") == 0;
-			txt_web = mdns_txt_get_value(rd, rl, "web_port", v, sizeof(v)) &&
-				strcmp(v, "80") == 0;
 			txt_sidecar = mdns_txt_get_value(rd, rl, "sidecar_port", v,
 				sizeof(v)) && strcmp(v, "5602") == 0;
 		}
@@ -145,13 +130,30 @@ static int test_build_packet_records(void)
 	CHECK("build_has_srv_port", srv_ok);
 	CHECK("build_has_a_ip", a_ok);
 	CHECK("build_txt_proto", txt_proto);
-	CHECK("build_txt_name", txt_name);
-	CHECK("build_txt_backend", txt_backend);
-	CHECK("build_txt_model", txt_model);
-	CHECK("build_txt_codec", txt_codec);
 	CHECK("build_txt_version", txt_version);
-	CHECK("build_txt_web_port", txt_web);
 	CHECK("build_txt_sidecar_port", txt_sidecar);
+
+	/* Trimmed schema: backend/model/codec/web_port/name are NOT advertised */
+	pos = 12;
+	bool saw_dropped = false;
+	for (uint16_t i = 0; i < an; i++) {
+		MdnsRr rr;
+		int next = mdns_parse_rr(pkt, len, pos, &rr);
+		if (next <= pos) break;
+		if (rr.type == MDNS_TYPE_TXT && rr.rdlength > 0) {
+			char v[64] = "";
+			const uint8_t *rd = pkt + rr.rdata_offset;
+			int rl = rr.rdlength;
+			saw_dropped =
+				mdns_txt_get_value(rd, rl, "backend", v, sizeof(v)) ||
+				mdns_txt_get_value(rd, rl, "model", v, sizeof(v)) ||
+				mdns_txt_get_value(rd, rl, "codec", v, sizeof(v)) ||
+				mdns_txt_get_value(rd, rl, "web_port", v, sizeof(v)) ||
+				mdns_txt_get_value(rd, rl, "name", v, sizeof(v));
+		}
+		pos = next;
+	}
+	CHECK("build_txt_no_dropped_keys", !saw_dropped);
 	return failures;
 }
 
@@ -175,29 +177,25 @@ static int test_build_packet_guards(void)
 	int next = mdns_parse_rr(pkt, len, 12, &rr);
 	CHECK("build_goodbye_ttl_zero", next > 12 && rr.ttl == 0);
 
-	/* Optional keys omitted when empty */
+	/* sidecar_port omitted when zero */
 	MdnsBeaconParams q = sample_params();
-	q.model[0] = '\0';
 	q.sidecar_port = 0;
 	len = mdns_beacon_build_packet(pkt, sizeof(pkt), &q, "cam0", &ip, 1, 120);
 	CHECK("build_optional_omit_len", len > 12);
 	int pos = 12;
 	uint16_t an = mdns_get16(pkt + 6);
-	bool saw_model = false, saw_sidecar = false;
+	bool saw_sidecar = false;
 	for (uint16_t i = 0; i < an; i++) {
 		MdnsRr r;
 		int nx = mdns_parse_rr(pkt, len, pos, &r);
 		if (nx <= pos) break;
 		if (r.type == MDNS_TYPE_TXT && r.rdlength > 0) {
 			char v[32] = "";
-			saw_model = mdns_txt_get_value(pkt + r.rdata_offset, r.rdlength,
-				"model", v, sizeof(v));
 			saw_sidecar = mdns_txt_get_value(pkt + r.rdata_offset, r.rdlength,
 				"sidecar_port", v, sizeof(v));
 		}
 		pos = nx;
 	}
-	CHECK("build_omit_model", !saw_model);
 	CHECK("build_omit_sidecar", !saw_sidecar);
 	return failures;
 }

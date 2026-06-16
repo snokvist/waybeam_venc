@@ -106,42 +106,72 @@ subscribes* (hub `/subscribe_video` or venc sidecar `MSG_SUBSCRIBE`).
 
 ## 4. mDNS service design (venc beacon)
 
-### 4.1 Service type
+### 4.1 Service type and naming
 
-New, distinct from the hub's: **`_waybeam-venc._tcp.local`**. Distinct type
-avoids record collisions when both venc and a hub run on the same host, and
-lets consumers query specifically for "devices" vs "hubs."
+New service type, distinct from the hub's: **`_waybeam-venc._tcp.local`**.
+A distinct type avoids record collisions when both venc and a hub run on the
+same host, and lets consumers query specifically for "devices" vs "hubs."
+
+**Naming — `waybeam` only, serial-suffixed.** We do **not** announce the
+legacy `openipc.local` Majestic alias; venc owns a single `waybeam`-family
+name. To keep that name unique and stable across a multi-camera fleet, the
+host name and the service instance are suffixed with a short slice of the
+SoC die ID (§4.5):
+
+| Record | Value | Example |
+|---|---|---|
+| Service instance | `waybeam-<suffix>` | `waybeam-f5cb1d` |
+| Host name (SRV target / A) | `waybeam-<suffix>.local` | `waybeam-f5cb1d.local` |
+| Service type (PTR) | `_waybeam-venc._tcp.local` | — |
+
+Because the suffix derives from a hardware-unique value, every camera gets a
+collision-free, deterministic name with **no RFC 6762 conflict-renaming
+churn** (no boot-order-dependent `waybeam-2.local`). One camera on the wire
+still reads cleanly as `waybeam-<suffix>.local`; N cameras are N distinct
+DNS-SD instances under the one service type. The bare `waybeam.local` is
+**not** claimed (it can't be unique across a fleet); consumers address by the
+suffixed name and key by the full serial (§4.5).
 
 ### 4.2 TXT schema — stable identity/endpoints ONLY
 
 venc's headline fields (bitrate, fps, mode) are **live-mutable**. Putting them
 in TXT means re-announcing on every `/api/v1/set` — noisy and racy against the
-encode loop. **Rule: TXT carries only stable identity + endpoints. Live state
-is pulled via `GET /api/v1/config`.**
+encode loop. **Rule: TXT carries only the few stable facts a consumer can't
+already get from the standard DNS records. Everything else is probed.**
 
-| TXT key | Source | Example | Mutable at runtime? |
+The **service type `_waybeam-venc._tcp` is the recognition signal** — it tells
+a consumer "this is an OpenIPC camera running the waybeam encoder." The
+hostname, IP, and primary port are already carried by the standard SRV / A /
+instance-name records. So TXT only needs to add what those records can't:
+
+| TXT key | Source | Example | Why it's here |
 |---|---|---|---|
-| `proto` | constant | `1` | no (schema version) |
-| `name` | config / hostname | `waybeam-0` | no |
-| `backend` | build | `star6e` \| `maruko` | no |
-| `model` | sensor/SoC | `ssc338q` | no |
-| `sensor` | config | `imx415` | rarely (restart) |
-| `codec` | constant | `h265` | no |
-| `web_port` | `system.web_port` | `80` | no |
-| `sidecar_port` | `outgoing.sidecar_port` | `5602` | no (restart) |
-| `version` | `VENC_VERSION` | `0.17.1` | no |
-| `api_contract` | build | `0.2.0` | no |
+| `proto` | constant | `1` | wire-schema version (forward-compat) |
+| `version` | `VENC_VERSION` | `0.18.0` | waybeam version — the one volatile-but-stable identity bit |
 
-> **Phase 1 status (implemented):** the beacon emits `proto`, `name`,
-> `backend`, `model`, `codec`, `version`, `web_port`, and `sidecar_port`
-> (optional keys `model`/`sidecar_port` omitted when empty/zero). `sensor`
-> and `api_contract` are reserved for a later phase (live sensor name needs
-> backend pipeline state; the HTTP contract version constant isn't wired
-> yet). See `src/mdns_wire.c` + `src/mdns_beacon.c`.
+> **D1 — TXT schema freeze (LOCKED target):** exactly the two keys above —
+> `proto` and `version`.
+>
+> **Implementation status:** the shipped Phase-1 beacon
+> (`src/mdns_beacon.c`) still also emits `sidecar_port` and names itself from
+> the plain system hostname. Dropping `sidecar_port` and switching to
+> serial-suffix naming (§4.1, §4.5) is the **Phase 1.5** work specified here —
+> not yet implemented. Until then the live TXT is `proto`/`version`/
+> `sidecar_port`.
 
-> Fields that *can* change but only across a pipeline restart (sensor,
-> sidecar_port) are acceptable because a restart re-announces anyway. Anything
-> that changes live (bitrate/fps/mode/stream enable) is **forbidden** in TXT.
+**Deliberately NOT in TXT — probe instead:** `sidecar_port`, `backend`/`model`/
+SoC, `sensor`, `codec`, `web_port` (it's the SRV port), `name` (it's the
+instance label), the full serial (it's exposed via the API, §4.5), and
+`api_contract`. These are either redundant with the DNS records or are
+*facts a consumer fetches with one `GET /api/v1/config` after device
+discovery*. In particular `sidecar_port` was intentionally **removed** from
+the beacon: it is a core venc mechanic, but a subscriber has already resolved
+the vehicle IP from the beacon and can read the live port (and everything else
+it needs) straight from the config endpoint — no reason to duplicate a
+restart-stable port into the announce. This keeps the discovery layer to a
+single always-true fact ("a waybeam encoder lives here, at this name/IP") and
+pushes everything else to capability probing (§6). Anything that changes live
+(bitrate/fps/mode/stream enable) is **forbidden** in TXT.
 
 DNS records: PTR (type→instance), SRV (instance→`<host>.local:web_port`),
 TXT (above), A (one per local IPv4, wlan first).
@@ -156,20 +186,128 @@ venc needs the **announce half** of `mod_mdns` only — no peer parsing, no
 - Multicast UDP socket on `224.0.0.251:5353`, non-blocking.
 - 3-packet startup announce (0/250/500 ms), respond to PTR queries with jitter.
 - **Goodbye (TTL=0) on exit** → beacon liveness == camera liveness.
-- Integrated into the backend runtime loop (`star6e_runtime.c` /
-  `maruko_runtime.c`) via an fd + poll callback, mirroring `rtp_sidecar`.
+- **Implemented as a self-contained thread** (`src/mdns_beacon.c`) started
+  from `main()` around `backend_execute()`, rather than folded into the
+  per-backend runtime loop. This keeps the fragile `star6e_runtime.c` /
+  `maruko_runtime.c` reinit paths untouched and the beacon fully isolated from
+  the encode path; it is stopped (goodbye) before any SIGHUP-respawn exec.
 
 ### 4.4 Shared wire codec (avoid a two-repo fork)
 
 The DNS encode/parse core would otherwise exist twice (venc + ground hub).
-**Extract it into a vendored, version-stamped source** shared by both repos —
+**It is a version-stamped source** (`MDNS_WIRE_VERSION`) shared by both repos —
 same discipline as `vendor/venc_ring/` (`VENC_RING_VERSION`, "keep in sync").
 
-- Proposed: `vendor/mdns_wire/{mdns_wire.c,mdns_wire.h}` with
-  `MDNS_WIRE_VERSION`, pure functions (build PTR/SRV/TXT/A, parse records,
-  TXT get/put). No socket or platform code — caller owns the socket.
+> **Attribution:** the wire codec and multicast socket handling derive from
+> [OpenIPC herald](https://github.com/OpenIPC/firmware/tree/master/general/package/herald)
+> (MIT) — the compact mDNS/DNS-SD stack for the OpenIPC project — via
+> waybeam-hub's `mod_mdns`, which inlined herald's wire helpers. The credit
+> chain is preserved in `src/mdns_wire.{c,h}` and `src/mdns_beacon.c`.
+
+- **Phase 1 location:** the codec ships as `src/mdns_wire.{c,h}` +
+  `include/mdns_wire.h` with `MDNS_WIRE_VERSION 1` — pure functions (build
+  PTR/SRV/TXT/A, parse records, TXT get). No socket or platform code; the
+  caller owns the socket.
 - venc links the encode path; ground hub links encode+parse. Hub keeps its
   socket/lifecycle/`mod_sync` glue on top.
+- **D4 (open):** before Phase 2, decide whether to promote this to a
+  dedicated `vendor/mdns_wire/` directory (matching `vendor/venc_ring/`) and
+  which repo owns the version bump/sync ritual.
+
+### 4.5 Device identity — SoC die ID (serial-suffix naming)
+
+The serial suffix in `waybeam-<suffix>.local` comes from the **SigmaStar SoC
+die ID** — the same value `ipcinfo -i` prints. It is hardware-unique,
+read-only, and stable across reboots/reflashes, which is exactly what a fleet
+key needs.
+
+#### How `ipcinfo` reads it (verified on Star6E / ssc338q @ 192.168.1.13)
+
+`ipcinfo` is the OpenIPC [`ipctool`](https://github.com/OpenIPC/ipctool)
+binary. Its SigmaStar HAL (`src/hal/sstar.c` → `sstar_get_die_id`,
+`src/hal/sstar.h`) reads the die ID natively from RIU registers via a
+`/dev/mem` mmap — **no SDK call, no shell-out, no extra dependency**:
+
+1. **Detect chip generation:** read `0x1F003C00` (low 16 bits). On the test
+   vehicle this returns `0xF1` → `INFINITY6E` (matches
+   `/sys/class/mstar/msys/CHIP_ID`).
+2. **Pick the die-ID base** by generation:
+   - `INFINITY6E` (ssc338q — our Star6E): base `0x1F203150` (`CHIP_ADDR1`)
+   - `INFINITY6` (non-E): base `0x1F004058` (`CHIP_ADDR2`)
+   - `INFINITY6C` (ssc30kq — **Maruko**): **die ID is NOT exposed**;
+     `sstar_get_die_id` returns false. See the fallback below.
+3. **Assemble 48 bits** as the low 16 bits of three consecutive registers,
+   MSW-first (`base+8`, `base+4`, `base+0`), each formatted `%04X`.
+
+Device-verified on `192.168.1.13` (`ipcinfo -i` = `47D1CEF5CB1D`):
+
+```
+0x1F203158 = 0x000047D1   →  "47D1"   (base+8, MSW)
+0x1F203154 = 0x0000CEF5   →  "CEF5"   (base+4)
+0x1F203150 = 0x0000CB1D   →  "CB1D"   (base+0, LSW)
+                              ───────
+                              47D1CEF5CB1D   == ipcinfo -i  ✓
+```
+
+#### Native extraction in venc (no fork)
+
+venc reads the same three registers directly: `open("/dev/mem")`,
+`mmap` the page containing the die-ID base (page-align the physical address,
+add the in-page offset), read the three 16-bit values, format the 12-hex
+string. Done **once at startup**, cached — never on the encode path, no
+`popen("ipcinfo -i")` dependency. Re-uses the existing `/dev/mem` access the
+SDK already needs. (Implementation may instead lift the value from a SigmaStar
+SDK chip-ID API if one is cleaner than raw `/dev/mem`; the register addresses
+above are the ground truth either way.)
+
+#### Suffix derivation
+
+- **Suffix** = last 6 hex chars of the 12-hex die ID, lowercased →
+  `47D1CEF5CB1D` → `f5cb1d`. 24 bits ≈ 16.7 M space; ample for a LAN, and the
+  tail visibly matches `ipcinfo -i` for field debugging.
+- **Host / instance** = `waybeam-f5cb1d` / `waybeam-f5cb1d.local`.
+- The **full 12-hex die ID** is the authoritative fleet key. It is **not** in
+  TXT (§4.2) — a consumer fetches it from `GET /api/v1/config` after discovery
+  (add a read-only `device.serial` field there). The 6-hex suffix is for
+  display/addressing; on the ~1-in-16M chance two suffixes collide, the full
+  serial from the API disambiguates.
+
+#### Maruko (ssc37x / INFINITY6C-class) fallback
+
+**Device-verified on 192.168.2.12 (`ssc37x`, gen reg `0xF9`):** `ipcinfo -i`
+returns **empty**, the die-ID register region reads all-zero (both the
+INFINITY6E base `0x1F203150` and the `0x1F004058` base), there is **no serial
+in the flash env**, and the EMAC MAC is the **same dummy `00:00:23:34:45:66`**
+seen on the Star6E. So neither the die ID nor the MAC is a usable per-unit
+identifier on this hardware.
+
+Fallback chain (first that applies):
+
+1. `discovery.name` config override, if set (operator-assigned) → used as-is,
+   no suffix.
+2. Bare `waybeam` with **no suffix**, accepting RFC 6762 conflict-renaming
+   (`waybeam-2.local`) in the rare multi-Maruko-on-one-LAN case.
+
+The EMAC MAC is explicitly **not** used (verified non-unique). This asymmetry
+(Star6E gets a stable hardware suffix, Maruko does not) is acceptable: the
+dominant fleet hardware is Star6E, and a Maruko operator can always pin a
+unique name via `discovery.name`.
+
+#### Availability detection (implementation rule)
+
+Don't enumerate every chip generation — **read and validate**. Attempt the
+die-ID read at the gen-appropriate base, then reject the result if it is
+all-zero or all-`0xFFFF`. A valid 48-bit non-degenerate value → use the
+suffix; anything else → fall back. This is what distinguishes Star6E (valid)
+from Maruko (all-zero) without hardcoding the full SigmaStar gen enum.
+
+#### Consumer flow (hub / Android)
+
+1. Browse `_waybeam-venc._tcp` → N instances (`waybeam-<suffix>`).
+2. Resolve SRV→A for each → vehicle IP + web port.
+3. `GET /api/v1/config` → read `device.serial` (full die ID) as the stable
+   fleet key, plus `sidecar_port` and any capabilities needed.
+4. Track/de-dupe by full serial, never by IP or friendly name.
 
 ---
 
@@ -287,6 +425,7 @@ See `docs/discovery-trust-migration-plan.md` for detail. Summary:
 |---|---|---|---|
 | **0** | all | This spec | — |
 | **1** | venc | Add `_waybeam-venc._tcp` beacon (additive). Hub mDNS untouched. | Old discovery fully intact; new beacon is extra. |
+| **1.5** | venc | Serial-suffix naming (`waybeam-<die-id>.local`), drop `sidecar_port` from TXT, expose `device.serial` via `GET /api/v1/config` (§4.1, §4.5, D6). | Beacon stays additive; only the name/TXT shape changes before any consumer depends on it. |
 | **2** | hub (ground) | Ground learns `_waybeam-venc._tcp`; adopt `vendor/mdns_wire`. | Ground still consumes `_waybeam-hub._tcp` too. |
 | **3** | hub (vehicle) | Add trust-on-subscribe seed alongside existing mDNS trust. | Both trust paths active; no regression. |
 | **4** | hub (vehicle) | Disable, then compile out vehicle `mod_mdns`. | Only after D2 confirmed; ground+venc cover discovery. |
@@ -300,8 +439,9 @@ and is gated on D2.
 
 ## 9. Open decisions (must be locked before the phase that needs them)
 
-- **D1 — TXT schema freeze** (before Phase 1). Exact key set in §4.2. Stable
-  fields only; `proto=1`.
+- **D1 — TXT schema freeze (LOCKED).** Target key set: `proto`, `version`
+  (§4.2). `sidecar_port` is being dropped in Phase 1.5 (D6); everything else is
+  probe-discoverable / via `GET /api/v1/config`.
 - **D2 — Trust-on-subscribe completeness** (before Phase 4). Prove it covers
   sync-hello acceptance, telemetry target, and video on the vehicle once mDNS
   trust seeding is gone. §5.2.
@@ -312,6 +452,12 @@ and is gated on D2.
 - **D5 — Vehicle hub mDNS removal mechanism** (Phase 4). Config-gate first
   (`mdns.enabled=false`), then drop `HUB_MOD_MDNS` from the `vehicle`/
   `vehicle_wfb_ng` profiles? Confirm `make test` keeps MDNS enabled.
+- **D6 — Device identity & serial-suffix naming (Phase 1.5).** §4.1 + §4.5.
+  Decisions folded in: `waybeam`-only (no `openipc.local`); host/instance
+  suffixed with the last 6 hex of the SoC die ID; full die ID is the fleet key
+  via `GET /api/v1/config` (new `device.serial` field), not TXT; `sidecar_port`
+  removed from TXT. Open sub-points: (a) raw `/dev/mem` read vs an SDK chip-ID
+  call; (b) the Maruko/INFINITY6C fallback (no hardware die ID).
 
 ---
 

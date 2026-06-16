@@ -121,8 +121,7 @@ int main(int argc, char* argv[])
 	 * optional waybeam-hub.  Inert if discovery is disabled in the config
 	 * or no usable interface exists; never blocks the encode path. */
 	MdnsBeacon beacon;
-	mdns_beacon_start_from_config(&beacon, VENC_CONFIG_DEFAULT_PATH,
-		backend->name);
+	mdns_beacon_start_from_config(&beacon, VENC_CONFIG_DEFAULT_PATH);
 
 	int rc = backend_execute(backend);
 

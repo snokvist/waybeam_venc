@@ -6,7 +6,10 @@
  *
  * Self-contained, socket-free helpers for encoding and parsing the DNS
  * resource records used by Waybeam service discovery.  Adapted from the
- * waybeam-hub mod_mdns implementation (originally OpenIPC herald, MIT).
+ * waybeam-hub mod_mdns implementation, whose DNS wire helpers are in turn
+ * derived from OpenIPC herald (MIT license) — the compact mDNS/DNS-SD stack
+ * for the OpenIPC project:
+ *   https://github.com/OpenIPC/firmware/tree/master/general/package/herald
  *
  * This file is the source of truth for the shared wire codec.  waybeam-hub
  * vendors a copy; bump MDNS_WIRE_VERSION and keep both in sync when the

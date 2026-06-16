@@ -6,10 +6,12 @@
  *
  * Advertises this encoder as a `_waybeam-venc._tcp.local` service so that
  * ground stations and Android clients can discover the device independently
- * of the optional waybeam-hub.  TXT records carry stable identity and
- * endpoint data only (backend, model, codec, version, web/sidecar ports) —
- * live state (bitrate, fps, mode) is pulled by the consumer via the HTTP
- * API, never advertised here.
+ * of the optional waybeam-hub.  The service type itself is the recognition
+ * signal ("an OpenIPC camera running the waybeam encoder"); TXT is kept
+ * deliberately minimal — only the waybeam `version`, the wire-schema `proto`,
+ * and the `sidecar_port` (the venc-direct subscribe path).  Everything else
+ * (SoC/backend, codec, hub presence) is left for the consumer to probe over
+ * the HTTP API.  Live state (bitrate, fps, mode) is never advertised here.
  *
  * The beacon runs on its own thread: it does not discover peers, does not
  * feed any trust layer, and never blocks the encode path.  It responds to
@@ -33,12 +35,9 @@ typedef struct {
 	bool     enabled;
 	char     service_type[64];   /* "_waybeam-venc._tcp"        */
 	char     name[64];           /* instance + hostname label   */
-	char     backend[16];        /* "star6e" | "maruko"         */
-	char     model[24];          /* SoC family; "" to omit      */
-	char     codec[12];          /* "h265"                      */
-	char     version[24];        /* app version                 */
+	char     version[24];        /* waybeam version (TXT)       */
 	uint16_t web_port;           /* HTTP API port (SRV target)  */
-	uint16_t sidecar_port;       /* RTP sidecar port; 0 to omit */
+	uint16_t sidecar_port;       /* sidecar subscribe port (TXT); 0 to omit */
 } MdnsBeaconParams;
 
 typedef struct {
@@ -78,12 +77,10 @@ int mdns_beacon_start(MdnsBeacon *b, const MdnsBeaconParams *p);
 
 /**
  * Convenience wrapper: read the `discovery` settings and ports from a venc
- * config file, resolve the remaining params (backend name, version,
- * hostname), and start.  Inert on any error.  `backend_name` is the build
- * backend string ("star6e" / "maruko"); may be NULL.
+ * config file, resolve the remaining params (version, hostname), and start.
+ * Inert on any error.
  */
-void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path,
-	const char *backend_name);
+void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path);
 
 /** Stop the thread, multicast a goodbye, and close the socket.  Safe to call
  *  on an inert beacon or one that never started. */
