@@ -344,6 +344,26 @@ one holds it (deterministically by IP), all reachable by `waybeam-<suffix>`.
 > if multi-device churn proves to matter. Tiebreak is by current IP, so it is
 > stable only as far as the IPs are (static / DHCP-reserved).
 
+### 4.7 RFC 6762 / 6763 conformance posture
+
+The beacon is an **announce-focused responder**, not a full zeroconf stack.
+What it does to the letter, and where it deliberately simplifies:
+
+| Area | Posture |
+|---|---|
+| Multicast endpoint | `224.0.0.251:5353`, `IP_MULTICAST_TTL=1` (link-local) ✓ |
+| Cache-flush bit | Set on **unique** records (SRV/TXT/A); **never** on the shared PTR (RFC 6762 §10.2) ✓ — interop-critical, and correct |
+| Goodbye | TTL=0 multicast on stop (full set) and on alias yield (alias-only) (§10.1) ✓ |
+| Query handling | Answers PTR/ANY for the service type and A/ANY for both host names; full record set in each response ✓ |
+| **Probing (§8.1)** | **Not implemented.** Unique names are not probed before claiming. The suffixed name is hardware-unique by construction; the bare alias uses *optimistic announce + reactive §8.2 conflict resolution* instead. Trade-off: a transient double-claim is possible at boot until the loser yields (sub-second in practice). |
+| Announce cadence (§8.3) | 3 packets at 0/250/500 ms, then re-announce every 60 s (RFC suggests ≥2 packets ≥1 s apart; ours is faster — more aggressive, still valid). |
+| Record TTL | 120 s for all records (RFC suggests 4500 s for PTR/TXT). Paired with the 60 s refresh, caches never expire; chosen for faster staleness recovery on a mobile FPV link. |
+| Unicast-response (QU) bit | Ignored — always responds via multicast. Acceptable; resolvers still receive answers. |
+| `_services._dns-sd._udp` meta-query (§9) | Not answered — direct `_waybeam-venc._tcp` browse works (verified against avahi); whole-network service enumeration won't list us. Minor, additive later if needed. |
+
+Validated end-to-end against **avahi** (the de-facto reference responder/
+resolver) on both SoC families — see §8 Phase 1.5/1.6 rows.
+
 ---
 
 ## 5. Trust model migration

@@ -448,12 +448,19 @@ static void *beacon_thread(void *arg)
 
 				/* Bare-alias conflict resolution (§4.6): if a peer claims
 				 * our alias, the lower IP yields it (the other side keeps
-				 * it).  We still answer to our unique suffixed name. */
+				 * it).  We still answer to our unique suffixed name.  We
+				 * advertise the alias on every local IP, so the §8.2
+				 * tiebreak must use our *highest* address (the greatest of
+				 * our own records the peer is contesting). */
 				if (b->alias_host[0] && !b->alias_suppressed) {
 					uint32_t peer =
 						beacon_scan_alias_conflict(b, rx, (int)n);
-					if (peer && mdns_beacon_alias_loses(
-						b->local_ips[0].s_addr, peer)) {
+					uint32_t our_max = b->local_ips[0].s_addr;
+					for (int k = 1; k < b->local_ip_count; k++)
+						if (ntohl(b->local_ips[k].s_addr) >
+							ntohl(our_max))
+							our_max = b->local_ips[k].s_addr;
+					if (peer && mdns_beacon_alias_loses(our_max, peer)) {
 						beacon_send(b, b->alias_goodbye_buf,
 							b->alias_goodbye_len);
 						b->alias_suppressed = 1;
