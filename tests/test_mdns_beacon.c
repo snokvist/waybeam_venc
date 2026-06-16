@@ -79,7 +79,7 @@ static int test_build_packet_records(void)
 
 	uint8_t pkt[MDNS_BEACON_BUF_SIZE];
 	int len = mdns_beacon_build_packet(pkt, (int)sizeof(pkt), &p, "cam0",
-		&ip, 1, 120);
+		&ip, 1, 120, NULL);
 	CHECK("build_len_ok", len > 12);
 
 	uint16_t qd = mdns_get16(pkt + 4);
@@ -165,12 +165,12 @@ static int test_build_packet_guards(void)
 	uint8_t pkt[MDNS_BEACON_BUF_SIZE];
 
 	CHECK("build_reject_no_ip",
-		mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "cam0", &ip, 0, 120) < 0);
+		mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "cam0", &ip, 0, 120, NULL) < 0);
 	CHECK("build_reject_empty_host",
-		mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "", &ip, 1, 120) < 0);
+		mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "", &ip, 1, 120, NULL) < 0);
 
 	/* Goodbye packet (ttl 0): every record carries TTL 0 */
-	int len = mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "cam0", &ip, 1, 0);
+	int len = mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "cam0", &ip, 1, 0, NULL);
 	CHECK("build_goodbye_len", len > 12);
 	uint16_t an = mdns_get16(pkt + 6);
 	int pos = 12;
@@ -186,6 +186,63 @@ static int test_build_packet_guards(void)
 	return failures;
 }
 
+/* ── Bare alias (waybeam.local) ──────────────────────────────────────── */
+
+/* Count A records in pkt whose name equals want. */
+static int count_a_records(const uint8_t *pkt, int len, const char *want)
+{
+	uint16_t an = mdns_get16(pkt + 6);
+	int pos = 12, hits = 0;
+	for (uint16_t i = 0; i < an; i++) {
+		MdnsRr rr;
+		int next = mdns_parse_rr(pkt, len, pos, &rr);
+		if (next <= pos) break;
+		if (rr.type == MDNS_TYPE_A && strcasecmp(rr.name, want) == 0)
+			hits++;
+		pos = next;
+	}
+	return hits;
+}
+
+static int test_bare_alias(void)
+{
+	int failures = 0;
+	MdnsBeaconParams p = sample_params();
+	struct in_addr ip;
+	inet_pton(AF_INET, "192.168.1.42", &ip);
+	uint8_t pkt[MDNS_BEACON_BUF_SIZE];
+
+	/* No alias requested → only the primary host A record. */
+	int len = mdns_beacon_build_packet(pkt, sizeof(pkt), &p,
+		"waybeam-f5cb1d", &ip, 1, 120, NULL);
+	CHECK("alias_absent_primary",
+		count_a_records(pkt, len, "waybeam-f5cb1d.local") == 1);
+	CHECK("alias_absent_bare",
+		count_a_records(pkt, len, "waybeam.local") == 0);
+
+	/* Alias requested → both primary and bare A records present. */
+	len = mdns_beacon_build_packet(pkt, sizeof(pkt), &p,
+		"waybeam-f5cb1d", &ip, 1, 120, "waybeam");
+	CHECK("alias_present_primary",
+		count_a_records(pkt, len, "waybeam-f5cb1d.local") == 1);
+	CHECK("alias_present_bare",
+		count_a_records(pkt, len, "waybeam.local") == 1);
+
+	/* Alias == primary (Maruko bare case) → not duplicated. */
+	len = mdns_beacon_build_packet(pkt, sizeof(pkt), &p,
+		"waybeam", &ip, 1, 120, "waybeam");
+	CHECK("alias_no_dup_when_equal",
+		count_a_records(pkt, len, "waybeam.local") == 1);
+
+	/* Tiebreak: higher IP wins, lower IP yields (RFC 6762 §8.2). */
+	uint32_t lo, hi;
+	inet_pton(AF_INET, "192.168.1.10", &lo);
+	inet_pton(AF_INET, "192.168.1.20", &hi);
+	CHECK("alias_tiebreak_low_yields", mdns_beacon_alias_loses(lo, hi));
+	CHECK("alias_tiebreak_high_keeps", !mdns_beacon_alias_loses(hi, lo));
+	return failures;
+}
+
 /* ── Config defaults ─────────────────────────────────────────────────── */
 
 static int test_discovery_defaults(void)
@@ -197,6 +254,7 @@ static int test_discovery_defaults(void)
 	CHECK("disc_default_service",
 		strcmp(cfg.discovery.service_type, "_waybeam-venc._tcp") == 0);
 	CHECK("disc_default_name_empty", cfg.discovery.name[0] == '\0');
+	CHECK("disc_default_bare_alias", cfg.discovery.bare_alias == true);
 	return failures;
 }
 
@@ -231,6 +289,7 @@ int test_mdns_beacon(void)
 	failures += test_wire_txt_get();
 	failures += test_build_packet_records();
 	failures += test_build_packet_guards();
+	failures += test_bare_alias();
 	failures += test_discovery_defaults();
 	failures += test_device_id();
 	return failures;

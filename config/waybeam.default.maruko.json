@@ -49,7 +49,8 @@
   "discovery": {
     "enabled": true,
     "serviceType": "_waybeam-venc._tcp",
-    "name": ""
+    "name": "",
+    "bareAlias": true
   },
   "fpv": {
     "roiEnabled": true,

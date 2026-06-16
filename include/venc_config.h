@@ -200,6 +200,7 @@ typedef struct {
 	bool enabled;                              /* mDNS device beacon on/off */
 	char service_type[VENC_CONFIG_STRING_MAX]; /* "_waybeam-venc._tcp"      */
 	char name[VENC_CONFIG_STRING_MAX];         /* instance label; "" = host */
+	bool bare_alias;                           /* also claim waybeam.local  */
 } VencConfigDiscovery;
 
 typedef struct {

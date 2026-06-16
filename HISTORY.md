@@ -35,10 +35,22 @@ OpenIPC `ipctool` and device-verified against `ipcinfo -i`). This gives every
 Star6E a stable, collision-free name with no RFC 6762 rename churn. SoCs with
 no die ID (ssc37x / Maruko, verified) fall back to `discovery.name` or bare
 `waybeam`. The full 12-hex die ID is the fleet key, exposed read-only at
-`GET /api/v1/config` → `data.device.serial`. New `discovery` config section
-(`enabled` default true, `serviceType`, `name`). The beacon is inert when
-disabled, when no usable interface exists, or if the socket can't bind — it
-never blocks the encode path.
+`GET /api/v1/config` → `data.device.serial`.
+
+**Bare `waybeam.local` alias.** Because most setups run a single vehicle, the
+beacon also claims the bare host name `waybeam.local` (config
+`discovery.bareAlias`, default true) so it can be reached as
+`http://waybeam.local` without the suffix. It publishes A records for both
+names and answers `A` queries for either. If a second waybeam device contests
+`waybeam.local`, the conflict is resolved on the existing RX socket by an
+RFC 6762 §8.2 IP tiebreak (higher IP keeps it; the lower IP yields with a
+goodbye and keeps only its unique suffixed name) — no flapping, every device
+still reachable by `waybeam-<suffix>.local`.
+
+New `discovery` config section (`enabled` default true, `serviceType`,
+`name`, `bareAlias`). The beacon is inert when disabled, when no usable
+interface exists, or if the socket can't bind — it never blocks the encode
+path.
 
 Design: `documentation/DISCOVERY_TRUST_MIGRATION_SPEC.md`.
 

@@ -92,7 +92,8 @@ static int detect_local_ips(struct in_addr *out, int max_ips)
 
 int mdns_beacon_build_packet(uint8_t *buf, int buf_size,
 	const MdnsBeaconParams *p, const char *hostname,
-	const struct in_addr *ips, int n_ips, uint32_t ttl)
+	const struct in_addr *ips, int n_ips, uint32_t ttl,
+	const char *extra_host)
 {
 	if (!buf || !p || !hostname || hostname[0] == '\0')
 		return -1;
@@ -163,8 +164,59 @@ int mdns_beacon_build_packet(uint8_t *buf, int buf_size,
 		answers++;
 	}
 
+	/* Bare convenience alias (§4.6): extra A records for "<extra_host>.local"
+	 * → same IPs.  Skipped when it would duplicate the primary host name. */
+	if (extra_host && extra_host[0] &&
+		strcasecmp(extra_host, hostname) != 0) {
+		char alias_fqdn[MDNS_MAX_NAME];
+		snprintf(alias_fqdn, sizeof(alias_fqdn), "%s.local", extra_host);
+		for (int i = 0; i < n_ips; i++) {
+			uint8_t a[4];
+			memcpy(a, &ips[i].s_addr, 4);
+			np = mdns_append_a(buf, pos, buf_size, alias_fqdn, a, ttl);
+			if (np < 0)
+				return -1;
+			pos = np;
+			answers++;
+		}
+	}
+
 	mdns_put16(buf + 6, (uint16_t)answers);
 	return pos;
+}
+
+/* Build an A-only packet (just "<alias_host>.local" → IPs) for claiming or
+ * (ttl=0) relinquishing the bare alias without touching the primary name. */
+static int build_alias_only(uint8_t *buf, int buf_size, const char *alias_host,
+	const struct in_addr *ips, int n_ips, uint32_t ttl)
+{
+	if (!buf || !alias_host || !alias_host[0] || n_ips <= 0 || buf_size < 12)
+		return -1;
+	char alias_fqdn[MDNS_MAX_NAME];
+	snprintf(alias_fqdn, sizeof(alias_fqdn), "%s.local", alias_host);
+
+	memset(buf, 0, 12);
+	mdns_put16(buf + 2, MDNS_FLAG_QR | MDNS_FLAG_AA);
+	int pos = 12, answers = 0;
+	for (int i = 0; i < n_ips; i++) {
+		uint8_t a[4];
+		memcpy(a, &ips[i].s_addr, 4);
+		int np = mdns_append_a(buf, pos, buf_size, alias_fqdn, a, ttl);
+		if (np < 0)
+			return -1;
+		pos = np;
+		answers++;
+	}
+	mdns_put16(buf + 6, (uint16_t)answers);
+	return pos;
+}
+
+bool mdns_beacon_alias_loses(uint32_t our_addr_net, uint32_t their_addr_net)
+{
+	/* RFC 6762 §8.2: the lexicographically greater A rdata wins.  A-record
+	 * bytes are network order, so a byte-string compare equals an unsigned
+	 * compare of the host-order value.  We yield iff theirs is greater. */
+	return ntohl(their_addr_net) > ntohl(our_addr_net);
 }
 
 /* ── Socket + send ───────────────────────────────────────────────────── */
@@ -241,7 +293,7 @@ static void beacon_send(MdnsBeacon *b, const uint8_t *buf, int len)
 
 /* ── Query classification ────────────────────────────────────────────── */
 
-static bool beacon_is_query_for_us(const MdnsBeacon *b,
+static bool beacon_should_respond(const MdnsBeacon *b,
 	const uint8_t *pkt, int len)
 {
 	if (len < 12)
@@ -255,7 +307,14 @@ static bool beacon_is_query_for_us(const MdnsBeacon *b,
 	const char *svc_type = b->params.service_type[0] ? b->params.service_type
 		: "_waybeam-venc._tcp";
 	char svc_fqdn[MDNS_MAX_NAME];
+	char host_fqdn[MDNS_MAX_NAME];
+	char alias_fqdn[MDNS_MAX_NAME];
 	snprintf(svc_fqdn, sizeof(svc_fqdn), "%s.local", svc_type);
+	snprintf(host_fqdn, sizeof(host_fqdn), "%s.local", b->hostname);
+	if (b->alias_host[0] && !b->alias_suppressed)
+		snprintf(alias_fqdn, sizeof(alias_fqdn), "%s.local", b->alias_host);
+	else
+		alias_fqdn[0] = '\0';
 
 	int pos = 12;
 	for (uint16_t i = 0; i < qd && pos < len; i++) {
@@ -269,11 +328,76 @@ static bool beacon_is_query_for_us(const MdnsBeacon *b,
 			return false;
 		uint16_t qtype = mdns_get16(pkt + pos);
 		pos += 4;
-		if ((qtype == MDNS_TYPE_PTR || qtype == 255) &&
+		bool any = (qtype == 255);
+		if ((qtype == MDNS_TYPE_PTR || any) &&
 			strcasecmp(qname, svc_fqdn) == 0)
+			return true;
+		if ((qtype == MDNS_TYPE_A || any) &&
+			strcasecmp(qname, host_fqdn) == 0)
+			return true;
+		if (alias_fqdn[0] && (qtype == MDNS_TYPE_A || any) &&
+			strcasecmp(qname, alias_fqdn) == 0)
 			return true;
 	}
 	return false;
+}
+
+/* Scan an incoming packet for another responder claiming our bare alias.
+ * Returns that peer's IPv4 (network order) on conflict, else 0. */
+static uint32_t beacon_scan_alias_conflict(const MdnsBeacon *b,
+	const uint8_t *pkt, int len)
+{
+	if (!b->alias_host[0] || len < 12)
+		return 0;
+	char alias_fqdn[MDNS_MAX_NAME];
+	snprintf(alias_fqdn, sizeof(alias_fqdn), "%s.local", b->alias_host);
+
+	uint16_t qd = mdns_get16(pkt + 4);
+	long rrs = (long)mdns_get16(pkt + 6) + mdns_get16(pkt + 8) +
+		mdns_get16(pkt + 10);
+	int pos = 12;
+
+	for (uint16_t i = 0; i < qd && pos < len; i++) {
+		char nm[MDNS_MAX_NAME];
+		int c = mdns_decode_name(pkt, len, pos, nm, (int)sizeof(nm));
+		if (c < 0)
+			return 0;
+		pos += c + 4;  /* qtype + qclass */
+	}
+	for (long i = 0; i < rrs && pos < len; i++) {
+		MdnsRr rr;
+		int next = mdns_parse_rr(pkt, len, pos, &rr);
+		if (next <= pos)
+			return 0;
+		if (rr.type == MDNS_TYPE_A && rr.rdlength == 4 &&
+			strcasecmp(rr.name, alias_fqdn) == 0) {
+			uint32_t ip;
+			memcpy(&ip, pkt + rr.rdata_offset, 4);
+			bool mine = false;
+			for (int k = 0; k < b->local_ip_count; k++)
+				if (ip == b->local_ips[k].s_addr) {
+					mine = true;
+					break;
+				}
+			if (!mine)
+				return ip;
+		}
+		pos = next;
+	}
+	return 0;
+}
+
+/* Rebuild the announce + goodbye packets for the current alias state. */
+static void beacon_rebuild(MdnsBeacon *b)
+{
+	const char *alias = (b->alias_host[0] && !b->alias_suppressed)
+		? b->alias_host : NULL;
+	b->response_len = mdns_beacon_build_packet(b->response_buf,
+		(int)sizeof(b->response_buf), &b->params, b->hostname,
+		b->local_ips, b->local_ip_count, MDNS_BEACON_TTL, alias);
+	b->goodbye_len = mdns_beacon_build_packet(b->goodbye_buf,
+		(int)sizeof(b->goodbye_buf), &b->params, b->hostname,
+		b->local_ips, b->local_ip_count, 0, alias);
 }
 
 /* ── Servicing thread ────────────────────────────────────────────────── */
@@ -321,7 +445,28 @@ static void *beacon_thread(void *arg)
 				}
 				if (self)
 					continue;
-				if (beacon_is_query_for_us(b, rx, (int)n))
+
+				/* Bare-alias conflict resolution (§4.6): if a peer claims
+				 * our alias, the lower IP yields it (the other side keeps
+				 * it).  We still answer to our unique suffixed name. */
+				if (b->alias_host[0] && !b->alias_suppressed) {
+					uint32_t peer =
+						beacon_scan_alias_conflict(b, rx, (int)n);
+					if (peer && mdns_beacon_alias_loses(
+						b->local_ips[0].s_addr, peer)) {
+						beacon_send(b, b->alias_goodbye_buf,
+							b->alias_goodbye_len);
+						b->alias_suppressed = 1;
+						beacon_rebuild(b);
+						fprintf(stderr, "[mdns_beacon] %s.local contested "
+							"— yielding alias\n", b->alias_host);
+					} else if (peer) {
+						/* We win — re-assert immediately to defend. */
+						beacon_send(b, b->response_buf, b->response_len);
+					}
+				}
+
+				if (beacon_should_respond(b, rx, (int)n))
 					beacon_send(b, b->response_buf, b->response_len);
 			}
 		}
@@ -355,18 +500,23 @@ int mdns_beacon_start(MdnsBeacon *b, const MdnsBeaconParams *p)
 		snprintf(b->hostname, sizeof(b->hostname), "%s", hn);
 	}
 
+	/* Bare convenience alias (§4.6): claim "waybeam.local" only when the
+	 * primary name is something else (i.e. a suffixed device).  If the
+	 * primary already is "waybeam" there is nothing extra to claim. */
+	if (b->params.bare_alias && strcmp(b->hostname, "waybeam") != 0)
+		snprintf(b->alias_host, sizeof(b->alias_host), "waybeam");
+
 	b->local_ip_count = detect_local_ips(b->local_ips, MDNS_BEACON_MAX_IPS);
 	if (b->local_ip_count <= 0) {
 		fprintf(stderr, "[mdns_beacon] no local IPv4 — beacon inert\n");
 		return 0;  /* inert, not fatal */
 	}
 
-	b->response_len = mdns_beacon_build_packet(b->response_buf,
-		(int)sizeof(b->response_buf), &b->params, b->hostname,
-		b->local_ips, b->local_ip_count, MDNS_BEACON_TTL);
-	b->goodbye_len = mdns_beacon_build_packet(b->goodbye_buf,
-		(int)sizeof(b->goodbye_buf), &b->params, b->hostname,
-		b->local_ips, b->local_ip_count, 0);
+	beacon_rebuild(b);
+	if (b->alias_host[0])
+		b->alias_goodbye_len = build_alias_only(b->alias_goodbye_buf,
+			(int)sizeof(b->alias_goodbye_buf), b->alias_host,
+			b->local_ips, b->local_ip_count, 0);
 	if (b->response_len <= 0 || b->goodbye_len <= 0) {
 		fprintf(stderr, "[mdns_beacon] failed to build packets\n");
 		return -1;
@@ -395,9 +545,11 @@ int mdns_beacon_start(MdnsBeacon *b, const MdnsBeaconParams *p)
 	}
 	b->thread_started = true;
 
-	printf("> mDNS beacon: %s.%s.local web:%u (%d ip)\n",
+	printf("> mDNS beacon: %s.%s.local web:%u (%d ip)%s%s\n",
 		b->hostname, b->params.service_type,
-		(unsigned)b->params.web_port, b->local_ip_count);
+		(unsigned)b->params.web_port, b->local_ip_count,
+		b->alias_host[0] ? " + alias " : "",
+		b->alias_host[0] ? "waybeam.local" : "");
 	return 0;
 }
 
@@ -438,6 +590,7 @@ void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path)
 
 	snprintf(p.version, sizeof(p.version), "%s", VENC_VERSION);
 	p.web_port = cfg.system.web_port;
+	p.bare_alias = cfg.discovery.bare_alias;
 
 	(void)mdns_beacon_start(b, &p);
 }

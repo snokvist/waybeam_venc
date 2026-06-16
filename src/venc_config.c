@@ -196,6 +196,7 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->discovery.service_type,
 		sizeof(cfg->discovery.service_type), "_waybeam-venc._tcp");
 	cfg->discovery.name[0] = '\0';
+	cfg->discovery.bare_alias = true;
 
 	/* snapshot — MJPEG /api/v1/snapshot.jpg endpoint.  Defaults inherit
 	 * main-stream dimensions (width=0/height=0) so a fresh config gets a
@@ -651,6 +652,7 @@ static void load_discovery(const cJSON *root, VencConfigDiscovery *s)
 		json_get_string(obj, "serviceType", s->service_type));
 	safe_strcpy(s->name, sizeof(s->name),
 		json_get_string(obj, "name", s->name));
+	s->bare_alias = json_get_bool(obj, "bareAlias", s->bare_alias);
 }
 
 static void load_audio(const cJSON *root, VencConfigAudio *a)
@@ -1210,7 +1212,8 @@ static void render_discovery(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_open(p, 1, "discovery");
 	pp_field_bool(p,   2, "enabled",     cfg->discovery.enabled,      0);
 	pp_field_string(p, 2, "serviceType", cfg->discovery.service_type, 0);
-	pp_field_string(p, 2, "name",        cfg->discovery.name,         1);
+	pp_field_string(p, 2, "name",        cfg->discovery.name,         0);
+	pp_field_bool(p,   2, "bareAlias",   cfg->discovery.bare_alias,   1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1410,6 +1413,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(disc, "enabled", cfg->discovery.enabled);
 		cJSON_AddStringToObject(disc, "serviceType", cfg->discovery.service_type);
 		cJSON_AddStringToObject(disc, "name", cfg->discovery.name);
+		cJSON_AddBoolToObject(disc, "bareAlias", cfg->discovery.bare_alias);
 	}
 
 	/* fpv */

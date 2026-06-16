@@ -15,6 +15,9 @@
  *
  * The instance/host name is `waybeam-<suffix>` where <suffix> is the tail of
  * the SoC die ID (device_id.h); see DISCOVERY_TRUST_MIGRATION_SPEC.md §4.5.
+ * When `bare_alias` is set, the beacon also claims the bare `waybeam.local`
+ * for single-device convenience, yielding it deterministically (lowest IP)
+ * if another waybeam device contests it — see §4.6.
  *
  * The beacon runs on its own thread: it does not discover peers, does not
  * feed any trust layer, and never blocks the encode path.  It responds to
@@ -40,6 +43,7 @@ typedef struct {
 	char     name[64];           /* instance + hostname label   */
 	char     version[24];        /* waybeam version (TXT)       */
 	uint16_t web_port;           /* HTTP API port (SRV target)  */
+	bool     bare_alias;         /* also claim bare "waybeam.local" (§4.6) */
 } MdnsBeaconParams;
 
 typedef struct {
@@ -50,6 +54,8 @@ typedef struct {
 	volatile int       stop;
 	MdnsBeaconParams   params;
 	char               hostname[64];   /* resolved "<name>"              */
+	char               alias_host[64]; /* bare "waybeam"; "" = no alias  */
+	volatile int       alias_suppressed; /* lost the conflict tiebreak   */
 	struct in_addr     local_ips[MDNS_BEACON_MAX_IPS];
 	int                local_ip_count;
 	struct sockaddr_in mcast_addr;
@@ -57,17 +63,31 @@ typedef struct {
 	int                response_len;
 	uint8_t            goodbye_buf[MDNS_BEACON_BUF_SIZE];
 	int                goodbye_len;
+	uint8_t            alias_goodbye_buf[256]; /* A-only TTL=0 for alias  */
+	int                alias_goodbye_len;
 } MdnsBeacon;
 
 /**
  * Build the full announce/response packet (PTR + SRV + TXT + A records)
  * into buf.  Pure and socket-free — fully unit-testable.  `hostname` is the
- * label used for the SRV target and A records ("<hostname>.local").  ttl==0
- * builds a goodbye packet.  Returns the packet length, or -1 on error.
+ * label used for the SRV target and A records ("<hostname>.local").  When
+ * `extra_host` is non-NULL, non-empty, and differs from `hostname`, an extra
+ * set of A records for "<extra_host>.local" (same IPs) is appended — the bare
+ * "waybeam.local" convenience alias (§4.6).  ttl==0 builds a goodbye packet.
+ * Returns the packet length, or -1 on error.
  */
 int mdns_beacon_build_packet(uint8_t *buf, int buf_size,
 	const MdnsBeaconParams *p, const char *hostname,
-	const struct in_addr *ips, int n_ips, uint32_t ttl);
+	const struct in_addr *ips, int n_ips, uint32_t ttl,
+	const char *extra_host);
+
+/**
+ * Conflict tiebreak for the bare alias (RFC 6762 §8.2 lexicographic compare
+ * of A rdata).  Returns true when WE should yield "waybeam.local" — i.e. the
+ * peer's address is the lexicographically greater (winning) record.  Both
+ * addresses are in network byte order.  Pure; exposed for testing.
+ */
+bool mdns_beacon_alias_loses(uint32_t our_addr_net, uint32_t their_addr_net);
 
 /**
  * Start the beacon from resolved params: detect local IPv4s, build packets,

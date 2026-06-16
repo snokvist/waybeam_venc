@@ -309,6 +309,41 @@ from Maruko (all-zero) without hardcoding the full SigmaStar gen enum.
    fleet key, plus `sidecar_port` and any capabilities needed.
 4. Track/de-dupe by full serial, never by IP or friendly name.
 
+### 4.6 Bare `waybeam.local` convenience alias (Phase 1.6)
+
+The suffixed name is unambiguous but not memorable. Since **most deployments
+run a single vehicle**, the beacon also claims the bare host name
+**`waybeam.local`** so a human can just `ping waybeam.local` / open
+`http://waybeam.local`. Config: `discovery.bareAlias` (default **true**).
+
+**Mechanics.** A single responder can own multiple host names, so the beacon
+publishes A records for **both** `waybeam-<suffix>.local` (always; the SRV
+target) and `waybeam.local` (the alias) → same IPs. The alias is **only**
+claimed when the primary name is *not* already `waybeam` (i.e. a suffixed
+device); on the Maruko bare-`waybeam` fallback there is nothing extra to add.
+The beacon also answers direct `A`/`ANY` queries for both names.
+
+**Multi-device safety (the only real risk).** A-records carry the cache-flush
+bit, so two devices both announcing `waybeam.local` → different IPs would flap
+in resolver caches. The beacon resolves this by **conflict detection on its
+existing RX socket** (no new socket, no formal probing):
+
+- It scans incoming mDNS for an `A waybeam.local` from another address.
+- Tiebreak is **RFC 6762 §8.2 lexicographic** on the A rdata → in practice
+  the **higher IP keeps `waybeam.local`, the lower IP yields** it (multicasts
+  a TTL=0 goodbye for the alias only and stops announcing it). The unique
+  suffixed name is never touched, so the yielding device stays fully
+  reachable. The winner re-asserts immediately to defend.
+
+Result: **one device → `waybeam.local` always resolves**; N devices → exactly
+one holds it (deterministically by IP), all reachable by `waybeam-<suffix>`.
+
+> **Known simplification:** suppression is sticky until restart — if the
+> winner later leaves, the yielder does not re-claim `waybeam.local` until it
+> restarts. Acceptable for the single-device-dominant use case; revisit only
+> if multi-device churn proves to matter. Tiebreak is by current IP, so it is
+> stable only as far as the IPs are (static / DHCP-reserved).
+
 ---
 
 ## 5. Trust model migration
@@ -426,6 +461,7 @@ See `docs/discovery-trust-migration-plan.md` for detail. Summary:
 | **0** | all | This spec | — |
 | **1** | venc | Add `_waybeam-venc._tcp` beacon (additive). Hub mDNS untouched. | Old discovery fully intact; new beacon is extra. |
 | **1.5** ✅ | venc | Serial-suffix naming (`waybeam-<die-id>.local`), drop `sidecar_port` from TXT, expose `device.serial` via `GET /api/v1/config` (§4.1, §4.5, D6). **Done** — host tests pass and `make verify` cross-builds both backends (star6e/glibc + maruko/musl) clean. | Beacon stays additive; only the name/TXT shape changes before any consumer depends on it. |
+| **1.6** ✅ | venc | Bare `waybeam.local` convenience alias with IP-tiebreak conflict resolution; `discovery.bareAlias` default true (§4.6, D7). **Done** — host-tested + `make verify` clean. | Alias is additive; the unique suffixed name always works regardless. |
 | **2** | hub (ground) | Ground learns `_waybeam-venc._tcp`; adopt `vendor/mdns_wire`. | Ground still consumes `_waybeam-hub._tcp` too. |
 | **3** | hub (vehicle) | Add trust-on-subscribe seed alongside existing mDNS trust. | Both trust paths active; no regression. |
 | **4** | hub (vehicle) | Disable, then compile out vehicle `mod_mdns`. | Only after D2 confirmed; ground+venc cover discovery. |
@@ -452,6 +488,10 @@ and is gated on D2.
 - **D5 — Vehicle hub mDNS removal mechanism** (Phase 4). Config-gate first
   (`mdns.enabled=false`), then drop `HUB_MOD_MDNS` from the `vehicle`/
   `vehicle_wfb_ng` profiles? Confirm `make test` keeps MDNS enabled.
+- **D7 — Bare `waybeam.local` alias (Phase 1.6, DONE).** §4.6. Default-on
+  (`discovery.bareAlias`); single responder publishes both the suffixed name
+  and the bare alias; multi-device contention resolved by RFC 6762 §8.2 IP
+  tiebreak (higher IP keeps it), suppression sticky until restart.
 - **D6 — Device identity & serial-suffix naming (Phase 1.5).** §4.1 + §4.5.
   Decisions folded in: `waybeam`-only (no `openipc.local`); host/instance
   suffixed with the last 6 hex of the SoC die ID; full die ID is the fleet key
