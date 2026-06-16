@@ -21,14 +21,22 @@ socket handling are derived from
 
 TXT is kept **deliberately minimal**: the service type `_waybeam-venc._tcp`
 is itself the recognition signal ("an OpenIPC camera running the waybeam
-encoder"), so TXT carries only `proto` (wire-schema version), `version`
-(waybeam version), and `sidecar_port` (the venc-direct subscribe path). The
-hostname/IP/port travel in the standard SRV/A/instance records; live state
-(bitrate/fps/mode) is never advertised. Backend/SoC, codec, and hub presence
-are left for the consumer to **probe** over the HTTP API — discovery
-announces an always-true device fact, capabilities are queried on demand. New
-`discovery` config section (`enabled` default true, `serviceType`, `name`);
-empty `name` falls back to the system hostname. The beacon is inert when
+encoder"), so TXT carries only `proto` (wire-schema version) and `version`
+(waybeam version). The hostname/IP/port travel in the standard SRV/A/instance
+records; live state (bitrate/fps/mode) is never advertised. The sidecar port,
+backend/SoC, codec, full serial, and hub presence are left for the consumer to
+fetch with one `GET /api/v1/config` after discovery — the beacon announces an
+always-true device fact, capabilities are queried on demand.
+
+**Serial-suffix naming.** The instance/host name is `waybeam-<suffix>.local`,
+where `<suffix>` is the tail of the SigmaStar SoC **die ID** read natively
+from RIU registers via `/dev/mem` (`src/device_id.c`, method lifted from
+OpenIPC `ipctool` and device-verified against `ipcinfo -i`). This gives every
+Star6E a stable, collision-free name with no RFC 6762 rename churn. SoCs with
+no die ID (ssc37x / Maruko, verified) fall back to `discovery.name` or bare
+`waybeam`. The full 12-hex die ID is the fleet key, exposed read-only at
+`GET /api/v1/config` → `data.device.serial`. New `discovery` config section
+(`enabled` default true, `serviceType`, `name`). The beacon is inert when
 disabled, when no usable interface exists, or if the socket can't bind — it
 never blocks the encode path.
 

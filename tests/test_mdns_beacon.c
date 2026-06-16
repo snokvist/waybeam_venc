@@ -1,5 +1,6 @@
 #include "mdns_beacon.h"
 
+#include "device_id.h"
 #include "mdns_wire.h"
 #include "venc_config.h"
 #include "test_helpers.h"
@@ -66,7 +67,6 @@ static MdnsBeaconParams sample_params(void)
 	snprintf(p.service_type, sizeof(p.service_type), "_waybeam-venc._tcp");
 	snprintf(p.version, sizeof(p.version), "0.17.1");
 	p.web_port = 80;
-	p.sidecar_port = 5602;
 	return p;
 }
 
@@ -88,7 +88,7 @@ static int test_build_packet_records(void)
 	CHECK("build_answer_count", an == 4);  /* PTR + SRV + TXT + 1 A */
 
 	bool ptr_ok = false, srv_ok = false, a_ok = false;
-	bool txt_proto = false, txt_version = false, txt_sidecar = false;
+	bool txt_proto = false, txt_version = false;
 
 	int pos = 12;
 	for (uint16_t i = 0; i < an; i++) {
@@ -120,8 +120,6 @@ static int test_build_packet_records(void)
 				strcmp(v, "1") == 0;
 			txt_version = mdns_txt_get_value(rd, rl, "version", v, sizeof(v)) &&
 				strcmp(v, "0.17.1") == 0;
-			txt_sidecar = mdns_txt_get_value(rd, rl, "sidecar_port", v,
-				sizeof(v)) && strcmp(v, "5602") == 0;
 		}
 		pos = next;
 	}
@@ -131,9 +129,9 @@ static int test_build_packet_records(void)
 	CHECK("build_has_a_ip", a_ok);
 	CHECK("build_txt_proto", txt_proto);
 	CHECK("build_txt_version", txt_version);
-	CHECK("build_txt_sidecar_port", txt_sidecar);
 
-	/* Trimmed schema: backend/model/codec/web_port/name are NOT advertised */
+	/* Trimmed schema: sidecar_port/backend/model/codec/web_port/name are
+	 * NOT advertised (probe-discoverable / GET /api/v1/config). */
 	pos = 12;
 	bool saw_dropped = false;
 	for (uint16_t i = 0; i < an; i++) {
@@ -145,6 +143,7 @@ static int test_build_packet_records(void)
 			const uint8_t *rd = pkt + rr.rdata_offset;
 			int rl = rr.rdlength;
 			saw_dropped =
+				mdns_txt_get_value(rd, rl, "sidecar_port", v, sizeof(v)) ||
 				mdns_txt_get_value(rd, rl, "backend", v, sizeof(v)) ||
 				mdns_txt_get_value(rd, rl, "model", v, sizeof(v)) ||
 				mdns_txt_get_value(rd, rl, "codec", v, sizeof(v)) ||
@@ -170,33 +169,20 @@ static int test_build_packet_guards(void)
 	CHECK("build_reject_empty_host",
 		mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "", &ip, 1, 120) < 0);
 
-	/* Goodbye packet (ttl 0): first record carries TTL 0 */
+	/* Goodbye packet (ttl 0): every record carries TTL 0 */
 	int len = mdns_beacon_build_packet(pkt, sizeof(pkt), &p, "cam0", &ip, 1, 0);
 	CHECK("build_goodbye_len", len > 12);
-	MdnsRr rr;
-	int next = mdns_parse_rr(pkt, len, 12, &rr);
-	CHECK("build_goodbye_ttl_zero", next > 12 && rr.ttl == 0);
-
-	/* sidecar_port omitted when zero */
-	MdnsBeaconParams q = sample_params();
-	q.sidecar_port = 0;
-	len = mdns_beacon_build_packet(pkt, sizeof(pkt), &q, "cam0", &ip, 1, 120);
-	CHECK("build_optional_omit_len", len > 12);
-	int pos = 12;
 	uint16_t an = mdns_get16(pkt + 6);
-	bool saw_sidecar = false;
+	int pos = 12;
+	bool all_ttl_zero = an > 0;
 	for (uint16_t i = 0; i < an; i++) {
-		MdnsRr r;
-		int nx = mdns_parse_rr(pkt, len, pos, &r);
-		if (nx <= pos) break;
-		if (r.type == MDNS_TYPE_TXT && r.rdlength > 0) {
-			char v[32] = "";
-			saw_sidecar = mdns_txt_get_value(pkt + r.rdata_offset, r.rdlength,
-				"sidecar_port", v, sizeof(v));
-		}
-		pos = nx;
+		MdnsRr rr;
+		int next = mdns_parse_rr(pkt, len, pos, &rr);
+		if (next <= pos) { all_ttl_zero = false; break; }
+		if (rr.ttl != 0) all_ttl_zero = false;
+		pos = next;
 	}
-	CHECK("build_omit_sidecar", !saw_sidecar);
+	CHECK("build_goodbye_ttl_zero", all_ttl_zero);
 	return failures;
 }
 
@@ -214,6 +200,30 @@ static int test_discovery_defaults(void)
 	return failures;
 }
 
+/* ── Device serial (die ID) ──────────────────────────────────────────── */
+
+static int test_device_id(void)
+{
+	int failures = 0;
+	char buf[16];
+
+	/* Guards: NULL and too-small buffers must fail and not write garbage. */
+	CHECK("dieid_null_rejected", !device_id_serial(NULL, sizeof(buf)));
+	buf[0] = 'x';
+	CHECK("dieid_short_buf_rejected", !device_id_serial(buf, 12));
+	CHECK("dieid_short_buf_empty", buf[0] == '\0');
+
+	/* Cached accessor never returns NULL; on a host without /dev/mem access
+	 * it is the empty string.  When it does yield a value it must be 12 hex
+	 * chars (the on-device path), never partial. */
+	const char *s = device_id_serial_cached();
+	CHECK("dieid_cached_nonnull", s != NULL);
+	bool ok_shape = (s[0] == '\0') || (strlen(s) == 12);
+	CHECK("dieid_cached_shape", ok_shape);
+	CHECK("dieid_cached_stable", device_id_serial_cached() == s);
+	return failures;
+}
+
 int test_mdns_beacon(void)
 {
 	int failures = 0;
@@ -222,5 +232,6 @@ int test_mdns_beacon(void)
 	failures += test_build_packet_records();
 	failures += test_build_packet_guards();
 	failures += test_discovery_defaults();
+	failures += test_device_id();
 	return failures;
 }

@@ -8,10 +8,13 @@
  * ground stations and Android clients can discover the device independently
  * of the optional waybeam-hub.  The service type itself is the recognition
  * signal ("an OpenIPC camera running the waybeam encoder"); TXT is kept
- * deliberately minimal — only the waybeam `version`, the wire-schema `proto`,
- * and the `sidecar_port` (the venc-direct subscribe path).  Everything else
- * (SoC/backend, codec, hub presence) is left for the consumer to probe over
- * the HTTP API.  Live state (bitrate, fps, mode) is never advertised here.
+ * deliberately minimal — only the waybeam `version` and the wire-schema
+ * `proto`.  Everything else (SoC/backend, codec, sidecar port, full serial,
+ * hub presence) is left for the consumer to fetch with one GET /api/v1/config
+ * after discovery.  Live state (bitrate, fps, mode) is never advertised here.
+ *
+ * The instance/host name is `waybeam-<suffix>` where <suffix> is the tail of
+ * the SoC die ID (device_id.h); see DISCOVERY_TRUST_MIGRATION_SPEC.md §4.5.
  *
  * The beacon runs on its own thread: it does not discover peers, does not
  * feed any trust layer, and never blocks the encode path.  It responds to
@@ -37,7 +40,6 @@ typedef struct {
 	char     name[64];           /* instance + hostname label   */
 	char     version[24];        /* waybeam version (TXT)       */
 	uint16_t web_port;           /* HTTP API port (SRV target)  */
-	uint16_t sidecar_port;       /* sidecar subscribe port (TXT); 0 to omit */
 } MdnsBeaconParams;
 
 typedef struct {

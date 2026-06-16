@@ -149,15 +149,15 @@ instance-name records. So TXT only needs to add what those records can't:
 | `proto` | constant | `1` | wire-schema version (forward-compat) |
 | `version` | `VENC_VERSION` | `0.18.0` | waybeam version — the one volatile-but-stable identity bit |
 
-> **D1 — TXT schema freeze (LOCKED target):** exactly the two keys above —
-> `proto` and `version`.
+> **D1 — TXT schema freeze (LOCKED):** exactly the two keys above — `proto`
+> and `version`.
 >
-> **Implementation status:** the shipped Phase-1 beacon
-> (`src/mdns_beacon.c`) still also emits `sidecar_port` and names itself from
-> the plain system hostname. Dropping `sidecar_port` and switching to
-> serial-suffix naming (§4.1, §4.5) is the **Phase 1.5** work specified here —
-> not yet implemented. Until then the live TXT is `proto`/`version`/
-> `sidecar_port`.
+> **Implementation status: DONE (Phase 1.5).** The beacon emits `proto` and
+> `version` only; `sidecar_port` was removed. Naming is serial-suffixed
+> (§4.1, §4.5) via `src/device_id.c`, and the full die ID is exposed at
+> `GET /api/v1/config` → `data.device.serial`. See `src/mdns_beacon.c`,
+> `src/device_id.c`, `src/venc_api.c::handle_config`,
+> `tests/test_mdns_beacon.c`.
 
 **Deliberately NOT in TXT — probe instead:** `sidecar_port`, `backend`/`model`/
 SoC, `sensor`, `codec`, `web_port` (it's the SRV port), `name` (it's the
@@ -425,7 +425,7 @@ See `docs/discovery-trust-migration-plan.md` for detail. Summary:
 |---|---|---|---|
 | **0** | all | This spec | — |
 | **1** | venc | Add `_waybeam-venc._tcp` beacon (additive). Hub mDNS untouched. | Old discovery fully intact; new beacon is extra. |
-| **1.5** | venc | Serial-suffix naming (`waybeam-<die-id>.local`), drop `sidecar_port` from TXT, expose `device.serial` via `GET /api/v1/config` (§4.1, §4.5, D6). | Beacon stays additive; only the name/TXT shape changes before any consumer depends on it. |
+| **1.5** ✅ | venc | Serial-suffix naming (`waybeam-<die-id>.local`), drop `sidecar_port` from TXT, expose `device.serial` via `GET /api/v1/config` (§4.1, §4.5, D6). **Done** (host-tested; on-device cross-build pending). | Beacon stays additive; only the name/TXT shape changes before any consumer depends on it. |
 | **2** | hub (ground) | Ground learns `_waybeam-venc._tcp`; adopt `vendor/mdns_wire`. | Ground still consumes `_waybeam-hub._tcp` too. |
 | **3** | hub (vehicle) | Add trust-on-subscribe seed alongside existing mDNS trust. | Both trust paths active; no regression. |
 | **4** | hub (vehicle) | Disable, then compile out vehicle `mod_mdns`. | Only after D2 confirmed; ground+venc cover discovery. |

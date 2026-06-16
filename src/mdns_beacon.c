@@ -9,9 +9,11 @@
 
 #include "mdns_beacon.h"
 
+#include "device_id.h"
 #include "mdns_wire.h"
 #include "venc_config.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,25 +131,20 @@ int mdns_beacon_build_packet(uint8_t *buf, int buf_size,
 
 	/* TXT — deliberately minimal (RFC 6763 §6).  The service type already
 	 * says "waybeam encoder on an OpenIPC camera"; we add only the waybeam
-	 * version, the wire-schema proto, and the sidecar subscribe port.
-	 * Backend/codec/hub-presence are left for the consumer to probe. */
+	 * version and the wire-schema proto.  The sidecar port, full serial,
+	 * backend/codec, and hub presence are fetched by the consumer with one
+	 * GET /api/v1/config after discovery. */
 	char proto_pair[16]   = "";
 	char version_pair[40] = "";
-	char sidecar_pair[28] = "";
 
 	snprintf(proto_pair, sizeof(proto_pair), "proto=%d", MDNS_WIRE_VERSION);
 	snprintf(version_pair, sizeof(version_pair), "version=%s",
 		p->version[0] ? p->version : "unknown");
 
-	const char *pairs[4];
+	const char *pairs[3];
 	int n = 0;
 	pairs[n++] = proto_pair;
 	pairs[n++] = version_pair;
-	if (p->sidecar_port) {
-		snprintf(sidecar_pair, sizeof(sidecar_pair), "sidecar_port=%u",
-			(unsigned)p->sidecar_port);
-		pairs[n++] = sidecar_pair;
-	}
 	pairs[n] = NULL;
 
 	np = mdns_append_txt(buf, pos, buf_size, inst_fqdn, pairs, ttl);
@@ -417,10 +414,30 @@ void mdns_beacon_start_from_config(MdnsBeacon *b, const char *config_path)
 	copy_str(p.service_type, sizeof(p.service_type),
 		cfg.discovery.service_type[0] ? cfg.discovery.service_type
 			: "_waybeam-venc._tcp");
-	copy_str(p.name, sizeof(p.name), cfg.discovery.name);
+
+	/* Name resolution (§4.1/§4.5): operator override → serial-suffixed
+	 * waybeam-<die-id tail> → bare waybeam.  The SoC die ID gives every
+	 * Star6E a stable, collision-free name with no RFC conflict churn;
+	 * Maruko (no die ID) lands on bare waybeam unless pinned via config. */
+	if (cfg.discovery.name[0]) {
+		copy_str(p.name, sizeof(p.name), cfg.discovery.name);
+	} else {
+		const char *serial = device_id_serial_cached();
+		size_t sl = strlen(serial);
+		if (sl >= 6) {
+			const char *suf = serial + sl - 6;  /* last 6 hex */
+			char low[8];
+			for (int i = 0; i < 6; i++)
+				low[i] = (char)tolower((unsigned char)suf[i]);
+			low[6] = '\0';
+			snprintf(p.name, sizeof(p.name), "waybeam-%s", low);
+		} else {
+			snprintf(p.name, sizeof(p.name), "waybeam");
+		}
+	}
+
 	snprintf(p.version, sizeof(p.version), "%s", VENC_VERSION);
 	p.web_port = cfg.system.web_port;
-	p.sidecar_port = cfg.outgoing.sidecar_port;
 
 	(void)mdns_beacon_start(b, &p);
 }
