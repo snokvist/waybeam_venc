@@ -425,7 +425,7 @@ See `docs/discovery-trust-migration-plan.md` for detail. Summary:
 |---|---|---|---|
 | **0** | all | This spec | — |
 | **1** | venc | Add `_waybeam-venc._tcp` beacon (additive). Hub mDNS untouched. | Old discovery fully intact; new beacon is extra. |
-| **1.5** ✅ | venc | Serial-suffix naming (`waybeam-<die-id>.local`), drop `sidecar_port` from TXT, expose `device.serial` via `GET /api/v1/config` (§4.1, §4.5, D6). **Done** (host-tested; on-device cross-build pending). | Beacon stays additive; only the name/TXT shape changes before any consumer depends on it. |
+| **1.5** ✅ | venc | Serial-suffix naming (`waybeam-<die-id>.local`), drop `sidecar_port` from TXT, expose `device.serial` via `GET /api/v1/config` (§4.1, §4.5, D6). **Done** — host tests pass and `make verify` cross-builds both backends (star6e/glibc + maruko/musl) clean. | Beacon stays additive; only the name/TXT shape changes before any consumer depends on it. |
 | **2** | hub (ground) | Ground learns `_waybeam-venc._tcp`; adopt `vendor/mdns_wire`. | Ground still consumes `_waybeam-hub._tcp` too. |
 | **3** | hub (vehicle) | Add trust-on-subscribe seed alongside existing mDNS trust. | Both trust paths active; no regression. |
 | **4** | hub (vehicle) | Disable, then compile out vehicle `mod_mdns`. | Only after D2 confirmed; ground+venc cover discovery. |
