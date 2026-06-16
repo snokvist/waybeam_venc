@@ -129,7 +129,15 @@ is pulled via `GET /api/v1/config`.**
 | `codec` | constant | `h265` | no |
 | `web_port` | `system.web_port` | `80` | no |
 | `sidecar_port` | `outgoing.sidecar_port` | `5602` | no (restart) |
+| `version` | `VENC_VERSION` | `0.17.1` | no |
 | `api_contract` | build | `0.2.0` | no |
+
+> **Phase 1 status (implemented):** the beacon emits `proto`, `name`,
+> `backend`, `model`, `codec`, `version`, `web_port`, and `sidecar_port`
+> (optional keys `model`/`sidecar_port` omitted when empty/zero). `sensor`
+> and `api_contract` are reserved for a later phase (live sensor name needs
+> backend pipeline state; the HTTP contract version constant isn't wired
+> yet). See `src/mdns_wire.c` + `src/mdns_beacon.c`.
 
 > Fields that *can* change but only across a pipeline restart (sensor,
 > sidecar_port) are acceptable because a restart re-announces anyway. Anything

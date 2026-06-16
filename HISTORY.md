@@ -1,5 +1,31 @@
 # History
 
+## [0.18.0] - 2026-06-16
+
+Add an mDNS device beacon (discovery migration, Phase 1). waybeam_venc now
+announces itself as a `_waybeam-venc._tcp.local` service on the multicast
+group 224.0.0.251:5353, so ground stations and Android clients can discover
+the encoder directly — independent of the optional waybeam-hub, which is the
+only thing that previously advertised the vehicle.
+
+**Announce-only, self-contained, off the hot path.** The beacon runs on its
+own thread (`src/mdns_beacon.c`), started from `main()` and torn down (with a
+multicast goodbye) before any SIGHUP-respawn exec. It responds to PTR queries
+for its own service type and re-announces periodically; it does **not**
+discover peers or feed any trust layer. The RFC 6762/6763 wire codec lives in
+`src/mdns_wire.c` (`MDNS_WIRE_VERSION 1`) — the source of truth that
+waybeam-hub will vendor; keep both in sync.
+
+TXT records carry **stable identity/endpoints only** — `proto`, `name`,
+`backend`, `model`, `codec`, `version`, `web_port`, `sidecar_port` — never
+live state (bitrate/fps/mode), which consumers pull from the HTTP API. New
+`discovery` config section (`enabled` default true, `serviceType`, `name`);
+empty `name` falls back to the system hostname. The beacon is inert when
+disabled, when no usable interface exists, or if the socket can't bind — it
+never blocks the encode path.
+
+Design: `documentation/DISCOVERY_TRUST_MIGRATION_SPEC.md`.
+
 ## [0.17.1] - 2026-06-13
 
 Fix dual-record mode never engaging under runtime control — the SD-card
