@@ -1,6 +1,6 @@
 # Discovery & Trust Migration Spec
 
-**Status:** venc Phases 1/1.5/1.6 shipped (PR #147); hub/Android phases pending. Plan revised 2026-06-16 — trust deleted outright, subscribe = live `outgoing.server` config-set (no new venc endpoint).
+**Status:** venc Phases 1/1.5/1.6 shipped (PR #147). Phases 2–7 **implemented** on branch `claude/mod-mdns-waybeam-venc-uy7y9z` (waybeam-hub commit `5960634`, Waybeam-android commit `afd4df9`) — **pending PR review + hardware soak**. Plan revised 2026-06-16 — trust deleted outright, subscribe = live `outgoing.server` config-set (no new venc endpoint).
 **Branch:** `claude/mod-mdns-waybeam-venc-uy7y9z` (all repos)
 **Scope:** 3 repos — `waybeam_venc` (anchor), `waybeam-hub`, `waybeam-android` (later)
 **Owner doc:** this file is the master. Hub-side companion:
@@ -530,12 +530,12 @@ only open venc-touching item, gated on **D4** (before hub Phase 2).
 |---|---|---|---|
 | **0** | all | This spec | — |
 | **1 / 1.5 / 1.6** ✅ | venc | mDNS beacon + serial-suffix naming + `waybeam.local` alias (PR #147). **Done** — host tests pass; `make verify` cross-builds both backends clean. | Additive; old discovery fully intact. |
-| **2** | hub (ground) | `mod_mdns` also browses `_waybeam-venc._tcp`; auto-subscribe fires on "venc beacon seen" and POSTs `outgoing.server` to venc; `mod_sync` left compiled but idle. | Old sync path still present; new path proven first. |
-| **3** | android | Browse venc beacon; restream-preference (GS present → `/restream/subscribe`; else direct venc subscribe). | Hub-mDNS fallback kept until parity proven. |
-| **4** | hub (ground) | Repoint `/status` + link-log to mDNS cache; remove menu-mirror; **delete `mod_sync`**. | Build green; peers come from mDNS. |
-| **5** | hub (both) | **Delete `hub_ip_trust`** (accept-all); drop the telemetry check + mDNS seeds. | Telemetry from any IP; build green. |
-| **6** | hub (vehicle) | Remove `mod_mdns` + `mod_sync` + `/subscribe_video*` from the vehicle profile. | venc beacon is sole discovery; vehicle hub = telemetry/PWM/OSD. |
-| **7** | all + coord | Android drops self-registration; purge dead config (`trusted_peers`, `reject_unknown`, sync ports, menu-mirror); rewrite/retire `protocols/hub-sync.md`; update mDNS spec, SNAPSHOT, roadmaps. | `/audit-protocols` clean. |
+| **2** ✅ | hub (ground) | `mod_mdns` also browses `_waybeam-venc._tcp`; auto-subscribe fires on "venc beacon seen" and POSTs `outgoing.server` to venc. **Done** (commit `5960634`) — folded with Phase 4: `mod_sync` deleted outright rather than left idle. | Old sync path still present; new path proven first. |
+| **3** ✅ | android | Browse venc beacon; restream-preference (GS present → `/restream/subscribe`; else direct venc subscribe). **Done** (commit `afd4df9`). | Hub-mDNS fallback kept until parity proven. |
+| **4** ✅ | hub (ground) | Repoint `/status` + link-log to mDNS cache; remove menu-mirror; **delete `mod_sync`**. **Done** (commit `5960634`). | Build green; peers come from mDNS. |
+| **5** ✅ | hub (both) | **Delete `hub_ip_trust`** (accept-all); drop the telemetry check + mDNS seeds. **Done** (commit `5960634`). | Telemetry from any IP; build green. |
+| **6** ✅ | hub (vehicle) | Remove `mod_mdns` + `mod_sync` from the vehicle profile (`-DHUB_MOD_MDNS` dropped, `mdns.enabled=false`). **Done** (commit `5960634`). Vehicle `/subscribe_video*` route handlers left in place (now unused/harmless) — flagged for a follow-up endpoint cleanup. | venc beacon is sole discovery; vehicle hub = telemetry/PWM/OSD. |
+| **7** ✅ | all + coord | Android drops self-registration; purge dead config (`trusted_peers`, `reject_unknown` removed; `sync_bind`/`sync_port` retained — still drive the hub's own `_waybeam-hub._tcp` announce, NOT dead); rewrite/retire `protocols/hub-sync.md`; update this spec, SNAPSHOT, roadmaps. **Done** (commits `5960634`/`afd4df9` + coord-repo docs). | `/audit-protocols` clean. |
 
 Phases 2–3 are **purely additive** (new path by config, fully revertible). The
 deletions in 4–6 land only after the replacement runs on hardware. The one
