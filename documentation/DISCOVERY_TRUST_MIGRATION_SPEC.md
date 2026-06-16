@@ -1,6 +1,6 @@
 # Discovery & Trust Migration Spec
 
-**Status:** Phase 1 — Spec (no code yet)
+**Status:** venc Phases 1/1.5/1.6 shipped (PR #147); hub/Android phases pending. Plan revised 2026-06-16 — trust deleted outright, subscribe = live `outgoing.server` config-set (no new venc endpoint).
 **Branch:** `claude/mod-mdns-waybeam-venc-uy7y9z` (all repos)
 **Scope:** 3 repos — `waybeam_venc` (anchor), `waybeam-hub`, `waybeam-android` (later)
 **Owner doc:** this file is the master. Hub-side companion:
@@ -33,8 +33,8 @@ Two facts break this model:
   *device* discovery.
 - **Remove mDNS from the vehicle (air-side) hub.** Keep mDNS only on the
   ground hub (for ground↔Android peering).
-- **Drop the complex hub_ip_trust mDNS-seeded trust layer** on the vehicle in
-  favor of **intent-based trust-on-subscribe**.
+- **Delete the `hub_ip_trust` layer outright** (both hubs) — the wfb RF link is
+  the security boundary; accept-all on the private link.
 - Ground / Android **discover venc, then probe independently** for hub
   capabilities at a known port.
 
@@ -47,7 +47,7 @@ The current `mod_mdns` does **two** jobs. Only one of them belongs on venc:
 | Job | What it is | Where it goes |
 |---|---|---|
 | **Announce** | Build PTR/SRV/TXT/A, answer queries (RFC 6762/6763 wire engine) | **venc** (always-on beacon) + ground hub (its own service) |
-| **Discover + consume** | Parse peers, feed `mod_sync` / `hub_ip_trust` | **ground hub only** (vehicle becomes passive) |
+| **Discover + consume** | Parse peers into the `mod_mdns` browse cache (no `mod_sync`, no `hub_ip_trust` — both deleted) | **ground hub only** (vehicle becomes passive) |
 
 The new mental model:
 
@@ -70,8 +70,8 @@ its live capabilities).
 | Node | Announces | Discovers | Trust seeding |
 |---|---|---|---|
 | **venc (air)** | `_waybeam-venc._tcp` — always | — | n/a (stateless beacon) |
-| **vehicle hub (air)** | *removed* | *removed* | **trust-on-subscribe** |
-| **ground hub** | `_waybeam-hub._tcp` (ground↔Android) | venc beacon **+** hub beacons | keeps its discover/trust layer |
+| **vehicle hub (air)** | *removed* | *removed* | **removed (accept-all)** |
+| **ground hub** | `_waybeam-hub._tcp` (ground↔Android) | venc beacon **+** hub beacons | **removed** (mDNS browse only) |
 | **Android (later)** | optional | venc beacon **+** hub beacons | n/a (client) |
 
 ### 3.2 Discovery + subscribe flow (target state)
@@ -92,15 +92,15 @@ its live capabilities).
                  ┌──────────────────────────────────────────┴──────────────┐
                  │  GROUND hub / Android                                    │
                  │  2. learn vehicle IP from venc beacon                    │
-                 │  4. hub present? → talk to hub (/subscribe_video, sync)  │
-                 │     hub absent?  → talk to venc directly (/api/v1, sidecar│
-                 │  5. SUBSCRIBE = explicit intent → vehicle trusts caller  │
+                 │  4. SUBSCRIBE = POST outgoing.server to venc :80 (live)  │
+                 │     GS present → GS owns stream + restreams to others    │
+                 │  5. no trust layer — the wfb link is the boundary        │
                  └─────────────────────────────────────────────────────────┘
 ```
 
 Key invariant: **the vehicle never initiates discovery.** It answers mDNS
-(venc), answers REST probes (hub, if up), and trusts whoever *explicitly
-subscribes* (hub `/subscribe_video` or venc sidecar `MSG_SUBSCRIBE`).
+(venc), answers REST probes (hub, if up), and accepts a live `outgoing.server`
+retarget from whoever subscribes. No trust layer — the wfb link is the boundary.
 
 ---
 
@@ -366,130 +366,181 @@ resolver) on both SoC families — see §8 Phase 1.5/1.6 rows.
 
 ---
 
-## 5. Trust model migration
+## 5. Trust model — removed, not migrated
 
-### 5.1 What goes away (vehicle)
+> **Supersedes earlier drafts.** Prior versions of this section replaced
+> ambient mDNS trust with "trust-on-subscribe." That intermediate step is
+> **dropped**: `hub_ip_trust` is deleted outright. The wfb RF link is the
+> security boundary — no internet exposure, no shared L2 segment to defend.
+> (Decisions locked 2026-06-16.)
 
-- `mod_mdns` on the vehicle hub: announce **and** discover paths.
-- The `hub_ip_trust_add_peer()` call that mod_mdns makes on peer discovery
-  (`mod_mdns.c:1075`) — the ambient-trust seed.
-- `mod_sync_notify_peer_discovered()` from mDNS on the vehicle
-  (`mod_mdns.c:1081`).
+### 5.1 What goes away (both hubs)
 
-### 5.2 What replaces it: trust-on-subscribe
+`hub_ip_trust` gated exactly two inbound paths and seeded from three:
 
-The vehicle gains trust from **explicit inbound intent**, which it already
-receives:
+| Path | file:line | Was | Becomes |
+|---|---|---|---|
+| Sync hello accept | `mod_sync.c:424` | DENY if untrusted | moot — `mod_sync` deleted (§5.2) |
+| Telemetry UDP ingest | `mod_telemetry.c:399` | DROP + `udp_rx_rejected++` | accept any source IP |
+| Seed on sync hello | `mod_sync.c:346` | `hub_ip_trust_add_peer()` | deleted with `mod_sync` |
+| Seed on mDNS discover | `mod_sync.c:617`, `mod_mdns.c:1075` | `hub_ip_trust_add_peer()` | deleted |
 
-- Hub path: `POST /subscribe_video` (and `/subscribe` heartbeat) — requester IP
-  becomes trusted for the duration of the subscription/lock.
-- venc-direct path: sidecar `MSG_SUBSCRIBE` (UDP 5602) — probe IP becomes the
-  receiver/trusted peer.
+After removal there is no IP allowlist anywhere. Telemetry, video subscribe, and
+all REST endpoints accept any source on the link.
 
-This dovetails with the existing **video subscription lock** (identity-based
-ownership, 409 on conflict, `subscriber.timeout_s` expiry) — trust and lock now
-share one lifecycle anchored on the subscribe action.
+### 5.2 `mod_sync` is deleted entirely
 
-> **Decision to lock (D2):** confirm that trust-on-subscribe covers *all* paths
-> that `hub_ip_trust` previously gated on the vehicle — sync hello acceptance,
-> telemetry target, video. If the ground's unicast `mod_sync` hello is gated by
-> `hub_ip_trust`, we need a seed *before* the first subscribe, or we relax sync
-> to accept-then-trust-on-subscribe. **Must be resolved before Phase 4.**
+`mod_sync` (the 8060 unicast hello/state gossip protocol) has **four** consumers
+— removing the menu-mirror alone does *not* kill it. Discovery now comes from
+the venc beacon, so all four are repointed or removed first:
 
-### 5.3 What stays (ground)
+| Consumer | file:line | Replacement |
+|---|---|---|
+| Remote menu-mirror (`state` msgs) | `mod_sync.c` state path | **deleted** (feature retired) |
+| Auto-subscribe one-shot trigger | `mod_webui.c:4153` | "venc beacon seen" event from `mod_mdns` |
+| Peer/capability list in `/status` | `mod_webui.c:1956, 2227` | `mod_mdns` browse cache |
+| Link-log targeting | `mod_link_log.c` | vehicle IP from the venc beacon |
 
-The ground hub keeps its full `mod_mdns` (announce + discover + trust). It is
-the active discoverer now: it consumes venc beacons **and** hub beacons and
-keeps feeding `mod_sync`.
+Once those three non-menu consumers read from the `mod_mdns` browse cache, the
+whole module is removed: `src/mod_sync.{c,h}`, its `CORE_SRCS`/`TEST_LIB_SRCS`
+entries, the `hub_modules_register(&mod_sync)` call, and every `mod_sync_*`
+caller.
+
+### 5.3 What stays
+
+- **Ground hub:** `mod_mdns` survives but now **browses `_waybeam-venc._tcp`**
+  as the vehicle anchor (alongside its own ground service). It no longer seeds
+  trust or notifies `mod_sync` (both gone).
+- **Vehicle hub:** telemetry, PWM, OSD only. No `mod_mdns`, no `mod_sync`, no
+  `hub_ip_trust`, no `/subscribe_video*` — subscribe moves to venc (§6).
 
 ---
 
-## 6. Capability probing contract (ground / Android)
+## 6. Subscribe, arbitration & capability probing
 
-After discovering a venc beacon (→ vehicle IP), the consumer determines what
-else is on the box by **probing known ports**, not by reading mDNS TXT.
+### 6.1 Subscribe = a live `outgoing.server` config-set (no new endpoint)
 
-**Phase-1 mechanism (chosen): pure REST probe, zero coupling.**
+venc already owns the only field that controls its RTP destination, and it is
+already classified `MUT_LIVE`:
 
-1. Hit `http://<vehicle>:8060/status` and `/modules` (well-known hub port).
-2. `200` → hub present; parse the real capability list from those endpoints
-   (they already serve exactly this).
-3. Refused / timeout (short, ~300 ms) → no hub; drive venc directly via
-   `:80/api/v1/*` + sidecar `:5602`.
+```c
+FIELD(outgoing, server, FT_STRING, MUT_LIVE),   /* src/venc_api.c:400 */
+```
 
-Rejected alternatives:
+Setting it through the existing config path calls `apply_server()`
+(`src/venc_api.c:1492/1504/1510`), which retargets the running stream via the
+output seqlock — **no restart, no respawn.** So the canonical "subscribe" is:
 
-- **Static TXT hint (`hub_port=`):** still probes, still times out when absent —
-  marginal gain. Skip unless the hub port ever becomes non-standard.
-- **venc-hosted hub registry (`/api/v1/peers`):** the hub POSTs its presence to
-  venc on startup; venc reflects it so the consumer gets one-stop discovery and
-  no blind timeout. **Most literally "venc = layer of truth,"** but adds a venc
-  endpoint + hub registration + stale-entry expiry. **Deferred to a later phase
-  (D3)** — adopt only if probe timeout churn proves to matter.
+```
+POST /api/v1/config  {"outgoing":{"server":"udp://<my-ip>:<my-port>"}}
+```
 
-> **Decision to lock (D3):** start pure-probe; graduate to the venc registry
-> only on evidence. Documented so we don't oscillate.
+> **Decision (D2, resolved):** there is **no** `/api/v1/subscribe` endpoint and
+> **no** subscription lock. A dedicated verb would only wrap a field that
+> already does the job; `GET /api/v1/config` already reports the current
+> destination and each POST overwrites it (last-writer-wins). venc earns
+> "anchor" by *owning the field*, not by exposing a new verb.
+
+Consumers already compute their own IP (ground `derive_local_ip`, Android
+`getDeviceIp`), so socket-IP inference buys nothing and is not implemented.
+
+### 6.2 Stream arbitration = topology, not a lock
+
+The vehicle streams to exactly one destination. Contention is **designed out**
+rather than locked:
+
+- **Ground station present:** the GS owns the vehicle's destination (sets
+  `outgoing.server` to itself) and **restreams** to any other viewer via its
+  existing `/restream/subscribe` (pixelpilot forward path — already independent
+  of `mod_sync`/`hub_ip_trust`). Android becomes a restream copy-recipient and
+  never touches the vehicle's destination.
+- **No ground station:** the sole decoder (e.g. Android) sets `outgoing.server`
+  to itself directly. "One decoder at a time" makes last-writer-wins correct.
+
+This is why the 409 lock, the one-shot auto-subscribe guard, and the
+ground↔Android coexistence dance all disappear — they existed to manage a
+contention the restream topology removes.
+
+> **Restream is single-subscriber today** (`restream_activate` takes one dst).
+> Fine for one-decoder-at-a-time; multi-recipient fan-out is a later option.
+
+### 6.3 Capability probing (retained, unchanged)
+
+After learning the vehicle IP from the venc beacon, a consumer discovers what
+*else* rides on that box by probing known ports — not by reading mDNS TXT:
+
+1. `GET http://<vehicle>:8060/status` + `/modules` (well-known hub port).
+2. `200` → hub present; parse its live capability list.
+3. Refused / ~300 ms timeout → no hub; drive venc directly at `:80/api/v1/*`
+   (+ sidecar `:5602` for frame metadata).
+
+> **Decision (D3, resolved):** pure REST probe, zero coupling. The venc-hosted
+> hub registry (`/api/v1/peers`) is **not** adopted — the restream topology and
+> a single well-known hub port make blind-timeout churn a non-issue.
 
 ---
 
 ## 7. Repo-by-repo change list
 
-### 7.1 `waybeam_venc` (anchor)
+### 7.1 `waybeam_venc` (anchor) — DONE, no further change
 
-- `vendor/mdns_wire/` — new vendored wire codec (extracted from hub mod_mdns).
-- `src/mdns_beacon.c` + `include/mdns_beacon.h` — announce-only responder
-  (`mdns_beacon_init/fd/poll/close`, `mdns_beacon_goodbye`). Reads `VencConfig`
-  for TXT fields; getifaddrs for A records.
-- `src/main.c` / backend runtime (`star6e_runtime.c`, `maruko_runtime.c`) —
-  init beacon after backend up, poll its fd in the loop, goodbye on teardown.
-  Must be pause/teardown-aware (mirror sidecar handling).
-- `include/venc_config.h` + `src/venc_config.c` — new `discovery` config block
-  (`enabled`, `service_type`, `name`/hostname override). Defaults make it on.
-- `Makefile` — link `vendor/mdns_wire`, both backends, strict `-Werror`.
-- `tests/` — `test_mdns_beacon.c` (TXT build, record encode, goodbye), wire
-  codec round-trip tests. `documentation/HTTP_API_CONTRACT.md` — note the
-  beacon + TXT schema (and that live state stays on `/api/v1/config`).
+The beacon shipped in PR #147 (Phases 1/1.5/1.6: `src/mdns_wire.{c,h}`,
+`src/mdns_beacon.{c,h}`, `src/device_id.{c,h}`, the `discovery` config block,
+serial-suffix naming + `waybeam.local` alias). **No new endpoint is needed:**
+subscribe is the existing `MUT_LIVE` `outgoing.server` config-set (§6.1). venc
+is feature-complete for this migration. The wire codec lives at
+`src/mdns_wire.{c,h}` today; promoting it to a shared `vendor/mdns_wire` is the
+only open venc-touching item, gated on **D4** (before hub Phase 2).
 
 ### 7.2 `waybeam-hub`
 
-See `docs/discovery-trust-migration-plan.md` for detail. Summary:
+- **Ground:** teach `mod_mdns` to browse `_waybeam-venc._tcp` as the vehicle
+  anchor; drive the one-shot auto-subscribe from a "venc beacon seen" event;
+  subscribe by POSTing `outgoing.server` to venc `:80/api/v1/config` (not the
+  vehicle hub). Keep / extend `/restream/subscribe` for fan-out to Android.
+- **Ground:** repoint `/status` peer list + link-log targeting to the
+  `mod_mdns` browse cache; remove menu-mirror; then **delete `mod_sync`**.
+- **Both:** **delete `hub_ip_trust`** (accept-all; §5.1) — drop the check at
+  `mod_telemetry.c:399` and the seed calls in `mod_mdns.c`/`mod_sync.c`.
+- **Vehicle:** remove `mod_mdns`, `mod_sync`, `hub_ip_trust`, and the
+  `/subscribe_video*` endpoints from the vehicle profile. Vehicle hub =
+  telemetry/PWM/OSD only; venc is the anchor and owns subscribe.
 
-- Ground: teach `mod_mdns` discover path to also match `_waybeam-venc._tcp`
-  and map it to "vehicle discovered" → existing one-shot auto-subscribe.
-  venc TXT vocabulary differs (no `has_subscribe_video` etc.), so
-  `mod_sync_notify_peer_discovered()` needs a venc-shaped argument path.
-- Ground: adopt `vendor/mdns_wire` (replace the in-module wire helpers).
-- Vehicle: gate `mod_mdns` off (config `mdns.enabled=false` on vehicle config
-  first; later compile-out of `HUB_MOD_MDNS` from the `vehicle` profile).
-- Vehicle: implement **trust-on-subscribe** seed in the `/subscribe*` +
-  sidecar paths to replace the removed `hub_ip_trust` mDNS seeding.
-- Add capability-probe client used after a venc beacon is discovered.
+### 7.3 `waybeam-android`
 
-### 7.3 `waybeam-android` (later)
-
-- mDNS browse for `_waybeam-venc._tcp` (device list) instead of relying on hub.
-- After discovery, REST-probe `:8060` for hub; fall back to venc `:80` direct.
-- Subscribe via whichever path is present (hub `/subscribe_video` or venc
-  sidecar/HTTP). No code in this repo; tracked here for protocol alignment.
+- Browse `_waybeam-venc._tcp` for the vehicle device list (alongside the hub
+  service); merge into the existing discovered-hubs map.
+- **Prefer the GS restream when a ground hub is present** (`POST
+  /restream/subscribe` to the GS); fall back to a **direct venc subscribe**
+  (`POST /api/v1/config {outgoing.server}`) when no GS exists.
+- Drop the self-registration as a discoverable decoder service — restream is
+  pull-based, so nothing needs to discover Android.
+- Identity stays an informational label; no token/auth (private link).
 
 ---
 
 ## 8. Phased rollout (each phase independently shippable & revertible)
 
+> **Revised 2026-06-16.** venc needs **no** new code (subscribe = live
+> `outgoing.server` config-set, §6.1). The remaining work is hub/Android
+> repointing + deletions. Additive phases (repoint to the new path) land and
+> soak before any deletion.
+
 | Phase | Repo(s) | Change | Coexistence guarantee |
 |---|---|---|---|
 | **0** | all | This spec | — |
-| **1** | venc | Add `_waybeam-venc._tcp` beacon (additive). Hub mDNS untouched. | Old discovery fully intact; new beacon is extra. |
-| **1.5** ✅ | venc | Serial-suffix naming (`waybeam-<die-id>.local`), drop `sidecar_port` from TXT, expose `device.serial` via `GET /api/v1/config` (§4.1, §4.5, D6). **Done** — host tests pass and `make verify` cross-builds both backends (star6e/glibc + maruko/musl) clean. | Beacon stays additive; only the name/TXT shape changes before any consumer depends on it. |
-| **1.6** ✅ | venc | Bare `waybeam.local` convenience alias with IP-tiebreak conflict resolution; `discovery.bareAlias` default true (§4.6, D7). **Done** — host-tested + `make verify` clean. | Alias is additive; the unique suffixed name always works regardless. |
-| **2** | hub (ground) | Ground learns `_waybeam-venc._tcp`; adopt `vendor/mdns_wire`. | Ground still consumes `_waybeam-hub._tcp` too. |
-| **3** | hub (vehicle) | Add trust-on-subscribe seed alongside existing mDNS trust. | Both trust paths active; no regression. |
-| **4** | hub (vehicle) | Disable, then compile out vehicle `mod_mdns`. | Only after D2 confirmed; ground+venc cover discovery. |
-| **5** | android | Browse venc beacon + probe hub. | Android keeps hub-mDNS fallback until parity proven. |
+| **1 / 1.5 / 1.6** ✅ | venc | mDNS beacon + serial-suffix naming + `waybeam.local` alias (PR #147). **Done** — host tests pass; `make verify` cross-builds both backends clean. | Additive; old discovery fully intact. |
+| **2** | hub (ground) | `mod_mdns` also browses `_waybeam-venc._tcp`; auto-subscribe fires on "venc beacon seen" and POSTs `outgoing.server` to venc; `mod_sync` left compiled but idle. | Old sync path still present; new path proven first. |
+| **3** | android | Browse venc beacon; restream-preference (GS present → `/restream/subscribe`; else direct venc subscribe). | Hub-mDNS fallback kept until parity proven. |
+| **4** | hub (ground) | Repoint `/status` + link-log to mDNS cache; remove menu-mirror; **delete `mod_sync`**. | Build green; peers come from mDNS. |
+| **5** | hub (both) | **Delete `hub_ip_trust`** (accept-all); drop the telemetry check + mDNS seeds. | Telemetry from any IP; build green. |
+| **6** | hub (vehicle) | Remove `mod_mdns` + `mod_sync` + `/subscribe_video*` from the vehicle profile. | venc beacon is sole discovery; vehicle hub = telemetry/PWM/OSD. |
+| **7** | all + coord | Android drops self-registration; purge dead config (`trusted_peers`, `reject_unknown`, sync ports, menu-mirror); rewrite/retire `protocols/hub-sync.md`; update mDNS spec, SNAPSHOT, roadmaps. | `/audit-protocols` clean. |
 
-Phases 1–3 are **purely additive** (no behavior removed), so they can ship and
-soak before the removal in Phase 4. Phase 4 is the only "burn the bridge" step
-and is gated on D2.
+Phases 2–3 are **purely additive** (new path by config, fully revertible). The
+deletions in 4–6 land only after the replacement runs on hardware. The one
+security-relevant consequence — telemetry accepting any source IP — is accepted
+(private wfb link is the boundary).
 
 ---
 
@@ -498,14 +549,15 @@ and is gated on D2.
 - **D1 — TXT schema freeze (LOCKED).** Target key set: `proto`, `version`
   (§4.2). `sidecar_port` is being dropped in Phase 1.5 (D6); everything else is
   probe-discoverable / via `GET /api/v1/config`.
-- **D2 — Trust-on-subscribe completeness** (before Phase 4). Prove it covers
-  sync-hello acceptance, telemetry target, and video on the vehicle once mDNS
-  trust seeding is gone. §5.2.
-- **D3 — Probe vs venc-registry** (before Phase 5/optimization). Default
-  pure-probe; venc `/api/v1/peers` registry only on evidence. §6.
+- **D2 — Trust model (RESOLVED 2026-06-16).** `hub_ip_trust` is **deleted
+  outright** (not migrated to trust-on-subscribe); accept-all on the private
+  link. `mod_sync` is deleted entirely. Subscribe = live `outgoing.server`
+  config-set with last-writer-wins, no lock. §5, §6.1.
+- **D3 — Probe vs venc-registry (RESOLVED 2026-06-16).** Pure REST probe, zero
+  coupling; no venc `/api/v1/peers` registry. §6.3.
 - **D4 — `vendor/mdns_wire` ownership** (before Phase 2). Which repo is the
   source of truth for the vendored codec + the version bump/sync ritual.
-- **D5 — Vehicle hub mDNS removal mechanism** (Phase 4). Config-gate first
+- **D5 — Vehicle hub mDNS removal mechanism** (Phase 6). Config-gate first
   (`mdns.enabled=false`), then drop `HUB_MOD_MDNS` from the `vehicle`/
   `vehicle_wfb_ng` profiles? Confirm `make test` keeps MDNS enabled.
 - **D7 — Bare `waybeam.local` alias (Phase 1.6, DONE).** §4.6. Default-on
@@ -525,11 +577,14 @@ and is gated on D2.
 
 - **Two-repo wire fork** if D4 is skipped → diverging RFC implementations.
   Mitigated by `vendor/mdns_wire` + version stamp.
-- **Trust gap** if D2 is wrong → ground/Android silently can't reach the
-  vehicle after Phase 4. Mitigated by additive Phases 1–3 soak and keeping a
-  config rollback (`mdns.enabled=true`) until proven.
-- **Probe timeout churn** on hub-less vehicles → bounded by short timeout;
-  escalation path is D3.
+- **Discovery gap** after the vehicle-hub mDNS removal (Phase 6) → ground/
+  Android can't find the vehicle if the venc beacon is down. Mitigated by the
+  additive Phases 2–3 soak and a config rollback (`mdns.enabled=true` on the
+  vehicle hub) until the venc beacon is proven as the sole anchor.
+- **Open telemetry ingest** after `hub_ip_trust` removal (Phase 5) → any host
+  on the link can inject telemetry UDP. Accepted: the wfb RF link is the
+  security boundary (no internet, no shared L2).
+- **Probe timeout churn** on hub-less vehicles → bounded by short timeout.
 - **Slower hub-down detection** (probe failure vs mDNS goodbye) → acceptable;
   the *device* (venc) still has a real goodbye.
 - **Strict venc build** (`-Werror -Wextra`, dual backend) → wire codec must be
@@ -541,17 +596,21 @@ and is gated on D2.
 
 - venc: unit tests for TXT build + DNS record encode + goodbye; `make verify`
   (both backends); on-device `avahi-browse -r _waybeam-venc._tcp` smoke test.
-- hub: extend `make test` (keep `HUB_MOD_MDNS`) with `_waybeam-venc._tcp`
-  parse + venc-shaped `notify_peer_discovered`; trust-on-subscribe unit tests;
-  capability-probe client tests (200 / refused / timeout).
-- Cross: ground discovers venc beacon → auto-subscribe one-shot still fires
-  exactly once; Android-direct (no hub) subscribe via venc sidecar works.
+- hub: extend `make test` with `_waybeam-venc._tcp` parse + mDNS browse-cache
+  peer registry (replacing `mod_sync`); capability-probe client tests (200 /
+  refused / timeout); confirm builds stay green after `mod_sync` + `hub_ip_trust`
+  deletion.
+- Cross: ground discovers venc beacon → auto-subscribe one-shot fires exactly
+  once and POSTs `outgoing.server` to venc; Android-direct (no hub) subscribe
+  via venc config-set works; GS-present → Android receives the GS restream and
+  never retargets the vehicle.
 
 ---
 
 ## 12. Out of scope (this spec)
 
-- Any code. This is Phase 1 only.
-- Android implementation (tracked, not built here).
+- venc code — Phases 1/1.5/1.6 already shipped (PR #147); nothing further needed.
+- Hub/Android implementation (tracked here for protocol alignment; built in
+  their own repos under Phases 2–7).
 - Changing the sidecar wire format or the video-lock semantics (reused as-is).
 ```
