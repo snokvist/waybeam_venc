@@ -353,6 +353,8 @@ static uint32_t beacon_scan_alias_conflict(const MdnsBeacon *b,
 	snprintf(alias_fqdn, sizeof(alias_fqdn), "%s.local", b->alias_host);
 
 	uint16_t qd = mdns_get16(pkt + 4);
+	/* Counts are attacker-supplied; the real bound on both loops below is the
+	 * `pos < len` gate, not these totals. */
 	long rrs = (long)mdns_get16(pkt + 6) + mdns_get16(pkt + 8) +
 		mdns_get16(pkt + 10);
 	int pos = 12;
@@ -361,6 +363,10 @@ static uint32_t beacon_scan_alias_conflict(const MdnsBeacon *b,
 		char nm[MDNS_MAX_NAME];
 		int c = mdns_decode_name(pkt, len, pos, nm, (int)sizeof(nm));
 		if (c < 0)
+			return 0;
+		/* Bounds-check the qtype+qclass skip before advancing (mirror of
+		 * beacon_should_respond) so pos can't run past the buffer. */
+		if (pos + c + 4 > len)
 			return 0;
 		pos += c + 4;  /* qtype + qclass */
 	}
