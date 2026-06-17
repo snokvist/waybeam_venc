@@ -1,5 +1,59 @@
 # History
 
+## [0.18.0] - 2026-06-16
+
+Add an mDNS device beacon (discovery migration, Phase 1). waybeam_venc now
+announces itself as a `_waybeam-venc._tcp.local` service on the multicast
+group 224.0.0.251:5353, so ground stations and Android clients can discover
+the encoder directly — independent of the optional waybeam-hub, which is the
+only thing that previously advertised the vehicle.
+
+**Announce-only, self-contained, off the hot path.** The beacon runs on its
+own thread (`src/mdns_beacon.c`), started from `main()` and torn down (with a
+multicast goodbye) before any SIGHUP-respawn exec. It responds to PTR queries
+for its own service type and re-announces periodically; it does **not**
+discover peers or feed any trust layer. The RFC 6762/6763 wire codec lives in
+`src/mdns_wire.c` (`MDNS_WIRE_VERSION 1`) — the source of truth that
+waybeam-hub will vendor; keep both in sync. The wire codec and multicast
+socket handling are derived from
+[OpenIPC herald](https://github.com/OpenIPC/firmware/tree/master/general/package/herald)
+(MIT), the compact mDNS/DNS-SD stack for the OpenIPC project.
+
+TXT is kept **deliberately minimal**: the service type `_waybeam-venc._tcp`
+is itself the recognition signal ("an OpenIPC camera running the waybeam
+encoder"), so TXT carries only `proto` (wire-schema version) and `version`
+(waybeam version). The hostname/IP/port travel in the standard SRV/A/instance
+records; live state (bitrate/fps/mode) is never advertised. The sidecar port,
+backend/SoC, codec, full serial, and hub presence are left for the consumer to
+fetch with one `GET /api/v1/config` after discovery — the beacon announces an
+always-true device fact, capabilities are queried on demand.
+
+**Serial-suffix naming.** The instance/host name is `waybeam-<suffix>.local`,
+where `<suffix>` is the tail of the SigmaStar SoC **die ID** read natively
+from RIU registers via `/dev/mem` (`src/device_id.c`, method lifted from
+OpenIPC `ipctool` and device-verified against `ipcinfo -i`). This gives every
+Star6E a stable, collision-free name with no RFC 6762 rename churn. SoCs with
+no die ID (ssc37x / Maruko, verified) fall back to `discovery.name` or bare
+`waybeam`. The full 12-hex die ID is the fleet key, exposed read-only at
+`GET /api/v1/config` → `data.device.serial`.
+
+**Bare `waybeam.local` alias.** Because most setups run a single vehicle, the
+beacon also claims the bare host name `waybeam.local` (config
+`discovery.bareAlias`, default true) so it can be reached as
+`http://waybeam.local` without the suffix. It publishes A records for both
+names and answers `A` queries for either. If a second waybeam device contests
+`waybeam.local`, the conflict is resolved on the existing RX socket by an
+RFC 6762 §8.2 IP tiebreak (higher IP keeps it; the lower IP yields with a
+goodbye and keeps only its unique suffixed name) — no flapping, every device
+still reachable by `waybeam-<suffix>.local`.
+
+New `discovery` config section (`enabled` default true, `serviceType`,
+`name`, `bareAlias`). The beacon is inert when disabled, when no usable
+interface exists, or if the socket can't bind — it never blocks the encode
+path.
+
+Design: `documentation/DISCOVERY_TRUST_MIGRATION_SPEC.md`.
+
 ## [0.17.1] - 2026-06-13
 
 Fix dual-record mode never engaging under runtime control — the SD-card
