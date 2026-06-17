@@ -427,18 +427,36 @@ already classified `MUT_LIVE`:
 FIELD(outgoing, server, FT_STRING, MUT_LIVE),   /* src/venc_api.c:400 */
 ```
 
-Setting it through the existing config path calls `apply_server()`
-(`src/venc_api.c:1492/1504/1510`), which retargets the running stream via the
-output seqlock — **no restart, no respawn.** So the canonical "subscribe" is:
+Setting it calls `apply_server()` (`src/venc_api.c:1492/1504/1510`), which
+retargets the running stream via the output seqlock — **no restart, no
+respawn.** venc exposes config-set as a **dot-notation `GET /api/v1/set`** (the
+same setter used for `video0.fps`, `outgoing.enabled`, …); there is **no**
+`POST`/JSON `/api/v1/config` route (`/api/v1/config` is GET-only). So the
+canonical "subscribe" is:
 
 ```
-POST /api/v1/config  {"outgoing":{"server":"udp://<my-ip>:<my-port>"}}
+GET /api/v1/set?outgoing.server=udp://<my-ip>:<my-port>
 ```
+
+> **Device-verified 2026-06-17 (Star6E .13).** `/api/v1/set` is the live
+> setter; an early draft of this spec (and the first hub/Android cut) used a
+> non-existent `POST /api/v1/config` — corrected in both repos.
+
+> **⚠ Topology constraint — live retarget needs UDP mode.**
+> `star6e_output_apply_server()` (`src/star6e_output.c:676`) **rejects any live
+> server change while the output is `shm://`** (the wfb SHM ring): *"live switch
+> away from shm:// is not supported (requires restart)"*, and likewise refuses a
+> live switch *to* `shm://`. So this subscribe works only when venc is already
+> in a **UDP** topology (udp→udp destination change). In a **wfb-RF** deployment
+> venc stays `shm://` feeding wfb-air, the ground is on a different L2 and never
+> sees the venc beacon, and delivery is via wfb-gs — the retarget is simply not
+> used. mDNS-discovery + live-retarget is therefore a **direct-WiFi/LAN**
+> topology feature (Android-direct, shared-WiFi ground).
 
 > **Decision (D2, resolved):** there is **no** `/api/v1/subscribe` endpoint and
 > **no** subscription lock. A dedicated verb would only wrap a field that
 > already does the job; `GET /api/v1/config` already reports the current
-> destination and each POST overwrites it (last-writer-wins). venc earns
+> destination and each `set` overwrites it (last-writer-wins). venc earns
 > "anchor" by *owning the field*, not by exposing a new verb.
 
 Consumers already compute their own IP (ground `derive_local_ip`, Android
