@@ -527,6 +527,12 @@ only open venc-touching item, gated on **D4** (before hub Phase 2).
 - **Vehicle:** remove `mod_mdns`, `mod_sync`, `hub_ip_trust`, and the
   `/subscribe_video*` endpoints from the vehicle profile. Vehicle hub =
   telemetry/PWM/OSD only; venc is the anchor and owns subscribe.
+- **Follow-up (cleanup):** `mod_mdns`'s `iq_ct` TXT field + `mod_mdns_set_iq_ct()`
+  seed/toggle (`/etc/iq_settings.json`, WebUI) is now dead — the only consumer
+  (Android auto-colortrans) was removed (§7.3) and the vehicle no longer
+  advertises mDNS, so this only ever compiled on the **ground** hub, which has
+  no camera. Safe to strip from `mod_mdns.c`/`mod_webui.c` in a later pass;
+  flagged, not deleted here.
 
 ### 7.3 `waybeam-android`
 
@@ -538,6 +544,14 @@ only open venc-touching item, gated on **D4** (before hub Phase 2).
 - Drop the self-registration as a discoverable decoder service — restream is
   pull-based, so nothing needs to discover Android.
 - Identity stays an informational label; no token/auth (private link).
+- **Drop discovery-driven auto-colortrans (0.7.1).** The app previously read the
+  vehicle hub's `iq_ct` TXT to auto-apply the Color Transform shader. With the
+  vehicle hub no longer advertising mDNS (Phase 6), that signal is gone and venc
+  exposes no `iq_ct` enable flag (colortrans is a structured ISP/IQ matrix via
+  `GET /api/v1/iq`, not a boolean). Resolution: Color Transform is a **manual
+  filter** like the other shaders; the `auto_colortrans` setting + mDNS-change
+  plumbing were removed. This was the app's last dependency on the vehicle-hub
+  beacon, so removing it completes the venc-as-sole-vehicle-anchor model.
 
 ---
 
