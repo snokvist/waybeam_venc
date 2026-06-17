@@ -440,7 +440,11 @@ GET /api/v1/set?outgoing.server=udp://<my-ip>:<my-port>
 
 > **Device-verified 2026-06-17 (Star6E .13).** `/api/v1/set` is the live
 > setter; an early draft of this spec (and the first hub/Android cut) used a
-> non-existent `POST /api/v1/config` — corrected in both repos.
+> non-existent `POST /api/v1/config` — corrected in both repos. The live
+> **udp→udp** retarget was proven end-to-end: with venc in UDP mode, a
+> `set?outgoing.server=` moved the running RTP stream to a new dst (captured
+> 5k pkts/3s before and after) with **no respawn** (PID unchanged) and the old
+> dst went silent.
 
 > **⚠ Topology constraint — live retarget needs UDP mode.**
 > `star6e_output_apply_server()` (`src/star6e_output.c:676`) **rejects any live
