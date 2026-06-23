@@ -204,6 +204,20 @@ same discipline as `vendor/venc_ring/` (`VENC_RING_VERSION`, "keep in sync").
 > waybeam-hub's `mod_mdns`, which inlined herald's wire helpers. The credit
 > chain is preserved in `src/mdns_wire.{c,h}` and `src/mdns_beacon.c`.
 
+**Herald conformance (reviewed 2026-06-23).** The wire format matches herald
+exactly (record order PTR/SRV/TXT/A, cache-flush classes, name compression,
+TTL=0 goodbye) so the beacon and a herald-client interoperate. Two RFC 6762
+conformance gaps were brought back in line with herald: IP multicast TTL is
+255 (§11, was 1) and query responses now carry 20–119 ms jitter (§6). The
+remaining divergences are deliberate policy, not drift, and are documented at
+the top of `src/mdns_beacon.c`:
+- short record TTL (120 s) + 60 s proactive refresh vs herald's 4500 s
+  reactive-only model — chosen for DHCP IP churn and passive (non-querying)
+  consumers;
+- no probing (§8.1) of the die-ID-derived primary name (collision-free by
+  construction); the contestable bare `waybeam.local` alias keeps §8.2
+  conflict resolution, which herald has no equivalent of.
+
 - **Phase 1 location:** the codec ships as `src/mdns_wire.{c,h}` +
   `include/mdns_wire.h` with `MDNS_WIRE_VERSION 1` — pure functions (build
   PTR/SRV/TXT/A, parse records, TXT get). No socket or platform code; the
