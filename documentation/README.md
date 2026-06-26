@@ -26,6 +26,10 @@ This folder is the canonical place for waybeam_venc project documentation.
 - `documentation/DEBUG_OSD_PLAN.md`
   - Debug OSD overlay API reference. Covers enabling, drawing primitives (text,
     rect, point, line), color constants, and how to add debug output from new modules.
+- `documentation/IMU_RATE_PERFORMANCE.md`
+  - BMI270 FIFO drain performance: why high ODR drops frames (synchronous
+    I²C-bound drain), the threaded-drain fix (default on Star6E) + poll cap,
+    device benchmarks, and the deferred 1 kHz / 1 MHz-I²C follow-up.
 - `documentation/OPTFLOW_FUSION_ROADMAP.md`
   - Optical flow + IMU fusion implementation roadmap.
   - Covers derotation, flight controller integration (MAVLink/MSP), degraded modes,

@@ -845,10 +845,16 @@ static void *imu_fifo_reader_thread(void *arg)
 	ImuState *st = (ImuState *)arg;
 	int odr = st->cfg.sample_rate_hz;
 
-	/* Poll interval: drain at ~50% FIFO capacity for good batching */
+	/* Poll interval: target ~50% FIFO capacity, but cap it well under a
+	 * video frame period (≤120 fps → 8.3 ms) so the gyro-assisted
+	 * stabilizer's per-frame ring window always sees fresh samples.  The
+	 * 50%-fill interval is 49 ms @800 Hz and ~200 ms @200 Hz — far too
+	 * stale for the stabilizer — so the 8 ms cap dominates at every
+	 * supported ODR while staying far below the FIFO-overflow interval
+	 * (≥49 ms even at 1600 Hz).  The floor avoids busy-looping. */
 	long poll_ms = (1024L * 500L) / ((long)odr * FIFO_COMBINED_SIZE);
-	if (poll_ms < 5)   poll_ms = 5;
-	if (poll_ms > 100)  poll_ms = 100;
+	if (poll_ms < 4)  poll_ms = 4;
+	if (poll_ms > 8)  poll_ms = 8;
 
 	printf("  - IMU   : FIFO reader: poll every %ld ms, ODR=%d Hz\n",
 		poll_ms, odr);

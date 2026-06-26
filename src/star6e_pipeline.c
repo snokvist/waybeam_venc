@@ -2129,7 +2129,14 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 			.cal_samples = vcfg->imu.cal_samples,
 			.push_fn = star6e_pipeline_imu_push,
 			.push_ctx = state,
-			.use_thread = 0,
+			/* Threaded drain: read the FIFO on a dedicated thread
+			 * instead of synchronously in the frame loop.  The
+			 * synchronous I2C read (~169us + 29.5us/byte) grows with
+			 * ODR and stalls frames at >=400 Hz, saturating the FIFO
+			 * into a death spiral at 1600 Hz.  Decoupling restores
+			 * full fps up to 800 Hz (device-verified).  See
+			 * documentation/IMU_RATE_PERFORMANCE.md. */
+			.use_thread = 1,
 		};
 		state->imu = imu_init(&imu_cfg);
 		if (state->imu) {
