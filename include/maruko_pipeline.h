@@ -2,6 +2,7 @@
 #define MARUKO_PIPELINE_H
 
 #include "imu_bmi270.h"
+#include "imu_ring.h"
 #include "maruko_audio.h"
 #include "maruko_bindings.h"
 #include "maruko_config.h"
@@ -98,6 +99,11 @@ void maruko_pipeline_teardown(MarukoBackendContext *ctx);
 
 /** Install SIGINT/SIGTERM/SIGHUP handlers for graceful shutdown/reinit. */
 void maruko_pipeline_install_signal_handlers(void);
+
+/** The pipeline-owned IMU gyro ring, or NULL until imu.enabled init has run.
+ *  Mirrors star6e_pipeline_imu_ring(); read-only for future motion/telemetry
+ *  consumers. */
+ImuRing *maruko_pipeline_imu_ring(void);
 
 /** Create the secondary VENC channel (chn 1) and start a thread that
  *  drains its frames.  The drain destination depends on `mode`:

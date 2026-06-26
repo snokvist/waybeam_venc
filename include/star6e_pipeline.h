@@ -117,6 +117,13 @@ void star6e_pipeline_stop(Star6ePipelineState *state);
 /** Disable VPE prescaler (cleanup during shutdown). */
 void star6e_pipeline_vpe_scl_preset_shutdown(void);
 
+/** Open/close the canonical-gcsv gyro log alongside a recording.  Open is
+ *  gated on the IMU being active, so the runtime calls it at every recorder
+ *  start; close is a no-op when not logging.  rec_path is the recorder's path
+ *  (the gcsv takes its basename). */
+void star6e_pipeline_imu_gcsv_open(const char *rec_path);
+void star6e_pipeline_imu_gcsv_close(void);
+
 /** Apply digital zoom on VPE port 0.  pct=0 disables (full-frame).
  *  x/y set the *target* pan position; the live crop decays toward it
  *  with a backend-hardcoded time constant (PAN_RAMP_DEFAULT_MS).

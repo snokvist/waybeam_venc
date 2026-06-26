@@ -8,6 +8,7 @@
 #include "codec_config.h"
 #include "codec_types.h"
 #include "debug_osd.h"
+#include "imu_gcsv_log.h"
 #include "imu_ring.h"
 #include "star6e_controls.h"
 #include "star6e_cus3a.h"
@@ -608,6 +609,12 @@ static void star6e_pipeline_stop_vpe(void)
  * whether stabilization is active. */
 static ImuRing g_imu_ring;
 static volatile int g_imu_ring_ready;
+
+/* Canonical-gcsv gyro log, opened alongside a recording when the IMU is
+ * active (see star6e_pipeline_imu_gcsv_open/close).  Inactive (no-op) until
+ * a recording starts.  Mutex statically initialized: open() runs on the main
+ * thread, push()/close() may run on the dual recording thread. */
+static ImuGcsvLog g_imu_gcsv_log = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
 
 /* Compute the effective output dim for digital zoom.
@@ -1812,6 +1819,7 @@ static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
 		.accel_z = sample->accel_z,
 	};
 	imu_ring_push(&g_imu_ring, &rs);
+	imu_gcsv_log_push(&g_imu_gcsv_log, sample);
 }
 
 /* Framing-module host service: the pipeline-owned IMU ring, or NULL until
@@ -1820,6 +1828,22 @@ static void star6e_pipeline_imu_push(void *ctx, const ImuSample *sample)
 ImuRing *star6e_pipeline_imu_ring(void)
 {
 	return g_imu_ring_ready ? &g_imu_ring : NULL;
+}
+
+/* Open the canonical-gcsv gyro log next to a just-started recording.  Gated on
+ * the IMU being active (ring ready) — without samples there is nothing to log,
+ * so the runtime can call this unconditionally at every recorder start.
+ * rec_path is the recorder's own path, so the gcsv shares its basename. */
+void star6e_pipeline_imu_gcsv_open(const char *rec_path)
+{
+	if (g_imu_ring_ready && rec_path && rec_path[0])
+		(void)imu_gcsv_log_open(&g_imu_gcsv_log, rec_path);
+}
+
+/* Close the gcsv gyro log at recorder stop.  No-op when not logging. */
+void star6e_pipeline_imu_gcsv_close(void)
+{
+	imu_gcsv_log_close(&g_imu_gcsv_log);
 }
 
 /* Tracks whether CUS3A has been enabled in this MI_SYS lifetime.  Cleared

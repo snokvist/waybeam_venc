@@ -4,6 +4,8 @@
 #include "debug_osd.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
+#include "imu_gcsv_log.h"
+#include "imu_ring.h"
 #include "intra_refresh.h"
 #include "isp_runtime.h"
 #include "maruko_bindings.h"
@@ -2249,14 +2251,55 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	return 0;
 }
 
-/* IMU push callback: stub.  Drained samples are discarded for now —
- * the callback exists so a future telemetry / sidecar consumer can
- * slot in without rewiring imu_init.  Mirrors star6e_pipeline.c's
- * star6e_pipeline_imu_push. */
+/* Shared gyro ring (the single home for IMU data — a future ported framing
+ * module's motion estimator can read it via maruko_pipeline_imu_ring()) plus
+ * the canonical-gcsv logger, opened alongside a recording.  Both are
+ * file-static, mirroring star6e_pipeline.c. */
+static ImuRing g_imu_ring;
+static volatile int g_imu_ring_ready;
+/* Mutex statically initialized (see imu_gcsv_log.h).  On Maruko open/push/close
+ * all run on the main thread, but the static init keeps it correct and matches
+ * Star6E. */
+static ImuGcsvLog g_imu_gcsv_log = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+/* IMU push callback: route frame-synced 6-axis samples into the shared gyro
+ * ring and, when a recording is active, the gcsv log.  Cheap (mutex + copy);
+ * the gcsv push is a no-op until imu_gcsv_log_open() runs at recorder start.
+ * Mirrors star6e_pipeline.c's star6e_pipeline_imu_push. */
 static void maruko_pipeline_imu_push(void *ctx, const ImuSample *sample)
 {
 	(void)ctx;
-	(void)sample;
+	if (!g_imu_ring_ready || !sample)
+		return;
+	ImuRingSample rs = {
+		.ts      = sample->ts,
+		.gyro_x  = sample->gyro_x,
+		.gyro_y  = sample->gyro_y,
+		.gyro_z  = sample->gyro_z,
+		.accel_x = sample->accel_x,
+		.accel_y = sample->accel_y,
+		.accel_z = sample->accel_z,
+	};
+	imu_ring_push(&g_imu_ring, &rs);
+	imu_gcsv_log_push(&g_imu_gcsv_log, sample);
+}
+
+/* The pipeline-owned IMU ring, or NULL until imu.enabled init has run.
+ * Read-only consumers (a future framing module's motion estimator, telemetry)
+ * use this.  Mirrors star6e_pipeline_imu_ring(). */
+ImuRing *maruko_pipeline_imu_ring(void)
+{
+	return g_imu_ring_ready ? &g_imu_ring : NULL;
+}
+
+/* Open the canonical-gcsv gyro log next to a just-started recording, but only
+ * when the IMU is running — otherwise there are no samples to log.  Called
+ * with the recorder's own path so the gcsv shares the recording's basename
+ * (<rec>.ts ↔ <rec>.gcsv).  imu_gcsv_log_open() replaces any prior file. */
+static void maruko_imu_gcsv_open(MarukoBackendContext *ctx, const char *rec_path)
+{
+	if (ctx->imu && rec_path && rec_path[0])
+		(void)imu_gcsv_log_open(&g_imu_gcsv_log, rec_path);
 }
 
 /* ── Dual VENC (Phase 7) ─────────────────────────────────────────────────
@@ -2910,6 +2953,10 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * VENC's internal queue, not the IMU code itself).  Star6E does
 	 * not exhibit this; pre-init only on Maruko. */
 	if (ctx->cfg.imu.enabled && !ctx->imu) {
+		if (!g_imu_ring_ready) {
+			imu_ring_init(&g_imu_ring);
+			g_imu_ring_ready = 1;
+		}
 		ImuConfig imu_cfg = {
 			.i2c_device = ctx->cfg.imu.i2c_device,
 			.i2c_addr = ctx->cfg.imu.i2c_addr,
@@ -3014,6 +3061,11 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 				printf("> [maruko] recording HEVC to %s (%s)\n",
 					ctx->cfg.record.dir,
 					ctx->cfg.record.mode);
+				/* gcsv for mirror (chn 0) and dual (chn 1): both
+				 * record the same camera, so the gyro tracks
+				 * either.  This block only runs for those two
+				 * modes (not dual-stream, which has no file). */
+				maruko_imu_gcsv_open(ctx, ctx->recorder.path);
 			}
 		} else if (strcmp(ctx->cfg.record.format, "ts") == 0) {
 			if (star6e_ts_recorder_start(&ctx->ts_recorder,
@@ -3024,6 +3076,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 					ctx->cfg.record.dir,
 					ctx->cfg.record.mode,
 					ctx->audio.started ? " + audio" : "");
+				maruko_imu_gcsv_open(ctx, ctx->ts_recorder.path);
 			}
 		} else {
 			fprintf(stderr,
@@ -3544,13 +3597,20 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 				 * than a branch and matches Star6E's pattern. */
 				star6e_recorder_stop(&ctx->recorder);
 				star6e_ts_recorder_stop(&ctx->ts_recorder);
+				/* Close the old gcsv now so a failed restart below
+				 * can't leave it open accumulating against a
+				 * recording that no longer exists. */
+				imu_gcsv_log_close(&g_imu_gcsv_log);
 				ctx->audio.rec_ring = NULL;
 				if (is_hevc) {
 					if (star6e_recorder_start(&ctx->recorder,
-					    rec_dir) == 0)
+					    rec_dir) == 0) {
+						maruko_imu_gcsv_open(ctx,
+							ctx->recorder.path);
 						(void)maruko_mi_venc_request_idr(
 							ctx->venc_device,
 							ctx->venc_channel, 1);
+					}
 				} else {
 					ctx->audio.rec_ring = ctx->audio.started
 						? &ctx->audio_recorder_ring
@@ -3559,15 +3619,19 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 					    &ctx->ts_recorder, rec_dir,
 					    ctx->audio.started
 						? &ctx->audio_recorder_ring
-						: NULL) == 0)
+						: NULL) == 0) {
+						maruko_imu_gcsv_open(ctx,
+							ctx->ts_recorder.path);
 						(void)maruko_mi_venc_request_idr(
 							ctx->venc_device,
 							ctx->venc_channel, 1);
+					}
 				}
 			}
 			if (stop_pending) {
 				star6e_recorder_stop(&ctx->recorder);
 				star6e_ts_recorder_stop(&ctx->ts_recorder);
+				imu_gcsv_log_close(&g_imu_gcsv_log);
 				ctx->audio.rec_ring = NULL;
 			}
 		}
@@ -3689,6 +3753,7 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * Stop both — at most one is open, the inactive call is a no-op. */
 	star6e_ts_recorder_stop(&ctx->ts_recorder);
 	star6e_recorder_stop(&ctx->recorder);
+	imu_gcsv_log_close(&g_imu_gcsv_log);
 	/* Audio teardown after recorder stop: the recorder pops from
 	 * audio_recorder_ring, so the recorder must be quiet before we
 	 * can destroy the ring or join the encode thread that pushes

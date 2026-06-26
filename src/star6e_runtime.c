@@ -430,12 +430,14 @@ static void *dual_rec_thread_fn(void *arg)
 		 * one thread. */
 		if (d->rec_req_stop && d->ts_recorder) {
 			star6e_ts_recorder_stop(d->ts_recorder);
+			star6e_pipeline_imu_gcsv_close();
 			d->rec_req_stop = 0;
 		}
 		if (d->rec_req_start && d->ts_recorder) {
 			star6e_ts_recorder_stop(d->ts_recorder);
 			star6e_ts_recorder_start(d->ts_recorder,
 				d->rec_req_start_dir, d->audio_ring);
+			star6e_pipeline_imu_gcsv_open(d->ts_recorder->path);
 			if (d->ts_recorder->request_idr)
 				d->ts_recorder->request_idr();
 			d->rec_req_start = 0;
@@ -700,6 +702,15 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 				vcfg->record.dir,
 				vcfg->audio.enabled ? &ps->audio_ring : NULL);
 		}
+		/* gcsv gyro log for the config-driven recording (mirror chn 0
+		 * or dual chn 1 — both record the same camera).  dual-stream
+		 * is excluded above (no on-disk recorder).  Runtime HTTP
+		 * toggles are handled at the mirror start/stop sites and in the
+		 * dual drain thread.  No-op unless the IMU is active. */
+		star6e_pipeline_imu_gcsv_open(
+			strcmp(vcfg->record.format, "hevc") == 0
+				? ps->recorder.path
+				: ps->ts_recorder.path);
 	}
 
 	return 0;
@@ -918,6 +929,9 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 				/* Mirror mode: act directly on the recorders */
 				star6e_recorder_stop(&ps->recorder);
 				star6e_ts_recorder_stop(&ps->ts_recorder);
+				/* Close the old gcsv so a failed restart can't leave
+				 * it open against a now-stopped recording. */
+				star6e_pipeline_imu_gcsv_close();
 				ps->audio.rec_ring = NULL;
 				if (strcmp(vcfg->record.format, "hevc") == 0) {
 					star6e_recorder_start(&ps->recorder, rec_dir);
@@ -928,6 +942,10 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 						rec_dir,
 						vcfg->audio.enabled ? &ps->audio_ring : NULL);
 				}
+				star6e_pipeline_imu_gcsv_open(
+					strcmp(vcfg->record.format, "hevc") == 0
+						? ps->recorder.path
+						: ps->ts_recorder.path);
 				/* Request IDR so the recording starts with a keyframe */
 				runtime_request_idr();
 			}
@@ -941,6 +959,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			} else if (!ps->dual) {
 				star6e_recorder_stop(&ps->recorder);
 				star6e_ts_recorder_stop(&ps->ts_recorder);
+				star6e_pipeline_imu_gcsv_close();
 				ps->audio.rec_ring = NULL;
 			}
 			/* dual-stream: nothing to do */
@@ -1285,6 +1304,7 @@ static void star6e_runner_teardown(void *opaque)
 	 * inside pipeline_stop(). */
 	star6e_recorder_stop(&ctx->ps.recorder);
 	star6e_ts_recorder_stop(&ctx->ps.ts_recorder);
+	star6e_pipeline_imu_gcsv_close();
 	audio_ring_destroy(&ctx->ps.audio_ring);
 	if (ctx->httpd_started) {
 		venc_httpd_stop();
