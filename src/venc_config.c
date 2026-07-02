@@ -559,14 +559,25 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		safe_strcpy(v->frame_lost_mode, sizeof(v->frame_lost_mode),
 			fl_mode);
 	}
-	v->frame_lost_threshold = (uint32_t)json_get_int(obj,
-		"frameLostThreshold", (int)v->frame_lost_threshold);
-	if (v->frame_lost_threshold > 200000U)
-		v->frame_lost_threshold = 200000U;
-	v->frame_lost_gap = (uint32_t)json_get_int(obj, "frameLostGap",
-		(int)v->frame_lost_gap);
-	if (v->frame_lost_gap > 600U)
-		v->frame_lost_gap = 600U;
+	{
+		/* Negative values fail closed to 0 (auto / off) — the naive
+		 * uint cast would wrap them past the upper clamp and land on
+		 * the MAXIMUM (full threshold / max decimation). */
+		int fl_thr = json_get_int(obj, "frameLostThreshold",
+			(int)v->frame_lost_threshold);
+		int fl_gap = json_get_int(obj, "frameLostGap",
+			(int)v->frame_lost_gap);
+		if (fl_thr < 0)
+			fl_thr = 0;
+		if (fl_thr > 200000)
+			fl_thr = 200000;
+		if (fl_gap < 0)
+			fl_gap = 0;
+		if (fl_gap > 600)
+			fl_gap = 600;
+		v->frame_lost_threshold = (uint32_t)fl_thr;
+		v->frame_lost_gap = (uint32_t)fl_gap;
+	}
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
 		(int)v->scene_threshold);
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",

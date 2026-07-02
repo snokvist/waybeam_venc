@@ -193,8 +193,8 @@ int star6e_controls_apply_frame_lost(MI_VENC_CHN chn, bool enabled,
 	 * re-derive the auto threshold on every step and would spam the
 	 * console.  Enable/mode/gap flips are rare and bench-relevant. */
 	static int last_state = -1;
-	int state = ((int)lost.bFrmLostOpen << 16) | ((int)pskip << 8) |
-		(int)(gap & 0xff);
+	int state = ((int)lost.bFrmLostOpen << 17) | ((int)pskip << 16) |
+		(int)(gap & 0xffff);
 	if (state != last_state) {
 		last_state = state;
 		printf("> FrameLost: open=%d mode=%s thr=%u bps gap=%u\n",

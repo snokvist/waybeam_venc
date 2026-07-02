@@ -481,6 +481,24 @@ static int test_frame_lost_clamping(void)
 	CHECK("frame_lost_thr_clamped",
 		cfg.video0.frame_lost_threshold == 200000);
 	CHECK("frame_lost_gap_clamped", cfg.video0.frame_lost_gap == 600);
+
+	/* Negative values must fail closed to 0, not wrap to the max. */
+	const char *json_neg =
+		"{ \"video0\": { \"frameLostThreshold\": -1,"
+		"  \"frameLostGap\": -5 } }";
+	path = write_temp_json(json_neg);
+	CHECK("frame_lost_neg_tmpfile", path != NULL);
+	if (!path) return failures;
+
+	venc_config_defaults(&cfg);
+	cfg.video0.frame_lost_threshold = 1234;
+	cfg.video0.frame_lost_gap = 7;
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+
+	CHECK("frame_lost_thr_neg_zero", cfg.video0.frame_lost_threshold == 0);
+	CHECK("frame_lost_gap_neg_zero", cfg.video0.frame_lost_gap == 0);
 	return failures;
 }
 

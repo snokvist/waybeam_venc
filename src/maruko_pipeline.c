@@ -1664,8 +1664,8 @@ int maruko_pipeline_apply_frame_lost(MI_VENC_DEV dev, MI_VENC_CHN chn,
 	 * re-derive the auto threshold on every step and would spam the
 	 * console.  Enable/mode/gap flips are rare and bench-relevant. */
 	static int last_state = -1;
-	int state = ((int)lost.bFrmLostOpen << 16) | (pskip ? 1 << 8 : 0) |
-		(int)(gap & 0xff);
+	int state = ((int)lost.bFrmLostOpen << 17) | (pskip ? 1 << 16 : 0) |
+		(int)(gap & 0xffff);
 	if (state != last_state) {
 		last_state = state;
 		printf("> [maruko] FrameLost: open=%d mode=%s thr=%u bps"

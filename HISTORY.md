@@ -41,6 +41,12 @@ selected — every call site hardcoded `E_MI_VENC_FRMLOST_NORMAL`.
   the existing safety net stops costing visible fps under motion — is a
   one-line change gated on hardware verification of PSKIP on both SoCs.
 
+`documentation/WFB_FEC_PSKIP_INTEROP_PLAN.md` documents the wire-level
+contract for FEC controllers (every pskip placeholder is one tiny M=1
+RTP packet) and the required wfb_ng-side changes: occupancy-gated
+M-bit block closure and K-estimator gating, so placeholders neither
+spawn K=1 FEC blocks nor poison frame-size-driven block sizing.
+
 Bench recipe (deterministic): stream at e.g. 8192 kbps, then
 `/api/v1/set?video0.frameLostMode=pskip&video0.frameLostThreshold=2000` —
 expect continuous tiny P-frames (sidecar `frame_size_bytes` collapses),
