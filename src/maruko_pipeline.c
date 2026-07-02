@@ -821,23 +821,85 @@ fail_scl:
 	return -1;
 }
 
+/* Poll an MI module's debug proc node until its enabled output port
+ * reports at most max_inflight tasks (workingTask_cnt / PipeBuf_cnt in
+ * the "Output port common info" section).  MI_SYS_UnBindChnPort runs an
+ * UNBOUNDED uninterruptible kernel poll (MI_SYS_IMPL_FlushRealTimeOutputBuf)
+ * for REALTIME/RING binds — if an in-flight buffer's consumer is already
+ * gone, the process hangs in D-state forever.  max_inflight is 0 for a
+ * stopped producer (truly drains) and 1 for the SCL->VENC RING leg,
+ * whose ring keeps one resident slot busy the whole time it is bound.
+ * This wait is bounded and advisory: on timeout or unreadable proc node
+ * the caller proceeds anyway. */
+static int maruko_wait_output_idle(const char *proc_path, int timeout_ms,
+	int max_inflight)
+{
+	int waited = 0;
+
+	while (1) {
+		FILE *f = fopen(proc_path, "r");
+		char line[256];
+		int header_seen = 0, working = -1, pipebuf = -1;
+
+		if (!f)
+			return 0; /* no proc node — nothing to wait on */
+		while (fgets(line, sizeof(line), f)) {
+			if (strstr(line, "workingTask_cnt") &&
+			    strstr(line, "finishedTask_cnt")) {
+				header_seen = 1;
+				continue;
+			}
+			if (header_seen) {
+				int chn, pass, port, finished, maxenq;
+				if (sscanf(line, "%d %d %d %d %d %d %d",
+				    &chn, &pass, &port, &working, &finished,
+				    &pipebuf, &maxenq) == 7)
+					break;
+				header_seen = 0;
+			}
+		}
+		fclose(f);
+		if (working <= max_inflight && pipebuf <= max_inflight)
+			return 0;
+		if (waited >= timeout_ms) {
+			printf("> [maruko] output not idle after %dms "
+				"(%s: working=%d pipebuf=%d) — proceeding\n",
+				waited, proc_path, working, pipebuf);
+			return -1;
+		}
+		usleep(10 * 1000);
+		waited += 10;
+	}
+}
+
+#define MARUKO_PROC_ISP "/proc/mi_modules/mi_isp/mi_isp0"
+#define MARUKO_PROC_SCL "/proc/mi_modules/mi_scl/mi_scl0"
+
 /* Stop VPE channels only — keep devices and dlopen handles alive.
  * Used during reinit to avoid kernel mutex destruction. */
 /* Stop VPE channels only — skip ISP DestroyChannel which crashes
  * with "Mutex not initialized" when CUS3A state persists in kernel. */
 static void maruko_stop_vpe_channels(void)
 {
-	if (g_mi_scl_chn_created) {
-		(void)g_mi_scl.fnDisablePort(0, 0, 0);
-		(void)g_mi_scl.fnStopChannel(0, 0);
-		(void)g_mi_scl.fnDestroyChannel(0, 0);
-		g_mi_scl_chn_created = 0;
-	}
+	/* Stop the producer (ISP) before destroying the consumer (SCL).
+	 * An ISP->SCL REALTIME buffer still in flight when the SCL channel
+	 * dies is never completed, and the later ISP->SCL unbind then hangs
+	 * the process in D-state inside MI_SYS_IMPL_FlushRealTimeOutputBuf
+	 * (observed once on a 1485/90fps SIGTERM teardown; no sysrq on the
+	 * I6C kernel, only reboot -f recovers).  Quiesce ISP, give SCL a
+	 * bounded window to drain the last frame, then destroy SCL. */
 	if (g_mi_isp_chn_created) {
 		(void)g_mi_isp.fnDisablePort(0, 0, 0);
 		(void)g_mi_isp.fnStopChannel(0, 0);
 		/* Skip DestroyChannel — kernel ISP retains CUS3A mutex
 		 * state that crashes on destroy+recreate cycle. */
+		(void)maruko_wait_output_idle(MARUKO_PROC_ISP, 200, 0);
+	}
+	if (g_mi_scl_chn_created) {
+		(void)g_mi_scl.fnDisablePort(0, 0, 0);
+		(void)g_mi_scl.fnStopChannel(0, 0);
+		(void)g_mi_scl.fnDestroyChannel(0, 0);
+		g_mi_scl_chn_created = 0;
 	}
 }
 
@@ -3765,6 +3827,8 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * process on ~14% of resilience reinits (S1 bench 2026-05-15).
 	 *
 	 * Sequence:
+	 *   0. Drain the SCL→VENC RING leg while the encoder still
+	 *      consumes, then stop SCL output production.
 	 *   1. VENC StopRecvPic (soft pause, lets buffered frames flow
 	 *      out one last time).
 	 *   2. Unbind VPE→VENC.
@@ -3774,6 +3838,21 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 *   6. Stop VIF.
 	 *   7. Unbind VIF→ISP.
 	 *   8. Sensor disable. */
+
+	/* Step 0: with VENC already StopRecvPic'd, in-flight SCL→VENC
+	 * output tasks can never complete, and the VPE→VENC unbind's
+	 * kernel flush then spins forever in uninterruptible D-state
+	 * (MI_SYS_IMPL_FlushRealTimeOutputBuf — observed twice, both
+	 * after long streams where the queue runs deeper; SCL proc
+	 * showed workingTask_cnt=4 stuck).  So drain first while the
+	 * encoder is still consuming, then disable the SCL output port
+	 * so nothing new enters the leg before the pause+unbind. */
+	if (g_mi_scl_chn_created) {
+		(void)maruko_wait_output_idle(MARUKO_PROC_SCL, 200, 1);
+		(void)g_mi_scl.fnDisablePort(0, 0, 0);
+		(void)maruko_wait_output_idle(MARUKO_PROC_SCL, 100, 1);
+	}
+
 	if (ctx->venc_started)
 		(void)maruko_mi_venc_stop_recv(ctx->venc_device,
 			ctx->venc_channel);
@@ -3804,6 +3883,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	}
 
 	if (ctx->bound_isp_vpe) {
+		/* Belt to the producer-first stop order in
+		 * maruko_stop_vpe_channels(): only enter the kernel's
+		 * unbounded REALTIME flush once the ISP output port reports
+		 * no in-flight tasks.  Bounded — proceeds on timeout. */
+		(void)maruko_wait_output_idle(MARUKO_PROC_ISP, 200, 0);
 		(void)MI_SYS_UnBindChnPort(&ctx->isp_port, &ctx->vpe_port);
 		ctx->bound_isp_vpe = 0;
 	}
