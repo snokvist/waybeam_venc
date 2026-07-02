@@ -1,7 +1,7 @@
 # Maruko IMX415 1485 Mbps Non-Binned Modes
 
 Status: device-verified July 2026 on SSC378QE (Infinity6C) + IMX415, 4-lane
-MIPI at 1485 Mbps/lane. Covers driver modes 5–11 in
+MIPI at 1485 Mbps/lane. Covers driver modes 5–7 in
 `drivers/sensor_imx415_maruko.c` and the pipeline bind policy in
 `src/maruko_pipeline.c`.
 
@@ -58,8 +58,8 @@ of ISP and CSI-MAC clocks change nothing) and buffer-insensitive (VIF output
 depth 4→8 no change). It is a per-frame dispatch + drain cost of the ISP m2m
 path. Consequences:
 
-- Max non-binned pixels @60 fps ≈ **4.1 MPix** → mode 10 `2952x1368@60`
-- Max non-binned pixels @90 fps ≈ **2.6 MPix** → mode 11 `2112x1184@90`
+- Max non-binned pixels @60 fps ≈ **4.1 MPix** → mode 6 `2952x1368@60`
+- Max non-binned pixels @90 fps ≈ **2.6 MPix** → mode 7 `2112x1184@90`
 - Full readout 3760x2116@60 (~8 MPix) is unreachable on this silicon.
 
 ## Mode table (driver indexes)
@@ -67,16 +67,14 @@ path. Consequences:
 | Idx | Mode name | Link rate | Notes |
 |---|---|---|---|
 | 0–4 | vendor modes (4K30, superwide, binned 1080p60/90, 720p120) | 891 | REALTIME bind |
-| 5 | 2952x1656@60fps_1485 | 1485 | 1:1 5MP crop; delivers ~51 fps (ceiling) |
-| 6 | 2952x1848@60fps_1485 | 1485 | ~45 fps |
-| 7 | 3264x1848@60fps_1485 | 1485 | ~42 fps |
-| 8 | 3552x1848@60fps_1485 | 1485 | ladder probe |
-| 9 | 2952x1224@90fps_1485 | 1485 | ~68 fps |
-| 10 | 2952x1368@60fps_1485 | 1485 | **max @60** — measured 60.0 fps |
-| 11 | 2112x1184@90fps_1485 | 1485 | **max @90** — measured 90.0 fps |
+| 5 | 2952x1656@50fps_1485 | 1485 | 1:1 5MP crop, ~16:9; sensor paced to 50.0 (VMAX=2289) = the ceiling for 4.89 MPix — measured ~49 fps (pacing at the exact ceiling leaves ~2% dispatch shortfall, but the FRAME_BASE queue stays empty for minimum latency; the old 60-fps pacing measured 50.9 by saturating the queue) |
+| 6 | 2952x1368@60fps_1485 | 1485 | **max @60** — measured 60.0 fps exact |
+| 7 | 2112x1184@90fps_1485 | 1485 | **max @90** — measured 90.0 fps exact |
 
-Modes 6–9 are ceiling-characterization ladder entries; they stream cleanly
-but cannot reach their nominal fps. Keep or prune at packaging time.
+Modes 6/7 deliver their full nominal rate; mode 5 delivers ~49/50. The ceiling-
+characterization ladder probes (2952x1848 / 3264x1848 / 3552x1848 @60,
+2952x1224@90 — delivering 45/42/~39/68 fps) were pruned after measurement;
+regenerate any of them with the recipe below if needed.
 
 ## Generating a new 1485 mode
 
@@ -101,8 +99,36 @@ height ≤ ~1230 lines.
 
 ## Known issues
 
-- **Teardown Oops**: stopping a 1485/FRAME_BASE run Oopses in
-  `_MI_SYS_IMPL_UnBindChannelPort`; a reboot is required between mode
-  switches. Under investigation (unbind order).
+- **Binned→1485 mode switch wedges FRAME_BASE delivery — and the wedge can
+  survive warm reboots.** After a REALTIME (891/binned) run tears down, a
+  subsequent FRAME_BASE (1485) start on the same boot gets frames into VIF
+  (IRQs tick, `/proc/mi_modules/mi_vif/mi_vif0` shows RewindCnt climbing
+  with FinishCnt=0) but nothing reaches the ISP (`mi_isp0` BindInQ=0,
+  dev VsyncCnt=0, AE stats stay zero) and venc self-aborts with "no
+  encoder data received". Once wedged, the state has been observed to
+  persist across `reboot`, `reboot -f`, and process restarts — only a
+  full **power-cycle** reliably cleared it (SigmaStar warm resets do not
+  drop the camera power domains; a latched ISP-input/DMA state survives).
+  Safe directions, device-verified across repeated cycles: 1485→1485,
+  1485→binned, and binned→binned all switch live. Rule: to go from a
+  binned mode to a 1485 mode, power-cycle.
+- **Teardown can hang in D-state.** One occurrence with the landed build:
+  SIGTERM teardown of a 1485 run stuck forever (uninterruptible D-state,
+  `wchan = MI_SYS_IMPL_FlushRealTimeOutputBuf`) when a second venc
+  instance was started ~5 s after the TERM, racing the teardown. Recovery:
+  `reboot -f` (the I6C kernel has **no sysrq**; SIGKILL makes MI zombies —
+  never use it). Notably this warm reboot did NOT wedge FRAME_BASE.
+  Operational rule: wait for the old process to fully exit before starting
+  a new one (poll `ps`, teardown takes several seconds).
+- **Teardown Oops (historical)**: an Oops in
+  `_MI_SYS_IMPL_UnBindChannelPort` was seen during the bind-type
+  experiments, but did NOT reproduce in 6+ SIGTERM teardown cycles with
+  the landed mode-conditional build (all teardowns clean, all MI
+  resources freed). If it resurfaces: static analysis of `mi_sys.ko`
+  located the FRAME_BASE-only hazard sites — the assert trap at
+  `+0x26` (undefined instruction; console prints the mi_sys_impl.c line),
+  and the framebase pending-bufref queue drain at `+0x1c6/+0x1e2/+0x286/
+  +0x2a8` (data abort; fault address ≈0x3e3 means walking a freed,
+  0x1d3-poisoned bufref).
 - FRAME_BASE adds up to one frame of latency vs REALTIME — this is why the
   bind stays mode-conditional.
