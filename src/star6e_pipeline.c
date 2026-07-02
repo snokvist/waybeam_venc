@@ -1212,8 +1212,13 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	MI_U32 bit_rate_bits;
 	MI_S32 ret;
 
-	if (bitrate > 200000)
-		bitrate = 200000;
+	/* Same practical bitrate bounds as the live apply_bitrate() path, so a
+	 * persisted sub-floor video0.bitrate can't birth the encoder collapsed
+	 * at boot / SIGHUP re-exec. */
+	if (bitrate > VENC_BITRATE_MAX_KBPS)
+		bitrate = VENC_BITRATE_MAX_KBPS;
+	if (bitrate < VENC_BITRATE_MIN_KBPS)
+		bitrate = VENC_BITRATE_MIN_KBPS;
 	bit_rate_bits = bitrate * 1024;
 
 	if (codec == PT_H265) {

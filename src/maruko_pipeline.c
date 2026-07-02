@@ -1688,7 +1688,14 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	uint32_t gop = cfg->venc_gop_size;
 	if (gop == 0)
 		gop = 1;
-	MI_U32 bit_rate_bits = cfg->venc_max_rate * 1024;
+	/* Same practical bitrate bounds as apply_bitrate() so a persisted
+	 * sub-floor bitrate can't birth the encoder collapsed at boot. */
+	uint32_t rate_kbps = cfg->venc_max_rate;
+	if (rate_kbps > VENC_BITRATE_MAX_KBPS)
+		rate_kbps = VENC_BITRATE_MAX_KBPS;
+	if (rate_kbps < VENC_BITRATE_MIN_KBPS)
+		rate_kbps = VENC_BITRATE_MIN_KBPS;
+	MI_U32 bit_rate_bits = rate_kbps * 1024;
 
 	fill_maruko_rc_attr(&attr, cfg, gop, bit_rate_bits, framerate);
 
@@ -2498,7 +2505,13 @@ static void dual_fill_attr(i6c_venc_chn *attr,
 	}
 
 	uint32_t safe_gop = gop ? gop : 1;
-	MI_U32 bit_rate_bits = bitrate_kbps * 1024;
+	/* Same practical bitrate bounds as apply_bitrate() (ch1/dual boot). */
+	uint32_t rate_kbps = bitrate_kbps;
+	if (rate_kbps > VENC_BITRATE_MAX_KBPS)
+		rate_kbps = VENC_BITRATE_MAX_KBPS;
+	if (rate_kbps < VENC_BITRATE_MIN_KBPS)
+		rate_kbps = VENC_BITRATE_MIN_KBPS;
+	MI_U32 bit_rate_bits = rate_kbps * 1024;
 	fill_maruko_rc_attr(attr, &dual_cfg, safe_gop, bit_rate_bits, framerate);
 }
 
