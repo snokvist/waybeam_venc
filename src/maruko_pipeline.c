@@ -2027,8 +2027,21 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
 	assign_maruko_ports(ctx, venc_device);
 
+	/* VIF->ISP bind is mode-conditional.  1485Mbps/lane x4 line bursts
+	 * (~594MPix/s) exceed the ISP 384MHz drain and overflow the P0 input
+	 * FIFO in REALTIME, so _1485 sensor modes need FRAME_BASE: VIF output
+	 * is buffered in DRAM and the ISP drains at its own rate (m2m; costs
+	 * up to one frame of latency and caps throughput at ~1.7ms+3.65ns/px
+	 * per frame).  891Mbps modes keep REALTIME for minimum glass-to-glass
+	 * latency — their burst rate (~356MPix/s) matches the ISP drain.
+	 * VIF->ISP on I6C accepts only these two link types. */
+	int vif_isp_link = strstr(ctx->sensor.mode.desc, "_1485") ?
+		I6_SYS_LINK_FRAMEBASE : I6_SYS_LINK_REALTIME;
+	printf("> [maruko] VIF->ISP bind: %s (mode %s)\n",
+		vif_isp_link == I6_SYS_LINK_FRAMEBASE ? "FRAMEBASE" : "REALTIME",
+		ctx->sensor.mode.desc);
 	MI_S32 ret = MI_SYS_BindChnPort2(&ctx->vif_port, &ctx->isp_port,
-		ctx->sensor.fps, ctx->sensor.fps, I6_SYS_LINK_REALTIME, 0);
+		ctx->sensor.fps, ctx->sensor.fps, vif_isp_link, 0);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] bind VIF->ISP failed %d\n", ret);
@@ -2059,6 +2072,11 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * and any processing jitter causes frame drops, capping FPS
 	 * well below the sensor's output rate.
 	 * Star6E uses (1, 3) on the VENC port; SDK samples use (2, 4). */
+	/* VIF output depth matters for the FRAMEBASE VIF->ISP bind: the default
+	 * (0,4) pool starves once VIF-write + 2-deep ISP pipelining hold all four
+	 * buffers, capping high-rate 1485 modes (~37fps at 3840x1800 vs sensor
+	 * 60). RAW12 buffers are ~10MB each at 4K width — depth 8 = ~83MB MMA. */
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vif_port, 0, 4);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->isp_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
@@ -2799,20 +2817,30 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	uint32_t out_w = ctx->cfg.image_width;
 	uint32_t out_h = ctx->cfg.image_height;
 
-	/* Effective SCL input dims: sensor capt after overscan clamp, then
-	 * sensor binning (mode.output < capt).  Mirrors the effective-dim
-	 * derivation in setup_maruko_graph_dimensions() — re-derived here
-	 * so the precrop rect is computed against the same surface that
-	 * actually feeds the SCL stage. */
+	/* SCL input dims = full sensor capture.  The ISP output port is a
+	 * zero-crop passthrough (see configure_maruko_isp), so the surface that
+	 * actually feeds the SCL is always the full capt — which is also the SCL
+	 * ring-pool stride.  Do NOT shrink this to mode.output: mode.output is the
+	 * *encode* target (applied as the SCL output size below, not its input).
+	 * The old "sensor binning" override set scl_in = mode.output; for genuine
+	 * downscale modes (capt 2952x1656 -> encode 2560x1440, senif != senout) it
+	 * made the SCL crop width != ring-pool stride and stalled the scaler
+	 * (0 frames out, ISP P0 FIFO FULL, encoder starved).  For binned modes the
+	 * sensor already emits capt == output, so this is a no-op for modes 0-4. */
 	uint32_t scl_in_w = ctx->sensor.plane.capt.width;
 	uint32_t scl_in_h = ctx->sensor.plane.capt.height;
-	if (ctx->sensor.mode.output.width > 0 &&
-	    ctx->sensor.mode.output.width < scl_in_w) {
-		scl_in_w = ctx->sensor.mode.output.width;
-		scl_in_h = ctx->sensor.mode.output.height;
-	}
 	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
 		scl_in_w, scl_in_h, out_w, out_h, ctx->cfg.keep_aspect ? true : false);
+	/* I6C SCL hardware requires crop.width == ring-pool maxWidth (== capt
+	 * width).  keep_aspect narrows the crop WIDTH when the sensor AR is wider
+	 * than the encode AR; that narrowed width stalls the scaler.  Restore full
+	 * width and let the SCL scale — the residual AR delta on a near-matching
+	 * downscale is sub-pixel.  A vertical (height) crop is stride-safe and is
+	 * left intact. */
+	if (precrop.w != (uint16_t)scl_in_w) {
+		precrop.x = 0;
+		precrop.w = (uint16_t)scl_in_w;
+	}
 	PipelinePrecropRect base_precrop = precrop;
 	if (ctx->cfg.verbose) {
 		if (precrop.x || precrop.y ||
