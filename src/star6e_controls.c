@@ -180,8 +180,10 @@ static int apply_bitrate(uint32_t kbps)
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
 
-	if (kbps > 200000)
-		kbps = 200000;
+	if (kbps > VENC_BITRATE_MAX_KBPS)
+		kbps = VENC_BITRATE_MAX_KBPS;
+	if (kbps < VENC_BITRATE_MIN_KBPS)
+		kbps = VENC_BITRATE_MIN_KBPS;
 	bits = kbps * 1024;
 
 	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)

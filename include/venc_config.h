@@ -26,6 +26,14 @@ extern "C" {
 #define VENC_OUTPUT_PAYLOAD_CEILING_BYTES 4000
 #define VENC_OUTPUT_PAYLOAD_MIN_BYTES 576
 
+/* Practical VENC bitrate bounds (kbps).  The min floor guards against
+ * impractically low targets the encoder can't honor — below ~1 Mbit/s the
+ * H.26x stream collapses (decoder drops SVC-T, RC oscillates).  Enforced as a
+ * clamp in each backend's apply_bitrate() (not a /set reject) so adaptive-link
+ * controllers that push low targets keep working, just floored. */
+#define VENC_BITRATE_MIN_KBPS 1000
+#define VENC_BITRATE_MAX_KBPS 200000
+
 /* ── Sub-structs mirroring JSON sections ─────────────────────────────── */
 
 typedef struct {
