@@ -1730,27 +1730,6 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		return ret;
 	}
 
-	/* Frame-lost safety net — must be after StartRecvPic. */
-	if (cfg->frame_lost) {
-		MI_VENC_ParamFrameLost_t lost = {0};
-		lost.bFrmLostOpen = 1;
-		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-		lost.u32FrmLostBpsThr =
-			pipeline_common_frame_lost_threshold(cfg->venc_max_rate);
-		lost.u32EncFrmGaps = 0;
-		MI_S32 fl_ret = maruko_mi_venc_set_frame_lost(venc_dev, *chn,
-			&lost);
-		if (fl_ret != 0) {
-			fprintf(stderr,
-				"WARNING: [maruko] SetFrameLostStrategy"
-				" thr=%u ret=%d (overshoot protection disabled)\n",
-				lost.u32FrmLostBpsThr, fl_ret);
-		} else {
-			printf("> [maruko] SetFrameLostStrategy: thr=%u ret=0\n",
-				lost.u32FrmLostBpsThr);
-		}
-	}
-
 	/* IntraRefresh — opt-in via video0.intra_refresh.  Ch0 only; the
 	 * dual ch1 path is intentionally skipped since TS containers need
 	 * IDRs.  Failure is logged and snapshotted but never aborts the
@@ -2291,7 +2270,6 @@ struct MarukoDualVenc {
 	uint32_t fps;
 	uint32_t gop;
 	char server[128];
-	int frame_lost;
 	int is_dual_stream;
 	/* Non-NULL when mode == "dual": chn 1 frames are written here.
 	 * Exactly one of ts_recorder / recorder is non-NULL based on
@@ -2526,7 +2504,7 @@ static void dual_fill_attr(i6c_venc_chn *attr,
 
 int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	uint32_t bitrate, uint32_t fps, double gop_sec,
-	const char *mode, const char *server, int frame_lost)
+	const char *mode, const char *server)
 {
 	struct MarukoDualVenc *d;
 	MI_VENC_DEV dev = ctx->venc_device;
@@ -2561,7 +2539,6 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	d->bitrate = bitrate;
 	d->fps = fps;
 	d->gop = gop_frames;
-	d->frame_lost = frame_lost;
 	d->is_dual_stream = (strcmp(mode, "dual-stream") == 0);
 	if (d->is_dual_stream) {
 		d->ts_recorder = NULL;
@@ -2665,16 +2642,6 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 		ctx->bound_vpe_venc = 1;
 	}
 
-	if (frame_lost) {
-		MI_VENC_ParamFrameLost_t lost = {0};
-		lost.bFrmLostOpen = 1;
-		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-		lost.u32FrmLostBpsThr =
-			pipeline_common_frame_lost_threshold(bitrate);
-		lost.u32EncFrmGaps = 0;
-		(void)maruko_mi_venc_set_frame_lost(dev, chn, &lost);
-	}
-
 	/* Source: chn 0's VENC output port.  Dst: chn 1 input.
 	 * Maruko SDK sample_venc.c:
 	 *   src = VENC/dev/MainChn/0  (chn 0 output)
@@ -2753,8 +2720,7 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 	d->started_thread = 1;
 
 	ctx->dual = d;
-	venc_api_dual_register(d->channel, d->bitrate, d->fps, d->gop,
-		d->frame_lost);
+	venc_api_dual_register(d->channel, d->bitrate, d->fps, d->gop);
 	return 0;
 }
 
@@ -2992,8 +2958,7 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ctx->cfg.record.fps,
 			ctx->cfg.record.gop_size,
 			ctx->cfg.record.mode,
-			ctx->cfg.record.server,
-			ctx->cfg.record.frame_lost);
+			ctx->cfg.record.server);
 	}
 
 	/* Phase 6: open recorder for "mirror" (chn 0 → file) and "dual"

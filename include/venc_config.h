@@ -92,7 +92,6 @@ typedef struct {
 	uint32_t bitrate;      /* kbps */
 	double gop_size;       /* seconds between keyframes; 0 = all-intra */
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
-	bool frame_lost;           /* enable frame-lost safety net */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
 	/* Derived from `resilience` preset only.  Not part of the JSON
