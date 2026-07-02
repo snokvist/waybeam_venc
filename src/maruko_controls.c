@@ -221,6 +221,15 @@ static int maruko_apply_bitrate(uint32_t kbps)
 	if (maruko_mi_venc_set_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) != 0)
 		return -1;
+	/* Auto frame-lost threshold derives from bitrate — re-apply the
+	 * strategy so it tracks the new target (matches Star6E). */
+	if (g_ctx.vcfg)
+		(void)maruko_pipeline_apply_frame_lost(g_ctx.venc_dev,
+			g_ctx.venc_chn, g_ctx.vcfg->video0.frame_lost,
+			strcmp(g_ctx.vcfg->video0.frame_lost_mode,
+				"pskip") == 0,
+			g_ctx.vcfg->video0.frame_lost_threshold,
+			g_ctx.vcfg->video0.frame_lost_gap, kbps);
 	/* Force an IDR after a bitrate change so the decoder resyncs against
 	 * the new rate-control state.  Rate-limit gated to coalesce storms;
 	 * see the matching note in src/star6e_controls.c apply_bitrate(). */
@@ -1088,8 +1097,16 @@ static int maruko_apply_isp_bin(const char *path)
 	return maruko_pipeline_load_isp_bin_live(g_ctx.backend, path);
 }
 
+static int maruko_apply_frame_lost(bool enabled, bool pskip,
+	uint32_t thr_kbps, uint32_t gap, uint32_t bitrate_kbps)
+{
+	return maruko_pipeline_apply_frame_lost(g_ctx.venc_dev, g_ctx.venc_chn,
+		enabled, pskip, thr_kbps, gap, bitrate_kbps);
+}
+
 static const VencApplyCallbacks g_maruko_apply_cb = {
 	.apply_bitrate = maruko_apply_bitrate,
+	.apply_frame_lost = maruko_apply_frame_lost,
 	.apply_fps = maruko_apply_fps,
 	.apply_gop = maruko_apply_gop,
 	.apply_qp_delta = maruko_apply_qp_delta,

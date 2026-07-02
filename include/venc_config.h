@@ -93,6 +93,20 @@ typedef struct {
 	double gop_size;       /* seconds between keyframes; 0 = all-intra */
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
 	bool frame_lost;           /* enable frame-lost safety net */
+	/* Frame-lost strategy tuning (all live-settable).  mode selects what
+	 * the encoder emits for an over-threshold frame:
+	 *   "normal" — frame is not encoded at all (cadence gap, chain-safe)
+	 *   "pskip"  — frame is encoded as an all-skip P-frame (tiny
+	 *              placeholder, reference chain and cadence intact)
+	 * threshold: overshoot trigger in kbps; 0 = auto (150% of bitrate
+	 * with a 512 kbps floor, see pipeline_common_frame_lost_threshold).
+	 * Setting it below the target bitrate forces the strategy
+	 * continuously — the deterministic bench trigger for pskip.
+	 * gap: SDK u32EncFrmGaps — encoded-frame gap while the strategy is
+	 * active (encode 1, skip N). */
+	char frame_lost_mode[8];   /* "normal" (default) | "pskip" */
+	uint32_t frame_lost_threshold; /* kbps, 0 = auto */
+	uint32_t frame_lost_gap;   /* u32EncFrmGaps, 0 = SDK default */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
 	/* Derived from `resilience` preset only.  Not part of the JSON

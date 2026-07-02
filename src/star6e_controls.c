@@ -175,34 +175,59 @@ static int apply_rc_qp_delta(const MI_VENC_ChnAttr_t *attr, MI_VENC_RcParam_t *p
 	}
 }
 
-int star6e_controls_apply_frame_lost_threshold(MI_VENC_CHN chn, bool enabled,
-	uint32_t kbps)
+int star6e_controls_apply_frame_lost(MI_VENC_CHN chn, bool enabled,
+	bool pskip, uint32_t thr_kbps, uint32_t gap, uint32_t bitrate_kbps)
 {
 	MI_VENC_ParamFrameLost_t lost = {0};
 
-	if (!enabled)
-		return 0;
+	lost.bFrmLostOpen = enabled ? 1 : 0;
+	lost.eFrmLostMode = pskip ? E_MI_VENC_FRMLOST_PSKIP
+				  : E_MI_VENC_FRMLOST_NORMAL;
+	lost.u32FrmLostBpsThr = pipeline_common_frame_lost_thr_bps(thr_kbps,
+		bitrate_kbps);
+	lost.u32EncFrmGaps = gap;
 
-	lost.bFrmLostOpen = 1;
-	lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-	lost.u32FrmLostBpsThr = pipeline_common_frame_lost_threshold(kbps);
-	lost.u32EncFrmGaps = 0;
+	if (MI_VENC_SetFrameLostStrategy(chn, &lost) != 0)
+		return -1;
+	/* Threshold-only changes stay quiet — adaptive-bitrate ladders
+	 * re-derive the auto threshold on every step and would spam the
+	 * console.  Enable/mode/gap flips are rare and bench-relevant. */
+	static int last_state = -1;
+	int state = ((int)lost.bFrmLostOpen << 16) | ((int)pskip << 8) |
+		(int)(gap & 0xff);
+	if (state != last_state) {
+		last_state = state;
+		printf("> FrameLost: open=%d mode=%s thr=%u bps gap=%u\n",
+			(int)lost.bFrmLostOpen, pskip ? "pskip" : "normal",
+			lost.u32FrmLostBpsThr, lost.u32EncFrmGaps);
+	}
+	return 0;
+}
 
-	return MI_VENC_SetFrameLostStrategy(chn, &lost) == 0 ? 0 : -1;
+/* Forward the live vcfg frame-lost knobs to the choke point above. */
+static int apply_frame_lost_from_cfg(MI_VENC_CHN chn, uint32_t bitrate_kbps)
+{
+	const VencConfig *vcfg = g_star6e_control_ctx.vcfg;
+
+	if (!vcfg)
+		return star6e_controls_apply_frame_lost(chn, true, false, 0, 0,
+			bitrate_kbps);
+	return star6e_controls_apply_frame_lost(chn,
+		vcfg->video0.frame_lost,
+		strcmp(vcfg->video0.frame_lost_mode, "pskip") == 0,
+		vcfg->video0.frame_lost_threshold,
+		vcfg->video0.frame_lost_gap,
+		bitrate_kbps);
 }
 
 static int apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
-	bool frame_lost_enabled = true;
 
 	if (kbps > 200000)
 		kbps = 200000;
 	bits = kbps * 1024;
-
-	if (g_star6e_control_ctx.vcfg)
-		frame_lost_enabled = g_star6e_control_ctx.vcfg->video0.frame_lost;
 
 	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
@@ -232,8 +257,9 @@ static int apply_bitrate(uint32_t kbps)
 
 	if (MI_VENC_SetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
-	if (star6e_controls_apply_frame_lost_threshold(g_star6e_control_ctx.venc_chn,
-	    frame_lost_enabled, kbps) != 0)
+	/* Auto frame-lost threshold derives from bitrate — re-apply the
+	 * strategy so it tracks the new target. */
+	if (apply_frame_lost_from_cfg(g_star6e_control_ctx.venc_chn, kbps) != 0)
 		return -1;
 	/* Force an IDR after a bitrate change so the decoder resyncs against
 	 * the new rate-control state.  Goes through the rate-limit gate so
@@ -1165,8 +1191,16 @@ static int apply_isp_bin(const char *path)
 		sensor_name, pad_id, g_star6e_control_ctx.sensor_fps);
 }
 
+static int apply_frame_lost(bool enabled, bool pskip, uint32_t thr_kbps,
+	uint32_t gap, uint32_t bitrate_kbps)
+{
+	return star6e_controls_apply_frame_lost(g_star6e_control_ctx.venc_chn,
+		enabled, pskip, thr_kbps, gap, bitrate_kbps);
+}
+
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
+	.apply_frame_lost = apply_frame_lost,
 	.apply_fps = apply_fps,
 	.apply_gop = apply_gop,
 	.apply_qp_delta = apply_qp_delta,

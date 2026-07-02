@@ -360,6 +360,33 @@ static const FieldUi ui_stab_kalman_r = {
 	"stab-fill. Default 2.0. Requires restart."
 };
 
+/* UI descriptors for the frame-lost strategy knobs — data-driven "Frame
+ * Lost" group.  The enable toggle (video0.frameLost) keeps its static
+ * SECTIONS row in the Video group. */
+static const char *const ui_frame_lost_mode_options[] = {
+	"normal", "pskip", NULL
+};
+static const FieldUi ui_frame_lost_mode = {
+	"Frame Lost", "Mode", "select", 0, 0, 0, ui_frame_lost_mode_options,
+	"What the encoder emits for a frame that trips the frame-lost "
+	"threshold: 'normal' skips encoding it entirely (cadence gap); "
+	"'pskip' encodes it as a tiny all-skip P-frame, keeping the "
+	"reference chain and frame cadence intact. Applies live."
+};
+static const FieldUi ui_frame_lost_threshold = {
+	"Frame Lost", "Threshold (kbps)", "number", 0, 200000, 100, NULL,
+	"Instant-bitrate trigger for the frame-lost strategy. 0 = auto "
+	"(150% of video0.bitrate, 512 kbps floor). Setting it below the "
+	"target bitrate forces the strategy continuously — the deterministic "
+	"bench trigger for pskip. Applies live."
+};
+static const FieldUi ui_frame_lost_gap = {
+	"Frame Lost", "Encode gap", "number", 0, 600, 1, NULL,
+	"SDK EncFrmGaps: frames skipped between encoded frames while the "
+	"frame-lost strategy is active (encode 1, skip N). 0 = SDK default. "
+	"Applies live."
+};
+
 /* UI descriptor for video0.pause_stab — the live stab pause.  Rendered as a
  * toggle in the "Stabilization" group purely from capabilities (the field is
  * runtime-only / not in /api/v1/config, so it has no static SECTIONS row). */
@@ -395,7 +422,13 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
-	FIELD(video0, frame_lost,      FT_BOOL,   MUT_RESTART),
+	FIELD(video0, frame_lost,      FT_BOOL,   MUT_LIVE),
+	FIELD_UI(video0, frame_lost_mode,      FT_STRING, MUT_LIVE,
+		&ui_frame_lost_mode),
+	FIELD_UI(video0, frame_lost_threshold, FT_UINT,   MUT_LIVE,
+		&ui_frame_lost_threshold),
+	FIELD_UI(video0, frame_lost_gap,       FT_UINT,   MUT_LIVE,
+		&ui_frame_lost_gap),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
@@ -509,6 +542,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
 	{ "video0.frameLost", "video0.frame_lost" },
+	{ "video0.frameLostMode", "video0.frame_lost_mode" },
+	{ "video0.frameLostThreshold", "video0.frame_lost_threshold" },
+	{ "video0.frameLostGap", "video0.frame_lost_gap" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -744,6 +780,20 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
 	}
+	if (strcmp(key, "video0.frame_lost_mode") == 0) {
+		if (strcmp(cfg->video0.frame_lost_mode, "normal") != 0 &&
+		    strcmp(cfg->video0.frame_lost_mode, "pskip") != 0)
+			return "frame_lost_mode must be 'normal' or 'pskip'";
+	}
+	if (strcmp(key, "video0.frame_lost_threshold") == 0) {
+		if (cfg->video0.frame_lost_threshold > 200000)
+			return "frame_lost_threshold must be 0 (auto) or "
+				"1-200000 kbps";
+	}
+	if (strcmp(key, "video0.frame_lost_gap") == 0) {
+		if (cfg->video0.frame_lost_gap > 600)
+			return "frame_lost_gap must be in range [0, 600]";
+	}
 	if (strcmp(key, "video0.zoom_x") == 0) {
 		double v = cfg->video0.zoom_x;
 		if (!isfinite(v) || v < 0.0 || v > 1.0)
@@ -855,6 +905,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"isp.awb_mode",
 		"video0.bitrate",
 		"video0.qp_delta",
+		"video0.frame_lost_mode",
+		"video0.frame_lost_threshold",
+		"video0.frame_lost_gap",
 		"video0.size",
 		"video0.scene_holdoff",
 		"video0.zoom_x",
@@ -981,6 +1034,7 @@ typedef struct {
 typedef enum {
 	LIVE_GROUP_INVALID = -1,
 	LIVE_GROUP_BITRATE = 0,
+	LIVE_GROUP_FRAME_LOST,
 	LIVE_GROUP_VIDEO_TIMING,
 	LIVE_GROUP_QP_DELTA,
 	LIVE_GROUP_ROI,
@@ -1130,6 +1184,11 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 
 	if (strcmp(canonical_key, "video0.bitrate") == 0)
 		return LIVE_GROUP_BITRATE;
+	if (strcmp(canonical_key, "video0.frame_lost") == 0 ||
+	    strcmp(canonical_key, "video0.frame_lost_mode") == 0 ||
+	    strcmp(canonical_key, "video0.frame_lost_threshold") == 0 ||
+	    strcmp(canonical_key, "video0.frame_lost_gap") == 0)
+		return LIVE_GROUP_FRAME_LOST;
 	if (strcmp(canonical_key, "video0.fps") == 0 ||
 	    strcmp(canonical_key, "video0.gop_size") == 0)
 		return LIVE_GROUP_VIDEO_TIMING;
@@ -1172,6 +1231,8 @@ static const char *live_group_name(LiveApplyGroup group)
 	switch (group) {
 	case LIVE_GROUP_BITRATE:
 		return "video0.bitrate";
+	case LIVE_GROUP_FRAME_LOST:
+		return "video0.frameLost*";
 	case LIVE_GROUP_VIDEO_TIMING:
 		return "video0.fps/video0.gop_size";
 	case LIVE_GROUP_QP_DELTA:
@@ -1314,6 +1375,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 	switch (group) {
 	case LIVE_GROUP_BITRATE:
 		return g_cb->apply_bitrate != NULL;
+	case LIVE_GROUP_FRAME_LOST:
+		return g_cb->apply_frame_lost != NULL;
 	case LIVE_GROUP_VIDEO_TIMING:
 		if (touched && touched->video_fps && !g_cb->apply_fps)
 			return 0;
@@ -1368,6 +1431,15 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 	switch (group) {
 	case LIVE_GROUP_BITRATE:
 		dst->video0.bitrate = src->video0.bitrate;
+		break;
+	case LIVE_GROUP_FRAME_LOST:
+		dst->video0.frame_lost = src->video0.frame_lost;
+		snprintf(dst->video0.frame_lost_mode,
+			sizeof(dst->video0.frame_lost_mode), "%s",
+			src->video0.frame_lost_mode);
+		dst->video0.frame_lost_threshold =
+			src->video0.frame_lost_threshold;
+		dst->video0.frame_lost_gap = src->video0.frame_lost_gap;
 		break;
 	case LIVE_GROUP_VIDEO_TIMING:
 		if (touched && touched->video_fps)
@@ -1469,6 +1541,12 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	switch (group) {
 	case LIVE_GROUP_BITRATE:
 		return g_cb->apply_bitrate(cfg->video0.bitrate);
+	case LIVE_GROUP_FRAME_LOST:
+		return g_cb->apply_frame_lost(cfg->video0.frame_lost,
+			strcmp(cfg->video0.frame_lost_mode, "pskip") == 0,
+			cfg->video0.frame_lost_threshold,
+			cfg->video0.frame_lost_gap,
+			cfg->video0.bitrate);
 	case LIVE_GROUP_VIDEO_TIMING:
 		if (touched && touched->video_fps) {
 			rc = g_cb->apply_fps(cfg->video0.fps);
@@ -2734,8 +2812,10 @@ static int dual_apply_bitrate(uint32_t kbps)
 	if (MI_VENC_SetChnAttr(g_dual.channel, &attr) != 0)
 		return -1;
 #if HAVE_BACKEND_STAR6E
-	if (star6e_controls_apply_frame_lost_threshold(g_dual.channel,
-	    g_dual.frame_lost, kbps) != 0)
+	/* Dual ch1 keeps the plain NORMAL/auto safety net — the pskip /
+	 * threshold / gap knobs are streaming-link (ch0) concerns. */
+	if (star6e_controls_apply_frame_lost(g_dual.channel,
+	    g_dual.frame_lost, false, 0, 0, kbps) != 0)
 		return -1;
 #endif
 	g_dual.bitrate = kbps;

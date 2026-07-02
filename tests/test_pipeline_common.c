@@ -36,6 +36,21 @@ int test_pipeline_common(void)
 	CHECK("pipeline common gop fps zero", pipeline_common_gop_frames(1.0, 0) == 30);
 	CHECK("pipeline common gop rounded", pipeline_common_gop_frames(1.5, 90) == 135);
 
+	/* frame-lost threshold: auto heuristic (150%, 512 kbps floor) vs
+	 * explicit override (clamped to 200000 kbps). */
+	CHECK("frame lost thr auto",
+		pipeline_common_frame_lost_thr_bps(0, 8192) ==
+		pipeline_common_frame_lost_threshold(8192));
+	CHECK("frame lost thr auto floor",
+		pipeline_common_frame_lost_thr_bps(0, 100) ==
+		100U * 1024U + 524288U);
+	CHECK("frame lost thr override",
+		pipeline_common_frame_lost_thr_bps(3000, 8192) ==
+		3000U * 1024U);
+	CHECK("frame lost thr override clamped",
+		pipeline_common_frame_lost_thr_bps(500000, 8192) ==
+		200000U * 1024U);
+
 	/* compute_precrop: keep_aspect=true, sensor 4:3 → encode 16:9.
 	 * 2560x1920 → 2560x1440 with 240px Y offset. */
 	rect = pipeline_common_compute_precrop(2560, 1920, 1920, 1080, true);

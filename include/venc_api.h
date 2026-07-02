@@ -12,6 +12,14 @@ extern "C" {
  * NULL entries mean the operation is not supported. */
 typedef struct {
 	int (*apply_bitrate)(uint32_t kbps);
+	/* Live-apply the VENC frame-lost (frameskip) strategy
+	 * (video0.frameLost / frameLostMode / frameLostThreshold /
+	 * frameLostGap).  pskip selects the all-skip placeholder P-frame
+	 * mode (E_MI_VENC_FRMLOST_PSKIP, reference chain intact) over
+	 * NORMAL frame dropping.  thr_kbps = 0 derives the auto threshold
+	 * from bitrate_kbps; gap = SDK u32EncFrmGaps. */
+	int (*apply_frame_lost)(bool enabled, bool pskip, uint32_t thr_kbps,
+		uint32_t gap, uint32_t bitrate_kbps);
 	int (*apply_fps)(uint32_t fps);
 	int (*apply_gop)(uint32_t gop_size);
 	int (*apply_qp_delta)(int delta);

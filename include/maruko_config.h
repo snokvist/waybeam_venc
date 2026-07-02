@@ -60,6 +60,11 @@ typedef struct {
 	uint16_t scene_threshold;
 	uint8_t scene_holdoff;
 	uint8_t frame_lost;
+	/* Frame-lost strategy mirrors of video0.frame_lost_{mode,threshold,
+	 * gap} — pskip = 1 selects E_MI_VENC_FRMLOST_PSKIP. */
+	uint8_t frame_lost_pskip;
+	uint32_t frame_lost_threshold;  /* kbps, 0 = auto from bitrate */
+	uint32_t frame_lost_gap;        /* u32EncFrmGaps */
 	/* IntraRefresh (GDR-style rolling stripe) — applied to ch0 after
 	 * StartRecvPic.  Mirror of VencConfig::video0.intra_refresh_{mode,lines,qp}.
 	 * Mode is parsed in pipeline; carry the raw string for traceability. */

@@ -46,6 +46,9 @@ int test_maruko_config(void)
 	strcpy(vcfg.isp.sensor_bin, "/etc/sensors/imx415.bin");
 	vcfg.fpv.noise_level = 4;
 	vcfg.system.verbose = true;
+	strcpy(vcfg.video0.frame_lost_mode, "pskip");
+	vcfg.video0.frame_lost_threshold = 4000;
+	vcfg.video0.frame_lost_gap = 2;
 
 	CHECK("maruko config from venc ok", maruko_config_from_venc(&vcfg, &cfg) == 0);
 	CHECK("maruko config width", cfg.sensor_width == 2688);
@@ -70,6 +73,9 @@ int test_maruko_config(void)
 	CHECK("maruko config isp bin", strcmp(cfg.isp_bin_path, "/etc/sensors/imx415.bin") == 0);
 	CHECK("maruko config 3dnr", cfg.vpe_level_3dnr == 4);
 	CHECK("maruko config verbose", cfg.verbose == 1);
+	CHECK("maruko config frame lost pskip", cfg.frame_lost_pskip == 1);
+	CHECK("maruko config frame lost thr", cfg.frame_lost_threshold == 4000);
+	CHECK("maruko config frame lost gap", cfg.frame_lost_gap == 2);
 
 	strcpy(vcfg.outgoing.server, "bad://server");
 	CHECK("maruko config bad uri fails", maruko_config_from_venc(&vcfg, &cfg) != 0);

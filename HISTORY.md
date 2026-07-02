@@ -1,5 +1,53 @@
 # History
 
+## [0.19.0] - 2026-07-02
+
+Expose the SDK VENC frame-lost strategy's P-SKIP mode and make the whole
+strategy live-tunable, so encoder-level frameskip can be bench-tested as a
+backpressure lever that keeps the video link unbroken.  In
+`E_MI_VENC_FRMLOST_PSKIP` mode an over-threshold frame is emitted as a tiny
+all-skip P-frame instead of being dropped: the H.265 reference chain and the
+frame cadence stay intact (the receiver just repeats the last picture), unlike
+the v0.9.2 post-encode skip that was rolled back for breaking the GOP.  PSKIP
+was declared in `include/star6e.h` since the dual-backend split but never
+selected — every call site hardcoded `E_MI_VENC_FRMLOST_NORMAL`.
+
+- **New `video0` fields (all live via `/api/v1/set`):**
+  - `frameLostMode` — `"normal"` (default, current behavior: frame not
+    encoded) or `"pskip"` (all-skip placeholder P-frame).
+  - `frameLostThreshold` — overshoot trigger in kbps; `0` = auto (150% of
+    `video0.bitrate` with a 512 kbps floor, unchanged heuristic).  Setting it
+    below the target bitrate forces the strategy continuously — the
+    deterministic bench trigger for verifying pskip on hardware.
+  - `frameLostGap` — SDK `u32EncFrmGaps`: encoded-frame gap while the
+    strategy is active (encode 1, skip N); an effective-fps knob with no
+    pipeline rebind.
+  - `frameLost` itself is now `MUT_LIVE` (was restart-required); disabling
+    live actually clears the strategy (Set with `bFrmLostOpen=0`).
+- **Unified choke points.**  All frame-lost writes now flow through one
+  helper per backend — `star6e_controls_apply_frame_lost()` /
+  `maruko_pipeline_apply_frame_lost()` — used by pipeline init, the
+  live-apply callback (`LIVE_GROUP_FRAME_LOST`), and the bitrate re-apply.
+  Threshold derivation is shared (`pipeline_common_frame_lost_thr_bps`).
+  Dual/ch1 recording channels intentionally keep the plain NORMAL/auto
+  safety net — pskip/threshold/gap are streaming-link (ch0) concerns.
+- **Maruko parity fix:** live bitrate changes now re-apply the frame-lost
+  strategy so the auto threshold tracks the new target (Star6E already did;
+  Maruko previously kept the stale boot-time threshold).
+- **WebUI:** the three new knobs render data-driven in a "Frame Lost"
+  capabilities group (no static SECTIONS rows); the `frameLost` tooltip no
+  longer claims restart-required.
+- **Default unchanged (`normal`).**  Flipping the default to `pskip` — so
+  the existing safety net stops costing visible fps under motion — is a
+  one-line change gated on hardware verification of PSKIP on both SoCs.
+
+Bench recipe (deterministic): stream at e.g. 8192 kbps, then
+`/api/v1/set?video0.frameLostMode=pskip&video0.frameLostThreshold=2000` —
+expect continuous tiny P-frames (sidecar `frame_size_bytes` collapses),
+unbroken decode with frozen/slow motion, no artifacts; revert with
+`threshold=0`.  Not yet hardware-verified on either SoC (this change is the
+enabler); host tests + dual-backend `-Wall -Wextra -Werror` syntax pass only.
+
 ## [0.18.1] - 2026-06-24
 
 Expose the mDNS `discovery` config section through the HTTP API and WebUI. The

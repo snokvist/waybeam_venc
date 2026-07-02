@@ -1328,9 +1328,12 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		return ret;
 	}
 
-	/* Frame lost strategy — see star6e_controls_apply_frame_lost_threshold. */
-	if (star6e_controls_apply_frame_lost_threshold(*chn,
-	    frame_lost_enabled, bitrate) != 0)
+	/* Frame lost strategy — see star6e_controls_apply_frame_lost.
+	 * vcfg == NULL (dual ch1) keeps the plain NORMAL/auto safety net. */
+	if (star6e_controls_apply_frame_lost(*chn, frame_lost_enabled,
+	    vcfg && strcmp(vcfg->video0.frame_lost_mode, "pskip") == 0,
+	    vcfg ? vcfg->video0.frame_lost_threshold : 0,
+	    vcfg ? vcfg->video0.frame_lost_gap : 0, bitrate) != 0)
 		fprintf(stderr, "[waybeam] WARNING: SetFrameLostStrategy"
 			" failed\n");
 

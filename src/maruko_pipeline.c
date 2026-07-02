@@ -1645,6 +1645,37 @@ publish:
 	return snap.active ? 0 : (cfg && cfg->ref_base > 0 ? -1 : 0);
 }
 
+int maruko_pipeline_apply_frame_lost(MI_VENC_DEV dev, MI_VENC_CHN chn,
+	int enabled, int pskip, uint32_t thr_kbps, uint32_t gap,
+	uint32_t bitrate_kbps)
+{
+	MI_VENC_ParamFrameLost_t lost = {0};
+
+	lost.bFrmLostOpen = enabled ? 1 : 0;
+	lost.eFrmLostMode = pskip ? E_MI_VENC_FRMLOST_PSKIP
+				  : E_MI_VENC_FRMLOST_NORMAL;
+	lost.u32FrmLostBpsThr = pipeline_common_frame_lost_thr_bps(thr_kbps,
+		bitrate_kbps);
+	lost.u32EncFrmGaps = gap;
+
+	if (maruko_mi_venc_set_frame_lost(dev, chn, &lost) != 0)
+		return -1;
+	/* Threshold-only changes stay quiet — adaptive-bitrate ladders
+	 * re-derive the auto threshold on every step and would spam the
+	 * console.  Enable/mode/gap flips are rare and bench-relevant. */
+	static int last_state = -1;
+	int state = ((int)lost.bFrmLostOpen << 16) | (pskip ? 1 << 8 : 0) |
+		(int)(gap & 0xff);
+	if (state != last_state) {
+		last_state = state;
+		printf("> [maruko] FrameLost: open=%d mode=%s thr=%u bps"
+			" gap=%u\n", (int)lost.bFrmLostOpen,
+			pskip ? "pskip" : "normal",
+			lost.u32FrmLostBpsThr, lost.u32EncFrmGaps);
+	}
+	return 0;
+}
+
 static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	uint32_t width, uint32_t height, uint32_t framerate,
 	MI_VENC_DEV venc_dev, MI_VENC_CHN *chn, int *dev_created)
@@ -1730,26 +1761,13 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		return ret;
 	}
 
-	/* Frame-lost safety net — must be after StartRecvPic. */
-	if (cfg->frame_lost) {
-		MI_VENC_ParamFrameLost_t lost = {0};
-		lost.bFrmLostOpen = 1;
-		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-		lost.u32FrmLostBpsThr =
-			pipeline_common_frame_lost_threshold(cfg->venc_max_rate);
-		lost.u32EncFrmGaps = 0;
-		MI_S32 fl_ret = maruko_mi_venc_set_frame_lost(venc_dev, *chn,
-			&lost);
-		if (fl_ret != 0) {
-			fprintf(stderr,
-				"WARNING: [maruko] SetFrameLostStrategy"
-				" thr=%u ret=%d (overshoot protection disabled)\n",
-				lost.u32FrmLostBpsThr, fl_ret);
-		} else {
-			printf("> [maruko] SetFrameLostStrategy: thr=%u ret=0\n",
-				lost.u32FrmLostBpsThr);
-		}
-	}
+	/* Frame-lost strategy — must be after StartRecvPic.  See
+	 * maruko_pipeline_apply_frame_lost. */
+	if (maruko_pipeline_apply_frame_lost(venc_dev, *chn, cfg->frame_lost,
+	    cfg->frame_lost_pskip, cfg->frame_lost_threshold,
+	    cfg->frame_lost_gap, cfg->venc_max_rate) != 0)
+		fprintf(stderr, "WARNING: [maruko] SetFrameLostStrategy failed"
+			" (overshoot protection disabled)\n");
 
 	/* IntraRefresh — opt-in via video0.intra_refresh.  Ch0 only; the
 	 * dual ch1 path is intentionally skipped since TS containers need
@@ -2665,15 +2683,11 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 		ctx->bound_vpe_venc = 1;
 	}
 
-	if (frame_lost) {
-		MI_VENC_ParamFrameLost_t lost = {0};
-		lost.bFrmLostOpen = 1;
-		lost.eFrmLostMode = E_MI_VENC_FRMLOST_NORMAL;
-		lost.u32FrmLostBpsThr =
-			pipeline_common_frame_lost_threshold(bitrate);
-		lost.u32EncFrmGaps = 0;
-		(void)maruko_mi_venc_set_frame_lost(dev, chn, &lost);
-	}
+	/* Dual ch1 recording feed keeps the plain NORMAL/auto safety net —
+	 * the pskip/threshold/gap knobs are streaming-link (ch0) concerns. */
+	if (frame_lost)
+		(void)maruko_pipeline_apply_frame_lost(dev, chn, 1, 0, 0, 0,
+			bitrate);
 
 	/* Source: chn 0's VENC output port.  Dst: chn 1 input.
 	 * Maruko SDK sample_venc.c:

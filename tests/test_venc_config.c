@@ -58,6 +58,10 @@ static int test_defaults(void)
 	CHECK("defaults_gop_size", cfg.video0.gop_size == 1.0);
 	CHECK("defaults_qp_delta", cfg.video0.qp_delta == -4);
 	CHECK("defaults_frame_lost", cfg.video0.frame_lost == true);
+	CHECK("defaults_frame_lost_mode",
+		strcmp(cfg.video0.frame_lost_mode, "normal") == 0);
+	CHECK("defaults_frame_lost_thr", cfg.video0.frame_lost_threshold == 0);
+	CHECK("defaults_frame_lost_gap", cfg.video0.frame_lost_gap == 0);
 	CHECK("defaults_zoom_off", cfg.video0.zoom_pct == 0.0);
 	CHECK("defaults_zoom_x", cfg.video0.zoom_x == 0.5);
 	CHECK("defaults_zoom_y", cfg.video0.zoom_y == 0.5);
@@ -205,7 +209,9 @@ static int test_load_full_json(void)
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
-		"    \"frameLost\": false, \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
+		"    \"frameLost\": false, \"frameLostMode\": \"pskip\","
+		"    \"frameLostThreshold\": 3000, \"frameLostGap\": 3,"
+		"    \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
@@ -239,6 +245,10 @@ static int test_load_full_json(void)
 	CHECK("load_gop", cfg.video0.gop_size == 1);
 	CHECK("load_qp_delta", cfg.video0.qp_delta == -7);
 	CHECK("load_frame_lost_off", cfg.video0.frame_lost == false);
+	CHECK("load_frame_lost_pskip",
+		strcmp(cfg.video0.frame_lost_mode, "pskip") == 0);
+	CHECK("load_frame_lost_thr", cfg.video0.frame_lost_threshold == 3000);
+	CHECK("load_frame_lost_gap", cfg.video0.frame_lost_gap == 3);
 	CHECK("load_framing_zoom2x", strcmp(cfg.video0.framing, "zoom-2x") == 0);
 	CHECK("load_framing_zoom_pct", cfg.video0.zoom_pct == 0.5);
 	CHECK("load_zoom_x", cfg.video0.zoom_x == 0.25);
@@ -447,6 +457,30 @@ static int test_noise_level_clamping(void)
 	free(path);
 
 	CHECK("noise_clamped_to_7", cfg.fpv.noise_level == 7);
+	return failures;
+}
+
+static int test_frame_lost_clamping(void)
+{
+	int failures = 0;
+	const char *json =
+		"{ \"video0\": { \"frameLostMode\": \"bogus\","
+		"  \"frameLostThreshold\": 500000, \"frameLostGap\": 9999 } }";
+	char *path = write_temp_json(json);
+	CHECK("frame_lost_tmpfile", path != NULL);
+	if (!path) return failures;
+
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+	venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+
+	CHECK("frame_lost_mode_fallback",
+		strcmp(cfg.video0.frame_lost_mode, "normal") == 0);
+	CHECK("frame_lost_thr_clamped",
+		cfg.video0.frame_lost_threshold == 200000);
+	CHECK("frame_lost_gap_clamped", cfg.video0.frame_lost_gap == 600);
 	return failures;
 }
 
@@ -1043,6 +1077,7 @@ int test_venc_config(void)
 	failures += test_roundtrip();
 	failures += test_overclock_clamping();
 	failures += test_noise_level_clamping();
+	failures += test_frame_lost_clamping();
 	failures += test_framing_presets();
 	failures += test_resolution_aliases();
 	failures += test_rotate_180();

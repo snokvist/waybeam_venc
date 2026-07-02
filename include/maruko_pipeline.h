@@ -121,6 +121,17 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
  *  ctx->dual is NULL (no-op). */
 void maruko_pipeline_stop_dual(MarukoBackendContext *ctx);
 
+/** Apply the full frame-lost strategy to a VENC channel.  Single choke
+ *  point for init, live bitrate re-apply, and the /api/v1/set path
+ *  (mirrors star6e_controls_apply_frame_lost).  pskip selects
+ *  E_MI_VENC_FRMLOST_PSKIP over NORMAL; thr_kbps = 0 derives the auto
+ *  threshold from bitrate_kbps; gap = u32EncFrmGaps.  Always issues Set
+ *  so a live disable actually clears the strategy.  Returns 0 on
+ *  success, -1 on error. */
+int maruko_pipeline_apply_frame_lost(MI_VENC_DEV dev, MI_VENC_CHN chn,
+  int enabled, int pskip, uint32_t thr_kbps, uint32_t gap,
+  uint32_t bitrate_kbps);
+
 /** Apply SCL digital zoom pan on chn 0.  pct=0 disables (full frame).
  *  zoom_pct changes are restart-required; live calls only reposition the
  *  crop at the active output dim.  Affects ch1 mirror as well because SCL

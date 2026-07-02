@@ -26,10 +26,14 @@ int star6e_controls_apply_roi_qp(int qp);
 /** Apply relative I/P QP delta to the running encoder. */
 int star6e_controls_apply_qp_delta(int delta);
 
-/** Apply frame-lost threshold to a VENC channel.
- *  When enabled, sets the threshold to 120% of target bitrate.
- *  No-op when enabled is false. Returns 0 on success, -1 on error. */
-int star6e_controls_apply_frame_lost_threshold(MI_VENC_CHN chn, bool enabled,
-	uint32_t kbps);
+/** Apply the full frame-lost strategy to a VENC channel.  Single choke
+ *  point for init, live bitrate re-apply, and the /api/v1/set path.
+ *  pskip selects E_MI_VENC_FRMLOST_PSKIP (all-skip placeholder P-frames,
+ *  reference chain intact) over NORMAL (frame not encoded).  thr_kbps = 0
+ *  derives the auto threshold from bitrate_kbps; gap = u32EncFrmGaps.
+ *  Always issues Set so a live disable actually clears the strategy.
+ *  Returns 0 on success, -1 on error. */
+int star6e_controls_apply_frame_lost(MI_VENC_CHN chn, bool enabled,
+	bool pskip, uint32_t thr_kbps, uint32_t gap, uint32_t bitrate_kbps);
 
 #endif /* STAR6E_CONTROLS_H */

@@ -25,6 +25,16 @@ uint32_t pipeline_common_frame_lost_threshold(uint32_t kbps)
 	return bits + margin;
 }
 
+uint32_t pipeline_common_frame_lost_thr_bps(uint32_t thr_kbps,
+	uint32_t bitrate_kbps)
+{
+	if (thr_kbps == 0U)
+		return pipeline_common_frame_lost_threshold(bitrate_kbps);
+	if (thr_kbps > 200000U)
+		thr_kbps = 200000U;
+	return thr_kbps * 1024U;
+}
+
 uint32_t pipeline_common_gop_frames(double gop_seconds, uint32_t fps)
 {
 	uint32_t gop_fps = fps ? fps : 30;

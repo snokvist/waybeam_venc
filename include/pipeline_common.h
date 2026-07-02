@@ -31,10 +31,16 @@ typedef struct {
 int pipeline_common_cap_exposure_for_fps(uint32_t fps);
 
 /** Compute frame-lost overshoot threshold in bits/s from target bitrate.
- * Formula: bits + max(20%% margin, 512 kbit/s).  Low bitrates need the
+ * Formula: bits + max(50%% margin, 512 kbit/s).  Low bitrates need the
  * absolute floor so I-frames in VBR/AVBR don't trip frame drops.
  * Clamps kbps to 200000 to keep kbps*1024 inside uint32_t. */
 uint32_t pipeline_common_frame_lost_threshold(uint32_t kbps);
+
+/** Resolve the frame-lost trigger in bits/s.  thr_kbps > 0 is an explicit
+ * override (clamped to 200000 kbps); thr_kbps == 0 selects the auto
+ * heuristic above from the target bitrate. */
+uint32_t pipeline_common_frame_lost_thr_bps(uint32_t thr_kbps,
+	uint32_t bitrate_kbps);
 
 /** Compute crop rectangle for the VIF/SCL stage.
  * keep_aspect = true  → center-crop the sensor to the aspect ratio of
