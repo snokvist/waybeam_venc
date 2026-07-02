@@ -915,7 +915,7 @@ const static I2C_ARRAY Sensor_5m_50fps_1485_init_table_4lane_linear[] = {
     { 0x3028, 0x8C }, // HMAX = 0x028C = 652
     { 0x3029, 0x02 }, //
     { 0x3031, 0x00 }, // ADBIT (10bit)
-    { 0x3032, 0x00 }, //
+    { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
     { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
     { 0x3040, 0xBC }, // PIX_HST = 0x01BC = 444
     { 0x3041, 0x01 }, //
@@ -1064,7 +1064,7 @@ const static I2C_ARRAY Sensor_2952x1368_60_init_table_4lane_linear[] = {
     { 0x3028, 0x8C }, // HMAX = 0x028C = 652
     { 0x3029, 0x02 }, //
     { 0x3031, 0x00 }, // ADBIT (10bit)
-    { 0x3032, 0x00 }, //
+    { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
     { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
     { 0x3040, 0xBC },
     { 0x3041, 0x01 },
@@ -1213,7 +1213,7 @@ const static I2C_ARRAY Sensor_2112x1184_90_init_table_4lane_linear[] = {
     { 0x3028, 0x8C }, // HMAX = 0x028C = 652
     { 0x3029, 0x02 }, //
     { 0x3031, 0x00 }, // ADBIT (10bit)
-    { 0x3032, 0x00 }, //
+    { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
     { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
     { 0x3040, 0x6C },
     { 0x3041, 0x03 },

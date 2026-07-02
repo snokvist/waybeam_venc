@@ -94,6 +94,14 @@ block, MIPI timing regs, and the rate-dependent PHY INCKSELs `0x400C=0x01`,
 list entry, and `pCus_SetVideoRes` case with `vts_30fps` = VMAX and
 `Preview_line_period = 8736`.
 
+**Trap: `0x3032` must be `0x01`.** The vendor 1485 table ships
+`0x3032 = 0x00`, which produces a dark image at ~¼ brightness (AE reads
+avgY≈0, encoder bitrate collapses to ~⅕ of normal) — the same
+single-register bug fixed on the 891 tables on 2026-05-14. Live-poke
+verified: `i2ctransfer -y 1 w3@0x1a 0x30 0x32 0x01` on a running dark
+sensor restores the image instantly. The skeleton in the driver is fixed;
+keep the byte if regenerating from vendor sources.
+
 Constraints: VENC device limit 4096x2176; at 90 fps (VMAX=1272) active
 height ≤ ~1230 lines.
 
