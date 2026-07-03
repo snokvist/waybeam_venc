@@ -12,7 +12,7 @@ all non-binned and ~16:9. **Breaking `sensor.mode` remap** (old→new: 0→0,
 | Idx | Mode | Device-verified (this session, .12) |
 |---|---|---|
 | 0 | 3760x2116@30 (891/REALTIME) | **FAILS — pre-existing master bug, see below** |
-| 1 | 2952x1656@50_1485 | 50.0 fps exact, ~16.5 Mbps — **`video0.size` must be `auto`** (see /16 note) |
+| 1 | 2952x1656@50_1485 | 50.0 fps exact, ~16.6 Mbps — explicit `video0.size 2952x1656` now valid (see /8 fix) or `auto` |
 | 2 | 2688x1512@60_1485 (NEW) | 60.0 fps exact, ~14.6 Mbps, dmesg clean |
 | 3 | 2112x1184@90_1485 | table byte-identical to #155-verified old mode 7; set as final bench state |
 | 4 | 1920x1080@100_1485 (NEW) | 100.0 fps exact (shutter 9994 µs), ~16.2 Mbps |
@@ -61,18 +61,30 @@ or (b) HW_RING with a width cap that falls back to the plain path when
 `out_w > 2952/3072-ish`, and bisect the actual width limit. If REALTIME+
 plain-frame works at 3760, gate HW_RING on width.
 
-## OPEN ITEM 2 — encode-width /16 validation vs hardware
+## RESOLVED ITEM 2 — encode-width validation was too strict (/16 → /8)
 
-`venc_config` rejects explicit `video0.size` widths not divisible by 16
-("width must be a multiple of 16"), but `size: auto` happily encodes
-2952 (÷16 = 184.5) natively and it works. Consequences:
+**Fixed on this branch.** `venc_config` had rejected explicit `video0.size`
+widths not divisible by 16, yet `size: auto` encoded 2952 (÷8, not ÷16)
+natively and streamed fine. Root cause of the drop when an explicit /16
+width was set instead: forcing 2944x1656 (nearest /16) does **not** crop —
+the SCL keeps the full 2952-wide input and anamorphically **downscales**
+2952→2944, a real scaler resize + IFC ring-stride change, costing ~7 fps
+(measured 43 vs 50).
 
-- Mode 1 **must** run `video0.size auto` for its 1:1 50 fps. Forcing
-  2944x1656 (nearest /16) adds a 2952→2944 SCL crop that costs ~7 fps
-  (measured 43 vs 50).
-- Also: heights not /8 are rejected (mode 0 sensor 2116 → encode 2112).
-- Follow-up: either relax the width check to /8 (verify VENC stride rules)
-  or document `auto` as the intended path for non-/16 modes.
+The /16 rule came from commit `4c9c63a` (#63/#55), picked defensively from a
+single failing case (`854×480` → `MI_ERR_VENC_ILLEGAL_PARAM`). But 854 is
+÷2 only, not even ÷8. The real HEVC constraint is /8 (min coding block;
+conformance window covers the remainder up to the CTU). Relaxed the width
+check to `w % 8` — still rejects 854, now accepts 2952.
+
+Device-verified on .12 (patched maruko binary, tmpfs): explicit
+`sensor.mode 1` + `video0.size 2952x1656` + `fps 50` → **50.0 fps exact**
+(frame deltas 2238→2288→…→2488 = 50/s), ~16.6 Mbps, `SCL port
+crop(0,0 2952x1656) out(2952x1656)` 1:1 passthrough, dmesg `Drop:0`, no
+FIFO-full/fence spam. Identical to the auto path.
+
+Note: heights not /8 are still rejected (mode 0 sensor 2116 → encode 2112);
+that half of the rule was always correct.
 
 ## OPEN ITEM 3 — teardown watchdog (roadmap, deferred by user)
 

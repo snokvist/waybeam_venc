@@ -83,6 +83,16 @@ The ceiling-characterization ladder probes (2952x1848 / 3264x1848 /
 3552x1848 @60, 2952x1224@90 — delivering 45/42/~39/68 fps) were pruned after
 measurement; regenerate any of them with the recipe below if needed.
 
+**Encode `video0.size` alignment.** Width and height must each be a multiple
+of **8** (HEVC min coding block; the encoder's conformance window covers the
+remainder up to the CTU). Mode 1's native **2952** is ÷8 but not ÷16, so it
+may be set explicitly (`video0.size 2952x1656`) or left `auto` — both give a
+1:1 SCL passthrough at 50.0 fps. Do **not** round to the nearest /16 (2944):
+that keeps the full 2952-wide SCL input and anamorphically downscales it to
+2944, a real scaler resize that costs ~7 fps (43 vs 50). The former /16
+width gate (relaxed to /8 on the mode-lineup branch) forced exactly that
+mistake. Mode 0 sensor height 2116 is not /8, so it encodes at 2112.
+
 ### Retired vendor modes (parked under `#if 0` in the driver)
 
 The binned vendor tables run HMAX=365 (4.882 µs line): a 1920 px line

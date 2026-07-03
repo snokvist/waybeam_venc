@@ -24,6 +24,13 @@ and ~16:9 (sensor native aspect). See `documentation/MARUKO_IMX415_1485_MODES.md
 - CSI-MAC clock selection now keyed on a per-mode `link_mbps` field instead
   of a hardcoded index threshold (renumber-safe; the FRAMEBASE bind was
   already keyed on the `_1485` name suffix).
+- **`video0.size` width alignment relaxed /16 → /8.** The former rule
+  (#63/#55, derived from an 854×480 failure that is only ÷2) needlessly
+  rejected native ÷8 widths like 2952. Mode 1's `2952x1656` may now be set
+  explicitly instead of only via `auto`; forcing the nearest /16 (2944)
+  anamorphically downscaled 2952→2944 and cost ~7 fps (43 vs 50, device-
+  verified). Height /8 unchanged. HEVC's conformance window covers the
+  sub-CTU remainder, so /8 is the correct minimum.
 
 ## [0.20.0] - 2026-07-03
 
