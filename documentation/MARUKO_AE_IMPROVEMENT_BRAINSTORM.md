@@ -6,7 +6,12 @@ Cus3A does not: (1) a visible **colour shift**, and (2) noticeable **AE
 "steps"** when brightness changes. This documents the root cause and a
 concrete improvement path that keeps the CPU win.
 
-Nothing here is implemented yet — it is a design proposal for review.
+**Status:** P1 (IIR controller) + P4 (pin ISP gain) are **implemented** in
+`src/maruko_cus3a.c` (first cut) and bench-smoke-tested — the loop converges,
+holds without oscillation, and pins ISP gain at 1.0×; `make verify` +
+1699 tests green. Still needs **real-scene field tuning** (ALPHA/target) and
+**P2 (real BV / colour)**, which requires on-device calibration and is not yet
+done. P3/P5/P6 are open.
 
 ## Why the two backends differ
 

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 /* ── CUS3A / ISP ABI structures ──────────────────────────────────────── */
 
@@ -266,24 +267,19 @@ static void release_symbols(Cus3aState *s)
 #define AE_STEP_DEN         10
 #define AE_GAIN_MIN         1024   /* 1.0x */
 #define AE_GAIN_MAX_DEFAULT 32768  /* 32x sensor cap (IMX415) */
-#define AE_ISP_GAIN_MAX     8192   /* 8x ISP digital gain ceiling */
+#define AE_ISP_GAIN_MAX     8192   /* 8x ISP digital gain ceiling (unused: P4) */
 #define AE_SHUTTER_MIN_US   30
 
-static uint32_t step_up(uint32_t v, uint32_t cap)
-{
-	uint64_t n = ((uint64_t)v * AE_STEP_NUM) / AE_STEP_DEN;
-	if (n > cap) n = cap;
-	if (n == v && v < cap) n = v + 1;
-	return (uint32_t)n;
-}
+/* P1 — log-domain IIR proportional controller (replaces the bang-bang
+ * cascade).  Converge in continuous exposure space with smooth damping so
+ * there are no visible ~20% steps.  Tune ALPHA on device: lower = smoother
+ * but slower.  DEADBAND stops micro-hunting; RATIO_CLAMP bounds how far a
+ * single transient can move per tick. */
+#define AE_IIR_ALPHA        0.20   /* fraction of log-exposure error / tick */
+#define AE_RATIO_CLAMP      4.0    /* max per-tick exposure ratio (and 1/x) */
+#define AE_DEADBAND_RATIO   0.015  /* +/-1.5% exposure -> hold */
 
-static uint32_t step_dn(uint32_t v, uint32_t floor_v)
-{
-	uint64_t n = ((uint64_t)v * AE_STEP_DEN) / AE_STEP_NUM;
-	if (n < floor_v) n = floor_v;
-	if (n == v && v > floor_v) n = v - 1;
-	return (uint32_t)n;
-}
+/* (bang-bang step_up/step_dn removed — replaced by the IIR controller.) */
 
 /* ── Supervisory + AE control thread ─────────────────────────────────── */
 
@@ -469,30 +465,60 @@ static void *cus3a_thread(void *arg)
 		 * runs in 3A_Proc_0 at sensor rate and we'd just stomp on
 		 * its output here. */
 		if (s->cfg.throttle_mode && can_drive) {
-			int delta = (int)AE_TARGET_Y - (int)avg_y;
+			/* P1 — log-domain IIR proportional controller (replaces
+			 * the ~20% bang-bang cascade).  Converge total exposure
+			 * toward the luma target with smooth damping so there are
+			 * no visible steps.  P4: ISP digital gain pinned at 1.0x
+			 * (it clips colour channels + amplifies noise); converge
+			 * with shutter (priority) then analog sensor gain. */
+			cur_isp_gain = AE_GAIN_MIN;
 
-			if (delta > AE_DEAD_BAND) {
-				/* Too dark: shutter → sensor gain → ISP gain */
-				if (cur_shutter_us < shutter_max_us)
-					cur_shutter_us = step_up(
-						cur_shutter_us, shutter_max_us);
-				else if (cur_sensor_gain < gain_max_eff)
-					cur_sensor_gain = step_up(
-						cur_sensor_gain, gain_max_eff);
-				else if (cur_isp_gain < AE_ISP_GAIN_MAX)
-					cur_isp_gain = step_up(
-						cur_isp_gain, AE_ISP_GAIN_MAX);
-			} else if (delta < -AE_DEAD_BAND) {
-				/* Too bright: ISP gain → sensor gain → shutter */
-				if (cur_isp_gain > AE_GAIN_MIN)
-					cur_isp_gain = step_dn(
-						cur_isp_gain, AE_GAIN_MIN);
-				else if (cur_sensor_gain > AE_GAIN_MIN)
-					cur_sensor_gain = step_dn(
-						cur_sensor_gain, AE_GAIN_MIN);
-				else if (cur_shutter_us > shutter_min_us)
-					cur_shutter_us = step_dn(
-						cur_shutter_us, shutter_min_us);
+			/* Applied exposure in linear units: shutter_us * gain(x). */
+			double e_applied = (double)cur_shutter_us *
+				((double)cur_sensor_gain / (double)AE_GAIN_MIN);
+			if (e_applied < 1.0)
+				e_applied = 1.0;
+
+			/* Proportional: exposure scales inversely with luma error
+			 * (+1 avoids div-by-zero and softens deep shadow). */
+			double ratio = ((double)AE_TARGET_Y + 1.0) /
+				((double)avg_y + 1.0);
+			if (ratio > AE_RATIO_CLAMP)
+				ratio = AE_RATIO_CLAMP;
+			else if (ratio < 1.0 / AE_RATIO_CLAMP)
+				ratio = 1.0 / AE_RATIO_CLAMP;
+
+			/* Log-domain IIR damping: e_next = e * ratio^alpha —
+			 * smooth, perceptually linear, no staircase/overshoot. */
+			double e_next = e_applied * pow(ratio, AE_IIR_ALPHA);
+
+			/* Deadband in exposure ratio: hold if the move is tiny. */
+			double drift = e_next / e_applied;
+			if (drift < 1.0 + AE_DEADBAND_RATIO &&
+			    drift > 1.0 - AE_DEADBAND_RATIO)
+				e_next = e_applied;
+
+			/* Split across shutter (priority) then analog gain. */
+			{
+				double e_max_shutter = (double)shutter_max_us;
+				if (e_max_shutter < 1.0)
+					e_max_shutter = 1.0;
+				if (e_next <= e_max_shutter) {
+					uint32_t ns = (uint32_t)(e_next + 0.5);
+					if (ns < shutter_min_us)
+						ns = shutter_min_us;
+					cur_shutter_us = ns;
+					cur_sensor_gain = AE_GAIN_MIN;
+				} else {
+					double g = (e_next / e_max_shutter) *
+						(double)AE_GAIN_MIN;
+					if (g > (double)gain_max_eff)
+						g = (double)gain_max_eff;
+					if (g < (double)AE_GAIN_MIN)
+						g = (double)AE_GAIN_MIN;
+					cur_shutter_us = shutter_max_us;
+					cur_sensor_gain = (uint32_t)(g + 0.5);
+				}
 			}
 
 			memset(&ae_result, 0, sizeof(ae_result));
