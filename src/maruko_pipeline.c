@@ -72,6 +72,11 @@ static int g_mi_scl_chn_created = 0;
  * snapshot backend.  Configured + enabled in configure_maruko_scl, bound
  * to MJPG VENC dev 8 by venc_jpeg_backend_init (src/maruko_jpeg.c). */
 static int g_mi_scl_port1_enabled = 0;
+/* Mirrors MI_SYS_WindowRect_t.  Defined up here because both the SCL
+ * configure path and the zoom helpers below use it. */
+typedef struct {
+	uint16_t u16X, u16Y, u16Width, u16Height;
+} MaruWindowRect_t;
 
 /* MI_ISP_CUS3A_SetAECropSize confines AE statistics to a sub-rect of the
  * ISP frame in 0..1023 normalized coords.  Resolved lazily via dlsym; if
@@ -627,14 +632,18 @@ fail:
 	return ret ? ret : -1;
 }
 
+/* ar_crop: keep_aspect AR rect in full-input coords (NULL = no crop).
+ * zoom_rect: Approach-C zoom window relative to the AR surface (NULL =
+ * no zoom).  See the keep_aspect block below for why the WIDTH
+ * component of the AR rect degrades to an anamorphic squeeze on this
+ * platform. */
 static int configure_maruko_scl(const SensorSelectResult *sensor,
 	uint32_t out_width, uint32_t out_height,
-	const PipelinePrecropRect *precrop)
+	const PipelinePrecropRect *ar_crop,
+	const PipelinePrecropRect *zoom_rect)
 {
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
-
-	(void)sensor;
 
 	if (!g_mi_scl_dev_created) {
 		/* Match majestic: enable all 4 HW scaler ports (bits 0-3). */
@@ -671,6 +680,53 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		goto fail;
 	}
 
+	/* keep_aspect AR crop — the WIDTH component cannot be honoured on
+	 * the I6C camera pipeline; every avenue is hardware-blocked
+	 * (verified on device, 2026-07-03):
+	 *   - SCL output-port crop with width != ring stride stalls the
+	 *     scaler, and mutating it live panics the kernel;
+	 *   - VIF sub-window crop is unsupported on I6C;
+	 *   - a non-zero ISP output-port crop stalls ISP frame processing
+	 *     at high resolutions;
+	 *   - MI_SCL_SetInputPortCrop (the vendor mixer path) is gated by
+	 *     mi_scl.ko on a FRAMEBASE-bound SCL input (RDMA read window),
+	 *     and mi_sys refuses FRAMEBASE on the ISP->SCL edge
+	 *     (-1610014712) — REALTIME is the only accepted producer bind.
+	 * So a wider-than-target source is anamorphically squeezed to the
+	 * encode size (full sensor FOV, horizontally compressed — standard
+	 * FPV framing).  The HEIGHT component of the AR rect is honoured
+	 * via the output-port crop, which is stride-safe. */
+	uint32_t in_w = sensor->plane.capt.width;
+	uint32_t in_h = sensor->plane.capt.height;
+	PipelinePrecropRect ar = {0, 0, (uint16_t)in_w, (uint16_t)in_h};
+	if (ar_crop)
+		ar = *ar_crop;
+	/* Notice only when the squeeze is actually visible (>2% width
+	 * delta) — near-16:9 sensor modes produce trivial rounding crops
+	 * that are not worth alarming about. */
+	if (ar.w != (uint16_t)in_w && !zoom_rect &&
+	    (uint32_t)(in_w - ar.w) * 50 > in_w)
+		printf("> [maruko] keep_aspect: width crop %ux%u@%u,%u is "
+			"not supported by I6C hardware — full sensor width "
+			"squeezed to %ux%u (set video0.keep_aspect=false to "
+			"silence)\n",
+			ar.w, ar.h, ar.x, ar.y, out_width, out_height);
+
+	PipelinePrecropRect pcrop;
+	pcrop.x = 0;
+	pcrop.y = ar.y;
+	pcrop.w = (uint16_t)in_w;
+	pcrop.h = ar.h;
+	if (zoom_rect) {
+		/* 1:1 zoom window (crop == output dims, no scaling) — safe
+		 * at any width.  Positioned relative to the AR surface,
+		 * which sits at ar.x/ar.y inside the full input. */
+		pcrop.x = (uint16_t)(ar.x + zoom_rect->x);
+		pcrop.y = (uint16_t)(ar.y + zoom_rect->y);
+		pcrop.w = zoom_rect->w;
+		pcrop.h = zoom_rect->h;
+	}
+
 	ret = g_mi_scl.fnStartChannel(0, 0);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -680,20 +736,14 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 	started = 1;
 
-	/* SCL port crop: when keep_aspect=true and source AR != encode AR,
-	 * pipeline_common_compute_precrop() returns a centered rect that
-	 * matches the encode aspect ratio (zero offsets + full source dims
-	 * otherwise).  Writing it into scl_port.crop avoids non-uniform
-	 * scaling in the SCL stage.  Output = target dimensions; IFC
-	 * compress required for HW_RING binding to VENC. */
+	/* Output = target dimensions; IFC compress required for HW_RING
+	 * binding to VENC. */
 	i6c_scl_port scl_port;
 	memset(&scl_port, 0, sizeof(scl_port));
-	if (precrop) {
-		scl_port.crop.x = precrop->x;
-		scl_port.crop.y = precrop->y;
-		scl_port.crop.width = precrop->w;
-		scl_port.crop.height = precrop->h;
-	}
+	scl_port.crop.x = pcrop.x;
+	scl_port.crop.y = pcrop.y;
+	scl_port.crop.width = pcrop.w;
+	scl_port.crop.height = pcrop.h;
 	scl_port.output.width = (unsigned short)out_width;
 	scl_port.output.height = (unsigned short)out_height;
 	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
@@ -736,12 +786,10 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	if (!g_mi_scl_port1_enabled) {
 		i6c_scl_port scl_port1;
 		memset(&scl_port1, 0, sizeof(scl_port1));
-		if (precrop) {
-			scl_port1.crop.x = precrop->x;
-			scl_port1.crop.y = precrop->y;
-			scl_port1.crop.width = precrop->w;
-			scl_port1.crop.height = precrop->h;
-		}
+		scl_port1.crop.x = pcrop.x;
+		scl_port1.crop.y = pcrop.y;
+		scl_port1.crop.width = pcrop.w;
+		scl_port1.crop.height = pcrop.h;
 		scl_port1.output.width = (unsigned short)out_width;
 		scl_port1.output.height = (unsigned short)out_height;
 		scl_port1.pixFmt = I6_PIXFMT_YUV420SP;
@@ -767,9 +815,9 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		}
 	}
 
-	if (precrop)
-		venc_api_set_active_precrop(precrop->x, precrop->y,
-			precrop->w, precrop->h);
+	/* Report the sensor-absolute AR rect (pre-zoom) — same semantic as
+	 * Star6E's venc_api_set_active_precrop call site. */
+	venc_api_set_active_precrop(ar.x, ar.y, ar.w, ar.h);
 	return 0;
 
 fail:
@@ -786,7 +834,8 @@ fail:
 
 static int maruko_start_vpe(const SensorSelectResult *sensor,
 	uint32_t out_width, uint32_t out_height, int vpe_level_3dnr,
-	const PipelinePrecropRect *precrop, int mirror, int flip)
+	const PipelinePrecropRect *ar_crop,
+	const PipelinePrecropRect *zoom_rect, int mirror, int flip)
 {
 	int isp_started = 0;
 
@@ -806,7 +855,8 @@ static int maruko_start_vpe(const SensorSelectResult *sensor,
 				(int)sensor->pad_id, mirror, flip, (int)orien_ret);
 	}
 
-	if (configure_maruko_scl(sensor, out_width, out_height, precrop) != 0)
+	if (configure_maruko_scl(sensor, out_width, out_height, ar_crop,
+	    zoom_rect) != 0)
 		goto fail_scl;
 
 	return 0;
@@ -1031,11 +1081,9 @@ static void fill_maruko_rc_attr(i6c_venc_chn *attr,
  * live pan re-issues SetPortConfig with new crop offsets while keeping
  * the same output dim (ISP / VENC channels never resize).
  *
- * MaruWindowRect_t mirrors MI_SYS_WindowRect_t.  Compute helpers live
- * here so they're reusable by both initial setup and live pan. */
-typedef struct {
-	uint16_t u16X, u16Y, u16Width, u16Height;
-} MaruWindowRect_t;
+ * MaruWindowRect_t (defined near the top of this file) mirrors
+ * MI_SYS_WindowRect_t.  Compute helpers live here so they're reusable
+ * by both initial setup and live pan. */
 
 /* Effective output dim for a given zoom_pct.  16-px alignment matches
  * SCL output and VENC create requirements; floor at 256 keeps the
@@ -1235,13 +1283,26 @@ static void maruko_apply_ae_crop(MarukoBackendContext *ctx,
 		cx = (double)(in_w - rect_w);
 	if (cy + (double)rect_h > (double)in_h)
 		cy = (double)(in_h - rect_h);
-	rx = cx * 1023.0 / (double)in_w;
-	ry = cy * 1023.0 / (double)in_h;
-	memset(&r, 0, sizeof(r));
-	r.crop_x = (uint16_t)(rx + 0.5);
-	r.crop_y = (uint16_t)(ry + 0.5);
-	r.crop_w = (uint16_t)((double)rect_w * 1023.0 / (double)in_w + 0.5);
-	r.crop_h = (uint16_t)((double)rect_h * 1023.0 / (double)in_h + 0.5);
+	/* The AE grid spans the FULL ISP surface; the pan window lives on
+	 * the (possibly input-cropped) SCL surface.  Translate to absolute
+	 * ISP coords before normalizing to 0..1023. */
+	{
+		uint32_t full_w = ctx->sensor.plane.capt.width;
+		uint32_t full_h = ctx->sensor.plane.capt.height;
+		if (full_w == 0 || full_h == 0) {
+			full_w = in_w;
+			full_h = in_h;
+		}
+		rx = ((double)ctx->scl_crop_x + cx) * 1023.0 / (double)full_w;
+		ry = ((double)ctx->scl_crop_y + cy) * 1023.0 / (double)full_h;
+		memset(&r, 0, sizeof(r));
+		r.crop_x = (uint16_t)(rx + 0.5);
+		r.crop_y = (uint16_t)(ry + 0.5);
+		r.crop_w = (uint16_t)((double)rect_w * 1023.0 /
+			(double)full_w + 0.5);
+		r.crop_h = (uint16_t)((double)rect_h * 1023.0 /
+			(double)full_h + 0.5);
+	}
 	if (r.crop_w == 0) r.crop_w = 1;
 	if (r.crop_h == 0) r.crop_h = 1;
 	if (r.crop_x + r.crop_w > 1023)
@@ -2893,17 +2954,10 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	uint32_t scl_in_h = ctx->sensor.plane.capt.height;
 	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
 		scl_in_w, scl_in_h, out_w, out_h, ctx->cfg.keep_aspect ? true : false);
-	/* I6C SCL hardware requires crop.width == ring-pool maxWidth (== capt
-	 * width).  keep_aspect narrows the crop WIDTH when the sensor AR is wider
-	 * than the encode AR; that narrowed width stalls the scaler.  Restore full
-	 * width and let the SCL scale — the residual AR delta on a near-matching
-	 * downscale is sub-pixel.  A vertical (height) crop is stride-safe and is
-	 * left intact. */
-	if (precrop.w != (uint16_t)scl_in_w) {
-		precrop.x = 0;
-		precrop.w = (uint16_t)scl_in_w;
-	}
-	PipelinePrecropRect base_precrop = precrop;
+	/* The AR rect goes down un-mangled: configure_maruko_scl applies it
+	 * as a channel-level INPUT crop (true keep_aspect framing, Star6E
+	 * parity) when the SDK provides MI_SCL_SetInputPortCrop, and
+	 * degrades to the historical full-width squeeze otherwise. */
 	if (ctx->cfg.verbose) {
 		if (precrop.x || precrop.y ||
 		    precrop.w != scl_in_w || precrop.h != scl_in_h) {
@@ -2920,6 +2974,8 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * receiver.  zoom_pct is MUT_RESTART so this only runs at start;
 	 * live x/y pan is handled by maruko_pipeline_apply_zoom which
 	 * re-issues SetPortConfig with new offsets at the same dim. */
+	PipelinePrecropRect zoom_rect = {0, 0, 0, 0};
+	int have_zoom = 0;
 	if (ctx->cfg.zoom_pct > 0.0 && ctx->cfg.zoom_pct < 1.0) {
 		uint32_t zw = out_w;
 		uint32_t zh = out_h;
@@ -2937,21 +2993,16 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		ctx->cfg.image_height = zh;
 		out_w = zw;
 		out_h = zh;
-		/* Replace the AR-precrop with the zoom rect (offset within
-		 * precrop area).  Position in scl_in coordinates so the SCL
-		 * crop is absolute. */
-		precrop.x = (uint16_t)(precrop.x + zrect.u16X);
-		precrop.y = (uint16_t)(precrop.y + zrect.u16Y);
-		precrop.w = zrect.u16Width;
-		precrop.h = zrect.u16Height;
+		/* The zoom window stays relative to the AR surface here;
+		 * configure_maruko_scl translates it into channel-surface
+		 * coords once it knows whether the AR rect became an input
+		 * crop. */
+		zoom_rect.x = zrect.u16X;
+		zoom_rect.y = zrect.u16Y;
+		zoom_rect.w = zrect.u16Width;
+		zoom_rect.h = zrect.u16Height;
+		have_zoom = 1;
 	}
-	/* Stash the AR-matched base crop for live pan.  The zoom rect is
-	 * always positioned inside this surface, not inside the full SCL
-	 * input, or panning can leak outside keep-aspect framing. */
-	ctx->scl_crop_x = base_precrop.x;
-	ctx->scl_crop_y = base_precrop.y;
-	ctx->scl_crop_w = base_precrop.w;
-	ctx->scl_crop_h = base_precrop.h;
 
 	if (maruko_start_vif(&ctx->sensor) != 0)
 		return -1;
@@ -2959,13 +3010,23 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 
 	if (maruko_start_vpe(&ctx->sensor, out_w, out_h,
 	    ctx->cfg.vpe_level_3dnr, &precrop,
+	    have_zoom ? &zoom_rect : NULL,
 	    ctx->cfg.image_mirror, ctx->cfg.image_flip) != 0)
 		return -1;
 	ctx->vpe_started = 1;
-	if (ctx->cfg.zoom_pct > 0.0 && ctx->cfg.zoom_pct < 1.0) {
+	/* Stash the AR base surface for live pan.  The zoom rect is always
+	 * positioned inside this surface, not the full SCL input, or
+	 * panning can leak outside keep-aspect framing. */
+	ctx->scl_crop_x = precrop.x;
+	ctx->scl_crop_y = precrop.y;
+	ctx->scl_crop_w = precrop.w;
+	ctx->scl_crop_h = precrop.h;
+	if (have_zoom) {
 		maruko_pipeline_set_zoom_status(ctx->cfg.zoom_pct,
-			out_w, out_h, precrop.x, precrop.y,
-			precrop.w, precrop.h);
+			out_w, out_h,
+			ctx->scl_crop_x + zoom_rect.x,
+			ctx->scl_crop_y + zoom_rect.y,
+			zoom_rect.w, zoom_rect.h);
 	} else {
 		maruko_pipeline_clear_zoom_status();
 	}
