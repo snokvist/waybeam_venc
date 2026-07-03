@@ -72,6 +72,11 @@ static int g_mi_scl_chn_created = 0;
  * snapshot backend.  Configured + enabled in configure_maruko_scl, bound
  * to MJPG VENC dev 8 by venc_jpeg_backend_init (src/maruko_jpeg.c). */
 static int g_mi_scl_port1_enabled = 0;
+/* Mirrors MI_SYS_WindowRect_t.  Defined up here because both the SCL
+ * configure path and the zoom helpers below use it. */
+typedef struct {
+	uint16_t u16X, u16Y, u16Width, u16Height;
+} MaruWindowRect_t;
 
 /* MI_ISP_CUS3A_SetAECropSize confines AE statistics to a sub-rect of the
  * ISP frame in 0..1023 normalized coords.  Resolved lazily via dlsym; if
@@ -627,14 +632,18 @@ fail:
 	return ret ? ret : -1;
 }
 
+/* ar_crop: keep_aspect AR rect in full-input coords (NULL = no crop).
+ * zoom_rect: Approach-C zoom window relative to the AR surface (NULL =
+ * no zoom).  See the keep_aspect block below for why the WIDTH
+ * component of the AR rect degrades to an anamorphic squeeze on this
+ * platform. */
 static int configure_maruko_scl(const SensorSelectResult *sensor,
 	uint32_t out_width, uint32_t out_height,
-	const PipelinePrecropRect *precrop)
+	const PipelinePrecropRect *ar_crop,
+	const PipelinePrecropRect *zoom_rect)
 {
 	MI_S32 ret = 0;
 	int dev = 0, chn = 0, started = 0, port = 0;
-
-	(void)sensor;
 
 	if (!g_mi_scl_dev_created) {
 		/* Match majestic: enable all 4 HW scaler ports (bits 0-3). */
@@ -671,6 +680,53 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		goto fail;
 	}
 
+	/* keep_aspect AR crop — the WIDTH component cannot be honoured on
+	 * the I6C camera pipeline; every avenue is hardware-blocked
+	 * (verified on device, 2026-07-03):
+	 *   - SCL output-port crop with width != ring stride stalls the
+	 *     scaler, and mutating it live panics the kernel;
+	 *   - VIF sub-window crop is unsupported on I6C;
+	 *   - a non-zero ISP output-port crop stalls ISP frame processing
+	 *     at high resolutions;
+	 *   - MI_SCL_SetInputPortCrop (the vendor mixer path) is gated by
+	 *     mi_scl.ko on a FRAMEBASE-bound SCL input (RDMA read window),
+	 *     and mi_sys refuses FRAMEBASE on the ISP->SCL edge
+	 *     (-1610014712) — REALTIME is the only accepted producer bind.
+	 * So a wider-than-target source is anamorphically squeezed to the
+	 * encode size (full sensor FOV, horizontally compressed — standard
+	 * FPV framing).  The HEIGHT component of the AR rect is honoured
+	 * via the output-port crop, which is stride-safe. */
+	uint32_t in_w = sensor->plane.capt.width;
+	uint32_t in_h = sensor->plane.capt.height;
+	PipelinePrecropRect ar = {0, 0, (uint16_t)in_w, (uint16_t)in_h};
+	if (ar_crop)
+		ar = *ar_crop;
+	/* Notice only when the squeeze is actually visible (>2% width
+	 * delta) — near-16:9 sensor modes produce trivial rounding crops
+	 * that are not worth alarming about. */
+	if (ar.w < (uint16_t)in_w && !zoom_rect &&
+	    (uint32_t)(in_w - ar.w) * 50 > in_w)
+		printf("> [maruko] keep_aspect: width crop %ux%u@%u,%u is "
+			"not supported by I6C hardware — full sensor width "
+			"squeezed to %ux%u (set isp.keepAspect=false to "
+			"silence)\n",
+			ar.w, ar.h, ar.x, ar.y, out_width, out_height);
+
+	PipelinePrecropRect pcrop;
+	pcrop.x = 0;
+	pcrop.y = ar.y;
+	pcrop.w = (uint16_t)in_w;
+	pcrop.h = ar.h;
+	if (zoom_rect) {
+		/* 1:1 zoom window (crop == output dims, no scaling) — safe
+		 * at any width.  Positioned relative to the AR surface,
+		 * which sits at ar.x/ar.y inside the full input. */
+		pcrop.x = (uint16_t)(ar.x + zoom_rect->x);
+		pcrop.y = (uint16_t)(ar.y + zoom_rect->y);
+		pcrop.w = zoom_rect->w;
+		pcrop.h = zoom_rect->h;
+	}
+
 	ret = g_mi_scl.fnStartChannel(0, 0);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -680,20 +736,14 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	}
 	started = 1;
 
-	/* SCL port crop: when keep_aspect=true and source AR != encode AR,
-	 * pipeline_common_compute_precrop() returns a centered rect that
-	 * matches the encode aspect ratio (zero offsets + full source dims
-	 * otherwise).  Writing it into scl_port.crop avoids non-uniform
-	 * scaling in the SCL stage.  Output = target dimensions; IFC
-	 * compress required for HW_RING binding to VENC. */
+	/* Output = target dimensions; IFC compress required for HW_RING
+	 * binding to VENC. */
 	i6c_scl_port scl_port;
 	memset(&scl_port, 0, sizeof(scl_port));
-	if (precrop) {
-		scl_port.crop.x = precrop->x;
-		scl_port.crop.y = precrop->y;
-		scl_port.crop.width = precrop->w;
-		scl_port.crop.height = precrop->h;
-	}
+	scl_port.crop.x = pcrop.x;
+	scl_port.crop.y = pcrop.y;
+	scl_port.crop.width = pcrop.w;
+	scl_port.crop.height = pcrop.h;
 	scl_port.output.width = (unsigned short)out_width;
 	scl_port.output.height = (unsigned short)out_height;
 	scl_port.pixFmt = I6_PIXFMT_YUV420SP;
@@ -736,12 +786,10 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	if (!g_mi_scl_port1_enabled) {
 		i6c_scl_port scl_port1;
 		memset(&scl_port1, 0, sizeof(scl_port1));
-		if (precrop) {
-			scl_port1.crop.x = precrop->x;
-			scl_port1.crop.y = precrop->y;
-			scl_port1.crop.width = precrop->w;
-			scl_port1.crop.height = precrop->h;
-		}
+		scl_port1.crop.x = pcrop.x;
+		scl_port1.crop.y = pcrop.y;
+		scl_port1.crop.width = pcrop.w;
+		scl_port1.crop.height = pcrop.h;
 		scl_port1.output.width = (unsigned short)out_width;
 		scl_port1.output.height = (unsigned short)out_height;
 		scl_port1.pixFmt = I6_PIXFMT_YUV420SP;
@@ -767,9 +815,9 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		}
 	}
 
-	if (precrop)
-		venc_api_set_active_precrop(precrop->x, precrop->y,
-			precrop->w, precrop->h);
+	/* Report the sensor-absolute AR rect (pre-zoom) — same semantic as
+	 * Star6E's venc_api_set_active_precrop call site. */
+	venc_api_set_active_precrop(ar.x, ar.y, ar.w, ar.h);
 	return 0;
 
 fail:
@@ -786,7 +834,8 @@ fail:
 
 static int maruko_start_vpe(const SensorSelectResult *sensor,
 	uint32_t out_width, uint32_t out_height, int vpe_level_3dnr,
-	const PipelinePrecropRect *precrop, int mirror, int flip)
+	const PipelinePrecropRect *ar_crop,
+	const PipelinePrecropRect *zoom_rect, int mirror, int flip)
 {
 	int isp_started = 0;
 
@@ -806,7 +855,8 @@ static int maruko_start_vpe(const SensorSelectResult *sensor,
 				(int)sensor->pad_id, mirror, flip, (int)orien_ret);
 	}
 
-	if (configure_maruko_scl(sensor, out_width, out_height, precrop) != 0)
+	if (configure_maruko_scl(sensor, out_width, out_height, ar_crop,
+	    zoom_rect) != 0)
 		goto fail_scl;
 
 	return 0;
@@ -821,23 +871,94 @@ fail_scl:
 	return -1;
 }
 
+/* Poll an MI module's debug proc node until every output-port row
+ * reports at most max_inflight tasks (workingTask_cnt / PipeBuf_cnt in
+ * the "Output port common info" section; the worst row across all
+ * ports is used, so multi-port configs drain too).
+ * MI_SYS_UnBindChnPort runs an
+ * UNBOUNDED uninterruptible kernel poll (MI_SYS_IMPL_FlushRealTimeOutputBuf)
+ * for REALTIME/RING binds — if an in-flight buffer's consumer is already
+ * gone, the process hangs in D-state forever.  max_inflight is 0 for a
+ * stopped producer (truly drains) and 1 for the SCL->VENC RING leg,
+ * whose ring keeps one resident slot busy the whole time it is bound.
+ * This wait is bounded and advisory: on timeout or unreadable proc node
+ * the caller proceeds anyway. */
+static int maruko_wait_output_idle(const char *proc_path, int timeout_ms,
+	int max_inflight)
+{
+	int waited = 0;
+
+	while (1) {
+		FILE *f = fopen(proc_path, "r");
+		char line[256];
+		int header_seen = 0, working = -1, pipebuf = -1;
+
+		if (!f)
+			return 0; /* no proc node — nothing to wait on */
+		while (fgets(line, sizeof(line), f)) {
+			if (strstr(line, "workingTask_cnt") &&
+			    strstr(line, "finishedTask_cnt")) {
+				header_seen = 1;
+				continue;
+			}
+			if (header_seen) {
+				int chn, pass, port, w, finished, pb, maxenq;
+				if (sscanf(line, "%d %d %d %d %d %d %d",
+				    &chn, &pass, &port, &w, &finished,
+				    &pb, &maxenq) == 7) {
+					if (w > working)
+						working = w;
+					if (pb > pipebuf)
+						pipebuf = pb;
+				} else if (working >= 0) {
+					break; /* end of the port-row block */
+				} else {
+					header_seen = 0;
+				}
+			}
+		}
+		fclose(f);
+		if (working <= max_inflight && pipebuf <= max_inflight)
+			return 0;
+		if (waited >= timeout_ms) {
+			printf("> [maruko] output not idle after %dms "
+				"(%s: working=%d pipebuf=%d) — proceeding\n",
+				waited, proc_path, working, pipebuf);
+			return -1;
+		}
+		usleep(10 * 1000);
+		waited += 10;
+	}
+}
+
+#define MARUKO_PROC_ISP "/proc/mi_modules/mi_isp/mi_isp0"
+#define MARUKO_PROC_SCL "/proc/mi_modules/mi_scl/mi_scl0"
+
 /* Stop VPE channels only — keep devices and dlopen handles alive.
  * Used during reinit to avoid kernel mutex destruction. */
 /* Stop VPE channels only — skip ISP DestroyChannel which crashes
  * with "Mutex not initialized" when CUS3A state persists in kernel. */
 static void maruko_stop_vpe_channels(void)
 {
-	if (g_mi_scl_chn_created) {
-		(void)g_mi_scl.fnDisablePort(0, 0, 0);
-		(void)g_mi_scl.fnStopChannel(0, 0);
-		(void)g_mi_scl.fnDestroyChannel(0, 0);
-		g_mi_scl_chn_created = 0;
-	}
+	/* Stop the producer (ISP) before destroying the consumer (SCL).
+	 * An ISP->SCL REALTIME buffer still in flight when the SCL channel
+	 * dies is never completed, and the later ISP->SCL unbind then hangs
+	 * the process in D-state inside MI_SYS_IMPL_FlushRealTimeOutputBuf
+	 * (observed once on a 1485/90fps SIGTERM teardown; no sysrq on the
+	 * I6C kernel, only reboot -f recovers).  Quiesce ISP, give SCL a
+	 * bounded window to drain the last frame, then destroy SCL. */
 	if (g_mi_isp_chn_created) {
 		(void)g_mi_isp.fnDisablePort(0, 0, 0);
 		(void)g_mi_isp.fnStopChannel(0, 0);
 		/* Skip DestroyChannel — kernel ISP retains CUS3A mutex
 		 * state that crashes on destroy+recreate cycle. */
+		(void)maruko_wait_output_idle(MARUKO_PROC_ISP, 200, 0);
+	}
+	if (g_mi_scl_chn_created) {
+		(void)g_mi_scl.fnDisablePort(0, 0, 0);
+		(void)g_mi_scl.fnStopChannel(0, 0);
+		(void)g_mi_scl.fnDestroyChannel(0, 0);
+		g_mi_scl_chn_created = 0;
 	}
 }
 
@@ -969,11 +1090,9 @@ static void fill_maruko_rc_attr(i6c_venc_chn *attr,
  * live pan re-issues SetPortConfig with new crop offsets while keeping
  * the same output dim (ISP / VENC channels never resize).
  *
- * MaruWindowRect_t mirrors MI_SYS_WindowRect_t.  Compute helpers live
- * here so they're reusable by both initial setup and live pan. */
-typedef struct {
-	uint16_t u16X, u16Y, u16Width, u16Height;
-} MaruWindowRect_t;
+ * MaruWindowRect_t (defined near the top of this file) mirrors
+ * MI_SYS_WindowRect_t.  Compute helpers live here so they're reusable
+ * by both initial setup and live pan. */
 
 /* Effective output dim for a given zoom_pct.  16-px alignment matches
  * SCL output and VENC create requirements; floor at 256 keeps the
@@ -1173,13 +1292,26 @@ static void maruko_apply_ae_crop(MarukoBackendContext *ctx,
 		cx = (double)(in_w - rect_w);
 	if (cy + (double)rect_h > (double)in_h)
 		cy = (double)(in_h - rect_h);
-	rx = cx * 1023.0 / (double)in_w;
-	ry = cy * 1023.0 / (double)in_h;
-	memset(&r, 0, sizeof(r));
-	r.crop_x = (uint16_t)(rx + 0.5);
-	r.crop_y = (uint16_t)(ry + 0.5);
-	r.crop_w = (uint16_t)((double)rect_w * 1023.0 / (double)in_w + 0.5);
-	r.crop_h = (uint16_t)((double)rect_h * 1023.0 / (double)in_h + 0.5);
+	/* The AE grid spans the FULL ISP surface; the pan window lives on
+	 * the (possibly input-cropped) SCL surface.  Translate to absolute
+	 * ISP coords before normalizing to 0..1023. */
+	{
+		uint32_t full_w = ctx->sensor.plane.capt.width;
+		uint32_t full_h = ctx->sensor.plane.capt.height;
+		if (full_w == 0 || full_h == 0) {
+			full_w = in_w;
+			full_h = in_h;
+		}
+		rx = ((double)ctx->scl_crop_x + cx) * 1023.0 / (double)full_w;
+		ry = ((double)ctx->scl_crop_y + cy) * 1023.0 / (double)full_h;
+		memset(&r, 0, sizeof(r));
+		r.crop_x = (uint16_t)(rx + 0.5);
+		r.crop_y = (uint16_t)(ry + 0.5);
+		r.crop_w = (uint16_t)((double)rect_w * 1023.0 /
+			(double)full_w + 0.5);
+		r.crop_h = (uint16_t)((double)rect_h * 1023.0 /
+			(double)full_h + 0.5);
+	}
 	if (r.crop_w == 0) r.crop_w = 1;
 	if (r.crop_h == 0) r.crop_h = 1;
 	if (r.crop_x + r.crop_w > 1023)
@@ -2013,8 +2145,21 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
 	assign_maruko_ports(ctx, venc_device);
 
+	/* VIF->ISP bind is mode-conditional.  1485Mbps/lane x4 line bursts
+	 * (~594MPix/s) exceed the ISP 384MHz drain and overflow the P0 input
+	 * FIFO in REALTIME, so _1485 sensor modes need FRAME_BASE: VIF output
+	 * is buffered in DRAM and the ISP drains at its own rate (m2m; costs
+	 * up to one frame of latency and caps throughput at ~1.7ms+3.65ns/px
+	 * per frame).  891Mbps modes keep REALTIME for minimum glass-to-glass
+	 * latency — their burst rate (~356MPix/s) matches the ISP drain.
+	 * VIF->ISP on I6C accepts only these two link types. */
+	int vif_isp_link = strstr(ctx->sensor.mode.desc, "_1485") ?
+		I6_SYS_LINK_FRAMEBASE : I6_SYS_LINK_REALTIME;
+	printf("> [maruko] VIF->ISP bind: %s (mode %s)\n",
+		vif_isp_link == I6_SYS_LINK_FRAMEBASE ? "FRAMEBASE" : "REALTIME",
+		ctx->sensor.mode.desc);
 	MI_S32 ret = MI_SYS_BindChnPort2(&ctx->vif_port, &ctx->isp_port,
-		ctx->sensor.fps, ctx->sensor.fps, I6_SYS_LINK_REALTIME, 0);
+		ctx->sensor.fps, ctx->sensor.fps, vif_isp_link, 0);
 	if (ret != 0) {
 		fprintf(stderr,
 			"ERROR: [maruko] bind VIF->ISP failed %d\n", ret);
@@ -2045,6 +2190,12 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * and any processing jitter causes frame drops, capping FPS
 	 * well below the sensor's output rate.
 	 * Star6E uses (1, 3) on the VENC port; SDK samples use (2, 4). */
+	/* VIF output depth 4 (= SDK default, set explicitly): depth 8 was
+	 * tested on the FRAMEBASE 1485 modes and changed nothing — the fps
+	 * ceiling is the ISP m2m dispatch cost, not pool exhaustion.  RAW12
+	 * buffers are ~10MB each at 4K width, so don't raise this casually
+	 * (depth 8 = ~83MB MMA). */
+	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vif_port, 0, 4);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->isp_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->venc_port, 1, 3);
@@ -2778,21 +2929,24 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	uint32_t out_w = ctx->cfg.image_width;
 	uint32_t out_h = ctx->cfg.image_height;
 
-	/* Effective SCL input dims: sensor capt after overscan clamp, then
-	 * sensor binning (mode.output < capt).  Mirrors the effective-dim
-	 * derivation in setup_maruko_graph_dimensions() — re-derived here
-	 * so the precrop rect is computed against the same surface that
-	 * actually feeds the SCL stage. */
+	/* SCL input dims = full sensor capture.  The ISP output port is a
+	 * zero-crop passthrough (see configure_maruko_isp), so the surface that
+	 * actually feeds the SCL is always the full capt — which is also the SCL
+	 * ring-pool stride.  Do NOT shrink this to mode.output: mode.output is the
+	 * *encode* target (applied as the SCL output size below, not its input).
+	 * The old "sensor binning" override set scl_in = mode.output; for genuine
+	 * downscale modes (capt 2952x1656 -> encode 2560x1440, senif != senout) it
+	 * made the SCL crop width != ring-pool stride and stalled the scaler
+	 * (0 frames out, ISP P0 FIFO FULL, encoder starved).  For binned modes the
+	 * sensor already emits capt == output, so this is a no-op for modes 0-4. */
 	uint32_t scl_in_w = ctx->sensor.plane.capt.width;
 	uint32_t scl_in_h = ctx->sensor.plane.capt.height;
-	if (ctx->sensor.mode.output.width > 0 &&
-	    ctx->sensor.mode.output.width < scl_in_w) {
-		scl_in_w = ctx->sensor.mode.output.width;
-		scl_in_h = ctx->sensor.mode.output.height;
-	}
 	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
 		scl_in_w, scl_in_h, out_w, out_h, ctx->cfg.keep_aspect ? true : false);
-	PipelinePrecropRect base_precrop = precrop;
+	/* The AR rect goes down un-mangled: configure_maruko_scl applies it
+	 * as a channel-level INPUT crop (true keep_aspect framing, Star6E
+	 * parity) when the SDK provides MI_SCL_SetInputPortCrop, and
+	 * degrades to the historical full-width squeeze otherwise. */
 	if (ctx->cfg.verbose) {
 		if (precrop.x || precrop.y ||
 		    precrop.w != scl_in_w || precrop.h != scl_in_h) {
@@ -2809,6 +2963,8 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * receiver.  zoom_pct is MUT_RESTART so this only runs at start;
 	 * live x/y pan is handled by maruko_pipeline_apply_zoom which
 	 * re-issues SetPortConfig with new offsets at the same dim. */
+	PipelinePrecropRect zoom_rect = {0, 0, 0, 0};
+	int have_zoom = 0;
 	if (ctx->cfg.zoom_pct > 0.0 && ctx->cfg.zoom_pct < 1.0) {
 		uint32_t zw = out_w;
 		uint32_t zh = out_h;
@@ -2826,21 +2982,16 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 		ctx->cfg.image_height = zh;
 		out_w = zw;
 		out_h = zh;
-		/* Replace the AR-precrop with the zoom rect (offset within
-		 * precrop area).  Position in scl_in coordinates so the SCL
-		 * crop is absolute. */
-		precrop.x = (uint16_t)(precrop.x + zrect.u16X);
-		precrop.y = (uint16_t)(precrop.y + zrect.u16Y);
-		precrop.w = zrect.u16Width;
-		precrop.h = zrect.u16Height;
+		/* The zoom window stays relative to the AR surface here;
+		 * configure_maruko_scl translates it into channel-surface
+		 * coords once it knows whether the AR rect became an input
+		 * crop. */
+		zoom_rect.x = zrect.u16X;
+		zoom_rect.y = zrect.u16Y;
+		zoom_rect.w = zrect.u16Width;
+		zoom_rect.h = zrect.u16Height;
+		have_zoom = 1;
 	}
-	/* Stash the AR-matched base crop for live pan.  The zoom rect is
-	 * always positioned inside this surface, not inside the full SCL
-	 * input, or panning can leak outside keep-aspect framing. */
-	ctx->scl_crop_x = base_precrop.x;
-	ctx->scl_crop_y = base_precrop.y;
-	ctx->scl_crop_w = base_precrop.w;
-	ctx->scl_crop_h = base_precrop.h;
 
 	if (maruko_start_vif(&ctx->sensor) != 0)
 		return -1;
@@ -2848,13 +2999,23 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 
 	if (maruko_start_vpe(&ctx->sensor, out_w, out_h,
 	    ctx->cfg.vpe_level_3dnr, &precrop,
+	    have_zoom ? &zoom_rect : NULL,
 	    ctx->cfg.image_mirror, ctx->cfg.image_flip) != 0)
 		return -1;
 	ctx->vpe_started = 1;
-	if (ctx->cfg.zoom_pct > 0.0 && ctx->cfg.zoom_pct < 1.0) {
+	/* Stash the AR base surface for live pan.  The zoom rect is always
+	 * positioned inside this surface, not the full SCL input, or
+	 * panning can leak outside keep-aspect framing. */
+	ctx->scl_crop_x = precrop.x;
+	ctx->scl_crop_y = precrop.y;
+	ctx->scl_crop_w = precrop.w;
+	ctx->scl_crop_h = precrop.h;
+	if (have_zoom) {
 		maruko_pipeline_set_zoom_status(ctx->cfg.zoom_pct,
-			out_w, out_h, precrop.x, precrop.y,
-			precrop.w, precrop.h);
+			out_w, out_h,
+			ctx->scl_crop_x + zoom_rect.x,
+			ctx->scl_crop_y + zoom_rect.y,
+			zoom_rect.w, zoom_rect.h);
 	} else {
 		maruko_pipeline_clear_zoom_status();
 	}
@@ -3715,6 +3876,8 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 * process on ~14% of resilience reinits (S1 bench 2026-05-15).
 	 *
 	 * Sequence:
+	 *   0. Drain the SCL→VENC RING leg while the encoder still
+	 *      consumes, then stop SCL output production.
 	 *   1. VENC StopRecvPic (soft pause, lets buffered frames flow
 	 *      out one last time).
 	 *   2. Unbind VPE→VENC.
@@ -3724,6 +3887,22 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 *   6. Stop VIF.
 	 *   7. Unbind VIF→ISP.
 	 *   8. Sensor disable. */
+
+	/* Step 0: drain BEFORE StopRecvPic.  Once VENC stops receiving,
+	 * in-flight SCL→VENC output tasks can never complete, and the
+	 * VPE→VENC unbind's kernel flush then spins forever in
+	 * uninterruptible D-state (MI_SYS_IMPL_FlushRealTimeOutputBuf —
+	 * observed twice, both after long streams where the queue runs
+	 * deeper; SCL proc showed workingTask_cnt=4 stuck).  So drain
+	 * while the encoder is still consuming, then disable the SCL
+	 * output port so nothing new enters the leg before the
+	 * pause+unbind. */
+	if (g_mi_scl_chn_created) {
+		(void)maruko_wait_output_idle(MARUKO_PROC_SCL, 200, 1);
+		(void)g_mi_scl.fnDisablePort(0, 0, 0);
+		(void)maruko_wait_output_idle(MARUKO_PROC_SCL, 100, 1);
+	}
+
 	if (ctx->venc_started)
 		(void)maruko_mi_venc_stop_recv(ctx->venc_device,
 			ctx->venc_channel);
@@ -3754,6 +3933,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	}
 
 	if (ctx->bound_isp_vpe) {
+		/* Belt to the producer-first stop order in
+		 * maruko_stop_vpe_channels(): only enter the kernel's
+		 * unbounded REALTIME flush once the ISP output port reports
+		 * no in-flight tasks.  Bounded — proceeds on timeout. */
+		(void)maruko_wait_output_idle(MARUKO_PROC_ISP, 200, 0);
 		(void)MI_SYS_UnBindChnPort(&ctx->isp_port, &ctx->vpe_port);
 		ctx->bound_isp_vpe = 0;
 	}
