@@ -1507,9 +1507,16 @@ static int pCus_init_1080p60_ispsafe_mipi4lane_linear(ms_cus_sensor* handle)
             }
         }
     }
-    /* ISP-safe HMAX = 0x044C (1100) BEFORE stream-start (overrides table 0x016D). */
-    SensorReg_Write(0x3028, 0x4C);
-    SensorReg_Write(0x3029, 0x04);
+    /* ISP-safe HMAX = 0x0226 (550, 7.407us line) BEFORE stream-start
+     * (overrides table 0x016D=365).  365 puts the line burst at 393 MPix/s,
+     * above the 384 MPix/s ISP drain -> FIFO FULL; 550 gives 259 MPix/s
+     * with margin, and VMAX=2250 (>= 2192 physical lines in 2x2 binning;
+     * binned VMAX counts PHYSICAL lines, 2x the output lines) then lands
+     * exactly 60.0 fps.  HMAX=1100 was tried first but caps the mode at
+     * 30 fps: 60 fps would need VMAX=1125 < the physical readout length,
+     * which the sensor answers with zero frames. */
+    SensorReg_Write(0x3028, 0x26);
+    SensorReg_Write(0x3029, 0x02);
     /* Stream-start tail (XMSTA + standby cancel). */
     for (i = n - IMX415_1080P_BINNED_TAIL; i < n; i++) {
         if (Sensor_1080p_binned_init_table_4lane_linear[i].reg == 0xffff) {
@@ -1598,13 +1605,13 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 14815; // HMAX=1100 at INCKSEL3=0xC6
         break;
 
-    case 2: // 1920x1080@60fps — binned, 99% FOV — ISP-safe HMAX=1100 (was FIFO-FULL @365)
+    case 2: // 1920x1080@60fps — binned, 99% FOV — ISP-safe HMAX=550 (was FIFO-FULL @365)
         handle->video_res_supported.ulcur_res = 2;
         handle->pCus_sensor_init = pCus_init_1080p60_ispsafe_mipi4lane_linear;
-        vts_30fps = 2250; // VMAX@30fps; @60fps -> 1125 (1080 active + 45 vblank)
+        vts_30fps = 2250; // VTS at 60fps (max_fps): 2250*7.407us = 16.67ms
         params->expo.vts = vts_30fps;
         params->expo.fps = 60;
-        Preview_line_period = 14815; // HMAX=1100 at INCKSEL3=0xC6 (matches working modes 0/1)
+        Preview_line_period = 7407; // HMAX=550 (ispsafe init override)
         break;
 
     case 3: // 1920x1080@90fps — binned, 99% FOV

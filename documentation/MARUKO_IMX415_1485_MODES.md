@@ -76,6 +76,20 @@ characterization ladder probes (2952x1848 / 3264x1848 / 3552x1848 @60,
 2952x1224@90 — delivering 45/42/~39/68 fps) were pruned after measurement;
 regenerate any of them with the recipe below if needed.
 
+### Mode 2 (1920x1080@60 binned) — ISP-safe HMAX rework
+
+The vendor binned 1080p60 table (HMAX=365, 4.882 µs line) puts the line
+burst at 393 MPix/s — above the 384 MPix/s ISP drain → FIFO FULL. The
+`ispsafe` init reuses the binned table and overrides HMAX before
+stream-start. **Trap: in 2x2 binning, VMAX counts PHYSICAL lines (2x the
+output lines)** — 1080p binned readout needs VMAX ≥ ~2250, so 60 fps
+fixes the line time: 16.67 ms / 2250 = 7.407 µs → **HMAX=550** (burst
+259 MPix/s, safe). HMAX=1100 was tried first and caps the mode at 30 fps
+— its 60 fps VMAX would be 1125, below the physical readout length,
+which the sensor answers with **zero frames** (venc aborts "no encoder
+data", and that aborted bring-up's teardown can wedge in D-state, see
+Known issues). Device-verified 60.0 fps exact at HMAX=550/VMAX=2250.
+
 ## Generating a new 1485 mode
 
 All 1485 tables derive from the proven 5m skeleton (mode 5); substitute only:
@@ -135,20 +149,24 @@ height ≤ ~1230 lines.
   Device-verified warm on a previously poisoned sensor: binned→1485 both
   directions, 1485↔1485, all modes at nominal fps and full brightness —
   no power-cycle rule needed anymore.
-- **Teardown can hang in D-state.** Two occurrences with the landed build:
-  SIGTERM teardown stuck forever (uninterruptible D-state,
-  `wchan = MI_SYS_IMPL_FlushRealTimeOutputBuf`, SCL output port frozen at
-  `workingTask_cnt=4`). Once when a second venc instance start raced the
-  teardown, once after a ~5-minute run (a fresh 30-second run with the
-  same config tore down clean — the trigger is task-queue depth
-  accumulating over long runs, not a specific config). The pre-unbind
-  drain (`maruko_wait_output_idle`) warns and proceeds but cannot unstick
-  an already-frozen queue. Recovery: `reboot -f` (the I6C kernel has
-  **no sysrq**; SIGKILL makes MI zombies — never use it). Notably the warm
-  reboot did NOT wedge FRAME_BASE. Operational rules: wait for the old
-  process to fully exit before starting a new one (poll `ps`, teardown
-  takes several seconds); if the hang keeps recurring, the planned fix is
-  a teardown watchdog (bounded flush wait + `reboot -f`).
+- **Teardown can hang in D-state.** Three occurrences with the landed
+  build: SIGTERM teardown stuck forever (uninterruptible D-state,
+  `wchan = MI_SYS_IMPL_FlushRealTimeOutputBuf`, SCL output port frozen).
+  Once when a second venc instance start raced the teardown, once after
+  a ~5-minute run (`workingTask_cnt=4`; a fresh 30-second run with the
+  same config tore down clean — task-queue depth accumulates over long
+  runs), and once tearing down an **aborted zero-frame bring-up** (the
+  HMAX=1100 mode-2 misconfig: sensor delivered nothing, SCL held
+  in-flight tasks whose fences never signal — dmesg floods "inputtask's
+  fence is not finished"; this class is deterministic, any "no encoder
+  data" abort risks it). The pre-unbind drain (`maruko_wait_output_idle`)
+  warns and proceeds but cannot unstick an already-frozen queue.
+  Recovery: `reboot -f` (the I6C kernel has **no sysrq**; SIGKILL makes
+  MI zombies — never use it). Notably the warm reboot did NOT wedge
+  FRAME_BASE. Operational rules: wait for the old process to fully exit
+  before starting a new one (poll `ps`, teardown takes several seconds);
+  the planned fix is a teardown watchdog (bounded flush wait +
+  `reboot -f`) — tracked in the coordination repo roadmap.
 - **Teardown Oops (historical)**: an Oops in
   `_MI_SYS_IMPL_UnBindChannelPort` was seen during the bind-type
   experiments, but did NOT reproduce in 6+ SIGTERM teardown cycles with

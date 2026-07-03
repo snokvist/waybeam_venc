@@ -1,5 +1,42 @@
 # History
 
+## [0.19.0] - 2026-07-03
+
+Maruko (Infinity6C/SSC378QE) IMX415 1485 Mbps non-binned sensor modes, plus
+the operational fixes discovered while bringing them up on hardware. Full
+platform notes in `documentation/MARUKO_IMX415_1485_MODES.md`.
+
+- **Three new sensor modes** (indexes 5–7): `2952x1656@50fps_1485` (1:1 5MP),
+  `2952x1368@60fps_1485` (ISP-ceiling max @60), `2112x1184@90fps_1485`
+  (ISP-ceiling max @90). Requires CSI-MAC clock 288 MHz (set in `poweron`
+  for mode index ≥ 5) and a mode-conditional VIF→ISP bind: FRAMEBASE for
+  `_1485` modes (REALTIME overflows the ISP input FIFO at 594 MPix/s line
+  bursts), REALTIME retained for 891 modes (minimum latency).
+- **Sensor register-state hardening**: 1485 and non-binned 891 tables now
+  write the readout-mode registers explicitly (`0x3020/21/22`, `0x30D9/DA`)
+  — the IMX415 latches binning across teardown and warm reboot, which
+  previously wedged every warm binned→1485 switch until a power-cycle.
+  Vendor 1485 table's `0x3032=0x00` dark-image bug fixed (`0x01`).
+- **Mode 2 (1920x1080@60 binned) frame-rate fix**: the ISP-safe HMAX
+  rework (HMAX=1100) could not deliver 60 fps at all — in 2x2 binning
+  VMAX counts physical lines (~2250 minimum for 1080p output), which at
+  a 14.8 µs line is 30 fps; the stored `vts_30fps=2250` shipped exactly
+  that under a 60 fps label. Now HMAX=550 (7.407 µs line): VMAX=2250 →
+  device-measured 60.0 fps, line burst 259 MPix/s (safely under the
+  384 MPix/s ISP drain that FIFO-FULLed the vendor HMAX=365 table).
+- **Teardown drain**: poll SCL/ISP output-port task counts (worst row
+  across all ports) before unbind so the kernel's unbounded REALTIME/RING
+  flush isn't entered with in-flight tasks that can no longer complete
+  (D-state hang observed after long runs; drain is bounded + advisory).
+- **Honest keep_aspect on Maruko**: true width crops are impossible on the
+  I6C camera path (SCL output crop must match ring stride; RDMA input crop
+  needs a FRAMEBASE producer bind that mi_sys refuses on ISP→SCL) — wide →
+  narrow-AR now anamorphically squeezes full sensor width with a one-line
+  startup notice (>2% width delta), height crops still honored, AE zoom
+  crop normalized against full ISP dims, zoom windows confined to the
+  keep_aspect framing surface. Star6E is unaffected (VIF capture-window
+  crop remains a real crop there).
+
 ## [0.18.1] - 2026-06-24
 
 Expose the mDNS `discovery` config section through the HTTP API and WebUI. The

@@ -704,11 +704,11 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 	/* Notice only when the squeeze is actually visible (>2% width
 	 * delta) — near-16:9 sensor modes produce trivial rounding crops
 	 * that are not worth alarming about. */
-	if (ar.w != (uint16_t)in_w && !zoom_rect &&
+	if (ar.w < (uint16_t)in_w && !zoom_rect &&
 	    (uint32_t)(in_w - ar.w) * 50 > in_w)
 		printf("> [maruko] keep_aspect: width crop %ux%u@%u,%u is "
 			"not supported by I6C hardware — full sensor width "
-			"squeezed to %ux%u (set video0.keep_aspect=false to "
+			"squeezed to %ux%u (set isp.keepAspect=false to "
 			"silence)\n",
 			ar.w, ar.h, ar.x, ar.y, out_width, out_height);
 
@@ -871,9 +871,11 @@ fail_scl:
 	return -1;
 }
 
-/* Poll an MI module's debug proc node until its enabled output port
+/* Poll an MI module's debug proc node until every output-port row
  * reports at most max_inflight tasks (workingTask_cnt / PipeBuf_cnt in
- * the "Output port common info" section).  MI_SYS_UnBindChnPort runs an
+ * the "Output port common info" section; the worst row across all
+ * ports is used, so multi-port configs drain too).
+ * MI_SYS_UnBindChnPort runs an
  * UNBOUNDED uninterruptible kernel poll (MI_SYS_IMPL_FlushRealTimeOutputBuf)
  * for REALTIME/RING binds — if an in-flight buffer's consumer is already
  * gone, the process hangs in D-state forever.  max_inflight is 0 for a
@@ -900,12 +902,19 @@ static int maruko_wait_output_idle(const char *proc_path, int timeout_ms,
 				continue;
 			}
 			if (header_seen) {
-				int chn, pass, port, finished, maxenq;
+				int chn, pass, port, w, finished, pb, maxenq;
 				if (sscanf(line, "%d %d %d %d %d %d %d",
-				    &chn, &pass, &port, &working, &finished,
-				    &pipebuf, &maxenq) == 7)
-					break;
-				header_seen = 0;
+				    &chn, &pass, &port, &w, &finished,
+				    &pb, &maxenq) == 7) {
+					if (w > working)
+						working = w;
+					if (pb > pipebuf)
+						pipebuf = pb;
+				} else if (working >= 0) {
+					break; /* end of the port-row block */
+				} else {
+					header_seen = 0;
+				}
 			}
 		}
 		fclose(f);
@@ -2195,10 +2204,11 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	 * and any processing jitter causes frame drops, capping FPS
 	 * well below the sensor's output rate.
 	 * Star6E uses (1, 3) on the VENC port; SDK samples use (2, 4). */
-	/* VIF output depth matters for the FRAMEBASE VIF->ISP bind: the default
-	 * (0,4) pool starves once VIF-write + 2-deep ISP pipelining hold all four
-	 * buffers, capping high-rate 1485 modes (~37fps at 3840x1800 vs sensor
-	 * 60). RAW12 buffers are ~10MB each at 4K width — depth 8 = ~83MB MMA. */
+	/* VIF output depth 4 (= SDK default, set explicitly): depth 8 was
+	 * tested on the FRAMEBASE 1485 modes and changed nothing — the fps
+	 * ceiling is the ISP m2m dispatch cost, not pool exhaustion.  RAW12
+	 * buffers are ~10MB each at 4K width, so don't raise this casually
+	 * (depth 8 = ~83MB MMA). */
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vif_port, 0, 4);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->isp_port, 1, 3);
 	(void)MI_SYS_SetChnOutputPortDepth(&ctx->vpe_port, 1, 3);
@@ -3900,14 +3910,15 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 	 *   7. Unbind VIF→ISP.
 	 *   8. Sensor disable. */
 
-	/* Step 0: with VENC already StopRecvPic'd, in-flight SCL→VENC
-	 * output tasks can never complete, and the VPE→VENC unbind's
-	 * kernel flush then spins forever in uninterruptible D-state
-	 * (MI_SYS_IMPL_FlushRealTimeOutputBuf — observed twice, both
-	 * after long streams where the queue runs deeper; SCL proc
-	 * showed workingTask_cnt=4 stuck).  So drain first while the
-	 * encoder is still consuming, then disable the SCL output port
-	 * so nothing new enters the leg before the pause+unbind. */
+	/* Step 0: drain BEFORE StopRecvPic.  Once VENC stops receiving,
+	 * in-flight SCL→VENC output tasks can never complete, and the
+	 * VPE→VENC unbind's kernel flush then spins forever in
+	 * uninterruptible D-state (MI_SYS_IMPL_FlushRealTimeOutputBuf —
+	 * observed twice, both after long streams where the queue runs
+	 * deeper; SCL proc showed workingTask_cnt=4 stuck).  So drain
+	 * while the encoder is still consuming, then disable the SCL
+	 * output port so nothing new enters the leg before the
+	 * pause+unbind. */
 	if (g_mi_scl_chn_created) {
 		(void)maruko_wait_output_idle(MARUKO_PROC_SCL, 200, 1);
 		(void)g_mi_scl.fnDisablePort(0, 0, 0);
