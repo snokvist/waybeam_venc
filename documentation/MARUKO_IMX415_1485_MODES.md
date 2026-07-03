@@ -1,7 +1,7 @@
 # Maruko IMX415 1485 Mbps Non-Binned Modes
 
 Status: device-verified July 2026 on SSC378QE (Infinity6C) + IMX415, 4-lane
-MIPI at 1485 Mbps/lane. Covers driver modes 5–7 in
+MIPI at 1485 Mbps/lane. Covers driver modes 1–4 (v0.21.0 numbering) in
 `drivers/sensor_imx415_maruko.c` and the pipeline bind policy in
 `src/maruko_pipeline.c`.
 
@@ -29,9 +29,10 @@ of these are in place:
    LOWLATENCY all fail to bind (-1610014712).
 
 2. **CSI-MAC clock ≥ 288 MHz** (`pCus_poweron`: `SetCSI_Clk(idx,
-   CUS_CSI_CLK_288M)` for mode index ≥ 5). At the default 216 MHz a 1485
-   link delivers ZERO frames. The 432M enum is not a real csi-mac parent on
-   I6C (the mux tops out at 288 MHz, see `infinity6c-clks.dtsi`).
+   CUS_CSI_CLK_288M)`, keyed on the mode table's `link_mbps` field). At the
+   default 216 MHz a 1485 link delivers ZERO frames. The 432M enum is not a
+   real csi-mac parent on I6C (the mux tops out at 288 MHz, see
+   `infinity6c-clks.dtsi`).
 
 ## The ISP throughput ceiling (FRAME_BASE modes)
 
@@ -62,25 +63,40 @@ path. Consequences:
 - Max non-binned pixels @90 fps ≈ **2.6 MPix** → mode 7 `2112x1184@90`
 - Full readout 3760x2116@60 (~8 MPix) is unreachable on this silicon.
 
-## Mode table (driver indexes)
+## Mode table (driver indexes — v0.21.0 lineup)
+
+One best mode per FPS tier, all non-binned and ~16:9 (sensor native aspect).
+**Breaking index remap in v0.21.0** — old→new: 0→0, 5→1, 7→3; old 6
+(2952x1368, 19.4:9) replaced by the 16:9 2688x1512; old 1–4 (superwide +
+binned vendor modes) unsurfaced. Configs with a pinned `sensor.mode` must be
+updated; `sensor.mode: -1` (auto) resolves correctly on its own.
 
 | Idx | Mode name | Link rate | Notes |
 |---|---|---|---|
-| 0–4 | vendor modes (4K30, superwide, binned 1080p60/90, 720p120) | 891 | REALTIME bind |
-| 5 | 2952x1656@50fps_1485 | 1485 | 1:1 5MP crop, ~16:9; sensor paced to 50.0 (VMAX=2289) = the ceiling for 4.89 MPix — measured ~49 fps (pacing at the exact ceiling leaves ~2% dispatch shortfall, but the FRAME_BASE queue stays empty for minimum latency; the old 60-fps pacing measured 50.9 by saturating the queue) |
-| 6 | 2952x1368@60fps_1485 | 1485 | **max @60** — measured 60.0 fps exact |
-| 7 | 2112x1184@90fps_1485 | 1485 | **max @90** — measured 90.0 fps exact |
+| 0 | 3760x2116@30fps | 891 | non-binned 97% FOV, REALTIME bind — best IQ and inherently lowest latency |
+| 1 | 2952x1656@50fps_1485 | 1485 | 1:1 5MP crop, ~16:9; sensor paced to 50.0 (VMAX=2289) = the ceiling for 4.89 MPix — measured ~49 fps (pacing at the exact ceiling leaves ~2% dispatch shortfall, but the FRAME_BASE queue stays empty for minimum latency; the old 60-fps pacing measured 50.9 by saturating the queue) |
+| 2 | 2688x1512@60fps_1485 | 1485 | **max 16:9 @60** (4.06 MPix, capacity 60.5) |
+| 3 | 2112x1184@90fps_1485 | 1485 | **max @90** — measured 90.0 fps exact |
+| 4 | 1920x1080@100fps_1485 | 1485 | low-latency 100 fps — sized ~8% under the ceiling (capacity ~108) so the FRAME_BASE queue stays empty; VMAX=1144 |
 
-Modes 6/7 deliver their full nominal rate; mode 5 delivers ~49/50. The ceiling-
-characterization ladder probes (2952x1848 / 3264x1848 / 3552x1848 @60,
-2952x1224@90 — delivering 45/42/~39/68 fps) were pruned after measurement;
-regenerate any of them with the recipe below if needed.
+The ceiling-characterization ladder probes (2952x1848 / 3264x1848 /
+3552x1848 @60, 2952x1224@90 — delivering 45/42/~39/68 fps) were pruned after
+measurement; regenerate any of them with the recipe below if needed.
 
-### Mode 2 (1920x1080@60 binned) — ISP-safe HMAX rework
+### Retired vendor modes (parked under `#if 0` in the driver)
+
+The binned vendor tables run HMAX=365 (4.882 µs line): a 1920 px line
+bursts at **393 MPix/s, above the 384 MPix/s ISP REALTIME drain** — chronic
+FIFO pressure. This is why the 1472x816@120 mode only ever delivered
+115–118 fps. The superwide 3760x1024@59 is not 16:9. All four (superwide,
+binned 1080p60-ispsafe, binned 1080p90, 720p-class 120) are kept in the
+driver source for posterity but removed from the selectable list.
+
+### Historical: binned 1080p60 ISP-safe HMAX rework
 
 The vendor binned 1080p60 table (HMAX=365, 4.882 µs line) puts the line
 burst at 393 MPix/s — above the 384 MPix/s ISP drain → FIFO FULL. The
-`ispsafe` init reuses the binned table and overrides HMAX before
+`ispsafe` init (now parked) reused the binned table and overrode HMAX before
 stream-start. **Trap: in 2x2 binning, VMAX counts PHYSICAL lines (2x the
 output lines)** — 1080p binned readout needs VMAX ≥ ~2250, so 60 fps
 fixes the line time: 16.67 ms / 2250 = 7.407 µs → **HMAX=550** (burst
@@ -88,7 +104,8 @@ fixes the line time: 16.67 ms / 2250 = 7.407 µs → **HMAX=550** (burst
 — its 60 fps VMAX would be 1125, below the physical readout length,
 which the sensor answers with **zero frames** (venc aborts "no encoder
 data", and that aborted bring-up's teardown can wedge in D-state, see
-Known issues). Device-verified 60.0 fps exact at HMAX=550/VMAX=2250.
+Known issues). Device-verified 60.0 fps exact at HMAX=550/VMAX=2250,
+then superseded by the non-binned 2688x1512@60_1485 mode.
 
 ## Generating a new 1485 mode
 

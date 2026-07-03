@@ -1,5 +1,30 @@
 # History
 
+## [0.21.0] - 2026-07-03
+
+Maruko IMX415 mode-lineup rework: one best mode per FPS tier, all non-binned
+and ~16:9 (sensor native aspect). See `documentation/MARUKO_IMX415_1485_MODES.md`.
+
+- **BREAKING: `sensor.mode` index remap** (Maruko IMX415). New lineup:
+  0 = `3760x2116@30fps` (891, REALTIME), 1 = `2952x1656@50fps_1485`,
+  2 = `2688x1512@60fps_1485` (NEW — exact 16:9, replaces 2952x1368 19.4:9),
+  3 = `2112x1184@90fps_1485`, 4 = `1920x1080@100fps_1485` (NEW).
+  Old→new: 0→0, 5→1, 7→3. Configs with a pinned mode index must be updated;
+  `sensor.mode: -1` (auto) resolves correctly unchanged.
+- **New 100 fps tier replaces the vendor 120 fps mode**: `1920x1080@100_1485`
+  is non-binned, exact 16:9, and sized ~8% under the ISP m2m ceiling
+  (capacity ~108 fps) so the FRAMEBASE queue stays empty — minimum latency
+  at full nominal rate. The old binned 1472x816@120 never delivered 120
+  (115–118 measured): its HMAX=365 table bursts 393 MPix/s, above the
+  384 MPix/s ISP REALTIME drain.
+- **Vendor superwide + binned modes unsurfaced** (superwide 3760x1024@59,
+  binned 1080p60-ispsafe, binned 1080p90, 1472x816@120): tables parked
+  under `#if 0` in the driver for posterity; all suffered either non-16:9
+  geometry or the 393 MPix/s FIFO-pressure defect.
+- CSI-MAC clock selection now keyed on a per-mode `link_mbps` field instead
+  of a hardcoded index threshold (renumber-safe; the FRAMEBASE bind was
+  already keyed on the `_1485` name suffix).
+
 ## [0.20.0] - 2026-07-03
 
 Maruko (Infinity6C/SSC378QE) IMX415 1485 Mbps non-binned sensor modes, plus
