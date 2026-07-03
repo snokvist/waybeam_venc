@@ -781,6 +781,8 @@ const static I2C_ARRAY Sensor_nobinned_base_init_table[] = {
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
     { 0x3050, 0x08 }, // SHR0
     { 0x30C1, 0x00 },
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; explicit — stale binned value
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel)   survives teardown/warm reboot)
     { 0x3116, 0x23 }, // INCKSEL2
     { 0x3118, 0xC6 }, // INCKSEL3 (I6C clock)
     { 0x311A, 0xE7 }, // INCKSEL4
@@ -917,6 +919,13 @@ const static I2C_ARRAY Sensor_5m_50fps_1485_init_table_4lane_linear[] = {
     { 0x3031, 0x00 }, // ADBIT (10bit)
     { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
     { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
+    { 0x3020, 0x00 }, // HADD (all-pixel)
+    { 0x3021, 0x00 }, // VADD (all-pixel)
+    { 0x3022, 0x00 }, // ADDMODE (all-pixel) — must be explicit: a prior binned-mode
+                      // run leaves these =1, and the sensor keeps that state across
+                      // pipeline teardown AND warm reboot (chip stays powered; the
+                      // RESET-pin toggle does not clear it). Stale binning breaks
+                      // every warm 1485 bring-up until a power-cycle.
     { 0x3040, 0xBC }, // PIX_HST = 0x01BC = 444
     { 0x3041, 0x01 }, //
     { 0x3042, 0x88 }, // PIX_HWIDTH = 0x0B88 = 2952
@@ -927,6 +936,8 @@ const static I2C_ARRAY Sensor_5m_50fps_1485_init_table_4lane_linear[] = {
     { 0x3047, 0x0C }, //
     { 0x3050, 0x08 }, // SHR0[19:0]
     { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; binned tables set 0x02 — explicit
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel; binned 0x01)   for same reason as HADD)
     { 0x3116, 0x23 }, // INCKSEL2
     { 0x3118, 0xA5 }, // INCKSEL3 (1485Mbps)
     { 0x311A, 0xE7 }, // INCKSEL4
@@ -1066,6 +1077,13 @@ const static I2C_ARRAY Sensor_2952x1368_60_init_table_4lane_linear[] = {
     { 0x3031, 0x00 }, // ADBIT (10bit)
     { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
     { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
+    { 0x3020, 0x00 }, // HADD (all-pixel)
+    { 0x3021, 0x00 }, // VADD (all-pixel)
+    { 0x3022, 0x00 }, // ADDMODE (all-pixel) — must be explicit: a prior binned-mode
+                      // run leaves these =1, and the sensor keeps that state across
+                      // pipeline teardown AND warm reboot (chip stays powered; the
+                      // RESET-pin toggle does not clear it). Stale binning breaks
+                      // every warm 1485 bring-up until a power-cycle.
     { 0x3040, 0xBC },
     { 0x3041, 0x01 },
     { 0x3042, 0x88 },
@@ -1076,6 +1094,8 @@ const static I2C_ARRAY Sensor_2952x1368_60_init_table_4lane_linear[] = {
     { 0x3047, 0x0A },
     { 0x3050, 0x08 }, // SHR0[19:0]
     { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; binned tables set 0x02 — explicit
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel; binned 0x01)   for same reason as HADD)
     { 0x3116, 0x23 }, // INCKSEL2
     { 0x3118, 0xA5 }, // INCKSEL3 (1485Mbps)
     { 0x311A, 0xE7 }, // INCKSEL4
@@ -1215,6 +1235,13 @@ const static I2C_ARRAY Sensor_2112x1184_90_init_table_4lane_linear[] = {
     { 0x3031, 0x00 }, // ADBIT (10bit)
     { 0x3032, 0x01 }, // must be 0x01 (vendor table ships 0x00 = dark image; same bug as the 2026-05-14 891-table fix, live-poke verified)
     { 0x3033, 0x08 }, // SYS_MODE (1485Mbps)
+    { 0x3020, 0x00 }, // HADD (all-pixel)
+    { 0x3021, 0x00 }, // VADD (all-pixel)
+    { 0x3022, 0x00 }, // ADDMODE (all-pixel) — must be explicit: a prior binned-mode
+                      // run leaves these =1, and the sensor keeps that state across
+                      // pipeline teardown AND warm reboot (chip stays powered; the
+                      // RESET-pin toggle does not clear it). Stale binning breaks
+                      // every warm 1485 bring-up until a power-cycle.
     { 0x3040, 0x6C },
     { 0x3041, 0x03 },
     { 0x3042, 0x40 },
@@ -1225,6 +1252,8 @@ const static I2C_ARRAY Sensor_2112x1184_90_init_table_4lane_linear[] = {
     { 0x3047, 0x09 },
     { 0x3050, 0x08 }, // SHR0[19:0]
     { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel; binned tables set 0x02 — explicit
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel; binned 0x01)   for same reason as HADD)
     { 0x3116, 0x23 }, // INCKSEL2
     { 0x3118, 0xA5 }, // INCKSEL3 (1485Mbps)
     { 0x311A, 0xE7 }, // INCKSEL4

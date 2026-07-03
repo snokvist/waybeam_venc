@@ -102,24 +102,39 @@ verified: `i2ctransfer -y 1 w3@0x1a 0x30 0x32 0x01` on a running dark
 sensor restores the image instantly. The skeleton in the driver is fixed;
 keep the byte if regenerating from vendor sources.
 
+**Trap: write the readout-mode registers explicitly.** Any new 1485
+(all-pixel) table must include `0x3020/0x3021/0x3022 = 0x00`
+(HADD/VADD/ADDMODE), `0x30D9 = 0x06` and `0x30DA = 0x02` (DIG_CLP,
+all-pixel values). The vendor all-pixel tables omit them and rely on
+power-on defaults, but the sensor keeps state across teardown and warm
+reboot, so a prior binned run otherwise leaves 2x2 binning latched and
+every warm 1485 bring-up fails (see Known issues).
+
 Constraints: VENC device limit 4096x2176; at 90 fps (VMAX=1272) active
 height ≤ ~1230 lines.
 
 ## Known issues
 
-- **Binned→1485 mode switch wedges FRAME_BASE delivery — and the wedge can
-  survive warm reboots.** After a REALTIME (891/binned) run tears down, a
-  subsequent FRAME_BASE (1485) start on the same boot gets frames into VIF
-  (IRQs tick, `/proc/mi_modules/mi_vif/mi_vif0` shows RewindCnt climbing
-  with FinishCnt=0) but nothing reaches the ISP (`mi_isp0` BindInQ=0,
-  dev VsyncCnt=0, AE stats stay zero) and venc self-aborts with "no
-  encoder data received". Once wedged, the state has been observed to
-  persist across `reboot`, `reboot -f`, and process restarts — only a
-  full **power-cycle** reliably cleared it (SigmaStar warm resets do not
-  drop the camera power domains; a latched ISP-input/DMA state survives).
-  Safe directions, device-verified across repeated cycles: 1485→1485,
-  1485→binned, and binned→binned all switch live. Rule: to go from a
-  binned mode to a 1485 mode, power-cycle.
+- **Binned→1485 mode switch wedge — ROOT-CAUSED AND FIXED (2026-07-03).**
+  The failure was never in the CSI/VIF/ISP receive path: the binned 891
+  tables set the sensor's binning registers (HADD/VADD/ADDMODE
+  `0x3020/21/22 = 0x01`, DIG_CLP `0x30D9=0x02`/`0x30DA=0x01`) and the 1485
+  all-pixel tables did not write those registers at all, relying on
+  power-on defaults. The IMX415 keeps register state across pipeline
+  teardown **and warm reboot** (the chip stays powered; the RESET-pin
+  toggle in `pCus_HardwareReset` demonstrably does not clear it), so any
+  warm entry into a 1485 mode after a binned run left the sensor in 2x2
+  binning against an all-pixel PHY/crop config — geometry mismatch, zero
+  frames to the ISP, venc aborts "no encoder data received", and the
+  kernel floods `invalid in early CameraOpen` (MhalCameraOpen never
+  completes, `/proc/mi_modules/mi_vif/mi_vif0` is never created). Only a
+  power-cycle cleared it because only a power-cycle resets the sensor.
+  **Fix:** all three 1485 tables (and the non-binned 891 base table) now
+  explicitly write the all-pixel values (`0x3020/21/22=0x00`,
+  `0x30D9=0x06`, `0x30DA=0x02`, per datasheet readout-mode table).
+  Device-verified warm on a previously poisoned sensor: binned→1485 both
+  directions, 1485↔1485, all modes at nominal fps and full brightness —
+  no power-cycle rule needed anymore.
 - **Teardown can hang in D-state.** One occurrence with the landed build:
   SIGTERM teardown of a 1485 run stuck forever (uninterruptible D-state,
   `wchan = MI_SYS_IMPL_FlushRealTimeOutputBuf`) when a second venc
