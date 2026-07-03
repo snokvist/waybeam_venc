@@ -131,3 +131,53 @@ win is preserved while the quality approaches the smooth Star6E feel.
 Key files: `src/maruko_cus3a.c` (control law + metadata), `src/venc_config.c:97`
 (aeFps default), reference `src/star6e_cus3a.c:288-468` (the supervisory-only
 pattern).
+
+---
+
+## Session followup — status & unconcluded work (2026-07-04)
+
+### Shipped this branch (PR #156)
+- **P1 (IIR-damped proportional control)** — `maruko_cus3a.c`. Replaced the
+  bang-bang step cascade with a log-domain IIR (`e_next = e·ratio^0.20`,
+  ratio-clamped 4×, 1.5% deadband, split shutter→analog). Device A/B: the new
+  custom AE now looks "very similar to the SDK" (user-confirmed) — the visible
+  stepping is gone. Committed `9a48c21`.
+- **P4 (pin ISP digital gain)** — `cur_isp_gain = AE_GAIN_MIN`; converge on
+  shutter+analog only. Committed `9a48c21`.
+- **majestic-parity IQ path** — re-enabled `MI_ISP_IQ_ApiCmdLoadBinFile`
+  (user_key 1234) + made the global bypass-OFF loop opt-in
+  (`MARUKO_IQ_BYPASS_ALL=1`). Committed `3a4ad62`. Both ~0 CPU delta.
+
+### Grain — root-caused, NOT the IQ path
+The grainy-vs-majestic image was **channel-level 3DNR off**:
+`isp_para.level3DNR` is driven by `fpv.noiseLevel`, device had it at **0** →
+3DNR disabled → grain. Setting `noiseLevel=3` gave a clean image matching
+majestic (user-confirmed "noticeably better"). **Cost:** waybeam's 3DNR is
+CPU-side (68→75% at 100fps) whereas majestic gets NR "for free" in the VPE
+hardware block. **Open decision:** do NOT bump the shipped `fpv.noise_level`
+default (0) — it trades directly against the CPU-gap goal. The correct fix is
+architectural (VPE port, separate branch) so NR rides hardware. Documented, not
+changed in code.
+
+### OPEN — blocks the remaining AE tuning
+- **avgY metering bug (must fix first).** The tick log shows `avgY ≈ 4` on a
+  *lit* bench scene — the average is being over-divided. Suspect the block-count
+  (`ae_info.AvgBlkX * AvgBlkY`) reads 0 and falls back to `MARUKO_AE_GRID_SZ`,
+  or the sum/scale is wrong. **Until avgY is trustworthy, P2/P6 (target-driving
+  and BV-for-colour) are meaningless** — you cannot tune a target against a
+  broken measurement. This is the next concrete task.
+- **"~150 delta ticks" question (unresolved).** The cus3a tick counter jumps
+  ~150 between 5 s prints. Never fully explained — likely just the per-frame
+  tick rate over the interval, but confirm it's not double-ticking. Cheap to
+  close once metering is trusted.
+- **P2 (real BV for colour)** — still needs HW calibration (capture native BV at
+  3–4 light levels, fit the encoding). Gated on avgY fix.
+- **P3 (aeFps 15→30), P5 (AWB damp), P6 (raise AE_TARGET_Y)** — untouched;
+  polish after P2. P6 also gated on trustworthy avgY.
+
+### CPU gap — deferred to VPE-port branch
+waybeam 68% vs majestic 43% at 100fps is **architectural**: majestic uses VPE
+(`mi_vpe_init` — fused HW ISP+3DNR+scale) while waybeam uses discrete `MI_ISP`
++ `MI_SCL`, which adds `IspMidThreadWq` (+13pt), heavier `isp0_P0_MAIN`
+(+~10pt), and a busier main loop (+~8pt). Not fixable by IQ tuning. Investigated
+separately on `feature/maruko-vpe-pipeline` (see that branch).
