@@ -152,12 +152,12 @@ pattern).
 The grainy-vs-majestic image was **channel-level 3DNR off**:
 `isp_para.level3DNR` is driven by `fpv.noiseLevel`, device had it at **0** →
 3DNR disabled → grain. Setting `noiseLevel=3` gave a clean image matching
-majestic (user-confirmed "noticeably better"). **Cost:** waybeam's 3DNR is
-CPU-side (68→75% at 100fps) whereas majestic gets NR "for free" in the VPE
-hardware block. **Open decision:** do NOT bump the shipped `fpv.noise_level`
-default (0) — it trades directly against the CPU-gap goal. The correct fix is
-architectural (VPE port, separate branch) so NR rides hardware. Documented, not
-changed in code.
+majestic (user-confirmed "noticeably better"). **Cost:** enabling channel-level
+3DNR raised waybeam CPU 68→75% at 100fps (its 3DNR runs in the ISP driver's
+per-frame path). **Open decision:** do NOT bump the shipped `fpv.noise_level`
+default (0) — it trades against the CPU-gap goal. majestic gets clean NR at
+*lower* CPU on the **same** ISP driver, so the right fix is matching majestic's
+ISP 3DNR configuration, not a pipeline change. Documented, not changed in code.
 
 ### OPEN — blocks the remaining AE tuning
 - **avgY metering bug (must fix first).** The tick log shows `avgY ≈ 4` on a
@@ -175,9 +175,15 @@ changed in code.
 - **P3 (aeFps 15→30), P5 (AWB damp), P6 (raise AE_TARGET_Y)** — untouched;
   polish after P2. P6 also gated on trustworthy avgY.
 
-### CPU gap — deferred to VPE-port branch
-waybeam 68% vs majestic 43% at 100fps is **architectural**: majestic uses VPE
-(`mi_vpe_init` — fused HW ISP+3DNR+scale) while waybeam uses discrete `MI_ISP`
-+ `MI_SCL`, which adds `IspMidThreadWq` (+13pt), heavier `isp0_P0_MAIN`
-(+~10pt), and a busier main loop (+~8pt). Not fixable by IQ tuning. Investigated
-separately on `feature/maruko-vpe-pipeline` (see that branch).
+### CPU gap — NOT architectural (VPE-port premise falsified)
+waybeam 68% vs majestic 43% at 1080p100 is a **config difference within the
+identical `MI_ISP`+`MI_SCL` pipeline**, not a VPE-vs-discrete architecture split.
+The `feature/maruko-vpe-pipeline` investigation proved I6C has no VPE deployed
+(no `libmi_vpe.so`/`mi_vpe.ko`; the SDK's `libmi_vpe` is a 47 KB shim over
+`MI_ISP_*`), and majestic runs the **same** mode (plus a 2nd h264 stream + audio)
+on the **same** discrete path at 43%. The gap concentrates in `IspMidThreadWq`
+(+13pt, majestic ~0), `isp0_P0_MAIN` (+9.6pt), and the main loop (+8.6pt) —
+`3A_Proc_0` is *higher* on majestic, so AE-throttle is not this lever. Chase what
+re-triggers `IspMidThreadWq` per frame (3DNR reconfig / per-frame
+`MI_ISP_SetChnParam` / CUS3A shadow push) vs majestic. Full writeup:
+`documentation/MARUKO_VPE_PORT_INVESTIGATION.md` (on the vpe-pipeline branch).
