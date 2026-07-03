@@ -106,30 +106,42 @@ FPV.
   quality is free). This makes 90/100 fps ship at ~50% instead of ~60%
   without a config change, and leaves 30/50 fps untouched.
 
-### 2. Disable / lower 3DNR — cuts the `IspMidThreadWq` bucket (SDK-grounded)
-`MI_ISP_SetChnParam` `e3DNRLevel = E_MI_ISP_3DNR_LEVEL_OFF` (`mi_isp.h`,
-enum in `isp/mi_isp_datatype.h`). Removes the per-frame 3DNR config compute +
-CMDQ bank-load + reference-buffer management that make up much of
-`IspMidThreadWq`'s ~11% (the temporal *filtering* is HW, but the per-frame
-*orchestration* is CPU). Pair with `MI_ISP_IQ_SetEnSysMcnrMemory(off)` to drop
-the motion-compensated-NR ref-buffer traffic. **Trade-off:** more temporal
-noise in low light (the H.265 encoder masks much of it at these bitrates).
-Lowering the level (e.g. 7→2) is the middle option. Needs on-device A/B — this
-is a code/config change, not yet measured.
+### 2. IQ-API NR/WDR bypass — **MEASURED ~0, do NOT pursue**
+Device A/B at 100 fps (mode 4), native AE: disabling `nr3d`, `nr_despike`,
+`nr3d_ex`, `wdr` via the IQ API (`MI_ISP_IQ_SetNr3d(enabled=false)` etc.,
+`src/maruko_iq.c:136-179`) moved system busy **66.2% → 65.3%** (≈1 pt, within
+noise) and `IspMidThreadWq` **13.0% → 12.9%** (unchanged). Surprisingly these
+modules ship **enabled** even in the linear mode (WDR=128, WDR-LTM/NR on,
+3DNR on) — but the IQ enable flags tune the module's *effect strength*, not the
+per-frame ISP control-plane work (`IspMidThreadWq` still computes 3DNR config +
+loads CMDQ banks + manages ref-buffers regardless). **Conclusion: the easy IQ
+bypass is a dead end for CPU.**
 
-### 3. Shrink the 3A statistics grid
-The AE stats grid is up to 128×90 = 11 520 blocks that `DoAe`/`DoAwb` and the
+Untested variant: the *channel-level* `MI_ISP_SetChnParam e3DNRLevel = OFF`
+(`mi_isp.h` — a different API than the IQ `nr3d` flag) plus
+`MI_ISP_IQ_SetEnSysMcnrMemory(off)` might disable the 3DNR *engine* (and its
+ref-buffer traffic) where the IQ flag does not. Neither is wired in our code;
+given the IQ result above, expectations should be low until a prototype
+measures it.
+
+### 3. Shrink the 3A statistics grid — untested, uncertain
+The AE stats grid is up to 128×90 = 11 520 blocks that the SDK 3A and our
 supervisory loop iterate every frame. `MI_ISP_CUS3A_SetAEWindowBlockNumber`,
-`SetAEHistogramWindow`, `SetAWBSampling` (`mi_isp_cus3a_api.h`) reduce it.
-**Trade-off:** coarser metering/WB regions — usually fine for a single-subject
-FPV scene. Moderate saving, proportional to block-count reduction.
+`SetAEHistogramWindow`, `SetAWBSampling` (`mi_isp_cus3a_api.h`, **not wired** in
+our code) reduce it. This is the only remaining "keep native AE quality, cut
+per-frame cost" lever, but given that the NR/WDR bypass moved nothing, temper
+expectations — much of `isp0_P0_MAIN` may be fixed servicing, not grid-size
+dependent. Needs a code prototype + on-device A/B before relying on it.
 
-### 4. Ensure WDR/LTM/defog/adaptive-gamma are off in linear modes
-These IQ modules compute per-frame curves/LUTs on the ARM. In a linear (non-WDR)
-FPV pipeline they should already be off — **verify** via the tuning bin or
-`MI_ISP_IQ_SetApiBypassMode` (`mi_isp_iq.h`). Small-to-moderate each; the
-runtime toggles are in `src/maruko_iq.c:136-179` (`nr3d`, `defog`, `wdr*`,
-`adaptive_gamma`, `nr_despike`, …).
+### Note — no SDK knob to run native 3A every Nth frame
+Searched the CUS3A/AE/ISP API: there is **no** parameter to decimate the SDK's
+native 3A to every-Nth-frame (the closest are `MI_ISP_AE_SetConverge`, which
+tunes convergence *conditions* not *rate*, and `MI_ISP_SkipFrame`, a
+pipeline/startup frame-skip, not 3A decimation). Per-frame 3A is baked into how
+the ISP driver services frame-end. So "keep the good SDK AE but run it less
+often" is not available — the only way to stop per-frame AE math is the
+userspace stub (the throttle), which is why fixing the throttle's quality
+(`MARUKO_AE_IMPROVEMENT_BRAINSTORM.md`) is the real path to CPU + quality.
 
 ### 5. Debug OSD redraw + IMU fallback (secondary)
 - Gate the debug-OSD redraw to ~5–10 Hz when enabled — it re-rasterises +
@@ -170,10 +182,14 @@ is **not supported** by the I6C SDK (no firmware 3A exists there); treat any
 I6E firmware-3A claim as unverified until checked on the I6E SDK/device.
 
 ## Bottom line
-The ~60% is ISP-dominated: ISP+3A ≈ 43% of the core, encoder/output only ~13%,
-VIF+VENC trivial. The one measured, low-risk win is the **AE throttle**
-(60%→50% at 90 fps) — recommend auto-enabling at fps ≥ 60. Beyond that,
-**disabling/lowering 3DNR** and **shrinking the 3A grid** are the next levers
-(single-digit points each, image-quality trade, need on-device A/B). Reaching
-I6E's 8–10% is not achievable on this single-core silicon — the residual ISP
-control-plane cost is per-frame and cannot be offloaded on I6C.
+The ~60–66% is ISP-dominated: ISP+3A ≈ 45% of the core, encoder/output ~13%,
+VIF+VENC trivial. The **only measured CPU lever is the AE throttle**
+(60%→50% at 90 fps). The IQ-API NR/WDR bypass was **measured at ~0** (66.2→65.3,
+noise) — a dead end. There is no SDK knob to run native 3A every Nth frame. The
+3A-grid-shrink is unwired and, after the NR/WDR null result, uncertain. So the
+practical conclusion is narrow: the per-frame ISP/3A cost on this single-core
+I6C is largely fixed, and the one real win — the throttle — comes with an AE
+quality cost. **Making the throttle's AE not-ugly
+(`MARUKO_AE_IMPROVEMENT_BRAINSTORM.md`) is therefore the highest-value work:
+it's the only path that buys both the ~10 CPU points and acceptable image.**
+Reaching I6E's 8–10% is not achievable on this silicon.
