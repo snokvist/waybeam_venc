@@ -135,14 +135,20 @@ height ≤ ~1230 lines.
   Device-verified warm on a previously poisoned sensor: binned→1485 both
   directions, 1485↔1485, all modes at nominal fps and full brightness —
   no power-cycle rule needed anymore.
-- **Teardown can hang in D-state.** One occurrence with the landed build:
-  SIGTERM teardown of a 1485 run stuck forever (uninterruptible D-state,
-  `wchan = MI_SYS_IMPL_FlushRealTimeOutputBuf`) when a second venc
-  instance was started ~5 s after the TERM, racing the teardown. Recovery:
-  `reboot -f` (the I6C kernel has **no sysrq**; SIGKILL makes MI zombies —
-  never use it). Notably this warm reboot did NOT wedge FRAME_BASE.
-  Operational rule: wait for the old process to fully exit before starting
-  a new one (poll `ps`, teardown takes several seconds).
+- **Teardown can hang in D-state.** Two occurrences with the landed build:
+  SIGTERM teardown stuck forever (uninterruptible D-state,
+  `wchan = MI_SYS_IMPL_FlushRealTimeOutputBuf`, SCL output port frozen at
+  `workingTask_cnt=4`). Once when a second venc instance start raced the
+  teardown, once after a ~5-minute run (a fresh 30-second run with the
+  same config tore down clean — the trigger is task-queue depth
+  accumulating over long runs, not a specific config). The pre-unbind
+  drain (`maruko_wait_output_idle`) warns and proceeds but cannot unstick
+  an already-frozen queue. Recovery: `reboot -f` (the I6C kernel has
+  **no sysrq**; SIGKILL makes MI zombies — never use it). Notably the warm
+  reboot did NOT wedge FRAME_BASE. Operational rules: wait for the old
+  process to fully exit before starting a new one (poll `ps`, teardown
+  takes several seconds); if the hang keeps recurring, the planned fix is
+  a teardown watchdog (bounded flush wait + `reboot -f`).
 - **Teardown Oops (historical)**: an Oops in
   `_MI_SYS_IMPL_UnBindChannelPort` was seen during the bind-type
   experiments, but did NOT reproduce in 6+ SIGTERM teardown cycles with
