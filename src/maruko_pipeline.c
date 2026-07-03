@@ -305,12 +305,18 @@ static int maruko_load_isp_bin(const char *isp_bin_path)
 					RTLD_DEFAULT,
 					"MI_ISP_IQ_ApiCmdLoadBinFile");
 				if (fn) {
-					/* DISABLED: IQ bin reload may reset
-					 * AE params from API bin load above.
-					 * Testing if this fixes dark image. */
-					printf("> [maruko] IQ bin load: "
-						"SKIPPED (testing AE fix)\n");
-					(void)fn;
+					/* Load the IQ "api bin" — this is where the
+					 * NR/sharpness/CCM tuning lives.  majestic does
+					 * exactly this ("Load api bin Success"); skipping
+					 * it (the old "AE fix") is what left NR at 0 =
+					 * grainy image.  The earlier "dark image" it was
+					 * meant to fix was the AE metering bug, not this
+					 * load. */
+					/* 4th arg is user_key (NOT the buffer size);
+					 * use the same 1234 the base-bin load uses. */
+					int r = fn(0, 0, buf, 1234);
+					printf("> [maruko] IQ api bin load: %s (%s)\n",
+						r == 0 ? "OK" : "FAILED", isp_bin_path);
 				} else {
 					printf("> [maruko] IQ bin load: "
 						"symbol not found (skipped)\n");
