@@ -146,6 +146,15 @@ height ≤ ~1230 lines.
 
 ## Known issues
 
+- **Mode 0 (3760x2116@30) delivers zero encoder frames — PRE-EXISTING master
+  regression, not introduced by the v0.21.0 lineup** (reproduced with the
+  v0.20.0 .ko + binary). Sensor and ISP deliver frames; the SCL→VENC
+  HW_RING/IFC path never engages (`RingRealTotalHeight=0`, SCL `EnqOTNull`
+  drops, VENC output `DropCnt`=all). Suspected Tier-C HW_RING width limit
+  at 3760 px — every mode verified since Tier C is ≤2952 wide. Full
+  diagnostic state and suggested attack in
+  `HANDOFF_MODE_LINEUP_STATUS.md`.
+
 - **Binned→1485 mode switch wedge — ROOT-CAUSED AND FIXED (2026-07-03).**
   The failure was never in the CSI/VIF/ISP receive path: the binned 891
   tables set the sensor's binning registers (HADD/VADD/ADDMODE
@@ -166,10 +175,10 @@ height ≤ ~1230 lines.
   Device-verified warm on a previously poisoned sensor: binned→1485 both
   directions, 1485↔1485, all modes at nominal fps and full brightness —
   no power-cycle rule needed anymore.
-- **Teardown can hang in D-state.** Three occurrences with the landed
+- **Teardown can hang in D-state.** Four occurrences with the landed
   build: SIGTERM teardown stuck forever (uninterruptible D-state,
   `wchan = MI_SYS_IMPL_FlushRealTimeOutputBuf`, SCL output port frozen).
-  Once when a second venc instance start raced the teardown, once after
+  Twice when a second venc instance start raced the teardown, once after
   a ~5-minute run (`workingTask_cnt=4`; a fresh 30-second run with the
   same config tore down clean — task-queue depth accumulates over long
   runs), and once tearing down an **aborted zero-frame bring-up** (the
