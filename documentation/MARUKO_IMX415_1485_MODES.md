@@ -156,13 +156,15 @@ height ≤ ~1230 lines.
 
 ## Known issues
 
-- **Mode 0 (3760x2116@30) delivers zero encoder frames — PRE-EXISTING master
-  regression, not introduced by the v0.21.0 lineup** (reproduced with the
-  v0.20.0 .ko + binary). Sensor and ISP deliver frames; the SCL→VENC
-  HW_RING/IFC path never engages (`RingRealTotalHeight=0`, SCL `EnqOTNull`
-  drops, VENC output `DropCnt`=all). Suspected Tier-C HW_RING width limit
-  at 3760 px — every mode verified since Tier C is ≤2952 wide. Full
-  diagnostic state and suggested attack in
+- **Mode 0 (3760x2116@30) works — earlier "zero frames" was a test
+  artifact, CORRECTED 2026-07-03.** Device-verified streaming at 30.0 fps
+  via live webui mode switch at both a downscaled encode (`out 1440x1080`)
+  and `auto`/native (`out 3760x2116`, VENC ring 3760). So the SCL→VENC
+  HW_RING/IFC path is fine at 3760 px. The prior zero-frame observation came
+  from a cold `setsid` start into mode 0 that was polluted by an overlapping
+  waybeam instance (encoder starvation, same class of error as D-state #4) —
+  not a width limit. Open only as a verification: a *clean* cold boot
+  directly into mode 0 hasn't been tested in isolation. See
   `HANDOFF_MODE_LINEUP_STATUS.md`.
 
 - **Binned→1485 mode switch wedge — ROOT-CAUSED AND FIXED (2026-07-03).**

@@ -11,7 +11,7 @@ all non-binned and ~16:9. **Breaking `sensor.mode` remap** (old→new: 0→0,
 
 | Idx | Mode | Device-verified (this session, .12) |
 |---|---|---|
-| 0 | 3760x2116@30 (891/REALTIME) | **FAILS — pre-existing master bug, see below** |
+| 0 | 3760x2116@30 (891/REALTIME) | **works** — 30.0 fps device-verified live at both `out 1440x1080` and `auto`/native `out 3760x2116`; earlier "zero-frames" was a cold-start test artifact, see below |
 | 1 | 2952x1656@50_1485 | 50.0 fps exact, ~16.6 Mbps — explicit `video0.size 2952x1656` now valid (see /8 fix) or `auto` |
 | 2 | 2688x1512@60_1485 (NEW) | 60.0 fps exact, ~14.6 Mbps, dmesg clean |
 | 3 | 2112x1184@90_1485 | table byte-identical to #155-verified old mode 7; set as final bench state |
@@ -24,42 +24,39 @@ Gates: `make verify` green both backends, `make test` 1699/1699. The .ko on
 .12 flash is this branch's build (md5 `18899d6b…`); flash `/usr/bin/waybeam`
 is still master v0.20.0 (fine — branch changes are driver-only).
 
-## OPEN ITEM 1 — mode 0 zero-frames: PRE-EXISTING master regression
+## ITEM 1 — mode 0 works; earlier "zero-frames" was likely a test artifact
 
-**Not caused by this branch.** Reproduced identically with master's .ko
-(`cce8971d…`) + master flash binary: bring-up completes, 3A runs, then
-"no encoder data received; aborting stream loop" after ~30 s. The aborted
-process exits and lingers as an unreaped `[waybeam]` zombie (harmless, no
-D-state; cleared by reboot).
+**Corrected 2026-07-03 (supersedes the earlier "pre-existing regression"
+claim, which was wrong).** Mode 0 streams fine, including at the full native
+3760 encode. Device-verified live (master v0.20.0 binary + this branch's .ko,
+reached by switching modes in the running webui):
 
-Diagnostic snapshot mid-failure (`/proc/mi_modules`, dumps were saved to the
-session scratchpad; re-generate live as needed):
+- mode 0, `video0.size 1440x1080` (downscaled): `sensor capt 3760x2116 →
+  out 1440x1080`, **30.0 fps steady**, zero aborts.
+- mode 0, `video0.size auto` (native): `sensor capt 3760x2116 →
+  out 3760x2116`, `VENC ring pool 3760x2116 ring=2116`, **30.0 fps steady**,
+  ~13 Mbps, ~55 KB/frame, frame counter advancing 30/s.
 
-- **Sensor + ISP are fine**: ISP dev `FrameDoneCnt` ticks; SCL *input* port
-  shows `FPS 30.00, FinishCnt 3429, DropCnt 0` — frames arrive from ISP.
-- **SCL channel drops almost everything**: CHN dump `DropCnt=3129,
-  EnqOTNull=3119` (enqueue-with-no-output-port), output-port dump section
-  EMPTY, chn `pixel` prints `ERR` — yet `MI_SCL_SetOutputPortParam` /
-  `EnableOutputPort` returned success (no error in app log).
-- **VENC starves and drops what it does get**: input `FrameCnt=184,
-  BlockCnt=1304` (~9 fps effective), encodes 183, output `FrameCnt=0,
-  DropCnt=183`, `GetStreamCnt=0`, `PollFailCnt=40`.
-- **HW_RING never engages**: VENC chn `RingStartLine=0,
-  RingRealTotalHeight=0` despite ring pool "size=3760x2112 ring=2112"
-  configured; ISP dev also logs `fifofullcnt=310 / DropCnt=310`.
+Switching freely across all five modes works.
 
-**Working hypothesis**: the Tier-C low-latency SCL→VENC HW_RING + IFC
-(compress=6) path fails at 3760-px width. Every mode verified since Tier C
-landed is ≤2952 wide; mode 0 (the only 3760-wide surfaced mode) simply has
-not been run since. Repro: `sensor.mode 0`, `video0.size 3760x2112` (or
-`auto`), fps 30.
+So the HW_RING/IFC path is fine at 3760 encode width. The earlier zero-frame
+observation came from a **cold `setsid` start straight into mode 0** — and
+that specific test was one of the two flagged as polluted by an overlapping
+waybeam instance (the same class of error that later caused D-state #4). The
+most probable explanation is that the overlap, not the 3760 width, starved
+the encoder. The prior HW_RING=0 / EnqOTNull diagnostics are consistent with
+two processes fighting over the SCL/VENC channels.
 
-Suggested attack: in `src/maruko_pipeline.c` around lines 739–770 (SCL port
-0 setup, `compress=(i6_common_compr)6 /* IFC */`, "IFC compress required for
-HW_RING"), try mode 0 with (a) compress=0 + FRAME bind instead of HW_RING,
-or (b) HW_RING with a width cap that falls back to the plain path when
-`out_w > 2952/3072-ish`, and bisect the actual width limit. If REALTIME+
-plain-frame works at 3760, gate HW_RING on width.
+**Remaining question (verification, not a known bug):** does a *clean* cold
+boot straight into mode 0 (no prior instance, fresh process) stream? Not yet
+tested in isolation. If a follow-up wants certainty: reboot, set mode 0 +
+`auto`, `setsid /usr/bin/waybeam`, confirm 30 fps. Given the live path works
+at 3760, a genuine cold-start-only failure would be surprising.
+
+The old mid-failure `/proc/mi_modules` snapshot (SCL `EnqOTNull`, VENC
+`RingRealTotalHeight=0`, ISP `fifofullcnt`) is preserved in the session
+scratchpad for reference, but should now be read as the overlap-starvation
+signature, not a 3760-width limit.
 
 ## RESOLVED ITEM 2 — encode-width validation was too strict (/16 → /8)
 
