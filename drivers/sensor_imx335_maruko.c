@@ -99,6 +99,9 @@ static struct { // LINEAR
         LINEAR_RES_2,
         LINEAR_RES_3,
         LINEAR_RES_4,
+        LINEAR_RES_5,
+        LINEAR_RES_6,
+        LINEAR_RES_7,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -145,6 +148,11 @@ static struct { // LINEAR
      * geometry, no stale-register risk (window regs match the shared table),
      * REALTIME VIF->ISP bind (207 MPix/s << 384 drain). */
     { LINEAR_RES_4, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
+    /* 4:3 best-per-fps window crops (center crop of the 2592x1944 array,
+     * ~5% ISP headroom).  Geometry derived from the 1920x1080 window mode. */
+    { LINEAR_RES_5, { 2496, 1872, 3, 50 }, { 0, 0, 2496, 1872 }, { "2496x1872@50fps" } },
+    { LINEAR_RES_6, { 2272, 1704, 3, 60 }, { 0, 0, 2272, 1704 }, { "2272x1704@60fps" } },
+    { LINEAR_RES_7, { 1792, 1344, 3, 90 }, { 0, 0, 1792, 1344 }, { "1792x1344@90fps" } },
 };
 
 static u32 vts_30fps = 4125;
@@ -960,6 +968,94 @@ static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+/* ── 4:3 window-crop modes (best-per-fps) ───────────────────────────────
+ * Reuse the proven 120fps analog/PLL config and override ONLY the readout
+ * window geometry + HMAX.  Every geometry value is derived from the working
+ * 1920x1080 window mode (all formulas verified exact against it):
+ *   HTRIM_start = 48 + (2592-W)/2 ; HNUM = W + 24 ; Y_OUT = H ;
+ *   AREA3_start = 176 + (1944-H) ; AREA3_width = 2*H.
+ * VMAX/fps is applied at runtime via vts_30fps (same as the 1080p modes),
+ * so it is intentionally NOT in these override tables.  HMAX is the one
+ * empirically-tuned value (line time grows with readout width). */
+static const I2C_ARRAY imx335_geo_2496x1872[] = { /* 50fps 4:3, HMAX=375 */
+    { 0x302C, 0x60 }, { 0x302D, 0x00 }, // HTRIMMING_START = 96
+    { 0x302E, 0xD8 }, { 0x302F, 0x09 }, // HNUM = 2520
+    { 0x3056, 0x50 }, { 0x3057, 0x07 }, // Y_OUT_SIZE = 1872
+    { 0x3074, 0xF8 }, { 0x3075, 0x00 }, // AREA3_ST = 248
+    { 0x3076, 0xA0 }, { 0x3077, 0x0E }, // AREA3_WIDTH = 3744
+    { 0x3034, 0x77 }, { 0x3035, 0x01 }, // HMAX = 375
+};
+static const I2C_ARRAY imx335_geo_2272x1704[] = { /* 60fps 4:3, HMAX=340 */
+    { 0x302C, 0xD0 }, { 0x302D, 0x00 }, // HTRIMMING_START = 208
+    { 0x302E, 0xF8 }, { 0x302F, 0x08 }, // HNUM = 2296
+    { 0x3056, 0xA8 }, { 0x3057, 0x06 }, // Y_OUT_SIZE = 1704
+    { 0x3074, 0xA0 }, { 0x3075, 0x01 }, // AREA3_ST = 416
+    { 0x3076, 0x50 }, { 0x3077, 0x0D }, // AREA3_WIDTH = 3408
+    { 0x3034, 0x54 }, { 0x3035, 0x01 }, // HMAX = 340
+};
+static const I2C_ARRAY imx335_geo_1792x1344[] = { /* 90fps 4:3, HMAX=275 */
+    { 0x302C, 0xC0 }, { 0x302D, 0x01 }, // HTRIMMING_START = 448
+    { 0x302E, 0x18 }, { 0x302F, 0x07 }, // HNUM = 1816
+    { 0x3056, 0x40 }, { 0x3057, 0x05 }, // Y_OUT_SIZE = 1344
+    { 0x3074, 0x08 }, { 0x3075, 0x03 }, // AREA3_ST = 776
+    { 0x3076, 0x80 }, { 0x3077, 0x0A }, // AREA3_WIDTH = 2688
+    { 0x3034, 0x13 }, { 0x3035, 0x01 }, // HMAX = 275 (proven; narrower than 1920)
+};
+
+/* Write the base 120fps analog table (minus its final standby-exit), then
+ * the crop geometry override while still in standby, then re-issue the
+ * standby exit — crop geometry latched before streaming, and a warm switch
+ * never inherits stale window state (PR#156 discipline). */
+static int imx335_init_window_crop(ms_cus_sensor* handle,
+        const I2C_ARRAY* geo, int geo_len)
+{
+    int i, cnt;
+    int n = ARRAY_SIZE(Sensor_init_table_4lane_5m120fps);
+
+    for (i = 0; i < n - 2; i++) {
+        if (Sensor_init_table_4lane_5m120fps[i].reg == 0xFFFF) {
+            SENSOR_MSLEEP(Sensor_init_table_4lane_5m120fps[i].data);
+            continue;
+        }
+        cnt = 0;
+        while (SensorReg_Write(Sensor_init_table_4lane_5m120fps[i].reg,
+                Sensor_init_table_4lane_5m120fps[i].data) != SUCCESS) {
+            if (++cnt >= 10) {
+                SENSOR_EMSG("[%s:%d]base init fail!!\n", __FUNCTION__, __LINE__);
+                return FAIL;
+            }
+        }
+    }
+    for (i = 0; i < geo_len; i++) {
+        cnt = 0;
+        while (SensorReg_Write(geo[i].reg, geo[i].data) != SUCCESS) {
+            if (++cnt >= 10) {
+                SENSOR_EMSG("[%s:%d]geo override fail!!\n", __FUNCTION__, __LINE__);
+                return FAIL;
+            }
+        }
+    }
+    for (i = n - 2; i < n; i++) {
+        cnt = 0;
+        while (SensorReg_Write(Sensor_init_table_4lane_5m120fps[i].reg,
+                Sensor_init_table_4lane_5m120fps[i].data) != SUCCESS) {
+            if (++cnt >= 10) {
+                SENSOR_EMSG("[%s:%d]standby-exit fail!!\n", __FUNCTION__, __LINE__);
+                return FAIL;
+            }
+        }
+    }
+    SENSOR_MSLEEP(100);
+    return SUCCESS;
+}
+
+static int pCus_init_window_2496x1872(ms_cus_sensor* handle)
+{ return imx335_init_window_crop(handle, imx335_geo_2496x1872, ARRAY_SIZE(imx335_geo_2496x1872)); }
+static int pCus_init_window_2272x1704(ms_cus_sensor* handle)
+{ return imx335_init_window_crop(handle, imx335_geo_2272x1704, ARRAY_SIZE(imx335_geo_2272x1704)); }
+static int pCus_init_window_1792x1344(ms_cus_sensor* handle)
+{ return imx335_init_window_crop(handle, imx335_geo_1792x1344, ARRAY_SIZE(imx335_geo_1792x1344)); }
+
 /////////////////// Resolution functions ///////////////////
 
 static int pCus_GetVideoResNum(ms_cus_sensor* handle, u32* ulres_num)
@@ -1039,6 +1135,30 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         params->expo.vts = vts_30fps;
         params->expo.fps = 100;
         Preview_line_period = 3694;
+        break;
+
+    case 4: // 2496x1872@50fps — 4:3 window crop, HMAX=375
+        handle->pCus_sensor_init = pCus_init_window_2496x1872;
+        vts_30fps = 3960; // 74.25MHz / (50 * HMAX 375)
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 50;
+        Preview_line_period = 5051; // HMAX 375 / 74.25MHz
+        break;
+
+    case 5: // 2272x1704@60fps — 4:3 window crop, HMAX=340
+        handle->pCus_sensor_init = pCus_init_window_2272x1704;
+        vts_30fps = 3640; // 74.25MHz / (60 * HMAX 340)
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 60;
+        Preview_line_period = 4579; // HMAX 340 / 74.25MHz
+        break;
+
+    case 6: // 1792x1344@90fps — 4:3 window crop, HMAX=275
+        handle->pCus_sensor_init = pCus_init_window_1792x1344;
+        vts_30fps = 3000; // 74.25MHz / (90 * HMAX 275)
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 90;
+        Preview_line_period = 3703; // HMAX 275 / 74.25MHz
         break;
 
     default:
