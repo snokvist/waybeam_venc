@@ -225,10 +225,13 @@ static void *maruko_ae_pacer_thread(void *arg)
 		usleep(50000);
 	if (!g_inj_run)
 		return NULL;
+	int rm_ret = g_inj_setrunmode(0, 0, 1); /* E_CUS3A_MODE_OFF */
 	printf("> [maruko] CUS3A_SetRunMode(OFF) ret=%d — paced native 3A "
-		"@%u Hz\n",
-		g_inj_setrunmode(0, 0, 1), /* E_CUS3A_MODE_OFF */
-		g_inj_fps);
+		"@%u Hz\n", rm_ret, g_inj_fps);
+	if (rm_ret != 0)
+		fprintf(stderr, "WARNING: [maruko] CUS3A_SetRunMode(OFF) failed "
+			"(ret=%d) — vendor per-frame auto-run may still be active; "
+			"AE could be double-driven (paced + auto)\n", rm_ret);
 	g_inj_runonce(0, 0, 1, 1, 0); /* arm AE+AWB, no AF */
 	while (g_inj_run) {
 		g_inj_runonce_now(0, 0);

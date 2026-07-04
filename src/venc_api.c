@@ -805,8 +805,8 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		uint32_t h = cfg->video0.height;
 		/* w==0 && h==0 means "auto" (use sensor native) — allowed. */
 		if (w != 0 || h != 0) {
-			if (w < 128 || h < 128 || w > 4096 || h > 4096)
-				return "video0.size width/height must be 128-4096";
+			if (w < 128 || h < 128 || w > 4096 || h > 2176)
+				return "video0.size must be 128-4096 wide and 128-2176 tall (SigmaStar VENC device limit 4096x2176)";
 			/* HEVC min-CU alignment: both width and height must be a
 			 * multiple of 8.  The encoder's conformance window handles
 			 * the remainder up to the CTU, so /8 (not /16) is the real

@@ -69,63 +69,6 @@ typedef struct {
 
 #define MARUKO_ISP_STATE_NORMAL 0
 
-/* ── CUS3A custom-adaptor stubs ──────────────────────────────────────── */
-
-/* ISP_AE_INTERFACE / ISP_AWB_INTERFACE layouts from isp_cus3a_if.h.
- * The SDK's 3A_Proc_0 thread calls these per-frame instead of the
- * native algorithm when adaptor is switched to ADAPTOR_1. */
-typedef struct {
-	void *pdata;
-	int  (*init)(void *pdata, void *init_state);
-	void (*release)(void *pdata);
-	void (*run)(void *pdata, const void *info, void *result);
-	int  (*ctrl)(void *pdata, int cmd, void *param);
-} StubAlgoInterface;
-
-/* CUS3A_ALGO_ADAPTOR_e: NATIVE=0, ADAPTOR_1=1.
- * CUS3A_ALGO_TYPE_e:    AE=0, AWB=1, AF=2. */
-#define CUS3A_ADAPTOR_1   1
-#define CUS3A_TYPE_AE     0
-#define CUS3A_TYPE_AWB    1
-
-typedef int (*fn_cus3a_reg_iface_ex_t)(int dev, int chn, int adaptor,
-	int type, void *iface);
-typedef int (*fn_cus3a_set_algo_adaptor_t)(int dev, int chn, int adaptor,
-	int type);
-
-/* Stub callbacks — return success and zero `Change`.
- *
- * ISP_AE_RESULT and ISP_AWB_RESULT both have a u32 `Size` field at offset
- * 0 followed by a u32 `Change` field at offset 4 (verified in
- * isp_cus3a_if.h:240,177).  Setting Change=0 tells the engine "no new
- * value to apply this frame" — exactly what we want. */
-static int  stub_ae_init(void *pdata, void *init_state)
-{
-	(void)pdata; (void)init_state;
-	return 0;
-}
-static void stub_ae_release(void *pdata) { (void)pdata; }
-static void stub_ae_run(void *pdata, const void *info, void *result)
-{
-	(void)pdata; (void)info;
-	if (result) {
-		uint32_t *r = (uint32_t *)result;
-		/* Size field at offset 0; require >=8 bytes before touching
-		 * the Change field at offset 4. */
-		if (r[0] >= 2 * sizeof(uint32_t))
-			r[1] = 0;
-	}
-}
-static int  stub_ae_ctrl(void *pdata, int cmd, void *param)
-{
-	(void)pdata; (void)cmd; (void)param;
-	return 0;
-}
-
-static StubAlgoInterface  g_stub_ae  = {
-	NULL, stub_ae_init,  stub_ae_release,  stub_ae_run,  stub_ae_ctrl,
-};
-
 /* ── ISP exposure limit (matches MI_ISP_AE_ExpoLimitType_t) ──────────── */
 
 typedef struct {
