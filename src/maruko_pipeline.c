@@ -761,42 +761,48 @@ static int configure_maruko_scl(const SensorSelectResult *sensor,
 		goto fail;
 	}
 
-	/* keep_aspect AR crop — the WIDTH component cannot be honoured on
-	 * the I6C camera pipeline; every avenue is hardware-blocked
-	 * (verified on device, 2026-07-03):
-	 *   - SCL output-port crop with width != ring stride stalls the
-	 *     scaler, and mutating it live panics the kernel;
-	 *   - VIF sub-window crop is unsupported on I6C;
-	 *   - a non-zero ISP output-port crop stalls ISP frame processing
-	 *     at high resolutions;
-	 *   - MI_SCL_SetInputPortCrop (the vendor mixer path) is gated by
-	 *     mi_scl.ko on a FRAMEBASE-bound SCL input (RDMA read window),
-	 *     and mi_sys refuses FRAMEBASE on the ISP->SCL edge
-	 *     (-1610014712) — REALTIME is the only accepted producer bind.
-	 * So a wider-than-target source is anamorphically squeezed to the
-	 * encode size (full sensor FOV, horizontally compressed — standard
-	 * FPV framing).  The HEIGHT component of the AR rect is honoured
-	 * via the output-port crop, which is stride-safe. */
+	/* keep_aspect AR crop is applied here as the SCL OUTPUT-port *source*
+	 * crop — the sub-window the scaler reads before scaling to the encode
+	 * size (honouring the FULL ar rect, x + width, not just its height).
+	 * This is the only crop stage that works on the I6C camera pipeline;
+	 * the other avenues are hardware-blocked (verified on device):
+	 *   - VIF sub-window crop is unsupported on I6C (Star6E crops here);
+	 *   - a non-zero ISP output-port crop stalls ISP processing at high res;
+	 *   - MI_SCL_SetInputPortCrop (the vendor mixer path) needs a FRAMEBASE
+	 *     SCL input, which mi_sys refuses on the REALTIME ISP->SCL edge
+	 *     (-1610014712).
+	 * A SCL source-crop whose width != ring stride IS fine at a fresh
+	 * bringup (an earlier "stalls the scaler / live-poke panics" reading was
+	 * an artifact of mutating a running pipeline — see the note below). */
 	uint32_t in_w = sensor->plane.capt.width;
 	uint32_t in_h = sensor->plane.capt.height;
 	PipelinePrecropRect ar = {0, 0, (uint16_t)in_w, (uint16_t)in_h};
 	if (ar_crop)
 		ar = *ar_crop;
-	/* Notice only when the squeeze is actually visible (>2% width
-	 * delta) — near-16:9 sensor modes produce trivial rounding crops
-	 * that are not worth alarming about. */
-	if (ar.w < (uint16_t)in_w && !zoom_rect &&
-	    (uint32_t)(in_w - ar.w) * 50 > in_w)
-		printf("> [maruko] keep_aspect: width crop %ux%u@%u,%u is "
-			"not supported by I6C hardware — full sensor width "
-			"squeezed to %ux%u (set isp.keepAspect=false to "
-			"silence)\n",
-			ar.w, ar.h, ar.x, ar.y, out_width, out_height);
-
+	/* Real AR centre-crop via the SCL *source* crop rect — honour the
+	 * FULL ar rect (x + width), not just its height.  The ar rect always
+	 * carries the OUTPUT aspect ratio (computed by
+	 * pipeline_common_compute_precrop), so the SCL then scales it to the
+	 * encode size by a SINGLE near-uniform factor on both axes (exact up to
+	 * the crop rect's 2-px even-rounding) — never the single-axis
+	 * (anamorphic) scale that stalls.
+	 *
+	 * This is what makes it stall-free.  Device-verified 2026-07-04 on
+	 * ssc378qe/I6C across 28 configs (all 5 modes x 16:9 + 4:3, down- AND
+	 * up-scale): the ONLY shape the I6C SCL cannot do is the old
+	 * full-width squeeze — read full 1920 and downscale ONE axis while the
+	 * other passes 1:1 (crop full 1920 -> output 1440x1080).  That starved
+	 * the encoder (0 frames -> 20s abort) and wedged the binned sensor.
+	 * A crop-then-uniform-scale (up or down) is always clean, because
+	 * cropping to the output AR first guarantees both axes move together.
+	 * (An earlier "upscale spams ISP P0 FIFO FULL" reading was a
+	 * live-poke artifact of mutating a running pipeline whose ring pools
+	 * were still sized for the native mode; at a fresh bringup, upscale is
+	 * fine — hence no crop/upscale guard here.) */
 	PipelinePrecropRect pcrop;
-	pcrop.x = 0;
+	pcrop.x = ar.x;
 	pcrop.y = ar.y;
-	pcrop.w = (uint16_t)in_w;
+	pcrop.w = ar.w;
 	pcrop.h = ar.h;
 	if (zoom_rect) {
 		/* 1:1 zoom window (crop == output dims, no scaling) — safe
@@ -3044,12 +3050,28 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * sensor already emits capt == output, so this is a no-op for modes 0-4. */
 	uint32_t scl_in_w = ctx->sensor.plane.capt.width;
 	uint32_t scl_in_h = ctx->sensor.plane.capt.height;
+	/* Always compute an AR-matched centre-crop, *ignoring* keep_aspect.
+	 * The I6C SCL cannot perform a single-axis (anamorphic) squeeze:
+	 * cropping the full width then downscaling only one axis stalls the
+	 * scaler and starves the encoder (device-verified 2026-07-04 on
+	 * ssc378qe — mode 4 1920x1080@100 -> 1440x1080 hung with 0 frames
+	 * until a 20s abort, and left the binned sensor wedged).  So the SCL
+	 * source-crop AR MUST match the output AR.  keep_aspect=false's
+	 * stretch-to-fill only ever "worked" when the ARs already matched
+	 * (where it is identical to keep_aspect=true); for a genuine AR
+	 * mismatch it requested a squeeze the hardware refuses, so we override
+	 * it here and crop instead. */
 	PipelinePrecropRect precrop = pipeline_common_compute_precrop(
-		scl_in_w, scl_in_h, out_w, out_h, ctx->cfg.keep_aspect ? true : false);
-	/* The AR rect goes down un-mangled: configure_maruko_scl applies it
-	 * as a channel-level INPUT crop (true keep_aspect framing, Star6E
-	 * parity) when the SDK provides MI_SCL_SetInputPortCrop, and
-	 * degrades to the historical full-width squeeze otherwise. */
+		scl_in_w, scl_in_h, out_w, out_h, true);
+	if (!ctx->cfg.keep_aspect &&
+	    (precrop.w != scl_in_w || precrop.h != scl_in_h))
+		printf("> [maruko] note: keepAspect=false requests an anamorphic "
+			"squeeze the I6C SCL cannot do — using a centre-crop "
+			"%ux%u@%u,%u instead\n",
+			precrop.w, precrop.h, precrop.x, precrop.y);
+	/* configure_maruko_scl applies this AR rect as the SCL source crop
+	 * (real centre-crop), then scales it 1:1/uniformly to the encode
+	 * size — no anamorphic squeeze. */
 	if (ctx->cfg.verbose) {
 		if (precrop.x || precrop.y ||
 		    precrop.w != scl_in_w || precrop.h != scl_in_h) {
@@ -3678,6 +3700,19 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 
 		{
 			int osd_row = 4;
+
+			/* AR centre-crop readout: the AR base crop rect (WxH+X+Y),
+			 * i.e. the sub-window of the sensor selected to match the
+			 * output AR (excludes any active zoom window, which narrows
+			 * the real read further).  Shown only when a crop is active
+			 * (output AR != sensor AR); confirms the keep_aspect crop. */
+			if (ctx->scl_crop_w &&
+			    (ctx->scl_crop_w != ctx->sensor.plane.capt.width ||
+			     ctx->scl_crop_h != ctx->sensor.plane.capt.height))
+				debug_osd_text(ctx->debug_osd, osd_row++, "crop",
+					"%ux%u+%u+%u",
+					ctx->scl_crop_w, ctx->scl_crop_h,
+					ctx->scl_crop_x, ctx->scl_crop_y);
 
 			if (osd_ae.ae_valid) {
 				debug_osd_text(ctx->debug_osd, osd_row++,
