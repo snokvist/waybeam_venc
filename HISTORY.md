@@ -25,9 +25,15 @@ No functional feature changes.
   longer leaves VPE→VENC bound at the new fps while the caller rolls back.
 - **CPU% debug-OSD window corrected to the documented ~1 s**
   (`src/debug_osd.c`, `OSD_CPU_RING` 3→2 — was a 1.5 s span).
+- **Removed the retired `throttle_mode` AE controller** (`src/maruko_cus3a.c`,
+  `include/maruko_cus3a.h`) — the 0.9.12 "aeEngine=custom" log-domain IIR
+  controller and its `MarukoAeResult`/`SetAeParam` plumbing were dead
+  (`throttle_mode` hard-wired off since paced native 3A superseded it). The
+  supervisory thread is now cleanly limits-only. Device-verified on I6C: native
+  AE still enforces `isp.gainMax`, reads stats, adapts exposure, and tears down
+  clean across mode cycles.
 - **Upstream hygiene**: dropped `.serena/` tooling config from tracking (now
-  gitignored) and four transient handoff/investigation docs; clarified the
-  retired `throttle_mode` dead-code comments so they don't read as live bugs.
+  gitignored) and four transient handoff/investigation docs.
 
 ## [0.24.0] - 2026-07-04
 

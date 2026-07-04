@@ -2475,7 +2475,6 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			ae_cfg.ae_fps        = ctx->cfg.ae_fps;
 			ae_cfg.gain_max      = ctx->cfg.isp_gain_max;
 			ae_cfg.verbose       = ctx->cfg.verbose;
-			ae_cfg.throttle_mode = false;
 			(void)maruko_cus3a_start(&ae_cfg);
 		} else if (ctx->cfg.verbose) {
 			printf("> [maruko] supervisory 3A disabled "
