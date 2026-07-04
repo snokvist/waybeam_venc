@@ -205,6 +205,50 @@ static void *maruko_inject_ae_driver(void *arg)
 	return NULL;
 }
 
+/* Path C deferred inject flip + vendor-algo pacer.  Two device-measured
+ * facts drive this shape:
+ *   1. Flipping CUS3A_SetRunMode(INJECT) during init (right after
+ *      EnableUserspace3A) yields black frames from frame 1 — the IQ
+ *      bin/baseline pushed during pipeline bring-up never reaches ISP HW
+ *      because the apply path is already inject-only.  So flip only after
+ *      the pipeline has been streaming for a few seconds (AE+AWB also
+ *      converge during this NORMAL window at native quality).
+ *   2. In INJECT run-mode the framework thread (3A_Proc_0, spawned by
+ *      CUS3A_Init) does NOT auto-run the algo — it only serves
+ *      CUS3A_RunOnceEn requests (device-verified: 0 jiffies after flip).
+ *      So after the flip THIS thread becomes the pacer, ticking the native
+ *      vendor AE+AWB at g_inj_fps.  The tick rate is our CPU<->AE-latency
+ *      knob: the vendor algo costs ~20% of a core at 100 Hz, linear in
+ *      rate; the apply stays a cheap server-side inject delta. */
+static int (*g_inj_setrunmode)(int, int, int);
+static int (*g_inj_runonce_now)(int, int);
+static int g_inj_agent;
+static pthread_t g_inj_flip_thread;
+
+static void *maruko_inject_flip_thread(void *arg)
+{
+	unsigned us = 1000000u / (g_inj_fps ? g_inj_fps : 100);
+
+	(void)arg;
+	sleep(3);
+	if (!g_inj_setrunmode || !g_inj_runonce_now)
+		return NULL;
+	printf("> [maruko] deferred CUS3A_SetRunMode(INJECT) ret=%d\n",
+		g_inj_setrunmode(0, 0, 2)); /* E_CUS3A_MODE_INJECT */
+	/* RunOnceEn = arm which algos a RunOnce serves (AE+AWB, no AF);
+	 * CUS3A_RunOnce = synchronously run them in THIS thread (disasm:
+	 * RunOnce calls Cus3A_ProcAE/AWB directly; RunOnceEn only sets
+	 * enable flags — ticking it runs nothing, device-verified). */
+	if (g_inj_runonce)
+		g_inj_runonce(0, 0, 1, 1, 0);
+	printf("> [maruko] RunOnce pacer @%u Hz\n", g_inj_fps);
+	while (g_inj_run) {
+		g_inj_runonce_now(0, 0);
+		usleep(us);
+	}
+	return NULL;
+}
+
 /* Enable CUS3A framework — required for ISP frame processing (without it
  * the ISP FIFO stalls at >=60fps).
  *
@@ -259,24 +303,16 @@ static void maruko_enable_cus3a(void)
 	 * In inject-mode the no-op AE adaptor is NOT installed: our injected
 	 * SetAeParam result is authoritative, so there is no native AE to stub. */
 	const char *inj_env = getenv("MARUKO_AE_INJECT");
-	if (inj_env) {
-		/* Option A: run the NATIVE vendor AE+AWB without the agent
-		 * (majestic's path).  Install the native sstar algos exactly as
-		 * MI_ISP_EnableUserspace3A does internally (CUS3A_Init +
-		 * CUS3A_EnableUserspaceAE/AWB), but SKIP MI_ISP_RegisterIspApiAgent
-		 * — that agent is what relocates the IQ mid-layer into this
-		 * process and makes every apply cost ~13% IspMidThreadWq.  The
-		 * vendor owns AE metering + AWB + the HW apply; our supervisory
-		 * thread only enforces limits (Star6E model).
-		 *
-		 * Run-mode is selected by the env VALUE so variants can be
-		 * A/B'd on-device without redeploying (each costs a cold boot):
-		 *   MARUKO_AE_INJECT=normal → E_CUS3A_MODE_NORMAL (Path A:
-		 *     tests whether the native algo reaches state NORMAL and
-		 *     whether apply stays cheap without the agent)
-		 *   any other value        → E_CUS3A_MODE_INJECT (server-side
-		 *     delta apply; algo stuck at state=-1 as of the handoff)
-		 * CUS3A_SetRunMode/EnableUserspaceAE live in libcus3a. */
+	int inj_legacy = inj_env && (strcmp(inj_env, "noagent") == 0 ||
+		strcmp(inj_env, "normal") == 0);
+	if (inj_legacy) {
+		/* Legacy no-agent variants, kept for A/B reference — both
+		 * PROVEN DEAD for image quality (AE state=-1, exposure frozen):
+		 * the native algo's init params come from IQ calibration that
+		 * only reaches the ISP through the agent (see _DoAeInit →
+		 * MI_ISP_CUS3A_GetAeInitStatus in the handoff doc).
+		 *   MARUKO_AE_INJECT=noagent → INJECT run-mode, no agent
+		 *   MARUKO_AE_INJECT=normal  → NORMAL run-mode, no agent */
 		void *cus = dlopen("libcus3a.so", RTLD_NOW | RTLD_GLOBAL);
 		void *cs = cus ? cus : h;
 		typedef int (*fn_i)(int);
@@ -305,6 +341,39 @@ static void maruko_enable_cus3a(void)
 			printf("> [maruko] inject-native: MISSING framework "
 				"symbols (ae=%p mode=%p)\n",
 				(void *)f_ae, (void *)f_mode);
+	} else if (inj_env) {
+		/* Path C — majestic parity (its binary disassembled, see
+		 * MARUKO_CUS3A_INJECT_HANDOFF.md 2026-07-04 update): the agent
+		 * IS registered (it is the native algo's config feed — IQ bin
+		 * calibration → GetAeInitStatus → algo init), and the CPU win
+		 * comes from INJECT run-mode routing the per-frame apply as a
+		 * server-side delta instead of through the in-process IQ
+		 * mid-layer.  EnableUserspace3A = CUS3A_Init +
+		 * EnableUserspaceAE/AWB/AF + RegisterIspApiAgent (libmi_isp
+		 * disasm), and CUS3A_Init spawns the framework thread that
+		 * auto-runs AE+AWB each frame-sync — no RunOnce driver, no
+		 * no-op adaptor. */
+		typedef int (*enable_us3a_fn)(MI_U32 dev, MI_U32 chn);
+		enable_us3a_fn f_us3a = (enable_us3a_fn)dlsym(h,
+			"MI_ISP_EnableUserspace3A");
+		int us3a_ret = f_us3a ? f_us3a(0, 0) : -1;
+		printf("> [maruko] EnableUserspace3A (agent) ret=%d\n",
+			us3a_ret);
+		void *cus = dlopen("libcus3a.so", RTLD_NOW | RTLD_GLOBAL);
+		void *cs = cus ? cus : h;
+		g_inj_setrunmode = (int (*)(int, int, int))dlsym(cs,
+			"CUS3A_SetRunMode");
+		g_inj_runonce = (int (*)(int, int, unsigned char,
+			unsigned char, unsigned char))dlsym(cs,
+			"CUS3A_RunOnceEn");
+		g_inj_runonce_now = (int (*)(int, int))dlsym(cs,
+			"CUS3A_RunOnce");
+		g_inj_agent = 1;
+		if (!g_inj_setrunmode)
+			printf("> [maruko] inject-agent: CUS3A_SetRunMode "
+				"NOT FOUND — running NORMAL (expensive) mode\n");
+		/* SetRunMode(INJECT) is NOT called here — see
+		 * maruko_inject_flip_thread (spawned at dispatch). */
 	} else {
 		/* spawn 3A_Proc_0 thread (drives IQ→HW pump via the agent). */
 		typedef int (*enable_us3a_fn)(MI_U32 dev, MI_U32 chn);
@@ -2457,20 +2526,41 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 
 		if (inject) {
 			/* No no-op adaptor: the native vendor AE+AWB own the
-			 * pipeline; we only supervise limits.  Spawn the driver
-			 * that ticks the vendor algo once per frame. */
+			 * pipeline; we only supervise limits. */
 			g_inj_fps = ctx->sensor.fps ? ctx->sensor.fps : 100;
+			/* Bench aid: a numeric MARUKO_AE_INJECT value (5-200)
+			 * overrides the pacer rate so CPU-vs-rate can be
+			 * A/B'd without a rebuild (each still needs its own
+			 * cold boot). */
+			const char *pace_env = getenv("MARUKO_AE_INJECT");
+			int pace = pace_env ? atoi(pace_env) : 0;
+			if (pace >= 5 && pace <= 200)
+				g_inj_fps = (unsigned)pace;
 			g_inj_run = 1;
-			if (g_inj_runonce && pthread_create(&g_inj_thread, NULL,
-					maruko_inject_ae_driver, NULL) == 0)
-				printf("> [maruko] inject-native AE driver "
-					"@%u Hz\n", g_inj_fps);
-			else
-				printf("> [maruko] inject-native: NO RunOnceEn "
-					"driver (AE will not adapt!)\n");
-			printf("> [maruko] AE mode: inject-native "
-				"(vendor AE+AWB in CUS3A inject-mode, no "
-				"userspace-3A agent)\n");
+			if (g_inj_agent) {
+				/* Path C: converge in NORMAL mode, then flip
+				 * to INJECT and pace the vendor algo. */
+				if (g_inj_setrunmode)
+					pthread_create(&g_inj_flip_thread,
+						NULL,
+						maruko_inject_flip_thread,
+						NULL);
+				printf("> [maruko] AE mode: inject-agent "
+					"(native AE+AWB via agent, deferred "
+					"INJECT apply, pacer @%u Hz)\n",
+					g_inj_fps);
+			} else {
+				if (g_inj_runonce && pthread_create(
+						&g_inj_thread, NULL,
+						maruko_inject_ae_driver,
+						NULL) == 0)
+					printf("> [maruko] inject-native AE "
+						"driver @%u Hz\n", g_inj_fps);
+				printf("> [maruko] AE mode: inject-native "
+					"(vendor AE+AWB, NO agent — legacy "
+					"A/B variant, image will not "
+					"converge)\n");
+			}
 		} else if (throttle) {
 			maruko_cus3a_install_noop_adaptor();
 			printf("> [maruko] AE mode: throttle "
