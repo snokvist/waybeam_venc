@@ -100,8 +100,6 @@ static struct { // LINEAR
         LINEAR_RES_3,
         LINEAR_RES_4,
         LINEAR_RES_5,
-        LINEAR_RES_6,
-        LINEAR_RES_7,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -113,46 +111,42 @@ static struct { // LINEAR
         const char* strResDesc;
     } senstr;
 } imx335_mipi_linear[] = {
-    /* Maruko (SSC378QE / I6C) — hardware constraints:
+    /* Maruko (SSC378QE / I6C) — final best-per-fps lineup.
      *
-     * 1. Window mode (0x3018=0x04) does NOT work on I6C ISP.
-     *    All Star6E IMX335 modes using HTRIMMING/HNUM/Y_OUT_SIZE
-     *    cause the ISP pipeline to hang. Only full-readout (all-pixel,
-     *    no windowing registers) produces frames.
+     * IMX335 is a 5MP 4:3 sensor (2592x1944 native, no binning).  Modes
+     * 0-3 keep the native 4:3 aspect: full-res at 30fps, then
+     * progressively tighter CENTER CROPS of the array for higher fps
+     * (~5% ISP headroom each).  Mode 4 is a 16:9 1920x1080 window paced
+     * to 100fps for the lowest possible latency.
      *
-     * 2. The I6C ISP/encoder cannot process 2560x1920 above 30fps.
-     *    Tested 35/45fps with both dynamic VTS and dedicated init
-     *    tables — sensor init succeeds but encoder never receives data.
+     * Window mode (0x3018=0x04) DOES work on I6C — the crop modes write
+     * explicit HTRIM/HNUM/Y_OUT/AREA3/HMAX geometry in standby
+     * (imx335_init_window_crop) and are all device-verified.  The old
+     * "window mode hangs the ISP" claim was a stale-register artifact
+     * (relying on power-on defaults), not a hardware limit.
      *
-     * 3. The IMX335 has no binning (unlike IMX415's HADD/VADD/ADDMODE),
-     *    so there is no way to reduce sensor output resolution without
-     *    window mode.
+     * HMAX per mode is derived from the proven 1920x1080 window (formulas
+     * verified exact against it); the ISP throughput ceiling
+     * (~245-274 MPix/s) bounds the crop sizes.  ALL geometry is written
+     * explicitly (never power-on defaults) so warm reboots / module
+     * reloads land the same mode (PR#156 discipline).
      *
-     * Mode 0: 1920x1080@60fps — windowed, HMAX=275. Verified 59fps.
-     * Mode 1: 1920x1080@90fps — windowed, HMAX=275. Verified 89fps.
+     *   idx  resolution   fps  HMAX  aspect  notes
+     *   0    2592x1944    30   600   4:3     full-res all-pixel (0x3018=0x00)
+     *   1    2496x1872    50   375   4:3     center crop
+     *   2    2272x1704    60   340   4:3     center crop
+     *   3    1792x1344    90   275   4:3     center crop
+     *   4    1920x1080    100  274   16:9    low-latency hero (paced 120fps table)
      *
-     * sensor_select forces a mode pre-transition (SetRes to index 1
-     * before index 0) so the framework always runs pCus_sensor_init
-     * even when selecting mode 0. */
-    { LINEAR_RES_1, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },
-    { LINEAR_RES_2, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
-    /* Mode 2: 2592x1944@30fps — full-res all-pixel (0x3018=0x00), full FOV,
-     * HMAX=600/VMAX=4125, vendor-proven timing.  Uses the (previously
-     * disabled) 5m30fps table.  Cold-boot safe as-is; warm switches into
-     * this mode need explicit all-pixel window regs (PR#156 discipline,
-     * added in a follow-up) because the 5m30fps table omits 0x3018 and the
-     * window registers and relies on power-on defaults. */
-    { LINEAR_RES_3, { 2592, 1944, 3, 30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
-    /* Mode 3: 1920x1080@100fps — low-latency hero.  Reuses the PROVEN 120fps
-     * windowed table (same as modes 0/1), paced to 100fps via VTS.  No new
-     * geometry, no stale-register risk (window regs match the shared table),
-     * REALTIME VIF->ISP bind (207 MPix/s << 384 drain). */
-    { LINEAR_RES_4, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
-    /* 4:3 best-per-fps window crops (center crop of the 2592x1944 array,
-     * ~5% ISP headroom).  Geometry derived from the 1920x1080 window mode. */
-    { LINEAR_RES_5, { 2496, 1872, 3, 50 }, { 0, 0, 2496, 1872 }, { "2496x1872@50fps" } },
-    { LINEAR_RES_6, { 2272, 1704, 3, 60 }, { 0, 0, 2272, 1704 }, { "2272x1704@60fps" } },
-    { LINEAR_RES_7, { 1792, 1344, 3, 90 }, { 0, 0, 1792, 1344 }, { "1792x1344@90fps" } },
+     * Note: sensor_select primes SetRes(index 1) before SetRes(index 0)
+     * so the framework runs pCus_sensor_init when mode 0 (full-res) is
+     * selected; the full-res init's all-pixel reset overrides the crop
+     * window regs left by that priming SetRes. */
+    { LINEAR_RES_1, { 2592, 1944, 3,  30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
+    { LINEAR_RES_2, { 2496, 1872, 3,  50 }, { 0, 0, 2496, 1872 }, { "2496x1872@50fps" } },
+    { LINEAR_RES_3, { 2272, 1704, 3,  60 }, { 0, 0, 2272, 1704 }, { "2272x1704@60fps" } },
+    { LINEAR_RES_4, { 1792, 1344, 3,  90 }, { 0, 0, 1792, 1344 }, { "1792x1344@90fps" } },
+    { LINEAR_RES_5, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
 };
 
 static u32 vts_30fps = 4125;
@@ -1105,23 +1099,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     handle->video_res_supported.ulcur_res = res_idx;
 
     switch (res_idx) {
-    case 0: // 1920x1080@60fps — windowed (Star6E 120fps table)
-        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
-        vts_30fps = 4512; // 2256 * 120 / 60
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 60;
-        Preview_line_period = 3694;
-        break;
-
-    case 1: // 1920x1080@90fps — windowed (Star6E 120fps table)
-        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
-        vts_30fps = 3008; // 2256 * 120 / 90
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 90;
-        Preview_line_period = 3694;
-        break;
-
-    case 2: // 2592x1944@30fps — full-res all-pixel, HMAX=600/VMAX=4125
+    case 0: // 2592x1944@30fps — full-res all-pixel, HMAX=600/VMAX=4125
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m30fps_linear;
         vts_30fps = 4125; // native VMAX at 30fps (full-res)
         params->expo.vts = vts_30fps;
@@ -1129,15 +1107,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 8080; // HMAX 600 / 74.25MHz = 8.08us/line
         break;
 
-    case 3: // 1920x1080@100fps — windowed (Star6E 120fps table, paced)
-        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
-        vts_30fps = 2707; // 2256 * 120 / 100
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 100;
-        Preview_line_period = 3694;
-        break;
-
-    case 4: // 2496x1872@50fps — 4:3 window crop, HMAX=375
+    case 1: // 2496x1872@50fps — 4:3 window crop, HMAX=375
         handle->pCus_sensor_init = pCus_init_window_2496x1872;
         vts_30fps = 3960; // 74.25MHz / (50 * HMAX 375)
         params->expo.vts = vts_30fps;
@@ -1145,7 +1115,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 5051; // HMAX 375 / 74.25MHz
         break;
 
-    case 5: // 2272x1704@60fps — 4:3 window crop, HMAX=340
+    case 2: // 2272x1704@60fps — 4:3 window crop, HMAX=340
         handle->pCus_sensor_init = pCus_init_window_2272x1704;
         vts_30fps = 3640; // 74.25MHz / (60 * HMAX 340)
         params->expo.vts = vts_30fps;
@@ -1153,12 +1123,20 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         Preview_line_period = 4579; // HMAX 340 / 74.25MHz
         break;
 
-    case 6: // 1792x1344@90fps — 4:3 window crop, HMAX=275
+    case 3: // 1792x1344@90fps — 4:3 window crop, HMAX=275
         handle->pCus_sensor_init = pCus_init_window_1792x1344;
         vts_30fps = 3000; // 74.25MHz / (90 * HMAX 275)
         params->expo.vts = vts_30fps;
         params->expo.fps = 90;
         Preview_line_period = 3703; // HMAX 275 / 74.25MHz
+        break;
+
+    case 4: // 1920x1080@100fps — windowed (Star6E 120fps table, paced)
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
+        vts_30fps = 2707; // 2256 * 120 / 100
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 100;
+        Preview_line_period = 3694;
         break;
 
     default:
