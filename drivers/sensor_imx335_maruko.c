@@ -232,11 +232,10 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us);
 
 /* Mode 2 (2592x1944@30fps): full-sensor all-pixel scan — HMAX=600/VMAX=4125,
  * vendor-proven timing.  Wired into pCus_SetVideoRes as res index 2.
- * NOTE: this table sets NO window/crop registers and relies on the power-on
- * all-pixel defaults (0x3018=0x00), so it is cold-boot safe but a WARM switch
- * into it after a windowed mode needs explicit window resets added first
- * (PR#156 discipline — follow-up).  The other two tables below (60/90fps
- * full-scan) remain unbuilt reference until they are made PR#156-compliant. */
+ * PR#156-compliant: explicitly resets the readout window to full-frame
+ * all-pixel (0x3018=0x00 + HTRIM/HNUM/Y_OUT below) so a warm switch from a
+ * windowed mode does not inherit stale window state.  The other two tables
+ * below (60/90fps full-scan) remain unbuilt reference until made compliant. */
 const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3002, 0x01 }, // Master mode stop
     { 0xFFFF, 0x14 }, // delay
@@ -249,6 +248,20 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3032, 0x00 }, // VMAX
     { 0x3034, 0x58 }, // HMAX
     { 0x3035, 0x02 }, // HMAX
+    /* All-pixel geometry reset (PR#156 discipline): explicitly return the
+     * readout window to full-frame so a WARM switch from a windowed mode
+     * (0x3018=0x04, Y_OUT=1080, HTRIM centred) does not leave stale window
+     * state that starves the encoder.  Values grounded in the working 120fps
+     * window table's register semantics + the vendor all-pixel block:
+     *   0x3018=0x00 all-pixel scan; HTRIM start=48 / HNUM=2616 (full width,
+     *   matches the window table's 1944->1920 margin ratio); Y_OUT=1944. */
+    { 0x3018, 0x00 }, // WINMODE: all-pixel scan
+    { 0x302C, 0x30 }, // HTRIMMING_START = 48
+    { 0x302D, 0x00 },
+    { 0x302E, 0x38 }, // HNUM = 2616 (full-width readout)
+    { 0x302F, 0x0A },
+    { 0x3056, 0x98 }, // Y_OUT_SIZE = 1944
+    { 0x3057, 0x07 },
     /* SHR0 writes (0x305A/3059/3058) removed — not in Maruko SDK table.
      * AE sets SHR0 dynamically via AEStatusNotify. */
     { 0x314C, 0xB0 },
