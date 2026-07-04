@@ -149,3 +149,59 @@ lever, orthogonal to this gap).
 **I6C has no VPE deployed; majestic hits 43% on the same discrete ISP+SCL path
 while doing more than waybeam — so the CPU gap is config, not architecture. VPE
 port cancelled; chase `IspMidThreadWq` instead.**
+
+---
+
+## Measured follow-up — `IspMidThreadWq` is per-frame AE-apply (device ablation)
+
+Ran a controlled ablation on .12 (I6C), 1920x1080@100, sampling per-thread CPU
+(incl. kernel threads) with a jiffie sampler. **Config changes to `aeEngine` /
+`noiseLevel` force a pipeline reinit on Maruko, which is fragile (SCL-fence
+D-state wedge on repeated respawn) — so each config was measured via a clean
+cold-start after reboot, not a live switch.**
+
+| Config (mode 4, 1080p100) | busy | `IspMidThreadWq` | `3A_Proc_0` | `isp0_P0_MAIN` | main |
+|---|---|---|---|---|---|
+| **B** baseline (sdk AE, nl=1) | 70.0% | **13.2%** | 21.9% | 17.5% | 10.6% |
+| **A** 3DNR off (sdk AE, nl=0) | 64.5% | 12.6% | 18.9% | 16.4% | 9.9% |
+| **D** throttle (custom AE 15Hz, nl=1) | **52.8%** | **2.0%** | 15.8% | 16.9% | 10.4% |
+| majestic (ref, sdk-equiv, +h264+audio) | 42.9% | ~0 | 24.9% | 7.0% | 4.5% |
+
+### Two findings
+
+1. **3DNR is NOT the driver** (A vs B): turning channel-level 3DNR off dropped
+   total 5.5pt but `IspMidThreadWq` barely moved (13.2→12.6). The 3DNR cost is
+   spread across 3A/isp0/main, not the mid workqueue.
+
+2. **`IspMidThreadWq` IS per-frame AE-apply** (D vs B): throttling AE from 100Hz
+   to 15Hz (`aeEngine=custom`) **collapses `IspMidThreadWq` 13.2→2.0pt** and cuts
+   total **70.0→52.8% (−17.2pt)**. So the +13pt majestic lacks is the cost of
+   applying userspace-3A results to the ISP (CMDQ bank-load / IQ shadow / i2c
+   exposure) *every* sensor frame. majestic avoids it despite running 3A at
+   *full* rate — see below.
+
+### What this means for the gap
+
+- **The dominant lever already exists and is already built: `aeEngine=custom`.**
+  It takes waybeam from 70% to 52.8% at 100fps — within ~10pt of majestic — and
+  its quality was just improved this session (P1 IIR + P4 gain-pin, PR #156). The
+  practical CPU close is: **ship `aeEngine=custom` at high fps.** (Confirms +
+  quantifies the older ~10pt AE-throttle note, now with the mechanism.)
+
+- **Residual ~10pt after throttle is `isp0_P0_MAIN` + main loop.** Note majestic
+  runs 3A at **full rate** (`3A_Proc_0`=24.9%, *higher* than our throttled 15.8%)
+  yet has `isp0_P0_MAIN`=7.0 (vs our 16.9) and `IspMidThreadWq`≈0. **majestic
+  proves full-rate, smooth AE at low ISP-apply cost is achievable on this exact
+  hardware** — so waybeam's expensive per-frame apply is a *usage* inefficiency
+  in the `MI_ISP_EnableUserspace3A` / CUS3A path (likely re-pushing a heavy 3A/IQ
+  result struct every tick where majestic pushes minimal exposure/gain deltas),
+  not a hardware limit. That is the next investigation for *full-rate-quality at
+  majestic CPU* — a bigger prize than the throttle, but harder.
+
+- **main loop +5.9pt** is independent and app-side (OSD redraw cadence, scene
+  detector) — cheap to trim regardless.
+
+### Bench note
+`aeEngine`/`noiseLevel` changes are **reinit-forcing and respawn-fragile** on
+Maruko — do NOT A/B them by live `/api/v1/set` or restart-cycling (wedges the SCL
+fence into D-state, needs `reboot -f`). Measure each via cold-start after reboot.
