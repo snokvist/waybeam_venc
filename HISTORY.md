@@ -25,6 +25,18 @@ toggle. Full mode detail: `documentation/MARUKO_IMX335_MODES.md`.
   (1600x900@144 still stalls with 3A frozen — the ~1.7 ms is vendor ISP pixel
   processing, not 3A). Exposure is static when set; bench use only.
 
+- **Live `video0.fps` accepts up to 144** (`PIPELINE_LIVE_FPS_MAX`,
+  `include/pipeline_common.h`; `maruko_apply_fps`, star6e `apply_fps`) — the
+  live-apply path previously hard-rejected any `fps > 120`, making it
+  impossible to *pre-stage* fps=144 while parked in a lower-fps mode (so the
+  next respawn's auto sensor-select could pick the 144 mode). The request is no
+  longer rejected: the requested value is committed to config, and each
+  platform's existing clamp-to-`sensor_fps` caps the actual VPE→VENC rebind to
+  the current mode's max — so a 100fps mode still binds at 100, but the config
+  now carries 144 for `sensor.mode:-1` to resolve on the next mode switch
+  (`sensor_mode_clamp_fps` re-clamps there too). 144 is the ceiling because it
+  is the highest fps any mode offers; above it is still a client error.
+
 ## [0.23.0] - 2026-07-04
 
 Maruko IMX335 best-per-fps mode lineup + debug-OSD readouts. Full mode

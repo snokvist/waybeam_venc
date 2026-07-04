@@ -101,6 +101,15 @@ everything. Configs with a pinned `sensor.mode` must be updated;
 `sensor.mode: -1` (auto) resolves by target width/height/fps and needs no
 change.
 
+**Pre-staging 144fps for a mode switch.** A live `video0.fps` request above
+the current mode's max is no longer rejected (ceiling `PIPELINE_LIVE_FPS_MAX`
+= 144). Set `video0.fps=144` first *while parked in a lower-fps mode*: the
+value is clamped to the current mode's max for the immediate rebind (so mode 4
+keeps running at 100), but the config now carries 144, so switching to
+`sensor.mode: -1` (or mode 5) resolves to the 144fps window instead of the
+auto-select clamping the target back down. Without this pre-stage, selecting a
+144 mode with the config still at 100fps would enter it at 100.
+
 ## Window-crop geometry
 
 Every crop reuses the proven 120fps analog/PLL config
