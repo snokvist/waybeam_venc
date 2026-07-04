@@ -2424,9 +2424,29 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			printf("> [maruko] NOTE: isp.aeEngine=custom is "
 				"retired; paced native 3A is always used\n");
 
+		/* Experimental bench toggle: WAYBEAM_NO_3A=1 freezes 3A entirely —
+		 * pause the vendor auto-run (SetRunMode OFF) and start NO pacer /
+		 * supervisory thread, so AE/AWB hold at the ISP-bin defaults (static
+		 * exposure). Sheds all per-frame 3A/apply cost, to test whether 3A —
+		 * vs the raw ISP per-frame time budget — is what caps high fps.
+		 * Bench use only (exposure no longer adapts). */
+		const char *no_3a_env = getenv("WAYBEAM_NO_3A");
+		int no_3a = (no_3a_env && no_3a_env[0] && no_3a_env[0] != '0');
+		if (no_3a) {
+			if (g_inj_setrunmode) {
+				int rm = g_inj_setrunmode(0, 0, 1); /* E_CUS3A_MODE_OFF */
+				printf("> [maruko] WAYBEAM_NO_3A: CUS3A_SetRunMode(OFF) "
+					"ret=%d — 3A FROZEN (static IQ, no pacer/"
+					"supervisory)\n", rm);
+			} else {
+				printf("> [maruko] WAYBEAM_NO_3A set but CUS3A_SetRunMode "
+					"symbol missing — vendor 3A stays active\n");
+			}
+		}
+
 		/* Supervisory thread: limits-only (enforces isp.gainMax and
 		 * the fps-derived shutter ceiling on the vendor algo). */
-		if (ctx->cfg.ae_fps > 0) {
+		if (!no_3a && ctx->cfg.ae_fps > 0) {
 			MarukoCus3aConfig ae_cfg;
 			maruko_cus3a_config_defaults(&ae_cfg);
 			ae_cfg.sensor_fps    = ctx->sensor.fps;
@@ -2455,7 +2475,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 * auto-run.  If any is missing, leave the vendor auto-run
 		 * active (full-rate, correct image, higher CPU) rather than
 		 * pausing it and ticking an unarmed RunOnce (frozen 3A). */
-		if (g_inj_setrunmode && g_inj_runonce && g_inj_runonce_now) {
+		if (!no_3a && g_inj_setrunmode && g_inj_runonce && g_inj_runonce_now) {
 			g_inj_run = 1;
 			if (pthread_create(&g_inj_flip_thread, NULL,
 					maruko_ae_pacer_thread, NULL) != 0)
@@ -2465,7 +2485,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			printf("> [maruko] AE mode: paced native 3A "
 				"(vendor AE+AWB, pacer @%u Hz after "
 				"convergence)\n", g_inj_fps);
-		else
+		else if (!no_3a)
 			printf("> [maruko] AE mode: native full-rate "
 				"(pacer unavailable — CUS3A symbols "
 				"missing)\n");
