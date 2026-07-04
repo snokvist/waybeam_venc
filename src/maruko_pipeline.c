@@ -3629,6 +3629,7 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		static unsigned int osd_prev_frame;
 		static struct timespec osd_prev_ts;
 		static unsigned int osd_fps;
+		static MarukoAeOsdStatus osd_ae;
 		struct timespec osd_now;
 
 		debug_osd_begin_frame(ctx->debug_osd);
@@ -3642,6 +3643,9 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 			osd_fps = (unsigned int)(df * 1000 / (unsigned long)osd_ms);
 			osd_prev_frame = rt->frame_counter;
 			osd_prev_ts = osd_now;
+			/* AE/AWB readouts ride the same 1Hz window — each
+			 * refresh round-trips several MI_ISP getters. */
+			maruko_controls_ae_osd_status(&osd_ae);
 		}
 
 		debug_osd_text(ctx->debug_osd, 0, "fps", "%u", osd_fps);
@@ -3650,6 +3654,27 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 
 		{
 			int osd_row = 2;
+
+			if (osd_ae.ae_valid) {
+				debug_osd_text(ctx->debug_osd, osd_row++,
+					"exp", "%uus sg%u/%u ig%u",
+					osd_ae.shutter_us,
+					osd_ae.sgain_x1024, osd_ae.max_sgain,
+					osd_ae.igain_x1024);
+				debug_osd_text(ctx->debug_osd, osd_row++,
+					"ae", "y%u t%u %s %uhz",
+					osd_ae.luma_y, osd_ae.scene_target,
+					osd_ae.boundary ? "bound" :
+					osd_ae.stable ? "stable" : "adj",
+					g_inj_run ? g_inj_fps : 0);
+			}
+			if (osd_ae.awb_valid) {
+				debug_osd_text(ctx->debug_osd, osd_row++,
+					"awb", "r%u b%u %uk %s",
+					osd_ae.rgain, osd_ae.bgain,
+					osd_ae.color_temp,
+					osd_ae.awb_stable ? "stable" : "adj");
+			}
 			MarukoIntraRefreshStatus ir;
 			MarukoRefPredStatus      rp;
 			maruko_pipeline_intra_refresh_status(&ir);

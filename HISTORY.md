@@ -35,6 +35,17 @@ Full investigation: `documentation/MARUKO_CUS3A_INJECT_HANDOFF.md`.
   silently drop every exposure apply (do not revisit); `CUS3A_RunOnceEn`
   only arms algo selection while `CUS3A_RunOnce` executes synchronously in
   the caller; `MI_ISP_RegisterIspApiAgent` is pure userspace fp tables.
+- **Debug OSD: smoothed CPU% + live AE/AWB readouts.** The CPU% readout
+  is now a sliding ~1 s average (snapshot ring at 500 ms cadence) instead
+  of a jumpy 500 ms delta; the duplicated per-platform `/proc/stat`
+  sampler in `debug_osd.c` is folded into one shared implementation
+  (both Star6E and Maruko). Maruko additionally gains three OSD rows,
+  refreshed at 1 Hz, to watch the paced 3A adapt live:
+  `exp` (shutter µs, sensor gain/limit, ISP gain), `ae` (measured luma
+  vs scene target, stable/adj/bound state, pacer Hz), and `awb`
+  (R/B gains, color temp, stable/adj) — backed by a new
+  `maruko_controls_ae_osd_status()` reusing the `/api/v1/ae/info` +
+  `/api/v1/awb/info` SDK queries.
 
 ## [0.21.0] - 2026-07-03
 

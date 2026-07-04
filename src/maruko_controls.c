@@ -1176,3 +1176,50 @@ const VencConfig *maruko_controls_vcfg(void)
 {
 	return g_ctx.vcfg;
 }
+
+void maruko_controls_ae_osd_status(MarukoAeOsdStatus *out)
+{
+	MarukoAeDiagSnapshot s;
+
+	memset(out, 0, sizeof(*out));
+	ae_diag_collect(&s);
+
+	/* Sensor plane shutter/gain remain valid even if the AE query
+	 * fails, so surface those as long as either source answered. */
+	out->ae_valid = (s.info_ret == 0 || s.plane_ret == 0);
+	out->shutter_us = ae_diag_exposure_us(&s);
+	out->sgain_x1024 = ae_diag_sensor_gain(&s);
+	out->igain_x1024 = ae_diag_isp_gain(&s);
+	if (s.limit_ret == 0) {
+		out->max_shutter_us = s.limit.maxShutterUs;
+		out->max_sgain = s.limit.maxSensorGain;
+	}
+	if (s.info_ret == 0) {
+		out->luma_y = s.info.stHistWeightY.u32LumY;
+		out->scene_target = s.info.u32SceneTarget;
+		out->stable = s.info.bIsStable ? 1 : 0;
+		out->boundary = s.info.bIsReachBoundary ? 1 : 0;
+	}
+
+	{
+		typedef MI_S32 (*fn_awb_query_t)(uint32_t, uint32_t,
+			MarukoAwbQueryInfo *);
+		void *handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+		if (handle) {
+			fn_awb_query_t fn = (fn_awb_query_t)dlsym(handle,
+				"MI_ISP_AWB_QueryInfo");
+			if (fn) {
+				MarukoAwbQueryInfo qi;
+				memset(&qi, 0, sizeof(qi));
+				if (fn(0, 0, &qi) == 0) {
+					out->awb_valid = 1;
+					out->rgain = qi.u16Rgain;
+					out->bgain = qi.u16Bgain;
+					out->color_temp = qi.u16ColorTemp;
+					out->awb_stable = qi.bIsStable ? 1 : 0;
+				}
+			}
+			dlclose(handle);
+		}
+	}
+}
