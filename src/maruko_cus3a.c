@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 /* ── CUS3A / ISP ABI structures ──────────────────────────────────────── */
 
@@ -67,63 +68,6 @@ typedef struct {
 } __attribute__((packed)) MarukoAeResult;
 
 #define MARUKO_ISP_STATE_NORMAL 0
-
-/* ── CUS3A custom-adaptor stubs ──────────────────────────────────────── */
-
-/* ISP_AE_INTERFACE / ISP_AWB_INTERFACE layouts from isp_cus3a_if.h.
- * The SDK's 3A_Proc_0 thread calls these per-frame instead of the
- * native algorithm when adaptor is switched to ADAPTOR_1. */
-typedef struct {
-	void *pdata;
-	int  (*init)(void *pdata, void *init_state);
-	void (*release)(void *pdata);
-	void (*run)(void *pdata, const void *info, void *result);
-	int  (*ctrl)(void *pdata, int cmd, void *param);
-} StubAlgoInterface;
-
-/* CUS3A_ALGO_ADAPTOR_e: NATIVE=0, ADAPTOR_1=1.
- * CUS3A_ALGO_TYPE_e:    AE=0, AWB=1, AF=2. */
-#define CUS3A_ADAPTOR_1   1
-#define CUS3A_TYPE_AE     0
-#define CUS3A_TYPE_AWB    1
-
-typedef int (*fn_cus3a_reg_iface_ex_t)(int dev, int chn, int adaptor,
-	int type, void *iface);
-typedef int (*fn_cus3a_set_algo_adaptor_t)(int dev, int chn, int adaptor,
-	int type);
-
-/* Stub callbacks — return success and zero `Change`.
- *
- * ISP_AE_RESULT and ISP_AWB_RESULT both have a u32 `Size` field at offset
- * 0 followed by a u32 `Change` field at offset 4 (verified in
- * isp_cus3a_if.h:240,177).  Setting Change=0 tells the engine "no new
- * value to apply this frame" — exactly what we want. */
-static int  stub_ae_init(void *pdata, void *init_state)
-{
-	(void)pdata; (void)init_state;
-	return 0;
-}
-static void stub_ae_release(void *pdata) { (void)pdata; }
-static void stub_ae_run(void *pdata, const void *info, void *result)
-{
-	(void)pdata; (void)info;
-	if (result) {
-		uint32_t *r = (uint32_t *)result;
-		/* Size field at offset 0; require >=8 bytes before touching
-		 * the Change field at offset 4. */
-		if (r[0] >= 2 * sizeof(uint32_t))
-			r[1] = 0;
-	}
-}
-static int  stub_ae_ctrl(void *pdata, int cmd, void *param)
-{
-	(void)pdata; (void)cmd; (void)param;
-	return 0;
-}
-
-static StubAlgoInterface  g_stub_ae  = {
-	NULL, stub_ae_init,  stub_ae_release,  stub_ae_run,  stub_ae_ctrl,
-};
 
 /* ── ISP exposure limit (matches MI_ISP_AE_ExpoLimitType_t) ──────────── */
 
@@ -266,24 +210,19 @@ static void release_symbols(Cus3aState *s)
 #define AE_STEP_DEN         10
 #define AE_GAIN_MIN         1024   /* 1.0x */
 #define AE_GAIN_MAX_DEFAULT 32768  /* 32x sensor cap (IMX415) */
-#define AE_ISP_GAIN_MAX     8192   /* 8x ISP digital gain ceiling */
+#define AE_ISP_GAIN_MAX     8192   /* 8x ISP digital gain ceiling (unused: P4) */
 #define AE_SHUTTER_MIN_US   30
 
-static uint32_t step_up(uint32_t v, uint32_t cap)
-{
-	uint64_t n = ((uint64_t)v * AE_STEP_NUM) / AE_STEP_DEN;
-	if (n > cap) n = cap;
-	if (n == v && v < cap) n = v + 1;
-	return (uint32_t)n;
-}
+/* P1 — log-domain IIR proportional controller (replaces the bang-bang
+ * cascade).  Converge in continuous exposure space with smooth damping so
+ * there are no visible ~20% steps.  Tune ALPHA on device: lower = smoother
+ * but slower.  DEADBAND stops micro-hunting; RATIO_CLAMP bounds how far a
+ * single transient can move per tick. */
+#define AE_IIR_ALPHA        0.20   /* fraction of log-exposure error / tick */
+#define AE_RATIO_CLAMP      4.0    /* max per-tick exposure ratio (and 1/x) */
+#define AE_DEADBAND_RATIO   0.015  /* +/-1.5% exposure -> hold */
 
-static uint32_t step_dn(uint32_t v, uint32_t floor_v)
-{
-	uint64_t n = ((uint64_t)v * AE_STEP_DEN) / AE_STEP_NUM;
-	if (n < floor_v) n = floor_v;
-	if (n == v && v > floor_v) n = v - 1;
-	return (uint32_t)n;
-}
+/* (bang-bang step_up/step_dn removed — replaced by the IIR controller.) */
 
 /* ── Supervisory + AE control thread ─────────────────────────────────── */
 
@@ -394,22 +333,48 @@ static void *cus3a_thread(void *arg)
 	while (s->running) {
 		unsigned int avg_y = 0;
 		int can_drive = 0;
+		unsigned int dbg_bx = 0, dbg_by = 0, dbg_avg_lin = 0;
 
 		/* ── Read luminance grid ───────────────────────────────── */
 		if (s->fn_get_hw_stats(0, 0, ae_hw) == 0) {
 			memset(&ae_info, 0, sizeof(ae_info));
 			s->fn_get_ae_status(0, 0, &ae_info);
 
-			unsigned int total = ae_info.AvgBlkX *
-				ae_info.AvgBlkY;
-			if (total == 0 || total > MARUKO_AE_GRID_SZ)
-				total = MARUKO_AE_GRID_SZ;
+			/* Block dims come from the grid struct itself
+			 * (ae_hw->nBlk*).  ae_info.AvgBlk* (from
+			 * MI_ISP_CUS3A_GetAeStatus) read 0 here, so total fell
+			 * back to the full 128×90 grid and divided the packed
+			 * sum by 11520 instead of the real block count —
+			 * pinning avgY to ~4 on a lit scene. */
+			unsigned int bx = ae_hw->nBlkX;
+			unsigned int by = ae_hw->nBlkY;
+			if (bx == 0 || by == 0 || bx > MARUKO_AE_GRID_X ||
+			    by > MARUKO_AE_GRID_Y) {
+				bx = MARUKO_AE_GRID_X;
+				by = MARUKO_AE_GRID_Y;
+			}
+			unsigned int total = bx * by;
 			if (total > 0) {
-				unsigned long sum = 0;
-				unsigned int n;
-				for (n = 0; n < total; n++)
-					sum += ae_hw->nAvg[n].y;
-				avg_y = (unsigned int)(sum / total);
+				unsigned long sum2d = 0, sumlin = 0;
+				unsigned int x, y;
+				/* 2D: real bx×by sub-block at fixed 128 stride */
+				for (y = 0; y < by; y++)
+					for (x = 0; x < bx; x++)
+						sum2d += ae_hw->nAvg[
+						  y * MARUKO_AE_GRID_X + x].y;
+				/* packed-linear: the grid is stored packed at
+				 * stride nBlkX (device-confirmed: 2D stride-128
+				 * read scores ~0, packed-linear ~real). */
+				for (x = 0; x < total; x++)
+					sumlin += ae_hw->nAvg[x].y;
+				avg_y = (unsigned int)(sumlin / total);
+				dbg_bx = bx;
+				dbg_by = by;
+				/* 2D stride-128 kept as diagnostic. NOTE: even the
+				 * correct packed read gives uAvgY~4 uniformly on a
+				 * lit scene — the stat scale/update itself is
+				 * suspect, not the divisor. Metering unresolved. */
+				dbg_avg_lin = (unsigned int)(sum2d / total);
 				can_drive = 1;
 			}
 		}
@@ -429,15 +394,22 @@ static void *cus3a_thread(void *arg)
 			if (!s->cfg.throttle_mode) {
 				s->fn_get_exposure_limit(0, 0, &cur_limit);
 
+				/* Compare against the FRESH read, not a local
+				 * "applied" cache: the CUS3A AE init (first
+				 * frame-syncs after start) resets limits to
+				 * the bin values, silently undoing an early
+				 * push — e.g. isp.gainMax above the bin
+				 * ceiling never stuck (found with
+				 * gainMax=32000 vs bin 8192, v0.22.0). */
 				if (want_shutter > 0 &&
-				    want_shutter != applied_shutter_max) {
+				    cur_limit.maxShutterUs != want_shutter) {
 					cur_limit.maxShutterUs = want_shutter;
 					applied_shutter_max = want_shutter;
 					shutter_max_us = want_shutter;
 					changed = 1;
 				}
 				if (effective_gain > 0 &&
-				    effective_gain != applied_gain_max) {
+				    cur_limit.maxSensorGain != effective_gain) {
 					cur_limit.maxSensorGain = effective_gain;
 					applied_gain_max = effective_gain;
 					gain_max_eff = effective_gain;
@@ -445,9 +417,17 @@ static void *cus3a_thread(void *arg)
 				}
 
 				if (changed) {
-					s->fn_set_exposure_limit(0, 0,
-						&cur_limit);
+					int lret = s->fn_set_exposure_limit(
+						0, 0, &cur_limit);
 					limit_writes++;
+					if (s->cfg.verbose)
+						printf("[maruko-cus3a] limit "
+							"push: shutter max "
+							"%uus gain max %u "
+							"ret=%d\n",
+							cur_limit.maxShutterUs,
+							cur_limit.maxSensorGain,
+							lret);
 				}
 			} else {
 				/* Throttle: just keep local caps current. */
@@ -469,30 +449,60 @@ static void *cus3a_thread(void *arg)
 		 * runs in 3A_Proc_0 at sensor rate and we'd just stomp on
 		 * its output here. */
 		if (s->cfg.throttle_mode && can_drive) {
-			int delta = (int)AE_TARGET_Y - (int)avg_y;
+			/* P1 — log-domain IIR proportional controller (replaces
+			 * the ~20% bang-bang cascade).  Converge total exposure
+			 * toward the luma target with smooth damping so there are
+			 * no visible steps.  P4: ISP digital gain pinned at 1.0x
+			 * (it clips colour channels + amplifies noise); converge
+			 * with shutter (priority) then analog sensor gain. */
+			cur_isp_gain = AE_GAIN_MIN;
 
-			if (delta > AE_DEAD_BAND) {
-				/* Too dark: shutter → sensor gain → ISP gain */
-				if (cur_shutter_us < shutter_max_us)
-					cur_shutter_us = step_up(
-						cur_shutter_us, shutter_max_us);
-				else if (cur_sensor_gain < gain_max_eff)
-					cur_sensor_gain = step_up(
-						cur_sensor_gain, gain_max_eff);
-				else if (cur_isp_gain < AE_ISP_GAIN_MAX)
-					cur_isp_gain = step_up(
-						cur_isp_gain, AE_ISP_GAIN_MAX);
-			} else if (delta < -AE_DEAD_BAND) {
-				/* Too bright: ISP gain → sensor gain → shutter */
-				if (cur_isp_gain > AE_GAIN_MIN)
-					cur_isp_gain = step_dn(
-						cur_isp_gain, AE_GAIN_MIN);
-				else if (cur_sensor_gain > AE_GAIN_MIN)
-					cur_sensor_gain = step_dn(
-						cur_sensor_gain, AE_GAIN_MIN);
-				else if (cur_shutter_us > shutter_min_us)
-					cur_shutter_us = step_dn(
-						cur_shutter_us, shutter_min_us);
+			/* Applied exposure in linear units: shutter_us * gain(x). */
+			double e_applied = (double)cur_shutter_us *
+				((double)cur_sensor_gain / (double)AE_GAIN_MIN);
+			if (e_applied < 1.0)
+				e_applied = 1.0;
+
+			/* Proportional: exposure scales inversely with luma error
+			 * (+1 avoids div-by-zero and softens deep shadow). */
+			double ratio = ((double)AE_TARGET_Y + 1.0) /
+				((double)avg_y + 1.0);
+			if (ratio > AE_RATIO_CLAMP)
+				ratio = AE_RATIO_CLAMP;
+			else if (ratio < 1.0 / AE_RATIO_CLAMP)
+				ratio = 1.0 / AE_RATIO_CLAMP;
+
+			/* Log-domain IIR damping: e_next = e * ratio^alpha —
+			 * smooth, perceptually linear, no staircase/overshoot. */
+			double e_next = e_applied * pow(ratio, AE_IIR_ALPHA);
+
+			/* Deadband in exposure ratio: hold if the move is tiny. */
+			double drift = e_next / e_applied;
+			if (drift < 1.0 + AE_DEADBAND_RATIO &&
+			    drift > 1.0 - AE_DEADBAND_RATIO)
+				e_next = e_applied;
+
+			/* Split across shutter (priority) then analog gain. */
+			{
+				double e_max_shutter = (double)shutter_max_us;
+				if (e_max_shutter < 1.0)
+					e_max_shutter = 1.0;
+				if (e_next <= e_max_shutter) {
+					uint32_t ns = (uint32_t)(e_next + 0.5);
+					if (ns < shutter_min_us)
+						ns = shutter_min_us;
+					cur_shutter_us = ns;
+					cur_sensor_gain = AE_GAIN_MIN;
+				} else {
+					double g = (e_next / e_max_shutter) *
+						(double)AE_GAIN_MIN;
+					if (g > (double)gain_max_eff)
+						g = (double)gain_max_eff;
+					if (g < (double)AE_GAIN_MIN)
+						g = (double)AE_GAIN_MIN;
+					cur_shutter_us = shutter_max_us;
+					cur_sensor_gain = (uint32_t)(g + 0.5);
+				}
 			}
 
 			memset(&ae_result, 0, sizeof(ae_result));
@@ -526,12 +536,14 @@ static void *cus3a_thread(void *arg)
 				if (s->cfg.throttle_mode) {
 					printf("[maruko-cus3a] %lu ticks | "
 						"%lu ae | %lu lim | "
-						"avgY=%u target=%d | want "
+						"blk=%ux%u avgY=%u(lin=%u) "
+						"target=%d | want "
 						"shutter=%uus sgain=%u "
 						"igain=%u | isp shutter=%uus "
 						"sgain=%u igain=%u\n",
 						ticks, ae_writes, limit_writes,
-						avg_y, AE_TARGET_Y,
+						dbg_bx, dbg_by,
+						avg_y, dbg_avg_lin, AE_TARGET_Y,
 						cur_shutter_us, cur_sensor_gain,
 						cur_isp_gain,
 						ae_info.Shutter,
@@ -570,41 +582,6 @@ static void *cus3a_thread(void *arg)
 }
 
 /* ── Public API ──────────────────────────────────────────────────────── */
-
-void maruko_cus3a_install_noop_adaptor(void)
-{
-	void *h = dlopen("libcus3a.so", RTLD_LAZY | RTLD_GLOBAL);
-	if (!h) {
-		fprintf(stderr,
-			"[maruko-cus3a] adaptor install: dlopen libcus3a.so "
-			"failed: %s\n", dlerror());
-		return;
-	}
-
-	fn_cus3a_reg_iface_ex_t fn_reg =
-		(fn_cus3a_reg_iface_ex_t)dlsym(h, "CUS3A_RegInterfaceEX");
-	fn_cus3a_set_algo_adaptor_t fn_set =
-		(fn_cus3a_set_algo_adaptor_t)dlsym(h, "CUS3A_SetAlgoAdaptor");
-	if (!fn_reg || !fn_set) {
-		fprintf(stderr,
-			"[maruko-cus3a] CUS3A_RegInterfaceEX or "
-			"SetAlgoAdaptor missing — cannot install no-op "
-			"adaptor (3A will run at sensor rate)\n");
-		dlclose(h);
-		return;
-	}
-
-	/* Only swap AE — leave AWB on the native algorithm so white balance
-	 * tracks the scene.  Stubbing AWB freezes it and produces a strong
-	 * color cast.  AE is the dominant CPU cost so swapping just AE
-	 * captures most of the savings. */
-	int r1 = fn_reg(0, 0, CUS3A_ADAPTOR_1, CUS3A_TYPE_AE, &g_stub_ae);
-	int s1 = fn_set(0, 0, CUS3A_ADAPTOR_1, CUS3A_TYPE_AE);
-	printf("> [maruko-cus3a] no-op AE adaptor installed: "
-		"reg=%d set=%d (AWB stays native)\n", r1, s1);
-
-	dlclose(h);
-}
 
 int maruko_cus3a_start(const MarukoCus3aConfig *cfg)
 {

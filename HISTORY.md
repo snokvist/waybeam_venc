@@ -1,5 +1,97 @@
 # History
 
+## [0.22.0] - 2026-07-04
+
+Maruko AE rework: **paced native 3A** replaces both historical AE engines.
+Full investigation: `documentation/MARUKO_CUS3A_INJECT_HANDOFF.md`.
+
+- **Maruko now runs ONE AE mode**: the vendor AE+AWB converge at full rate
+  for ~3 s after pipeline start, then the CUS3A per-frame auto-run is
+  paused (`CUS3A_SetRunMode(OFF)`) and a pacer thread re-runs the same
+  converged algo via `CUS3A_RunOnce` at `sensor_fps/3` (floor 30 Hz).
+  Applies keep flowing through the stock ISP-API agent path.
+  Device-measured @1080p100: 70.0% of the core (old `sdk` full-rate) /
+  52.8% (old `custom` throttle) → **39.4%**, at full vendor image quality
+  (exposure + AWB convergence verified live, below majestic's 42.9%).
+- **`isp.aeEngine` is retired on Maruko** (still honored on Star6E). The
+  key still parses so existing configs load; `custom` logs a notice and
+  behaves as paced. The 0.9.12 no-op AE adaptor + P1 throttle controller
+  path is removed. `isp.aeFps` keeps governing only the supervisory
+  limits thread (Star6E semantics unchanged).
+- Pacer rate is auto-derived — no user knob: 100 fps → 33 Hz,
+  90 fps → 30 Hz, ≤90 fps → 30 Hz floor (full-rate quality at low fps).
+- **`isp.gainMax` fixes** (found live-testing gain headroom): (1) the
+  supervisory limits thread now compares against a fresh
+  `GetExposureLimit` read each tick instead of a local cache — the CUS3A
+  AE init was silently resetting limits to bin values right after the
+  startup push, so a config `gainMax` above the bin ceiling never stuck;
+  (2) the live `isp.gainMax` API setter now routes through the
+  supervisory target (`maruko_cus3a_set_gain_max`) instead of writing
+  the raw limit — writing `0` ("bin default") used to push a literal
+  0 limit and slam the image black.  Verified live on-device:
+  32000 → sgain rises past the bin's 8192 (to the algo's internal
+  ~11470 cap), 2048 → clamps down, 0 → returns to bin default 8192.
+- Findings for posterity: CUS3A INJECT run-mode makes the agent mid-layer
+  silently drop every exposure apply (do not revisit); `CUS3A_RunOnceEn`
+  only arms algo selection while `CUS3A_RunOnce` executes synchronously in
+  the caller; `MI_ISP_RegisterIspApiAgent` is pure userspace fp tables.
+- **Debug OSD: smoothed CPU% + live AE/AWB readouts.** The CPU% readout
+  is now a sliding ~1 s average (snapshot ring at 500 ms cadence) instead
+  of a jumpy 500 ms delta; the duplicated per-platform `/proc/stat`
+  sampler in `debug_osd.c` is folded into one shared implementation
+  (both Star6E and Maruko). Maruko additionally gains three OSD rows,
+  refreshed at 1 Hz, to watch the paced 3A adapt live:
+  `exp` (shutter µs, sensor gain/limit, ISP gain), `ae` (measured luma
+  vs scene target, stable/adj/bound state, pacer Hz), and `awb`
+  (R/B gains, color temp, stable/adj) — backed by a new
+  `maruko_controls_ae_osd_status()` reusing the `/api/v1/ae/info` +
+  `/api/v1/awb/info` SDK queries.
+- **Review-pass hardening** (adversarial multi-agent review of the above):
+  (1) the `ae` OSD row is now gated on a distinct `ae_info_valid` flag so
+  it no longer renders fabricated zeros when only the sensor-plane query
+  answers (the `exp` row keeps its sensor-plane fallback); (2) the AE
+  pacer now requires all three CUS3A symbols (`RunOnceEn`/`RunOnce`/
+  `SetRunMode`) before engaging — a missing `RunOnceEn` falls back to
+  vendor full-rate instead of pausing auto-run and ticking an unarmed
+  `RunOnce` (frozen 3A); (3) the pacer's 3 s convergence wait is now an
+  interruptible 50 ms poll of `g_inj_run`, so a teardown/respawn in the
+  first 3 s joins in ≤50 ms instead of blocking the whole window — matters
+  on this restart-latency-sensitive SoC. Device-verified: pacer
+  re-derives 33 Hz on live switch to 1080p100, both OSD rows show valid
+  data, ~48% busy with OSD active.
+
+## [0.21.0] - 2026-07-03
+
+Maruko IMX415 mode-lineup rework: one best mode per FPS tier, all non-binned
+and ~16:9 (sensor native aspect). See `documentation/MARUKO_IMX415_1485_MODES.md`.
+
+- **BREAKING: `sensor.mode` index remap** (Maruko IMX415). New lineup:
+  0 = `3760x2116@30fps` (891, REALTIME), 1 = `2952x1656@50fps_1485`,
+  2 = `2688x1512@60fps_1485` (NEW — exact 16:9, replaces 2952x1368 19.4:9),
+  3 = `2112x1184@90fps_1485`, 4 = `1920x1080@100fps_1485` (NEW).
+  Old→new: 0→0, 5→1, 7→3. Configs with a pinned mode index must be updated;
+  `sensor.mode: -1` (auto) resolves correctly unchanged.
+- **New 100 fps tier replaces the vendor 120 fps mode**: `1920x1080@100_1485`
+  is non-binned, exact 16:9, and sized ~8% under the ISP m2m ceiling
+  (capacity ~108 fps) so the FRAMEBASE queue stays empty — minimum latency
+  at full nominal rate. The old binned 1472x816@120 never delivered 120
+  (115–118 measured): its HMAX=365 table bursts 393 MPix/s, above the
+  384 MPix/s ISP REALTIME drain.
+- **Vendor superwide + binned modes unsurfaced** (superwide 3760x1024@59,
+  binned 1080p60-ispsafe, binned 1080p90, 1472x816@120): tables parked
+  under `#if 0` in the driver for posterity; all suffered either non-16:9
+  geometry or the 393 MPix/s FIFO-pressure defect.
+- CSI-MAC clock selection now keyed on a per-mode `link_mbps` field instead
+  of a hardcoded index threshold (renumber-safe; the FRAMEBASE bind was
+  already keyed on the `_1485` name suffix).
+- **`video0.size` width alignment relaxed /16 → /8.** The former rule
+  (#63/#55, derived from an 854×480 failure that is only ÷2) needlessly
+  rejected native ÷8 widths like 2952. Mode 1's `2952x1656` may now be set
+  explicitly instead of only via `auto`; forcing the nearest /16 (2944)
+  anamorphically downscaled 2952→2944 and cost ~7 fps (43 vs 50, device-
+  verified). Height /8 unchanged. HEVC's conformance window covers the
+  sub-CTU remainder, so /8 is the correct minimum.
+
 ## [0.20.0] - 2026-07-03
 
 Maruko (Infinity6C/SSC378QE) IMX415 1485 Mbps non-binned sensor modes, plus

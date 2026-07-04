@@ -805,14 +805,22 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		uint32_t h = cfg->video0.height;
 		/* w==0 && h==0 means "auto" (use sensor native) — allowed. */
 		if (w != 0 || h != 0) {
-			if (w < 128 || h < 128 || w > 4096 || h > 4096)
-				return "video0.size width/height must be 128-4096";
-			/* HEVC CTU alignment: width must be multiple of 16,
-			 * height multiple of 8.  MI_VENC_CreateChn rejects
-			 * misaligned widths with MI_ERR_VENC_ILLEGAL_PARAM
-			 * (-1610473469) and the daemon cannot recover. */
-			if (w % 16 != 0)
-				return "video0.size width must be a multiple of 16";
+			if (w < 128 || h < 128 || w > 4096 || h > 2176)
+				return "video0.size must be 128-4096 wide and 128-2176 tall (SigmaStar VENC device limit 4096x2176)";
+			/* HEVC min-CU alignment: both width and height must be a
+			 * multiple of 8.  The encoder's conformance window handles
+			 * the remainder up to the CTU, so /8 (not /16) is the real
+			 * constraint — native sensor widths like 2952 (÷8, not ÷16)
+			 * create the VENC channel and stream fine (the auto path
+			 * uses exactly these).  A width below /8 (e.g. 854×480, which
+			 * is only ÷2) makes MI_VENC_CreateChn fail with
+			 * MI_ERR_VENC_ILLEGAL_PARAM (-1610473469) and the daemon
+			 * cannot recover — that is what this gate blocks.  The former
+			 * /16 rule needlessly forced `video0.size auto` for 2952-wide
+			 * modes; setting the nearest /16 (2944) instead made the SCL
+			 * anamorphically downscale 2952→2944 and cost ~7 fps. */
+			if (w % 8 != 0)
+				return "video0.size width must be a multiple of 8";
 			if (h % 8 != 0)
 				return "video0.size height must be a multiple of 8";
 		}
