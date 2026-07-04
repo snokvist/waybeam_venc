@@ -222,19 +222,65 @@ static void *maruko_inject_ae_driver(void *arg)
  *      rate; the apply stays a cheap server-side inject delta. */
 static int (*g_inj_setrunmode)(int, int, int);
 static int (*g_inj_runonce_now)(int, int);
+static int (*g_inj_reg_agent)(MI_U32, MI_U32, void *, void *);
 static int g_inj_agent;
 static pthread_t g_inj_flip_thread;
+
+/* Decline-stub ISP-API agent.  MI_ISP_GENERAL_Set/GetIspApiData first offer
+ * every IQ/3A api call to the registered agent and only fall through to the
+ * server ioctl when the agent returns 0xA0078008 ("not handled") — libmi_isp
+ * disasm.  The REAL agent (registered by EnableUserspace3A) captures every
+ * apply into the in-process IQ mid-layer, which inject-mode suppresses, so
+ * post-flip applies vanish (device-verified: algo runs, stats track the
+ * scene, exposure never moves).  Swapping in this stub after convergence
+ * makes the vendor algo's SetAeParam/SetAwbParam fall through to the server
+ * where the inject delta actually lands (the no-agent path device-proven in
+ * the earlier P1 experiment). */
+static MI_S32 maruko_agent_decline(void *pstData, void *pData)
+{
+	(void)pstData; (void)pData;
+	return (MI_S32)0xA0078008;
+}
+
+/* Minimal CusAEResult_t (packed Maruko layout, see maruko_cus3a.c) for the
+ * bench apply-probe below. */
+typedef struct {
+	uint32_t Size, Change, Shutter, SensorGain, IspGain;
+	uint32_t ShutterHdrShort, SensorGainHdrShort, IspGainHdrShort;
+	uint32_t u4BVx16384, AvgY, HdrRatio, FNx10, DebandFPS, WeightY;
+} __attribute__((packed)) MarukoInjAeResult;
 
 static void *maruko_inject_flip_thread(void *arg)
 {
 	unsigned us = 1000000u / (g_inj_fps ? g_inj_fps : 100);
+	void *h = g_mi_isp.handle;
+	int (*f_setae)(int, int, void *) = h ?
+		(int (*)(int, int, void *))dlsym(h,
+			"MI_ISP_CUS3A_SetAeParam") : NULL;
+	int (*f_algostat)(int, int, int *) = NULL;
+	unsigned long tick = 0;
+	int probed = 0;
+
+	{
+		void *cus = dlopen("libcus3a.so", RTLD_NOW | RTLD_GLOBAL);
+		if (cus)
+			f_algostat = (int (*)(int, int, int *))dlsym(cus,
+				"CUS3A_GetAlgoStatus");
+	}
 
 	(void)arg;
 	sleep(3);
 	if (!g_inj_setrunmode || !g_inj_runonce_now)
 		return NULL;
-	printf("> [maruko] deferred CUS3A_SetRunMode(INJECT) ret=%d\n",
-		g_inj_setrunmode(0, 0, 2)); /* E_CUS3A_MODE_INJECT */
+	/* Path D: run-mode OFF pauses the framework's per-frame auto-run
+	 * (like INJECT) but leaves InjectModeEnable at 0, so the vendor
+	 * algo's SetAeParam applies keep flowing through the REAL agent
+	 * mid-layer (the proven throttle-mode path, ~0.13pt/Hz).  INJECT
+	 * mode is a dead end: InjectModeEnable(1) makes the mid-layer DROP
+	 * every apply — device-proven (exposure frozen, apply-probe with
+	 * paced algo paused produced zero bitrate dip). */
+	printf("> [maruko] deferred CUS3A_SetRunMode(OFF) ret=%d\n",
+		g_inj_setrunmode(0, 0, 1)); /* E_CUS3A_MODE_OFF */
 	/* RunOnceEn = arm which algos a RunOnce serves (AE+AWB, no AF);
 	 * CUS3A_RunOnce = synchronously run them in THIS thread (disasm:
 	 * RunOnce calls Cus3A_ProcAE/AWB directly; RunOnceEn only sets
@@ -243,7 +289,45 @@ static void *maruko_inject_flip_thread(void *arg)
 		g_inj_runonce(0, 0, 1, 1, 0);
 	printf("> [maruko] RunOnce pacer @%u Hz\n", g_inj_fps);
 	while (g_inj_run) {
-		g_inj_runonce_now(0, 0);
+		int ro = g_inj_runonce_now(0, 0);
+
+		tick++;
+		/* Bench instrumentation: once ~20s in, poke a manual mid
+		 * exposure through the (post-stub) server apply path.  If
+		 * the image dips and the paced algo restores it, the whole
+		 * loop is live; if nothing happens, applies still don't
+		 * land; if it dips and stays, the algo output is dead. */
+		if (!probed && tick >= 20u * (g_inj_fps ? g_inj_fps : 100)
+				&& f_setae) {
+			MarukoInjAeResult r = {0};
+			r.Size = sizeof(r); r.Change = 1;
+			r.Shutter = 2000; r.SensorGain = 2048;
+			r.IspGain = 1024;
+			r.ShutterHdrShort = 2000;
+			r.SensorGainHdrShort = 2048;
+			r.IspGainHdrShort = 1024;
+			r.u4BVx16384 = 16384; r.AvgY = 40;
+			r.HdrRatio = 1024; r.FNx10 = 28;
+			r.DebandFPS = g_inj_fps; r.WeightY = 40;
+			printf("> [maruko] APPLY-PROBE SetAeParam"
+				"(2000us/2048) ret=%d — pacer paused 3s\n",
+				f_setae(0, 0, &r));
+			/* Hold the pacer so the algo can't immediately
+			 * override the probe; a landing probe = a clear
+			 * 3s dip in the 1s bitrate log. */
+			sleep(3);
+			printf("> [maruko] APPLY-PROBE done, pacer "
+				"resumed\n");
+			probed = 1;
+		}
+		if ((tick % (5u * (g_inj_fps ? g_inj_fps : 100))) == 0) {
+			int st[3] = {-9, -9, -9};
+			if (f_algostat)
+				f_algostat(0, 0, st);
+			printf("> [maruko] pacer: runonce ret=%d "
+				"algostat ae=%d awb=%d af=%d\n",
+				ro, st[0], st[1], st[2]);
+		}
 		usleep(us);
 	}
 	return NULL;
@@ -368,6 +452,8 @@ static void maruko_enable_cus3a(void)
 			"CUS3A_RunOnceEn");
 		g_inj_runonce_now = (int (*)(int, int))dlsym(cs,
 			"CUS3A_RunOnce");
+		g_inj_reg_agent = (int (*)(MI_U32, MI_U32, void *,
+			void *))dlsym(h, "MI_ISP_RegisterIspApiAgent");
 		g_inj_agent = 1;
 		if (!g_inj_setrunmode)
 			printf("> [maruko] inject-agent: CUS3A_SetRunMode "
