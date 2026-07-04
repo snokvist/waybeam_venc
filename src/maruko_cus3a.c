@@ -625,41 +625,6 @@ static void *cus3a_thread(void *arg)
 
 /* ── Public API ──────────────────────────────────────────────────────── */
 
-void maruko_cus3a_install_noop_adaptor(void)
-{
-	void *h = dlopen("libcus3a.so", RTLD_LAZY | RTLD_GLOBAL);
-	if (!h) {
-		fprintf(stderr,
-			"[maruko-cus3a] adaptor install: dlopen libcus3a.so "
-			"failed: %s\n", dlerror());
-		return;
-	}
-
-	fn_cus3a_reg_iface_ex_t fn_reg =
-		(fn_cus3a_reg_iface_ex_t)dlsym(h, "CUS3A_RegInterfaceEX");
-	fn_cus3a_set_algo_adaptor_t fn_set =
-		(fn_cus3a_set_algo_adaptor_t)dlsym(h, "CUS3A_SetAlgoAdaptor");
-	if (!fn_reg || !fn_set) {
-		fprintf(stderr,
-			"[maruko-cus3a] CUS3A_RegInterfaceEX or "
-			"SetAlgoAdaptor missing — cannot install no-op "
-			"adaptor (3A will run at sensor rate)\n");
-		dlclose(h);
-		return;
-	}
-
-	/* Only swap AE — leave AWB on the native algorithm so white balance
-	 * tracks the scene.  Stubbing AWB freezes it and produces a strong
-	 * color cast.  AE is the dominant CPU cost so swapping just AE
-	 * captures most of the savings. */
-	int r1 = fn_reg(0, 0, CUS3A_ADAPTOR_1, CUS3A_TYPE_AE, &g_stub_ae);
-	int s1 = fn_set(0, 0, CUS3A_ADAPTOR_1, CUS3A_TYPE_AE);
-	printf("> [maruko-cus3a] no-op AE adaptor installed: "
-		"reg=%d set=%d (AWB stays native)\n", r1, s1);
-
-	dlclose(h);
-}
-
 int maruko_cus3a_start(const MarukoCus3aConfig *cfg)
 {
 	int ret;

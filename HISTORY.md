@@ -1,5 +1,30 @@
 # History
 
+## [0.22.0] - 2026-07-04
+
+Maruko AE rework: **paced native 3A** replaces both historical AE engines.
+Full investigation: `documentation/MARUKO_CUS3A_INJECT_HANDOFF.md`.
+
+- **Maruko now runs ONE AE mode**: the vendor AE+AWB converge at full rate
+  for ~3 s after pipeline start, then the CUS3A per-frame auto-run is
+  paused (`CUS3A_SetRunMode(OFF)`) and a pacer thread re-runs the same
+  converged algo via `CUS3A_RunOnce` at `sensor_fps/3` (floor 30 Hz).
+  Applies keep flowing through the stock ISP-API agent path.
+  Device-measured @1080p100: 70.0% of the core (old `sdk` full-rate) /
+  52.8% (old `custom` throttle) → **39.4%**, at full vendor image quality
+  (exposure + AWB convergence verified live, below majestic's 42.9%).
+- **`isp.aeEngine` is retired on Maruko** (still honored on Star6E). The
+  key still parses so existing configs load; `custom` logs a notice and
+  behaves as paced. The 0.9.12 no-op AE adaptor + P1 throttle controller
+  path is removed. `isp.aeFps` keeps governing only the supervisory
+  limits thread (Star6E semantics unchanged).
+- Pacer rate is auto-derived — no user knob: 100 fps → 33 Hz,
+  90 fps → 30 Hz, ≤90 fps → 30 Hz floor (full-rate quality at low fps).
+- Findings for posterity: CUS3A INJECT run-mode makes the agent mid-layer
+  silently drop every exposure apply (do not revisit); `CUS3A_RunOnceEn`
+  only arms algo selection while `CUS3A_RunOnce` executes synchronously in
+  the caller; `MI_ISP_RegisterIspApiAgent` is pure userspace fp tables.
+
 ## [0.21.0] - 2026-07-03
 
 Maruko IMX415 mode-lineup rework: one best mode per FPS tier, all non-binned
