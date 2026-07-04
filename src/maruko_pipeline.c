@@ -181,6 +181,30 @@ static int maruko_config_dev_ring_pool(i6c_sys_mod module, MI_U32 device,
 	return ret;
 }
 
+/* inject-native driver: once we skip RegisterIspApiAgent, the SDK spawns no
+ * 3A_Proc_0 thread, so the vendor CUS3A AE+AWB algo never ticks.  We drive it
+ * ourselves once per frame via CUS3A_RunOnceEn (resolved from libcus3a in the
+ * inject branch of maruko_enable_cus3a).  Cheap: the run() computes 3A and the
+ * apply is a server-side inject delta (no IspMidThreadWq). */
+static int (*g_inj_runonce)(int, int, unsigned char, unsigned char,
+	unsigned char);
+static pthread_t g_inj_thread;
+static volatile int g_inj_run;
+static unsigned g_inj_fps = 100;
+
+static void *maruko_inject_ae_driver(void *arg)
+{
+	unsigned us = 1000000u / (g_inj_fps ? g_inj_fps : 100);
+
+	(void)arg;
+	while (g_inj_run) {
+		if (g_inj_runonce)
+			g_inj_runonce(0, 0, 1, 1, 0); /* tick AE + AWB */
+		usleep(us);
+	}
+	return NULL;
+}
+
 /* Enable CUS3A framework — required for ISP frame processing (without it
  * the ISP FIFO stalls at >=60fps).
  *
@@ -235,23 +259,42 @@ static void maruko_enable_cus3a(void)
 	 * In inject-mode the no-op AE adaptor is NOT installed: our injected
 	 * SetAeParam result is authoritative, so there is no native AE to stub. */
 	if (getenv("MARUKO_AE_INJECT")) {
-		typedef int (*inject_fn)(MI_U32 dev, MI_U32 chn, void *data);
-		inject_fn fn_inject = (inject_fn)dlsym(h,
-			"MI_ISP_CUS3A_InjectModeEnable");
-		if (fn_inject) {
-			MI_BOOL en[1] = {1};  /* CusInject3AEnable_t{ bInject3A } */
-			int r = fn_inject(0, 0, en);
-			printf("> [maruko] InjectModeEnable ret=%d "
-				"(no userspace-3A agent)\n", r);
-		} else {
-			printf("> [maruko] InjectModeEnable symbol missing; "
-				"falling back to EnableUserspace3A\n");
-			typedef int (*enable_us3a_fn)(MI_U32, MI_U32);
-			enable_us3a_fn f = (enable_us3a_fn)dlsym(h,
-				"MI_ISP_EnableUserspace3A");
-			if (f)
-				f(0, 0);
-		}
+		/* Option A: run the NATIVE vendor AE+AWB in inject-mode
+		 * (majestic's path).  Install the native sstar algos exactly as
+		 * MI_ISP_EnableUserspace3A does internally (CUS3A_Init +
+		 * CUS3A_EnableUserspaceAE/AWB), but SKIP MI_ISP_RegisterIspApiAgent
+		 * — that agent is what relocates the IQ mid-layer into this
+		 * process and makes every apply cost ~13% IspMidThreadWq.  Then
+		 * CUS3A_SetRunMode(INJECT) routes the vendor 3A results as cheap
+		 * server-side deltas.  The vendor owns AE metering + AWB + the HW
+		 * apply; our supervisory thread only enforces limits (Star6E
+		 * model).  CUS3A_SetRunMode/EnableUserspaceAE live in libcus3a. */
+		void *cus = dlopen("libcus3a.so", RTLD_NOW | RTLD_GLOBAL);
+		void *cs = cus ? cus : h;
+		typedef int (*fn_i)(int);
+		typedef int (*fn_ii)(int, int);
+		typedef int (*fn_iii)(int, int, int);
+		fn_i   f_init = (fn_i)  dlsym(cs, "CUS3A_Init");
+		fn_ii  f_ae   = (fn_ii) dlsym(cs, "CUS3A_EnableUserspaceAE");
+		fn_ii  f_awb  = (fn_ii) dlsym(cs, "CUS3A_EnableUserspaceAWB");
+		fn_iii f_mode = (fn_iii)dlsym(cs, "CUS3A_SetRunMode");
+		g_inj_runonce = (int (*)(int, int, unsigned char, unsigned char,
+			unsigned char))dlsym(cs, "CUS3A_RunOnceEn");
+		if (f_init)
+			f_init(0);                       /* E_ISP_DEV_0 */
+		if (f_ae)
+			printf("> [maruko] CUS3A_EnableUserspaceAE ret=%d\n",
+				f_ae(0, 0));
+		if (f_awb)
+			printf("> [maruko] CUS3A_EnableUserspaceAWB ret=%d\n",
+				f_awb(0, 0));
+		if (f_mode)
+			printf("> [maruko] CUS3A_SetRunMode(INJECT) ret=%d\n",
+				f_mode(0, 0, 2));        /* E_CUS3A_MODE_INJECT */
+		if (!f_ae || !f_mode)
+			printf("> [maruko] inject-native: MISSING framework "
+				"symbols (ae=%p mode=%p)\n",
+				(void *)f_ae, (void *)f_mode);
 	} else {
 		/* spawn 3A_Proc_0 thread (drives IQ→HW pump via the agent). */
 		typedef int (*enable_us3a_fn)(MI_U32 dev, MI_U32 chn);
@@ -2375,9 +2418,10 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 *               at ae_fps Hz.  Saves ~24% of one core. */
 		int throttle = ctx->cfg.ae_mode[0] &&
 			strcmp(ctx->cfg.ae_mode, "throttle") == 0;
-		/* Inject-mode drives AE via our SetAeParam loop (like throttle)
-		 * but the apply is cheap (no agent), so run it WITHOUT the no-op
-		 * adaptor and at full ae_fps for smooth, low-CPU AE. */
+		/* Inject-mode (Option A): the NATIVE vendor AE+AWB run in CUS3A
+		 * inject run-mode (installed in maruko_enable_cus3a).  The vendor
+		 * owns AE+AWB+apply, so our supervisory thread is limits-only
+		 * (like native/Star6E) and no no-op adaptor is installed. */
 		int inject = getenv("MARUKO_AE_INJECT") != NULL;
 
 		/* Start supervisory thread FIRST so it captures the bin's
@@ -2392,8 +2436,9 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			ae_cfg.ae_fps        = ctx->cfg.ae_fps;
 			ae_cfg.gain_max      = ctx->cfg.isp_gain_max;
 			ae_cfg.verbose       = ctx->cfg.verbose;
-			/* inject-mode also drives SetAeParam (our P1 loop). */
-			ae_cfg.throttle_mode = throttle || inject;
+			/* inject-mode: native vendor AE drives; our thread stays
+			 * limits-only (throttle_mode off). */
+			ae_cfg.throttle_mode = throttle;
 			(void)maruko_cus3a_start(&ae_cfg);
 		} else if (ctx->cfg.verbose) {
 			printf("> [maruko] supervisory 3A disabled "
@@ -2401,11 +2446,21 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		}
 
 		if (inject) {
-			/* No no-op adaptor: injected SetAeParam is authoritative;
-			 * AWB stays native (server-side). */
-			printf("> [maruko] AE mode: inject "
-				"(CUS3A inject-mode + manual SetAeParam, "
-				"no userspace-3A agent)\n");
+			/* No no-op adaptor: the native vendor AE+AWB own the
+			 * pipeline; we only supervise limits.  Spawn the driver
+			 * that ticks the vendor algo once per frame. */
+			g_inj_fps = ctx->sensor.fps ? ctx->sensor.fps : 100;
+			g_inj_run = 1;
+			if (g_inj_runonce && pthread_create(&g_inj_thread, NULL,
+					maruko_inject_ae_driver, NULL) == 0)
+				printf("> [maruko] inject-native AE driver "
+					"@%u Hz\n", g_inj_fps);
+			else
+				printf("> [maruko] inject-native: NO RunOnceEn "
+					"driver (AE will not adapt!)\n");
+			printf("> [maruko] AE mode: inject-native "
+				"(vendor AE+AWB in CUS3A inject-mode, no "
+				"userspace-3A agent)\n");
 		} else if (throttle) {
 			maruko_cus3a_install_noop_adaptor();
 			printf("> [maruko] AE mode: throttle "
