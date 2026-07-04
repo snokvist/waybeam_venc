@@ -56,7 +56,51 @@ sensor rate (since no `3A_Proc_0` auto-thread exists without the agent).
   `300us / gain 1024`, WB frozen (green). The native sstar algo is installed and
   `RunOnceEn` ticks it, but it never reaches NORMAL state. ✗
 
-## 2026-07-04 UPDATE — Path A run + majestic disassembly (READ THIS FIRST)
+## 2026-07-04 FINAL — SOLVED: Path D (paced native 3A, run-mode OFF)
+
+**39.4% busy @1080p100, 100 fps, live vendor AE+AWB, converged neutral image
+— device-verified on .12, below majestic (42.9%).** Commits ee60089 →
+93d0c43 on this branch. The winning mechanism (all device-proven):
+
+1. Init exactly as the default path: `MI_ISP_EnableUserspace3A` (CUS3A_Init
+   + native algo registration + REAL agent) — the agent is the algo's
+   config feed (IQ bin calibration → `GetAeInitStatus` → `_DoAeInit`);
+   without it the native algo never leaves state=-1 (Paths A/attempt-3).
+2. Let AE+AWB converge in NORMAL run-mode for ~3 s (framework thread
+   auto-runs per frame-sync).
+3. `CUS3A_SetRunMode(OFF)` — pauses the per-frame auto-run (kills the
+   ~22pt 3A cost + ~13pt apply cost) but leaves `InjectModeEnable` at 0 so
+   applies keep flowing through the real agent (the throttle-mode path).
+4. A pacer thread ticks `CUS3A_RunOnceEn(0,0,1,1,0)` once to arm, then
+   `CUS3A_RunOnce(0,0)` at a chosen rate — runs the vendor AE+AWB
+   synchronously in the pacer thread, applies land. ~0.25pt/Hz total
+   (58.4% @100 Hz, 39.4% @25 Hz; floor 33.9% with pacer stopped).
+
+**Why INJECT failed (don't retry):** `InjectModeEnable(1)` makes the
+agent-side mid-layer DROP every SetAeParam — proven by an apply-probe
+(manual SetAeParam(2000us) with the pacer paused: ret=0, zero bitrate dip).
+With run-mode OFF the same probe craters the bitrate for exactly the pause
+and the paced algo restores it on resume — applies + algo liveness both
+proven. The decline-stub agent experiment (fall through to server ioctl)
+also failed: server accepts (ret=0) and silently drops exposure applies
+when userspace 3A owns the pipeline. majestic's low `isp0` (7 vs our 16.5)
+remains unexplained — separate second-order investigation.
+
+Key SDK facts (disasm-grounded): `RegisterIspApiAgent` = pure userspace fp
+tables; `Set/GetIspApiData` = agent-first with 0xA0078008 fallthrough;
+`CUS3A_Init` spawns the 3A_Proc_0 thread; `RunOnceEn` only arms selection,
+`CUS3A_RunOnce` executes in the caller; `ProcAE` applies unconditionally
+via `SetAeParam`; `EnableUserspace3A` = CUS3A_Init + EnableUserspaceAE/AWB/AF
++ RegisterIspApiAgent; majestic embeds the same mi_cus3a framework
+statically and keeps the agent.
+
+**Remaining to ship:** wire as config (proposal: `isp.aeMode=paced` +
+`isp.aeFps` as pacer rate, 7-touch schema), remove the bench apply-probe +
+env gate, pacer teardown join, propose as high-fps default. Env-only today:
+`MARUKO_AE_INJECT=1` (sensor-rate pacer) or `=<5..200>` (pacer Hz);
+`noagent`/`normal` keep the dead A/B variants.
+
+## 2026-07-04 UPDATE — Path A run + majestic disassembly (superseded by FINAL above)
 
 **Path A executed (one cold-start, .12): FAILED on image, exactly as branch 3
 of the decision tree.** `CUS3A_SetRunMode(NORMAL)` ret=0 (env-selectable now:
