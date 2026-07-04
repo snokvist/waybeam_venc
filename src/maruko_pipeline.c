@@ -3665,8 +3665,19 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		debug_osd_text(ctx->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ctx->debug_osd));
 
+		/* Sensor readout + encoded output — lets a tester read back
+		 * exactly which mode is live (WxH@fps + mode idx, encoded WxH
+		 * + codec) straight off the overlay. */
+		debug_osd_text(ctx->debug_osd, 2, "snr", "%ux%u@%u m%d",
+			(unsigned)ctx->sensor.plane.capt.width,
+			(unsigned)ctx->sensor.plane.capt.height,
+			ctx->sensor.fps, ctx->sensor.mode_index);
+		debug_osd_text(ctx->debug_osd, 3, "enc", "%ux%u %s",
+			ctx->cfg.image_width, ctx->cfg.image_height,
+			ctx->cfg.rc_codec == PT_H265 ? "h265" : "h264");
+
 		{
-			int osd_row = 2;
+			int osd_row = 4;
 
 			if (osd_ae.ae_valid) {
 				debug_osd_text(ctx->debug_osd, osd_row++,

@@ -1,5 +1,44 @@
 # History
 
+## [0.23.0] - 2026-07-04
+
+Maruko IMX335 best-per-fps mode lineup + debug-OSD readouts. Full mode
+detail: `documentation/MARUKO_IMX335_MODES.md`.
+
+- **IMX335 gets a 5-mode best-per-fps lineup**, porting the IMX415 method
+  to the 4:3 5MP sensor. One mode per fps tier, native 4:3 aspect for
+  0–3, 16:9 low-latency hero at 100 fps:
+
+  | idx | resolution | fps | aspect | role |
+  |---|---|---|---|---|
+  | 0 | 2592x1944 | 30 | 4:3 | full-res all-pixel (best IQ / full FOV) |
+  | 1 | 2496x1872 | 50 | 4:3 | center crop |
+  | 2 | 2272x1704 | 60 | 4:3 | center crop |
+  | 3 | 1792x1344 | 90 | 4:3 | center crop |
+  | 4 | 1920x1080 | 100 | 16:9 | low-latency hero (REALTIME) |
+
+  All device-verified on SSC378QE + IMX335. **Window mode works on I6C** —
+  the old "windowed readout hangs the ISP" claim was a stale-register
+  artifact. Each crop writes its full readout geometry
+  (HTRIM/HNUM/Y_OUT/AREA3/HMAX) explicitly in standby
+  (`imx335_init_window_crop`), reusing the proven 120fps analog config;
+  geometry is derived exact from the 1920x1080 window mode. Crop sizes sit
+  ~5–8% under the ISP throughput ceiling (~245–274 MPix/s); all bind
+  REALTIME for minimum latency.
+- **BREAKING `sensor.mode` remap** — dropped the two redundant 16:9
+  1920x1080@60/@90 modes (60/90 are now the higher-res 4:3 crops) and
+  renumbered. Pinned `sensor.mode` configs must be updated; `sensor.mode:
+  -1` (auto) resolves by target dims and needs no change.
+- **Cold-boot enum wedge documented**: repeated `reboot -f` after a hung
+  teardown can leave IMX335 i2c enumeration wedged (`QueryResCount → 0`,
+  every mode fails "not available on pad", mode-independent). Recovery is a
+  power-cycle; graceful `reboot` avoids it. Not a geometry bug.
+- **Debug OSD gains sensor + encode readouts** (both Maruko and Star6E):
+  two fixed rows below `cpu` — `snr <WxH>@<fps> m<idx>` (sensor readout +
+  mode index) and `enc <WxH> <codec>` — so a tester can read the live mode
+  straight off the overlay. Inserted at rows 2–3; the AE/AWB/exp block
+  shifts down, nothing clobbered.
+
 ## [0.22.0] - 2026-07-04
 
 Maruko AE rework: **paced native 3A** replaces both historical AE engines.
