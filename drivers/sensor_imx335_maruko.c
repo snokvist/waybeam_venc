@@ -1135,7 +1135,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         vts_30fps = 3000; // 74.25MHz / (90 * HMAX 275)
         params->expo.vts = vts_30fps;
         params->expo.fps = 90;
-        Preview_line_period = 3703; // HMAX 275 / 74.25MHz
+        Preview_line_period = 3703; // HMAX 275 / 74.25MHz (formula)
         break;
 
     case 4: // 1920x1080@100fps — windowed (Star6E 120fps table, paced)
@@ -1143,6 +1143,12 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         vts_30fps = 2707; // 2256 * 120 / 100
         params->expo.vts = vts_30fps;
         params->expo.fps = 100;
+        /* Same physical HMAX=275 as case 3, but this keeps the legacy
+         * 120fps-table constant 3694 that the 100fps hero was device-
+         * verified with (implies ~74.44MHz vs the formula's 74.25MHz).
+         * The ~0.24% delta vs case 3's 3703 is inconsequential to AE
+         * (closed-loop luma feedback corrects it). Do NOT "unify" the two
+         * without re-verifying the 100fps mode on device. */
         Preview_line_period = 3694;
         break;
 

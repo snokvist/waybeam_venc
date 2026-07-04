@@ -995,8 +995,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * is live (WxH@fps + mode idx) and the encoded WxH straight off
 		 * the overlay.  Star6E video codec is always H.265. */
 		debug_osd_text(ps->debug_osd, 2, "snr", "%ux%u@%u m%d",
-			ps->sensor.plane.capt.width,
-			ps->sensor.plane.capt.height,
+			(unsigned)ps->sensor.plane.capt.width,
+			(unsigned)ps->sensor.plane.capt.height,
 			ps->sensor.fps, ps->sensor.mode_index);
 		debug_osd_text(ps->debug_osd, 3, "enc", "%ux%u h265",
 			vcfg->video0.width, vcfg->video0.height);

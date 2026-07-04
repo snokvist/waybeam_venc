@@ -3669,8 +3669,8 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		 * exactly which mode is live (WxH@fps + mode idx, encoded WxH
 		 * + codec) straight off the overlay. */
 		debug_osd_text(ctx->debug_osd, 2, "snr", "%ux%u@%u m%d",
-			ctx->sensor.plane.capt.width,
-			ctx->sensor.plane.capt.height,
+			(unsigned)ctx->sensor.plane.capt.width,
+			(unsigned)ctx->sensor.plane.capt.height,
 			ctx->sensor.fps, ctx->sensor.mode_index);
 		debug_osd_text(ctx->debug_osd, 3, "enc", "%ux%u %s",
 			ctx->cfg.image_width, ctx->cfg.image_height,
