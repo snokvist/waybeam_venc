@@ -97,6 +97,8 @@ SENSOR_DRV_ENTRY_IMPL_BEGIN_EX(IMX335_HDR);
 static struct { // LINEAR
     enum { LINEAR_RES_1 = 0,
         LINEAR_RES_2,
+        LINEAR_RES_3,
+        LINEAR_RES_4,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -131,6 +133,18 @@ static struct { // LINEAR
      * even when selecting mode 0. */
     { LINEAR_RES_1, { 1920, 1080, 3, 60 }, { 0, 0, 1920, 1080 }, { "1920x1080@60fps" } },
     { LINEAR_RES_2, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
+    /* Mode 2: 2592x1944@30fps — full-res all-pixel (0x3018=0x00), full FOV,
+     * HMAX=600/VMAX=4125, vendor-proven timing.  Uses the (previously
+     * disabled) 5m30fps table.  Cold-boot safe as-is; warm switches into
+     * this mode need explicit all-pixel window regs (PR#156 discipline,
+     * added in a follow-up) because the 5m30fps table omits 0x3018 and the
+     * window registers and relies on power-on defaults. */
+    { LINEAR_RES_3, { 2592, 1944, 3, 30 }, { 0, 0, 2592, 1944 }, { "2592x1944@30fps" } },
+    /* Mode 3: 1920x1080@100fps — low-latency hero.  Reuses the PROVEN 120fps
+     * windowed table (same as modes 0/1), paced to 100fps via VTS.  No new
+     * geometry, no stale-register risk (window regs match the shared table),
+     * REALTIME VIF->ISP bind (207 MPix/s << 384 drain). */
+    { LINEAR_RES_4, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
 };
 
 static u32 vts_30fps = 4125;
@@ -216,10 +230,13 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us);
 //                       adjust parameter                    //
 ///////////////////////////////////////////////////////////////
 
-/* Unused init tables — kept for reference.  Both active modes (60fps,
- * 90fps) use the Star6E 120fps windowed table below. */
-#if 0
-/* Mode 0: 2560x1920@30fps — full sensor, all-pixel scan */
+/* Mode 2 (2592x1944@30fps): full-sensor all-pixel scan — HMAX=600/VMAX=4125,
+ * vendor-proven timing.  Wired into pCus_SetVideoRes as res index 2.
+ * NOTE: this table sets NO window/crop registers and relies on the power-on
+ * all-pixel defaults (0x3018=0x00), so it is cold-boot safe but a WARM switch
+ * into it after a windowed mode needs explicit window resets added first
+ * (PR#156 discipline — follow-up).  The other two tables below (60/90fps
+ * full-scan) remain unbuilt reference until they are made PR#156-compliant. */
 const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3002, 0x01 }, // Master mode stop
     { 0xFFFF, 0x14 }, // delay
@@ -325,6 +342,7 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
     { 0x3002, 0x00 }, // Master mode start
 };
 
+#if 0 /* unbuilt reference — needs PR#156 window-reg discipline before use */
 /* Mode 1: 2592x1944@60fps — full-scan, HMAX=304, 891Mbps MIPI.
  * From tipoman9/star6c_sensor (proven on SSC377/378).
  * Key: HMAX halved (600→304) doubles FPS; MIPI downclocked to
@@ -903,6 +921,32 @@ static int pCus_init_mipi4lane_5m120fps_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+/* Full-res 2592x1944@30fps all-pixel readout (mode 2).  Same writer shape
+ * as the 120fps window init; the 5m30fps table carries HMAX=600/VMAX=4125
+ * and leaves the window registers at their power-on (all-pixel) defaults. */
+static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_init_table_4lane_5m30fps); i++) {
+        if (Sensor_init_table_4lane_5m30fps[i].reg == 0xFFFF) {
+            SENSOR_MSLEEP(Sensor_init_table_4lane_5m30fps[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_init_table_4lane_5m30fps[i].reg,
+                    Sensor_init_table_4lane_5m30fps[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+    SENSOR_MSLEEP(100);
+    return SUCCESS;
+}
+
 /////////////////// Resolution functions ///////////////////
 
 static int pCus_GetVideoResNum(ms_cus_sensor* handle, u32* ulres_num)
@@ -965,6 +1009,22 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         vts_30fps = 3008; // 2256 * 120 / 90
         params->expo.vts = vts_30fps;
         params->expo.fps = 90;
+        Preview_line_period = 3694;
+        break;
+
+    case 2: // 2592x1944@30fps — full-res all-pixel, HMAX=600/VMAX=4125
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m30fps_linear;
+        vts_30fps = 4125; // native VMAX at 30fps (full-res)
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 30;
+        Preview_line_period = 8080; // HMAX 600 / 74.25MHz = 8.08us/line
+        break;
+
+    case 3: // 1920x1080@100fps — windowed (Star6E 120fps table, paced)
+        handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
+        vts_30fps = 2707; // 2256 * 120 / 100
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 100;
         Preview_line_period = 3694;
         break;
 
