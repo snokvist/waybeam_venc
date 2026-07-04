@@ -20,6 +20,17 @@ Full investigation: `documentation/MARUKO_CUS3A_INJECT_HANDOFF.md`.
   limits thread (Star6E semantics unchanged).
 - Pacer rate is auto-derived — no user knob: 100 fps → 33 Hz,
   90 fps → 30 Hz, ≤90 fps → 30 Hz floor (full-rate quality at low fps).
+- **`isp.gainMax` fixes** (found live-testing gain headroom): (1) the
+  supervisory limits thread now compares against a fresh
+  `GetExposureLimit` read each tick instead of a local cache — the CUS3A
+  AE init was silently resetting limits to bin values right after the
+  startup push, so a config `gainMax` above the bin ceiling never stuck;
+  (2) the live `isp.gainMax` API setter now routes through the
+  supervisory target (`maruko_cus3a_set_gain_max`) instead of writing
+  the raw limit — writing `0` ("bin default") used to push a literal
+  0 limit and slam the image black.  Verified live on-device:
+  32000 → sgain rises past the bin's 8192 (to the algo's internal
+  ~11470 cap), 2048 → clamps down, 0 → returns to bin default 8192.
 - Findings for posterity: CUS3A INJECT run-mode makes the agent mid-layer
   silently drop every exposure apply (do not revisit); `CUS3A_RunOnceEn`
   only arms algo selection while `CUS3A_RunOnce` executes synchronously in

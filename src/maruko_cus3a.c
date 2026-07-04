@@ -451,15 +451,22 @@ static void *cus3a_thread(void *arg)
 			if (!s->cfg.throttle_mode) {
 				s->fn_get_exposure_limit(0, 0, &cur_limit);
 
+				/* Compare against the FRESH read, not a local
+				 * "applied" cache: the CUS3A AE init (first
+				 * frame-syncs after start) resets limits to
+				 * the bin values, silently undoing an early
+				 * push — e.g. isp.gainMax above the bin
+				 * ceiling never stuck (found with
+				 * gainMax=32000 vs bin 8192, v0.22.0). */
 				if (want_shutter > 0 &&
-				    want_shutter != applied_shutter_max) {
+				    cur_limit.maxShutterUs != want_shutter) {
 					cur_limit.maxShutterUs = want_shutter;
 					applied_shutter_max = want_shutter;
 					shutter_max_us = want_shutter;
 					changed = 1;
 				}
 				if (effective_gain > 0 &&
-				    effective_gain != applied_gain_max) {
+				    cur_limit.maxSensorGain != effective_gain) {
 					cur_limit.maxSensorGain = effective_gain;
 					applied_gain_max = effective_gain;
 					gain_max_eff = effective_gain;
@@ -467,9 +474,17 @@ static void *cus3a_thread(void *arg)
 				}
 
 				if (changed) {
-					s->fn_set_exposure_limit(0, 0,
-						&cur_limit);
+					int lret = s->fn_set_exposure_limit(
+						0, 0, &cur_limit);
 					limit_writes++;
+					if (s->cfg.verbose)
+						printf("[maruko-cus3a] limit "
+							"push: shutter max "
+							"%uus gain max %u "
+							"ret=%d\n",
+							cur_limit.maxShutterUs,
+							cur_limit.maxSensorGain,
+							lret);
 				}
 			} else {
 				/* Throttle: just keep local caps current. */

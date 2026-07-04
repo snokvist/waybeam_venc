@@ -3,6 +3,7 @@
 #include "idr_rate_limit.h"
 #include "maruko_audio.h"
 #include "maruko_bindings.h"
+#include "maruko_cus3a.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
 #include "maruko_pipeline.h"
@@ -774,7 +775,27 @@ static int maruko_apply_awb_mode(int mode, uint32_t ct)
 
 static int maruko_apply_gain_max(uint32_t gain)
 {
-	/* Set max sensor gain via SetExposureLimit. */
+	/* Route through the supervisory thread when it runs: it re-reads
+	 * the limit every tick and pushes the effective ceiling (config
+	 * value, or the ISP bin default when gain==0).  Writing the raw
+	 * value here instead is wrong twice over: gain==0 becomes a
+	 * literal 0 limit (image slams to 1x gain = black), and the
+	 * supervisory would fight any direct write with its own target. */
+	maruko_cus3a_set_gain_max(gain);
+	if (maruko_cus3a_running()) {
+		printf("> [maruko] Gain max -> %u (0 = bin default; applied "
+			"by supervisory within one tick)\n", gain);
+		return 0;
+	}
+
+	/* Fallback (supervisory disabled, isp.aeFps=0): direct write.
+	 * gain==0 means "bin default", which we cannot know here — leave
+	 * the current limit untouched. */
+	if (gain == 0) {
+		printf("> [maruko] Gain max -> 0 ignored (supervisory off; "
+			"keeping current limit)\n");
+		return 0;
+	}
 	typedef int (*ae_get_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
 	typedef int (*ae_set_fn)(uint32_t, uint32_t, MarukoIspExposureLimit *);
 	void *h = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
