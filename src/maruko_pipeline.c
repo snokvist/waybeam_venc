@@ -258,17 +258,25 @@ static void maruko_enable_cus3a(void)
 	 *
 	 * In inject-mode the no-op AE adaptor is NOT installed: our injected
 	 * SetAeParam result is authoritative, so there is no native AE to stub. */
-	if (getenv("MARUKO_AE_INJECT")) {
-		/* Option A: run the NATIVE vendor AE+AWB in inject-mode
+	const char *inj_env = getenv("MARUKO_AE_INJECT");
+	if (inj_env) {
+		/* Option A: run the NATIVE vendor AE+AWB without the agent
 		 * (majestic's path).  Install the native sstar algos exactly as
 		 * MI_ISP_EnableUserspace3A does internally (CUS3A_Init +
 		 * CUS3A_EnableUserspaceAE/AWB), but SKIP MI_ISP_RegisterIspApiAgent
 		 * — that agent is what relocates the IQ mid-layer into this
-		 * process and makes every apply cost ~13% IspMidThreadWq.  Then
-		 * CUS3A_SetRunMode(INJECT) routes the vendor 3A results as cheap
-		 * server-side deltas.  The vendor owns AE metering + AWB + the HW
-		 * apply; our supervisory thread only enforces limits (Star6E
-		 * model).  CUS3A_SetRunMode/EnableUserspaceAE live in libcus3a. */
+		 * process and makes every apply cost ~13% IspMidThreadWq.  The
+		 * vendor owns AE metering + AWB + the HW apply; our supervisory
+		 * thread only enforces limits (Star6E model).
+		 *
+		 * Run-mode is selected by the env VALUE so variants can be
+		 * A/B'd on-device without redeploying (each costs a cold boot):
+		 *   MARUKO_AE_INJECT=normal → E_CUS3A_MODE_NORMAL (Path A:
+		 *     tests whether the native algo reaches state NORMAL and
+		 *     whether apply stays cheap without the agent)
+		 *   any other value        → E_CUS3A_MODE_INJECT (server-side
+		 *     delta apply; algo stuck at state=-1 as of the handoff)
+		 * CUS3A_SetRunMode/EnableUserspaceAE live in libcus3a. */
 		void *cus = dlopen("libcus3a.so", RTLD_NOW | RTLD_GLOBAL);
 		void *cs = cus ? cus : h;
 		typedef int (*fn_i)(int);
@@ -288,9 +296,11 @@ static void maruko_enable_cus3a(void)
 		if (f_awb)
 			printf("> [maruko] CUS3A_EnableUserspaceAWB ret=%d\n",
 				f_awb(0, 0));
+		int run_mode = strcmp(inj_env, "normal") == 0 ? 0 : 2;
 		if (f_mode)
-			printf("> [maruko] CUS3A_SetRunMode(INJECT) ret=%d\n",
-				f_mode(0, 0, 2));        /* E_CUS3A_MODE_INJECT */
+			printf("> [maruko] CUS3A_SetRunMode(%s) ret=%d\n",
+				run_mode == 0 ? "NORMAL" : "INJECT",
+				f_mode(0, 0, run_mode));
 		if (!f_ae || !f_mode)
 			printf("> [maruko] inject-native: MISSING framework "
 				"symbols (ae=%p mode=%p)\n",

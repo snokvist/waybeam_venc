@@ -56,7 +56,50 @@ sensor rate (since no `3A_Proc_0` auto-thread exists without the agent).
   `300us / gain 1024`, WB frozen (green). The native sstar algo is installed and
   `RunOnceEn` ticks it, but it never reaches NORMAL state. ✗
 
-## THE FORK (this is the real open question)
+## 2026-07-04 UPDATE — Path A run + majestic disassembly (READ THIS FIRST)
+
+**Path A executed (one cold-start, .12): FAILED on image, exactly as branch 3
+of the decision tree.** `CUS3A_SetRunMode(NORMAL)` ret=0 (env-selectable now:
+`MARUKO_AE_INJECT=normal`), driver ticking, 100 fps, system busy **33.9%** —
+but `AE state=-1` persists, exposure frozen at 300us/sgain=1024 for 50+ s,
+snapshot near-black with green cast. Run-mode is irrelevant to convergence:
+**the native algo does not run without the agent.**
+
+**Why (disassembly-grounded, `libcus3a.so`):** `CUS3A_Init` itself spawns
+`Cus3A_ProcRoutine` (so our RunOnceEn driver duplicates an existing thread —
+remove it). That routine polls the ISP frame-sync fd and calls `_DoAeInit` →
+`MI_ISP_CUS3A_GetAeInitStatus` to fill `ISP_AE_INIT_PARAM`; with no IQ
+calibration in the ISP the init params are zeros (matches our logged
+`maxShutter=0 maxGain=0` / `ISP bin limits unavailable`) and the algo never
+leaves state=-1. The agent is what makes IQ/calibration loading
+(`MI_ISP_ApiCmdLoadBinFile`) work — i.e. **the agent is the algo's config
+feed, not just the expensive apply path.**
+
+**majestic's actual recipe (from its binary, pulled off .12):** it statically
+embeds the *same* `mi_cus3a` framework as our `libcus3a.so` (identical build
+`project_commit.699b9f2 build 20240618`; `Cus3A_ProcAE` is a thread name, not
+an API). Its dlsym surface: `MI_ISP_RegisterIspApiAgent` ✓,
+`MI_ISP_ApiCmdLoadBinFile` ✓, `MI_ISP_CUS3A_Enable` ✓,
+`MI_ISP_CUS3A_InjectModeEnable` ✓ — and **no** `MI_ISP_EnableUserspace3A`.
+And `libmi_isp.so` disassembly shows `MI_ISP_EnableUserspace3A` ==
+`CUS3A_Init + CUS3A_EnableUserspaceAE/AWB/AF + MI_ISP_RegisterIspApiAgent`.
+So majestic = **agent registered + native framework + INJECT run-mode** — the
+one combination our attempt matrix never tried. The handoff's claim
+"majestic has no agent" is WRONG; the agent is present, but with run-mode
+INJECT the per-frame apply bypasses the in-process IQ mid-layer
+(IspMidThreadWq≈0 on majestic despite the agent).
+
+**⇒ Path C (next experiment, replaces Path B as priority):** inject branch =
+current native install **+ `MI_ISP_RegisterIspApiAgent`** (or simply
+`MI_ISP_EnableUserspace3A`) **+ `CUS3A_SetRunMode(INJECT)`**, IQ bin load as
+in the default path, RunOnceEn driver removed. Expect AE state NORMAL +
+converged image. CPU estimate: inject floor 34.9 + native algo thread ~22 →
+~55-57%; if so, the follow-on lever is pacing the algo (RunOnceEn at reduced
+rate with the proc thread quiesced, or run-mode OFF + manual RunOnceEn) and
+the isp0 kernel gap (ours ~16.5 vs majestic 7.0) which is NOT explained by
+agent/run-mode (constant across all our configs).
+
+## THE FORK (superseded by the update above — kept for history)
 
 `AE state=-1` in Attempt 3 strongly implies **the native sstar AE algo needs the
 API agent** (its ISP-register tunnel) to reach a running state — the exact thing
