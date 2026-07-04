@@ -1,7 +1,7 @@
 # Maruko IMX335 Best-Per-FPS Mode Lineup
 
 Status: device-verified July 2026 on SSC378QE (Infinity6C) + IMX335, 4-lane
-MIPI. Covers the 5-mode lineup in `drivers/sensor_imx335_maruko.c` and the
+MIPI. Covers the 6-mode lineup in `drivers/sensor_imx335_maruko.c` and the
 REALTIME bind policy in `src/maruko_pipeline.c`. Ported from the IMX415
 method (`MARUKO_IMX415_1485_MODES.md`) — same "one best mode per fps tier,
 native aspect, ~5% ISP headroom" philosophy, adapted to the IMX335's 4:3
@@ -53,15 +53,38 @@ model:
 | 2 | 2272x1704 | 3.87 | 60 | 63.2 | 5.3% |
 | 3 | 1792x1344 | 2.41 | 90 | 95.3 | 5.9% |
 | 4 | 1920x1080 | 2.07 | 100 | 108 | 8.0% |
+| 5 | 1536x864 | 1.33 | 144 | 153 | 6.1% |
 
 All modes bind **REALTIME** (`VIF->ISP bind: REALTIME` in the log) for
 minimum glass-to-glass latency — none need the FRAME_BASE buffering the
 IMX415 1485 modes require, because their line bursts stay within the ISP
 drain.
 
+### Two walls at 144fps (device-proven, 2026-07-04)
+
+The 144fps mode is bounded by **two independent** ISP limits — the per-frame
+*time* model above is only one of them:
+
+1. **Per-frame time** — the model. `T ≈ 1.7 ms + 3.65 ns/px`. At 144fps the
+   frame period is 6.94 ms, so the window must satisfy `T < 6.94 ms`, i.e.
+   ≤ ~1.42 MPix. **1536x864 (1.33 MP → 6.54 ms)** clears it; **1600x900
+   (1.44 MP → 6.96 ms)** misses by ~1% and the ISP Skip-IQs and stalls to 0.
+2. **Bandwidth** — ~274 MPix/s. **1920x1080@144 = 298 MPix/s** overflows the
+   ISP P0 input FIFO (`FIFO FULL` in dmesg) and collapses to ~26 fps, even
+   though its per-frame *time* would be fine.
+
+Both limits are at the ISP **input** (straight off the sensor), so reducing
+the SCL/encode output size rescues neither — the **sensor readout window**
+itself must shrink. That per-frame cost is **not** 3A: with `WAYBEAM_NO_3A=1`
+(3A frozen, `CUS3A_SetRunMode(OFF)`) the 1600x900 window still stalls, so the
+fixed ~1.7 ms is vendor ISP pixel processing (demosaic/NR/frame setup), not
+the AE/AWB loop. 1536x864 is the largest 16:9 window that clears both walls,
+measured **144.0 fps SCL / 143.4 fps VENC, 0 DropCnt / 0 FIFO-FULL / 0
+Skip-IQ**.
+
 ## Mode table (driver indexes — final lineup)
 
-Modes 0–3 keep the native 4:3 aspect; mode 4 is a 16:9 low-latency hero.
+Modes 0–3 keep the native 4:3 aspect; modes 4–5 are 16:9 low-latency.
 
 | Idx | Resolution | fps | HMAX | Aspect | Init function | Role |
 |---|---|---|---|---|---|---|
@@ -70,12 +93,22 @@ Modes 0–3 keep the native 4:3 aspect; mode 4 is a 16:9 low-latency hero.
 | 2 | 2272x1704 | 60 | 340 | 4:3 | `pCus_init_window_2272x1704` | center crop |
 | 3 | 1792x1344 | 90 | 275 | 4:3 | `pCus_init_window_1792x1344` | center crop |
 | 4 | 1920x1080 | 100 | 274 | 16:9 | `pCus_init_mipi4lane_5m120fps_linear` | low-latency hero (paced 120fps table) |
+| 5 | 1536x864 | 144 | 275 | 16:9 | `pCus_init_window_1536x864` | ultra-low-latency (see "Two walls at 144fps") |
 
 **Breaking index remap.** This lineup dropped two redundant 16:9 modes
 (1920x1080@60 and @90 — now served by the higher-res 4:3 crops) and renumbers
 everything. Configs with a pinned `sensor.mode` must be updated;
 `sensor.mode: -1` (auto) resolves by target width/height/fps and needs no
 change.
+
+**Pre-staging 144fps for a mode switch.** A live `video0.fps` request above
+the current mode's max is no longer rejected (ceiling `PIPELINE_LIVE_FPS_MAX`
+= 144). Set `video0.fps=144` first *while parked in a lower-fps mode*: the
+value is clamped to the current mode's max for the immediate rebind (so mode 4
+keeps running at 100), but the config now carries 144, so switching to
+`sensor.mode: -1` (or mode 5) resolves to the 144fps window instead of the
+auto-select clamping the target back down. Without this pre-stage, selecting a
+144 mode with the config still at 100fps would enter it at 100.
 
 ## Window-crop geometry
 
@@ -132,7 +165,7 @@ it is not: in the wedged state every mode fails identically.
 - **Recovery:** a full **power-cycle** (not a warm reboot) — only a
   power-cycle resets the sensor. A graceful `reboot` (runs init.d shutdown,
   unloads modules) is much less likely to wedge than `reboot -f`.
-- Once enumerated, `Pad 0: 5 mode(s)` prints and all modes select normally.
+- Once enumerated, `Pad 0: 6 mode(s)` prints and all modes select normally.
 
 Live (warm, API-driven) mode switching across all five modes was verified
 working once the explicit-geometry discipline was in place — the earlier

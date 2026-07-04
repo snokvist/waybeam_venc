@@ -1,5 +1,42 @@
 # History
 
+## [0.24.0] - 2026-07-04
+
+IMX335 gets a **144fps ultra-low-latency mode** + a `WAYBEAM_NO_3A` debug
+toggle. Full mode detail: `documentation/MARUKO_IMX335_MODES.md`.
+
+- **New mode 5 = 1536x864@144 (16:9)** — device-verified clean end-to-end on
+  SSC378QE + IMX335: SCL 144.0 fps, VENC 143.4 fps, **0 DropCnt / 0 FIFO-FULL /
+  0 Skip-IQ**. Reuses the proven 120fps analog window (HMAX=275, `imx335_geo_
+  1536x864`), VMAX paced to 144 (`vts_30fps=1875`). The lowest-latency mode in
+  the lineup (6.94 ms frame period).
+
+- **Why 1536x864 and not larger** — 144fps is bound by TWO independent ISP
+  walls, both device-proven: (a) **bandwidth** ~274 MPix/s — 1920x1080@144 =
+  298 MPix/s overflows the ISP P0 FIFO and collapses to ~26 fps; (b) **per-frame
+  time** T ≈ 1.7 ms fixed + 3.65 ns/px vs the 6.94 ms frame period — 1600x900
+  (1.44 MP, ~6.96 ms) misses by ~1% and Skip-IQ stalls. Both limits are at the
+  ISP *input*, so an output/SCL downscale rescues neither; the sensor readout
+  window itself must shrink. 1536x864 (1.33 MP) sits under both.
+
+- **`WAYBEAM_NO_3A=1` env var** (`src/maruko_pipeline.c`) — freezes 3A entirely
+  (`CUS3A_SetRunMode(OFF)`, no pacer/supervisory) for bench diagnosis. Used to
+  prove the fixed per-frame ISP cost is **not** reclaimable by disabling 3A
+  (1600x900@144 still stalls with 3A frozen — the ~1.7 ms is vendor ISP pixel
+  processing, not 3A). Exposure is static when set; bench use only.
+
+- **Live `video0.fps` accepts up to 144** (`PIPELINE_LIVE_FPS_MAX`,
+  `include/pipeline_common.h`; `maruko_apply_fps`, star6e `apply_fps`) — the
+  live-apply path previously hard-rejected any `fps > 120`, making it
+  impossible to *pre-stage* fps=144 while parked in a lower-fps mode (so the
+  next respawn's auto sensor-select could pick the 144 mode). The request is no
+  longer rejected: the requested value is committed to config, and each
+  platform's existing clamp-to-`sensor_fps` caps the actual VPE→VENC rebind to
+  the current mode's max — so a 100fps mode still binds at 100, but the config
+  now carries 144 for `sensor.mode:-1` to resolve on the next mode switch
+  (`sensor_mode_clamp_fps` re-clamps there too). 144 is the ceiling because it
+  is the highest fps any mode offers; above it is still a client error.
+
 ## [0.23.0] - 2026-07-04
 
 Maruko IMX335 best-per-fps mode lineup + debug-OSD readouts. Full mode

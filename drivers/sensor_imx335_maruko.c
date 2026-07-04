@@ -100,6 +100,7 @@ static struct { // LINEAR
         LINEAR_RES_3,
         LINEAR_RES_4,
         LINEAR_RES_5,
+        LINEAR_RES_6,
         LINEAR_RES_END } mode;
     struct _senout {
         s32 width, height, min_fps, max_fps;
@@ -137,6 +138,20 @@ static struct { // LINEAR
      *   2    2272x1704    60   340   4:3     center crop
      *   3    1792x1344    90   275   4:3     center crop
      *   4    1920x1080    100  274   16:9    low-latency hero (paced 120fps table)
+     *   5    1536x864     144  275   16:9    ultra-low-latency — 1.33 MPix,
+     *                                        clears the ISP per-frame time budget
+     *                                        (~1.7ms + 3.65ns/px = ~6.54ms) under
+     *                                        the 6.94ms frame period.
+     *
+     * The 144fps window is bounded by TWO independent ISP walls (both device-
+     * proven on IMX335/I6C, 2026-07-04): (a) BANDWIDTH — 1920x1080@144 =
+     * 298 MPix/s > ~274 MPix/s ceiling -> FIFO-FULL -> ~26fps; (b) PER-FRAME TIME
+     * — 1600x900@144 (1.44MP, ~6.96ms) misses the 6.94ms frame budget by ~1% ->
+     * ISP Skip-IQ + stall (NOT reclaimable by disabling 3A — the fixed ~1.7ms is
+     * vendor ISP pixel processing, not 3A; verified with WAYBEAM_NO_3A). Both
+     * walls are at the ISP *input*, so an output/SCL downscale rescues neither;
+     * the readout window itself must shrink. 1536x864 (1.33MP) sits under both
+     * and runs 144.0/143.4 fps (SCL/VENC) with 0 drop / 0 FIFO / 0 Skip-IQ.
      *
      * Note: sensor_select primes SetRes(index 1) before SetRes(index 0)
      * so the framework runs pCus_sensor_init when mode 0 (full-res) is
@@ -147,6 +162,7 @@ static struct { // LINEAR
     { LINEAR_RES_3, { 2272, 1704, 3,  60 }, { 0, 0, 2272, 1704 }, { "2272x1704@60fps" } },
     { LINEAR_RES_4, { 1792, 1344, 3,  90 }, { 0, 0, 1792, 1344 }, { "1792x1344@90fps" } },
     { LINEAR_RES_5, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
+    { LINEAR_RES_6, { 1536,  864, 3, 144 }, { 0, 0, 1536,  864 }, { "1536x864@144fps" } },
 };
 
 static u32 vts_30fps = 4125;
@@ -1002,6 +1018,23 @@ static const I2C_ARRAY imx335_geo_1792x1344[] = { /* 90fps 4:3, HMAX=275 */
     { 0x3076, 0x80 }, { 0x3077, 0x0A }, // AREA3_WIDTH = 2688
     { 0x3034, 0x13 }, { 0x3035, 0x01 }, // HMAX = 275 (proven; narrower than 1920)
 };
+/* 16:9 (not 4:3) — the ONE 144fps mode. 1536x864 = 1.33 MPix. At 144fps the
+ * binding limit is NOT ISP bandwidth but the ISP PER-FRAME time budget
+ * (~1.7ms fixed + 3.65ns/px = ~6.54ms) vs the 6.94ms frame period, so this clears
+ * 144 with margin (~153fps ceiling). Device-proven walls on BOTH sides of it:
+ *   1600x900 (1.44MP -> ~6.96ms) missed the per-frame budget by ~1% and STALLED
+ *     (0 FIFO-FULL, [Skip IQ], SCL->0 fps, teardown D-state hang);
+ *   1920x1080@144 (298 MPix/s) blew the ISP BANDWIDTH ceiling (~274) -> FIFO-FULL
+ *     -> ~26fps. Two independent ISP walls; 1536x864 sits under both. A SCL/output
+ *   downscale rescues NEITHER — both limits are at the ISP input. */
+static const I2C_ARRAY imx335_geo_1536x864[] = { /* 144fps 16:9, HMAX=275 */
+    { 0x302C, 0x40 }, { 0x302D, 0x02 }, // HTRIMMING_START = 576
+    { 0x302E, 0x18 }, { 0x302F, 0x06 }, // HNUM = 1560
+    { 0x3056, 0x60 }, { 0x3057, 0x03 }, // Y_OUT_SIZE = 864
+    { 0x3074, 0xE8 }, { 0x3075, 0x04 }, // AREA3_ST = 1256
+    { 0x3076, 0xC0 }, { 0x3077, 0x06 }, // AREA3_WIDTH = 1728
+    { 0x3034, 0x13 }, { 0x3035, 0x01 }, // HMAX = 275
+};
 
 /* Write the base 120fps analog table (minus its final standby-exit), then
  * the crop geometry override while still in standby, then re-issue the
@@ -1056,6 +1089,8 @@ static int pCus_init_window_2272x1704(ms_cus_sensor* handle)
 { return imx335_init_window_crop(handle, imx335_geo_2272x1704, ARRAY_SIZE(imx335_geo_2272x1704)); }
 static int pCus_init_window_1792x1344(ms_cus_sensor* handle)
 { return imx335_init_window_crop(handle, imx335_geo_1792x1344, ARRAY_SIZE(imx335_geo_1792x1344)); }
+static int pCus_init_window_1536x864(ms_cus_sensor* handle)
+{ return imx335_init_window_crop(handle, imx335_geo_1536x864, ARRAY_SIZE(imx335_geo_1536x864)); }
 
 /////////////////// Resolution functions ///////////////////
 
@@ -1150,6 +1185,14 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
          * (closed-loop luma feedback corrects it). Do NOT "unify" the two
          * without re-verifying the 100fps mode on device. */
         Preview_line_period = 3694;
+        break;
+
+    case 5: // 1536x864@144fps — 16:9 window crop, HMAX=275 (shippable 144 mode)
+        handle->pCus_sensor_init = pCus_init_window_1536x864;
+        vts_30fps = 1875; // 74.25MHz / (144 * HMAX 275) = VMAX at 144fps
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 144;
+        Preview_line_period = 3703; // HMAX 275 / 74.25MHz (same as case 3)
         break;
 
     default:

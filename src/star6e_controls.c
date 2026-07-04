@@ -342,9 +342,12 @@ static int apply_fps(uint32_t fps)
 	MI_S32 bind_ret;
 	uint32_t sensor_fps;
 
-	if (fps == 0 || fps > 120)
+	if (fps == 0 || fps > PIPELINE_LIVE_FPS_MAX)
 		return -1;
 
+	/* A request above the current mode's max is clamped for the rebind (see
+	 * PIPELINE_LIVE_FPS_MAX) — the caller's config still holds the requested
+	 * value so a later respawn can select a higher-fps sensor mode for it. */
 	sensor_fps = g_star6e_control_ctx.sensor_fps;
 	if (fps > sensor_fps) {
 		printf("> FPS %u exceeds sensor mode max %u, clamping\n", fps,
