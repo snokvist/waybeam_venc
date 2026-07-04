@@ -46,6 +46,19 @@ Full investigation: `documentation/MARUKO_CUS3A_INJECT_HANDOFF.md`.
   (R/B gains, color temp, stable/adj) — backed by a new
   `maruko_controls_ae_osd_status()` reusing the `/api/v1/ae/info` +
   `/api/v1/awb/info` SDK queries.
+- **Review-pass hardening** (adversarial multi-agent review of the above):
+  (1) the `ae` OSD row is now gated on a distinct `ae_info_valid` flag so
+  it no longer renders fabricated zeros when only the sensor-plane query
+  answers (the `exp` row keeps its sensor-plane fallback); (2) the AE
+  pacer now requires all three CUS3A symbols (`RunOnceEn`/`RunOnce`/
+  `SetRunMode`) before engaging — a missing `RunOnceEn` falls back to
+  vendor full-rate instead of pausing auto-run and ticking an unarmed
+  `RunOnce` (frozen 3A); (3) the pacer's 3 s convergence wait is now an
+  interruptible 50 ms poll of `g_inj_run`, so a teardown/respawn in the
+  first 3 s joins in ≤50 ms instead of blocking the whole window — matters
+  on this restart-latency-sensitive SoC. Device-verified: pacer
+  re-derives 33 Hz on live switch to 1080p100, both OSD rows show valid
+  data, ~48% busy with OSD active.
 
 ## [0.21.0] - 2026-07-03
 

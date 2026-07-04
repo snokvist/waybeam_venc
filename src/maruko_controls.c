@@ -1195,6 +1195,7 @@ void maruko_controls_ae_osd_status(MarukoAeOsdStatus *out)
 		out->max_sgain = s.limit.maxSensorGain;
 	}
 	if (s.info_ret == 0) {
+		out->ae_info_valid = 1;
 		out->luma_y = s.info.stHistWeightY.u32LumY;
 		out->scene_target = s.info.u32SceneTarget;
 		out->stable = s.info.bIsStable ? 1 : 0;

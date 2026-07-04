@@ -214,17 +214,22 @@ static pthread_t g_inj_flip_thread;
 static void *maruko_ae_pacer_thread(void *arg)
 {
 	unsigned us = 1000000u / (g_inj_fps ? g_inj_fps : 30);
+	int i;
 
 	(void)arg;
-	sleep(AE_PACER_CONVERGE_S);
-	if (!g_inj_run || !g_inj_setrunmode || !g_inj_runonce_now)
+	/* Interruptible convergence wait: poll g_inj_run at 50 ms so a
+	 * teardown/respawn issued during the first AE_PACER_CONVERGE_S
+	 * seconds joins within ~50 ms instead of blocking the whole window
+	 * inside pthread_join — respawn latency is fragile on this SoC. */
+	for (i = 0; i < AE_PACER_CONVERGE_S * 20 && g_inj_run; i++)
+		usleep(50000);
+	if (!g_inj_run)
 		return NULL;
 	printf("> [maruko] CUS3A_SetRunMode(OFF) ret=%d — paced native 3A "
 		"@%u Hz\n",
 		g_inj_setrunmode(0, 0, 1), /* E_CUS3A_MODE_OFF */
 		g_inj_fps);
-	if (g_inj_runonce)
-		g_inj_runonce(0, 0, 1, 1, 0); /* arm AE+AWB, no AF */
+	g_inj_runonce(0, 0, 1, 1, 0); /* arm AE+AWB, no AF */
 	while (g_inj_run) {
 		g_inj_runonce_now(0, 0);
 		usleep(us);
@@ -2436,7 +2441,12 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			if (g_inj_fps < 30)
 				g_inj_fps = 30;
 		}
-		if (g_inj_setrunmode && g_inj_runonce_now) {
+		/* All three symbols are required: RunOnceEn arms AE+AWB,
+		 * RunOnce executes them per tick, SetRunMode pauses the vendor
+		 * auto-run.  If any is missing, leave the vendor auto-run
+		 * active (full-rate, correct image, higher CPU) rather than
+		 * pausing it and ticking an unarmed RunOnce (frozen 3A). */
+		if (g_inj_setrunmode && g_inj_runonce && g_inj_runonce_now) {
 			g_inj_run = 1;
 			if (pthread_create(&g_inj_flip_thread, NULL,
 					maruko_ae_pacer_thread, NULL) != 0)
@@ -3661,6 +3671,8 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 					osd_ae.shutter_us,
 					osd_ae.sgain_x1024, osd_ae.max_sgain,
 					osd_ae.igain_x1024);
+			}
+			if (osd_ae.ae_info_valid) {
 				debug_osd_text(ctx->debug_osd, osd_row++,
 					"ae", "y%u t%u %s %uhz",
 					osd_ae.luma_y, osd_ae.scene_target,

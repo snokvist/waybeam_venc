@@ -19,15 +19,19 @@ const VencApplyCallbacks *maruko_controls_callbacks(void);
 const VencConfig *maruko_controls_vcfg(void);
 
 /** Compact AE/AWB live status for the debug OSD.  Gains are in SDK x1024
- * units (1024 = 1.0x), color_temp in Kelvin.  ae_valid/awb_valid gate the
- * respective field groups; limits are 0 when the limit query fails. */
+ * units (1024 = 1.0x), color_temp in Kelvin.  Validity flags gate their
+ * field groups: ae_valid covers shutter/gains (sensor-plane fallback);
+ * ae_info_valid additionally covers luma/target/stable/boundary (only the
+ * ISP AE query populates those); awb_valid covers the AWB group.  Limits
+ * are 0 when the limit query fails. */
 typedef struct {
-	int ae_valid;
+	int ae_valid;           /* shutter_us + gains populated */
 	uint32_t shutter_us;
 	uint32_t sgain_x1024;
 	uint32_t igain_x1024;
 	uint32_t max_shutter_us;
 	uint32_t max_sgain;
+	int ae_info_valid;      /* luma/target/stable/boundary populated */
 	uint32_t luma_y;        /* AE-measured scene luma */
 	uint32_t scene_target;  /* AE's current luma target */
 	int stable;
