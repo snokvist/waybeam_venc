@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>
 
 /* ── CUS3A / ISP ABI structures ──────────────────────────────────────── */
 
@@ -46,27 +45,6 @@ typedef struct {
 	uint32_t IspGainHDRShort;
 } __attribute__((packed)) MarukoAeInfo;
 
-/* CusAEResult_t — Maruko packed layout (mi_isp_hw_dep_datatype.h:175).
- * Pushed via MI_ISP_CUS3A_SetAeParam to inject userspace AE values into
- * the ISP/sensor pipeline.  Field set verified against
- * sdk/verify/mixer/src/mid/maruko_impl/isp/mid_iq_impl.cpp:3304-3324. */
-typedef struct {
-	uint32_t Size;
-	uint32_t Change;
-	uint32_t Shutter;
-	uint32_t SensorGain;
-	uint32_t IspGain;
-	uint32_t ShutterHdrShort;
-	uint32_t SensorGainHdrShort;
-	uint32_t IspGainHdrShort;
-	uint32_t u4BVx16384;
-	uint32_t AvgY;
-	uint32_t HdrRatio;
-	uint32_t FNx10;
-	uint32_t DebandFPS;
-	uint32_t WeightY;
-} __attribute__((packed)) MarukoAeResult;
-
 #define MARUKO_ISP_STATE_NORMAL 0
 
 /* ── ISP exposure limit (matches MI_ISP_AE_ExpoLimitType_t) ──────────── */
@@ -95,9 +73,6 @@ typedef int (*fn_ae_get_exposure_limit_t)(uint32_t dev, uint32_t chn,
 typedef int (*fn_ae_set_exposure_limit_t)(uint32_t dev, uint32_t chn,
 	MarukoIspExposureLimit *limit);
 
-typedef int (*fn_cus3a_set_ae_param_t)(uint32_t dev, uint32_t chn,
-	MarukoAeResult *result);
-
 /* ── Module state ────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -123,7 +98,6 @@ typedef struct {
 	fn_ae_get_state_t           fn_ae_get_state;
 	fn_ae_get_exposure_limit_t  fn_get_exposure_limit;
 	fn_ae_set_exposure_limit_t  fn_set_exposure_limit;
-	fn_cus3a_set_ae_param_t     fn_set_ae_param;
 } Cus3aState;
 
 static Cus3aState g_cus3a;
@@ -172,9 +146,6 @@ static int resolve_symbols(Cus3aState *s)
 	s->fn_set_exposure_limit = (fn_ae_set_exposure_limit_t)dlsym(s->h_isp,
 		"MI_ISP_AE_SetExposureLimit");
 
-	s->fn_set_ae_param = (fn_cus3a_set_ae_param_t)dlsym(s->h_isp,
-		"MI_ISP_CUS3A_SetAeParam");
-
 	if (!s->fn_get_hw_stats || !s->fn_get_ae_status) {
 		fprintf(stderr,
 			"[maruko-cus3a] missing AE stats symbols\n");
@@ -183,12 +154,6 @@ static int resolve_symbols(Cus3aState *s)
 	if (!s->fn_get_exposure_limit || !s->fn_set_exposure_limit) {
 		fprintf(stderr,
 			"[maruko-cus3a] missing exposure limit symbols\n");
-		return -1;
-	}
-	if (s->cfg.throttle_mode && !s->fn_set_ae_param) {
-		fprintf(stderr,
-			"[maruko-cus3a] throttle mode requested but "
-			"MI_ISP_CUS3A_SetAeParam missing — cannot drive AE\n");
 		return -1;
 	}
 	return 0;
@@ -202,29 +167,19 @@ static void release_symbols(Cus3aState *s)
 	s->h_cus3a = NULL;
 }
 
-/* ── AE control law ──────────────────────────────────────────────────── */
+/* ── AE limits ───────────────────────────────────────────────────────── */
 
-#define AE_TARGET_Y         80     /* avg-luma target (0-255 codes) */
-#define AE_DEAD_BAND        8
-#define AE_STEP_NUM         12     /* +20% per tick, ~0.26 EV */
-#define AE_STEP_DEN         10
 #define AE_GAIN_MIN         1024   /* 1.0x */
 #define AE_GAIN_MAX_DEFAULT 32768  /* 32x sensor cap (IMX415) */
-#define AE_ISP_GAIN_MAX     8192   /* 8x ISP digital gain ceiling (unused: P4) */
-#define AE_SHUTTER_MIN_US   30
 
-/* P1 — log-domain IIR proportional controller (replaces the bang-bang
- * cascade).  Converge in continuous exposure space with smooth damping so
- * there are no visible ~20% steps.  Tune ALPHA on device: lower = smoother
- * but slower.  DEADBAND stops micro-hunting; RATIO_CLAMP bounds how far a
- * single transient can move per tick. */
-#define AE_IIR_ALPHA        0.20   /* fraction of log-exposure error / tick */
-#define AE_RATIO_CLAMP      4.0    /* max per-tick exposure ratio (and 1/x) */
-#define AE_DEADBAND_RATIO   0.015  /* +/-1.5% exposure -> hold */
-
-/* (bang-bang step_up/step_dn removed — replaced by the IIR controller.) */
-
-/* ── Supervisory + AE control thread ─────────────────────────────────── */
+/* ── Supervisory AE thread (limits-only) ─────────────────────────────────
+ *
+ * The vendor AE/AWB runs under paced native 3A (maruko_ae_pacer_thread in
+ * maruko_pipeline.c).  This thread does NOT drive exposure — it enforces the
+ * user's gain/shutter caps via MI_ISP_AE_SetExposureLimit and reads AE stats
+ * for the verbose log.  (The retired "throttle"/aeEngine=custom controller
+ * that used to live here was removed in v0.24.1 — paced native superseded it
+ * on every axis; HISTORY 0.22.0.) */
 
 static void *cus3a_thread(void *arg)
 {
@@ -232,17 +187,9 @@ static void *cus3a_thread(void *arg)
 	MarukoAeHwStats *ae_hw;
 	MarukoAeInfo ae_info;
 	MarukoIspExposureLimit cur_limit;
-	MarukoAeResult ae_result;
 	unsigned int sleep_ms;
-	unsigned long ticks = 0, ae_writes = 0, limit_writes = 0;
+	unsigned long ticks = 0, limit_writes = 0;
 	unsigned long last_log_ms = 0;
-	uint32_t applied_shutter_max = 0;
-	uint32_t applied_gain_max = 0;
-
-	uint32_t cur_shutter_us;
-	uint32_t cur_sensor_gain = AE_GAIN_MIN;
-	uint32_t cur_isp_gain = AE_GAIN_MIN;
-	uint32_t shutter_min_us = AE_SHUTTER_MIN_US;
 	uint32_t shutter_max_us;
 	uint32_t gain_max_eff;
 
@@ -266,13 +213,9 @@ static void *cus3a_thread(void *arg)
 	memset(&cur_limit, 0, sizeof(cur_limit));
 	s->fn_get_exposure_limit(0, 0, &cur_limit);
 
-	/* In throttle mode the no-op AE adaptor zeros the AE init state, so
-	 * any SetExposureLimit write here would clobber the bin's defaults
-	 * with zeros.  We don't need it anyway — SetAeParam ignores
-	 * SetExposureLimit, and gain_max_eff (computed below) gates our
-	 * push directly.  In native mode the live read is valid; we then
-	 * fold in our user caps and write back. */
-	if (!s->cfg.throttle_mode) {
+	/* Fold the user's shutter/gain caps into the live exposure limit and
+	 * write it back — the SDK's native AE respects SetExposureLimit. */
+	{
 		uint32_t want_shutter = compute_max_shutter(s);
 		uint32_t want_gain = s->gain_max;
 
@@ -289,17 +232,6 @@ static void *cus3a_thread(void *arg)
 				"maxGain=%u\n",
 				cur_limit.maxShutterUs,
 				cur_limit.maxSensorGain);
-
-		applied_shutter_max = cur_limit.maxShutterUs;
-		applied_gain_max = cur_limit.maxSensorGain;
-	} else {
-		/* Throttle: seed the "applied" trackers from captured bin
-		 * baseline so the per-tick "changed" check doesn't trigger
-		 * spurious writes. */
-		applied_shutter_max = compute_max_shutter(s);
-		applied_gain_max = s->gain_max > 0
-			? s->gain_max
-			: s->bin_max_sensor_gain;
 	}
 
 	sleep_ms = s->cfg.ae_fps > 0 ? 1000 / s->cfg.ae_fps : 66;
@@ -309,43 +241,28 @@ static void *cus3a_thread(void *arg)
 	/* Prefer the bin's calibrated ceiling when the user hasn't capped
 	 * gain explicitly; AE_GAIN_MAX_DEFAULT (32x) is only a last-resort
 	 * fallback when bin limits are unavailable.  Pushing past the bin
-	 * ceiling produces visible color/brightness drift even though
-	 * SetAeParam silently accepts the higher value. */
+	 * ceiling produces visible color/brightness drift. */
 	gain_max_eff = s->gain_max > 0
 		? s->gain_max
 		: (s->bin_max_sensor_gain > 0
 			? s->bin_max_sensor_gain
 			: AE_GAIN_MAX_DEFAULT);
 
-	cur_shutter_us = shutter_max_us > 0 ? shutter_max_us : 8333;
-	cur_sensor_gain = AE_GAIN_MIN * 4;       /* 4x mid-light start */
-	if (cur_sensor_gain > gain_max_eff)
-		cur_sensor_gain = gain_max_eff;
-
 	if (s->cfg.verbose)
-		printf("[maruko-cus3a] thread started: %u Hz, mode=%s, "
-			"shutter %u..%uus, gain %u..%u\n",
-			s->cfg.ae_fps,
-			s->cfg.throttle_mode ? "throttle" : "native",
-			shutter_min_us, shutter_max_us,
+		printf("[maruko-cus3a] thread started: %u Hz native, "
+			"shutter max %uus, gain %u..%u\n",
+			s->cfg.ae_fps, shutter_max_us,
 			AE_GAIN_MIN, gain_max_eff);
 
 	while (s->running) {
 		unsigned int avg_y = 0;
-		int can_drive = 0;
-		unsigned int dbg_bx = 0, dbg_by = 0, dbg_avg_lin = 0;
 
-		/* ── Read luminance grid ───────────────────────────────── */
+		/* Supervisory read: AE luma average for the debug log.  The
+		 * SDK's native AE owns the actual exposure loop. */
 		if (s->fn_get_hw_stats(0, 0, ae_hw) == 0) {
 			memset(&ae_info, 0, sizeof(ae_info));
 			s->fn_get_ae_status(0, 0, &ae_info);
 
-			/* Block dims come from the grid struct itself
-			 * (ae_hw->nBlk*).  ae_info.AvgBlk* (from
-			 * MI_ISP_CUS3A_GetAeStatus) read 0 here, so total fell
-			 * back to the full 128×90 grid and divided the packed
-			 * sum by 11520 instead of the real block count —
-			 * pinning avgY to ~4 on a lit scene. */
 			unsigned int bx = ae_hw->nBlkX;
 			unsigned int by = ae_hw->nBlkY;
 			if (bx == 0 || by == 0 || bx > MARUKO_AE_GRID_X ||
@@ -355,35 +272,16 @@ static void *cus3a_thread(void *arg)
 			}
 			unsigned int total = bx * by;
 			if (total > 0) {
-				unsigned long sum2d = 0, sumlin = 0;
-				unsigned int x, y;
-				/* 2D: real bx×by sub-block at fixed 128 stride */
-				for (y = 0; y < by; y++)
-					for (x = 0; x < bx; x++)
-						sum2d += ae_hw->nAvg[
-						  y * MARUKO_AE_GRID_X + x].y;
-				/* packed-linear: the grid is stored packed at
-				 * stride nBlkX (device-confirmed: 2D stride-128
-				 * read scores ~0, packed-linear ~real). */
+				unsigned long sumlin = 0;
+				unsigned int x;
+				/* Grid is stored packed at stride nBlkX. */
 				for (x = 0; x < total; x++)
 					sumlin += ae_hw->nAvg[x].y;
 				avg_y = (unsigned int)(sumlin / total);
-				dbg_bx = bx;
-				dbg_by = by;
-				/* 2D stride-128 kept as diagnostic. NOTE: even the
-				 * correct packed read gives uAvgY~4 uniformly on a
-				 * lit scene — the stat scale/update itself is
-				 * suspect, not the divisor. Metering unresolved. */
-				dbg_avg_lin = (unsigned int)(sum2d / total);
-				can_drive = 1;
 			}
 		}
 
 		/* ── Enforce static gain/shutter caps from config ──────── */
-		/* Only meaningful in native mode (SDK AE respects
-		 * SetExposureLimit).  In throttle mode our SetAeParam
-		 * ignores SetExposureLimit, so we just track the local
-		 * shutter_max_us / gain_max_eff used by the AE controller. */
 		{
 			uint32_t want_shutter = compute_max_shutter(s);
 			uint32_t want_gain = s->gain_max;
@@ -391,138 +289,40 @@ static void *cus3a_thread(void *arg)
 				s->bin_max_sensor_gain;
 			int changed = 0;
 
-			if (!s->cfg.throttle_mode) {
-				s->fn_get_exposure_limit(0, 0, &cur_limit);
+			s->fn_get_exposure_limit(0, 0, &cur_limit);
 
-				/* Compare against the FRESH read, not a local
-				 * "applied" cache: the CUS3A AE init (first
-				 * frame-syncs after start) resets limits to
-				 * the bin values, silently undoing an early
-				 * push — e.g. isp.gainMax above the bin
-				 * ceiling never stuck (found with
-				 * gainMax=32000 vs bin 8192, v0.22.0). */
-				if (want_shutter > 0 &&
-				    cur_limit.maxShutterUs != want_shutter) {
-					cur_limit.maxShutterUs = want_shutter;
-					applied_shutter_max = want_shutter;
-					shutter_max_us = want_shutter;
-					changed = 1;
-				}
-				if (effective_gain > 0 &&
-				    cur_limit.maxSensorGain != effective_gain) {
-					cur_limit.maxSensorGain = effective_gain;
-					applied_gain_max = effective_gain;
-					gain_max_eff = effective_gain;
-					changed = 1;
-				}
-
-				if (changed) {
-					int lret = s->fn_set_exposure_limit(
-						0, 0, &cur_limit);
-					limit_writes++;
-					if (s->cfg.verbose)
-						printf("[maruko-cus3a] limit "
-							"push: shutter max "
-							"%uus gain max %u "
-							"ret=%d\n",
-							cur_limit.maxShutterUs,
-							cur_limit.maxSensorGain,
-							lret);
-				}
-			} else {
-				/* Throttle: just keep local caps current. */
-				if (want_shutter > 0 &&
-				    want_shutter != applied_shutter_max) {
-					applied_shutter_max = want_shutter;
-					shutter_max_us = want_shutter;
-				}
-				if (effective_gain > 0 &&
-				    effective_gain != applied_gain_max) {
-					applied_gain_max = effective_gain;
-					gain_max_eff = effective_gain;
-				}
+			/* Compare against the FRESH read, not a local
+			 * "applied" cache: the CUS3A AE init (first
+			 * frame-syncs after start) resets limits to the bin
+			 * values, silently undoing an early push — e.g.
+			 * isp.gainMax above the bin ceiling never stuck
+			 * (found with gainMax=32000 vs bin 8192, v0.22.0). */
+			if (want_shutter > 0 &&
+			    cur_limit.maxShutterUs != want_shutter) {
+				cur_limit.maxShutterUs = want_shutter;
+				shutter_max_us = want_shutter;
+				changed = 1;
 			}
-		}
-
-		/* ── AE control law: 3-stage cascade ───────────────────── */
-		/* Throttle mode only.  In native mode the SDK's NATIVE AE
-		 * runs in 3A_Proc_0 at sensor rate and we'd just stomp on
-		 * its output here. */
-		if (s->cfg.throttle_mode && can_drive) {
-			/* P1 — log-domain IIR proportional controller (replaces
-			 * the ~20% bang-bang cascade).  Converge total exposure
-			 * toward the luma target with smooth damping so there are
-			 * no visible steps.  P4: ISP digital gain pinned at 1.0x
-			 * (it clips colour channels + amplifies noise); converge
-			 * with shutter (priority) then analog sensor gain. */
-			cur_isp_gain = AE_GAIN_MIN;
-
-			/* Applied exposure in linear units: shutter_us * gain(x). */
-			double e_applied = (double)cur_shutter_us *
-				((double)cur_sensor_gain / (double)AE_GAIN_MIN);
-			if (e_applied < 1.0)
-				e_applied = 1.0;
-
-			/* Proportional: exposure scales inversely with luma error
-			 * (+1 avoids div-by-zero and softens deep shadow). */
-			double ratio = ((double)AE_TARGET_Y + 1.0) /
-				((double)avg_y + 1.0);
-			if (ratio > AE_RATIO_CLAMP)
-				ratio = AE_RATIO_CLAMP;
-			else if (ratio < 1.0 / AE_RATIO_CLAMP)
-				ratio = 1.0 / AE_RATIO_CLAMP;
-
-			/* Log-domain IIR damping: e_next = e * ratio^alpha —
-			 * smooth, perceptually linear, no staircase/overshoot. */
-			double e_next = e_applied * pow(ratio, AE_IIR_ALPHA);
-
-			/* Deadband in exposure ratio: hold if the move is tiny. */
-			double drift = e_next / e_applied;
-			if (drift < 1.0 + AE_DEADBAND_RATIO &&
-			    drift > 1.0 - AE_DEADBAND_RATIO)
-				e_next = e_applied;
-
-			/* Split across shutter (priority) then analog gain. */
-			{
-				double e_max_shutter = (double)shutter_max_us;
-				if (e_max_shutter < 1.0)
-					e_max_shutter = 1.0;
-				if (e_next <= e_max_shutter) {
-					uint32_t ns = (uint32_t)(e_next + 0.5);
-					if (ns < shutter_min_us)
-						ns = shutter_min_us;
-					cur_shutter_us = ns;
-					cur_sensor_gain = AE_GAIN_MIN;
-				} else {
-					double g = (e_next / e_max_shutter) *
-						(double)AE_GAIN_MIN;
-					if (g > (double)gain_max_eff)
-						g = (double)gain_max_eff;
-					if (g < (double)AE_GAIN_MIN)
-						g = (double)AE_GAIN_MIN;
-					cur_shutter_us = shutter_max_us;
-					cur_sensor_gain = (uint32_t)(g + 0.5);
-				}
+			if (effective_gain > 0 &&
+			    cur_limit.maxSensorGain != effective_gain) {
+				cur_limit.maxSensorGain = effective_gain;
+				gain_max_eff = effective_gain;
+				changed = 1;
 			}
 
-			memset(&ae_result, 0, sizeof(ae_result));
-			ae_result.Size = sizeof(ae_result);
-			ae_result.Change = 1;
-			ae_result.Shutter = cur_shutter_us;
-			ae_result.SensorGain = cur_sensor_gain;
-			ae_result.IspGain = cur_isp_gain;
-			ae_result.ShutterHdrShort = cur_shutter_us;
-			ae_result.SensorGainHdrShort = cur_sensor_gain;
-			ae_result.IspGainHdrShort = cur_isp_gain;
-			ae_result.HdrRatio = 1024;
-			ae_result.u4BVx16384 = 16384;
-			ae_result.AvgY = avg_y;
-			ae_result.FNx10 = 28;
-			ae_result.DebandFPS = s->cfg.sensor_fps;
-			ae_result.WeightY = avg_y;
-
-			s->fn_set_ae_param(0, 0, &ae_result);
-			ae_writes++;
+			if (changed) {
+				int lret = s->fn_set_exposure_limit(
+					0, 0, &cur_limit);
+				limit_writes++;
+				if (s->cfg.verbose)
+					printf("[maruko-cus3a] limit "
+						"push: shutter max "
+						"%uus gain max %u "
+						"ret=%d\n",
+						cur_limit.maxShutterUs,
+						cur_limit.maxSensorGain,
+						lret);
+			}
 		}
 
 		ticks++;
@@ -533,32 +333,14 @@ static void *cus3a_thread(void *arg)
 			clock_gettime(CLOCK_MONOTONIC, &ts);
 			now_ms = ts.tv_sec * 1000UL + ts.tv_nsec / 1000000;
 			if (s->cfg.verbose && now_ms - last_log_ms >= 5000) {
-				if (s->cfg.throttle_mode) {
-					printf("[maruko-cus3a] %lu ticks | "
-						"%lu ae | %lu lim | "
-						"blk=%ux%u avgY=%u(lin=%u) "
-						"target=%d | want "
-						"shutter=%uus sgain=%u "
-						"igain=%u | isp shutter=%uus "
-						"sgain=%u igain=%u\n",
-						ticks, ae_writes, limit_writes,
-						dbg_bx, dbg_by,
-						avg_y, dbg_avg_lin, AE_TARGET_Y,
-						cur_shutter_us, cur_sensor_gain,
-						cur_isp_gain,
-						ae_info.Shutter,
-						ae_info.SensorGain,
-						ae_info.IspGain);
-				} else {
-					printf("[maruko-cus3a] %lu ticks | "
-						"%lu lim | avgY=%u | "
-						"isp shutter=%uus sgain=%u "
-						"igain=%u\n",
-						ticks, limit_writes, avg_y,
-						ae_info.Shutter,
-						ae_info.SensorGain,
-						ae_info.IspGain);
-				}
+				printf("[maruko-cus3a] %lu ticks | "
+					"%lu lim | avgY=%u | "
+					"isp shutter=%uus sgain=%u "
+					"igain=%u\n",
+					ticks, limit_writes, avg_y,
+					ae_info.Shutter,
+					ae_info.SensorGain,
+					ae_info.IspGain);
 				last_log_ms = now_ms;
 			}
 		}
@@ -576,8 +358,8 @@ static void *cus3a_thread(void *arg)
 	free(ae_hw);
 	if (s->cfg.verbose)
 		printf("[maruko-cus3a] thread stopped (%lu ticks, "
-			"%lu ae writes, %lu limit writes)\n",
-			ticks, ae_writes, limit_writes);
+			"%lu limit writes)\n",
+			ticks, limit_writes);
 	return NULL;
 }
 

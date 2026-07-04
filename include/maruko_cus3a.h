@@ -8,18 +8,15 @@
  *  The vendor AE/AWB algorithms run under paced native 3A (see
  *  maruko_ae_pacer_thread in maruko_pipeline.c); this thread just enforces
  *  gain/shutter caps via MI_ISP_AE_SetExposureLimit and reads stats for
- *  verbose logging.  Equivalent to Star6E's pattern.
- *
- *  `throttle_mode` selected the retired 0.9.12 "aeEngine=custom" P1
- *  controller and must stay 0 — the paced native algo supersedes it on
- *  every axis (HISTORY 0.22.0). */
+ *  verbose logging.  Equivalent to Star6E's pattern.  (The retired 0.9.12
+ *  "aeEngine=custom" throttle controller was removed in v0.24.1 — paced
+ *  native supersedes it on every axis; HISTORY 0.22.0.) */
 typedef struct {
 	uint32_t sensor_fps;       /* sensor output fps (for max shutter calc) */
 	uint32_t ae_fps;           /* monitoring rate in Hz (default 15) */
 	uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
 	uint32_t gain_max;         /* 0 = use ISP bin default */
 	int      verbose;          /* enable periodic status logging */
-	int      throttle_mode;    /* retired; must be 0 */
 } MarukoCus3aConfig;
 
 /** Fill config with sensible FPV defaults (sensor_fps=120, ae_fps=15). */

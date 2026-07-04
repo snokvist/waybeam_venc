@@ -242,10 +242,32 @@ static void *maruko_ae_pacer_thread(void *arg)
 
 static void maruko_ae_pacer_stop(void)
 {
+	struct timespec deadline;
+	int jr;
+
 	if (!g_inj_run)
 		return;
 	g_inj_run = 0;
-	pthread_join(g_inj_flip_thread, NULL);
+	/* Bounded join: the pacer's steady-state loop calls CUS3A_RunOnce,
+	 * which on this SoC can stall inside the SDK during an ISP FIFO/MMU
+	 * fault (the documented teardown D-state class).  An unbounded
+	 * pthread_join would then wedge teardown/respawn forever.  Give the
+	 * loop a short deadline to observe g_inj_run==0 and exit (normal case:
+	 * one usleep, <=~33 ms); if it is stuck, detach and let teardown
+	 * proceed rather than hanging the whole process. */
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_nsec += 300L * 1000L * 1000L; /* 300 ms */
+	if (deadline.tv_nsec >= 1000000000L) {
+		deadline.tv_nsec -= 1000000000L;
+		deadline.tv_sec += 1;
+	}
+	jr = pthread_timedjoin_np(g_inj_flip_thread, NULL, &deadline);
+	if (jr != 0) {
+		fprintf(stderr, "WARNING: [maruko] AE pacer join timed out "
+			"(%d) — detaching; thread may be stuck in CUS3A_RunOnce\n",
+			jr);
+		pthread_detach(g_inj_flip_thread);
+	}
 }
 
 /* Enable CUS3A framework — required for ISP frame processing (without it
@@ -2453,7 +2475,6 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			ae_cfg.ae_fps        = ctx->cfg.ae_fps;
 			ae_cfg.gain_max      = ctx->cfg.isp_gain_max;
 			ae_cfg.verbose       = ctx->cfg.verbose;
-			ae_cfg.throttle_mode = false;
 			(void)maruko_cus3a_start(&ae_cfg);
 		} else if (ctx->cfg.verbose) {
 			printf("> [maruko] supervisory 3A disabled "

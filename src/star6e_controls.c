@@ -369,10 +369,20 @@ static int apply_fps(uint32_t fps)
 		return -1;
 	}
 
-	if (apply_encoder_fps(fps) != 0)
+	if (apply_encoder_fps(fps) != 0 || apply_scene_fps(fps) != 0) {
+		/* Bind succeeded but the encoder/scene fps write failed —
+		 * restore the bind to sensor_fps:sensor_fps so we don't leave
+		 * VPE->VENC bound at the new fps while the caller treats the
+		 * group as failed and rolls back the committed config. */
+		printf("> Encoder fps apply failed, restoring bind %u:%u\n",
+			sensor_fps, sensor_fps);
+		MI_SYS_UnBindChnPort(&g_star6e_control_ctx.vpe_port,
+			&g_star6e_control_ctx.venc_port);
+		MI_SYS_BindChnPort2(&g_star6e_control_ctx.vpe_port,
+			&g_star6e_control_ctx.venc_port, sensor_fps, sensor_fps,
+			I6_SYS_LINK_FRAMEBASE, 0);
 		return -1;
-	if (apply_scene_fps(fps) != 0)
-		return -1;
+	}
 
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
 	return 0;
