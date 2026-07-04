@@ -2,9 +2,11 @@
 
 **Branch:** `feature/maruko-cus3a-apply-cost`
 **Date:** 2026-07-04
-**Status:** investigation complete + scoped plan; implementation not yet started.
-**Prize:** full-rate, vendor-quality AE at **majestic CPU** — closes the residual
-CPU gap *and* removes the AE-throttle quality compromise, in one small change.
+**Status:** env-gated Option-B prototype implemented + device-validated.
+**CPU thesis PROVEN** (70→38.9% @1080p100, full-rate). **Option B REFUTED** for
+image quality — see "DEVICE VALIDATION" at the bottom; the shippable path is
+Option A (native vendor AE+AWB in inject-mode). Default behavior unchanged (gate off).
+**Prize:** full-rate, vendor-quality AE at **majestic CPU**.
 
 ## The finding (corrected mechanism)
 
@@ -103,3 +105,54 @@ custom as default" item is then moot — inject-mode *is* the good default).
   `star6e_cus3a.c:204-458`.
 - Measured cause: `MARUKO_VPE_PORT_INVESTIGATION.md` (ablation: throttle collapses
   `IspMidThreadWq` 13→2).
+
+---
+
+## DEVICE VALIDATION (2026-07-04) — CPU thesis PROVEN, but Option B REFUTED
+
+Implemented inject-mode behind an env gate (`MARUKO_AE_INJECT=1`): drop
+`EnableUserspace3A` + no-op adaptor, call `MI_ISP_CUS3A_Enable` +
+`MI_ISP_CUS3A_InjectModeEnable`, keep the P1 loop driving `SetAeParam`. Cold-start
+on .12 @1080p100, `aeFps=100` (full rate):
+
+**CPU — thesis confirmed, spectacularly.** `InjectModeEnable ret=0`.
+
+| | native baseline | **inject + P1 (full-rate)** | majestic |
+|---|---|---|---|
+| busy | 70.0% | **38.9%** | 42.9% |
+| `IspMidThreadWq` | 13.2% | **~0** | ~0 |
+| `3A_Proc_0` | 21.9% | **~0** | 24.9% |
+
+−31pt, below majestic, at full-rate AE. The `RegisterIspApiAgent` mechanism is
+the whole cost — removing it collapses the ISP apply overhead exactly as predicted.
+
+**Image — Option B ("keep our P1 loop") does NOT work.** The injected-AE image is
+**yellow/green cast + very noisy + 85fps** (user-confirmed on the live stream):
+- **AWB not applied (yellow/green).** `EnableUserspace3A`'s agent was also pumping
+  AWB→HW; `CUS3A_Enable(bAWB=1)` alone in inject-mode does not drive it. Our
+  manual path only touches AE.
+- **Noise + bad exposure.** Our P1 metering reads `uAvgY≈4` uniformly across the
+  32×32 grid on a *lit* scene (device-confirmed: grid is packed at stride nBlkX;
+  the divisor bug — `ae_info.AvgBlk*`=0 → /11520 — is fixed, but even the correct
+  packed read is ~4, so the stat scale/update is itself wrong). Broken metering
+  drives sensor gain to max → noise.
+- **85 fps** (not 100) — manual full-rate `SetAeParam` also perturbs pacing.
+
+**Conclusion — the shippable inject path is Option A, not B.** The vendor's native
+AE **and** AWB must run in inject-mode (majestic's exact configuration), owning
+metering + AWB + the sensor/HW apply, while we only supervise limits (the Star6E
+pattern). Manual per-frame `SetAeParam` is a leftover of the agent model and does
+not substitute for the vendor 3A apply once the agent is gone. Our P1/P4 controller
+(PR #156) remains valuable **only** for the legacy `EnableUserspace3A` throttle
+path; it is the wrong tool for inject-mode.
+
+### Next step (revised)
+Wire **Option A**: register the vendor/native AE+AWB via the Cus3A framework
+(`CUS3A_Init` + `CUS3A_RegInterfaceEX` with the sstar native interface,
+adaptor = NATIVE, `CUS3A_SetRunMode(E_CUS3A_MODE_INJECT)`) so the vendor 3A runs
+server-side and applies cheaply — no `RegisterIspApiAgent`, no manual `SetAeParam`.
+Reference: `.../verify/mixer/.../mid_iq_impl.cpp:3020-3070`; `libcus3a.so` is on the
+device. Supervisory thread reduces to Star6E-style limit enforcement only.
+
+The env-gated Option-B prototype (this commit) stays as the CPU proof-of-mechanism;
+it is NOT a shippable image. Default behavior is unchanged (gate off).

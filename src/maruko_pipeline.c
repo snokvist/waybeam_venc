@@ -217,13 +217,50 @@ static void maruko_enable_cus3a(void)
 	MI_S32 ret = fn_enable(0, 0, p110);
 	printf("> [maruko] CUS3A_Enable(1,1,0) ret=%d\n", ret);
 
-	/* Step 2: spawn 3A_Proc_0 thread (drives IQ→HW pump). */
-	typedef int (*enable_us3a_fn)(MI_U32 dev, MI_U32 chn);
-	enable_us3a_fn fn_enable_us3a = (enable_us3a_fn)dlsym(h,
-		"MI_ISP_EnableUserspace3A");
-	if (fn_enable_us3a) {
-		int us3a_ret = fn_enable_us3a(0, 0);
-		printf("> [maruko] EnableUserspace3A ret=%d\n", us3a_ret);
+	/* Step 2: how AE/IQ results reach ISP HW.  Two mutually exclusive
+	 * plumbings, and this choice is THE dominant CPU lever at high fps:
+	 *
+	 *   inject-mode (MARUKO_AE_INJECT set): MI_ISP_CUS3A_InjectModeEnable.
+	 *     No API agent is registered, so a per-frame MI_ISP_CUS3A_SetAeParam
+	 *     is a cheap delta injected into the ISP *server's* pipeline.  This
+	 *     is majestic's path (and our Star6E backend's spirit): full-rate AE
+	 *     with IspMidThreadWq ~0, isp0 ~7%.
+	 *
+	 *   default: MI_ISP_EnableUserspace3A — internally calls
+	 *     MI_ISP_RegisterIspApiAgent, relocating the SigmaStar IQ/3A mid-
+	 *     layer INTO this process.  Every SetAeParam then forces a full
+	 *     in-process CMDQ/IQ pass → IspMidThreadWq ~13% of a core at 100fps.
+	 *     (See documentation/MARUKO_CUS3A_INJECT_MIGRATION.md.)
+	 *
+	 * In inject-mode the no-op AE adaptor is NOT installed: our injected
+	 * SetAeParam result is authoritative, so there is no native AE to stub. */
+	if (getenv("MARUKO_AE_INJECT")) {
+		typedef int (*inject_fn)(MI_U32 dev, MI_U32 chn, void *data);
+		inject_fn fn_inject = (inject_fn)dlsym(h,
+			"MI_ISP_CUS3A_InjectModeEnable");
+		if (fn_inject) {
+			MI_BOOL en[1] = {1};  /* CusInject3AEnable_t{ bInject3A } */
+			int r = fn_inject(0, 0, en);
+			printf("> [maruko] InjectModeEnable ret=%d "
+				"(no userspace-3A agent)\n", r);
+		} else {
+			printf("> [maruko] InjectModeEnable symbol missing; "
+				"falling back to EnableUserspace3A\n");
+			typedef int (*enable_us3a_fn)(MI_U32, MI_U32);
+			enable_us3a_fn f = (enable_us3a_fn)dlsym(h,
+				"MI_ISP_EnableUserspace3A");
+			if (f)
+				f(0, 0);
+		}
+	} else {
+		/* spawn 3A_Proc_0 thread (drives IQ→HW pump via the agent). */
+		typedef int (*enable_us3a_fn)(MI_U32 dev, MI_U32 chn);
+		enable_us3a_fn fn_enable_us3a = (enable_us3a_fn)dlsym(h,
+			"MI_ISP_EnableUserspace3A");
+		if (fn_enable_us3a) {
+			int us3a_ret = fn_enable_us3a(0, 0);
+			printf("> [maruko] EnableUserspace3A ret=%d\n", us3a_ret);
+		}
 	}
 
 	/* Step 3 (no-op AE adaptor) is conditional on isp.aeMode and runs
@@ -2338,6 +2375,10 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		 *               at ae_fps Hz.  Saves ~24% of one core. */
 		int throttle = ctx->cfg.ae_mode[0] &&
 			strcmp(ctx->cfg.ae_mode, "throttle") == 0;
+		/* Inject-mode drives AE via our SetAeParam loop (like throttle)
+		 * but the apply is cheap (no agent), so run it WITHOUT the no-op
+		 * adaptor and at full ae_fps for smooth, low-CPU AE. */
+		int inject = getenv("MARUKO_AE_INJECT") != NULL;
 
 		/* Start supervisory thread FIRST so it captures the bin's
 		 * calibrated AE limits while the SDK's NATIVE algo is still
@@ -2351,14 +2392,21 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			ae_cfg.ae_fps        = ctx->cfg.ae_fps;
 			ae_cfg.gain_max      = ctx->cfg.isp_gain_max;
 			ae_cfg.verbose       = ctx->cfg.verbose;
-			ae_cfg.throttle_mode = throttle;
+			/* inject-mode also drives SetAeParam (our P1 loop). */
+			ae_cfg.throttle_mode = throttle || inject;
 			(void)maruko_cus3a_start(&ae_cfg);
 		} else if (ctx->cfg.verbose) {
 			printf("> [maruko] supervisory 3A disabled "
 				"(isp.aeFps=0)\n");
 		}
 
-		if (throttle) {
+		if (inject) {
+			/* No no-op adaptor: injected SetAeParam is authoritative;
+			 * AWB stays native (server-side). */
+			printf("> [maruko] AE mode: inject "
+				"(CUS3A inject-mode + manual SetAeParam, "
+				"no userspace-3A agent)\n");
+		} else if (throttle) {
 			maruko_cus3a_install_noop_adaptor();
 			printf("> [maruko] AE mode: throttle "
 				"(no-op AE adaptor + manual SetAeParam)\n");

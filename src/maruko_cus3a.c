@@ -390,22 +390,48 @@ static void *cus3a_thread(void *arg)
 	while (s->running) {
 		unsigned int avg_y = 0;
 		int can_drive = 0;
+		unsigned int dbg_bx = 0, dbg_by = 0, dbg_avg_lin = 0;
 
 		/* ── Read luminance grid ───────────────────────────────── */
 		if (s->fn_get_hw_stats(0, 0, ae_hw) == 0) {
 			memset(&ae_info, 0, sizeof(ae_info));
 			s->fn_get_ae_status(0, 0, &ae_info);
 
-			unsigned int total = ae_info.AvgBlkX *
-				ae_info.AvgBlkY;
-			if (total == 0 || total > MARUKO_AE_GRID_SZ)
-				total = MARUKO_AE_GRID_SZ;
+			/* Block dims come from the grid struct itself
+			 * (ae_hw->nBlk*).  ae_info.AvgBlk* (from
+			 * MI_ISP_CUS3A_GetAeStatus) read 0 here, so total fell
+			 * back to the full 128×90 grid and divided the packed
+			 * sum by 11520 instead of the real block count —
+			 * pinning avgY to ~4 on a lit scene. */
+			unsigned int bx = ae_hw->nBlkX;
+			unsigned int by = ae_hw->nBlkY;
+			if (bx == 0 || by == 0 || bx > MARUKO_AE_GRID_X ||
+			    by > MARUKO_AE_GRID_Y) {
+				bx = MARUKO_AE_GRID_X;
+				by = MARUKO_AE_GRID_Y;
+			}
+			unsigned int total = bx * by;
 			if (total > 0) {
-				unsigned long sum = 0;
-				unsigned int n;
-				for (n = 0; n < total; n++)
-					sum += ae_hw->nAvg[n].y;
-				avg_y = (unsigned int)(sum / total);
+				unsigned long sum2d = 0, sumlin = 0;
+				unsigned int x, y;
+				/* 2D: real bx×by sub-block at fixed 128 stride */
+				for (y = 0; y < by; y++)
+					for (x = 0; x < bx; x++)
+						sum2d += ae_hw->nAvg[
+						  y * MARUKO_AE_GRID_X + x].y;
+				/* packed-linear: the grid is stored packed at
+				 * stride nBlkX (device-confirmed: 2D stride-128
+				 * read scores ~0, packed-linear ~real). */
+				for (x = 0; x < total; x++)
+					sumlin += ae_hw->nAvg[x].y;
+				avg_y = (unsigned int)(sumlin / total);
+				dbg_bx = bx;
+				dbg_by = by;
+				/* 2D stride-128 kept as diagnostic. NOTE: even the
+				 * correct packed read gives uAvgY~4 uniformly on a
+				 * lit scene — the stat scale/update itself is
+				 * suspect, not the divisor. Metering unresolved. */
+				dbg_avg_lin = (unsigned int)(sum2d / total);
 				can_drive = 1;
 			}
 		}
@@ -552,12 +578,14 @@ static void *cus3a_thread(void *arg)
 				if (s->cfg.throttle_mode) {
 					printf("[maruko-cus3a] %lu ticks | "
 						"%lu ae | %lu lim | "
-						"avgY=%u target=%d | want "
+						"blk=%ux%u avgY=%u(lin=%u) "
+						"target=%d | want "
 						"shutter=%uus sgain=%u "
 						"igain=%u | isp shutter=%uus "
 						"sgain=%u igain=%u\n",
 						ticks, ae_writes, limit_writes,
-						avg_y, AE_TARGET_Y,
+						dbg_bx, dbg_by,
+						avg_y, dbg_avg_lin, AE_TARGET_Y,
 						cur_shutter_us, cur_sensor_gain,
 						cur_isp_gain,
 						ae_info.Shutter,
