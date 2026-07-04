@@ -256,7 +256,12 @@ const static I2C_ARRAY Sensor_init_table_4lane_5m30fps[] = {
      * state that starves the encoder.  Values grounded in the working 120fps
      * window table's register semantics + the vendor all-pixel block:
      *   0x3018=0x00 all-pixel scan; HTRIM start=48 / HNUM=2616 (full width,
-     *   matches the window table's 1944->1920 margin ratio); Y_OUT=1944. */
+     *   matches the window table's 1944->1920 margin ratio); Y_OUT=1944.
+     * AREA3 (0x3074-77) is intentionally NOT reset here: with 0x3018=0x00 the
+     * sensor ignores the window AREA registers, so stale crop AREA3 values are
+     * inert (device-verified: warm crop->full-res comes up clean without it).
+     * If a warm crop->full-res regression ever appears, AREA3 is the register
+     * pair to add. */
     { 0x3018, 0x00 }, // WINMODE: all-pixel scan
     { 0x302C, 0x30 }, // HTRIMMING_START = 48
     { 0x302D, 0x00 },
@@ -936,9 +941,11 @@ static int pCus_init_mipi4lane_5m120fps_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
-/* Full-res 2592x1944@30fps all-pixel readout (mode 2).  Same writer shape
+/* Full-res 2592x1944@30fps all-pixel readout (mode 0).  Same writer shape
  * as the 120fps window init; the 5m30fps table carries HMAX=600/VMAX=4125
- * and leaves the window registers at their power-on (all-pixel) defaults. */
+ * and writes the all-pixel geometry (0x3018=0x00, HTRIM/HNUM/Y_OUT full
+ * width) explicitly so a warm switch out of a crop mode never inherits
+ * stale window state (PR#156 discipline). */
 static int pCus_init_mipi4lane_5m30fps_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
