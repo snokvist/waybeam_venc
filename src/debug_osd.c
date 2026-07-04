@@ -2,15 +2,16 @@
 
 /* ── CPU usage sampler (shared, /proc/stat) ────────────────────────────
  * Snapshot ring at 500ms cadence; CPU% is computed over the span from
- * the oldest retained snapshot (~1s with OSD_CPU_RING=3), so the OSD
- * readout is a sliding 1-second average instead of a jumpy 500ms delta,
- * while still refreshing every 500ms. */
+ * the oldest retained snapshot (~1s with OSD_CPU_RING=2 — the oldest of
+ * two 500ms-spaced snapshots is one full interval back at steady state),
+ * so the OSD readout is a sliding 1-second average instead of a jumpy
+ * 500ms delta, while still refreshing every 500ms. */
 #if defined(PLATFORM_STAR6E) || defined(PLATFORM_MARUKO)
 
 #include <stdio.h>
 #include <time.h>
 
-#define OSD_CPU_RING 3
+#define OSD_CPU_RING 2
 
 typedef struct {
 	struct { unsigned long long total, idle; } ring[OSD_CPU_RING];

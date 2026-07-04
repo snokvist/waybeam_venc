@@ -1,5 +1,34 @@
 # History
 
+## [0.24.1] - 2026-07-04
+
+Pre-upstream-squash cleanup: adversarial review of the 0.22.0–0.24.0 range
+(PRs #157–#160) surfaced a handful of straggling defects, all fixed here.
+No functional feature changes.
+
+- **GOP frame count now tracks the *actual* encoder fps, not the committed
+  request** (`src/venc_api.c`) — a live `video0.fps` above the current sensor
+  mode's max is clamped to `sensor_fps` for the bind, but the GOP was computed
+  from the unclamped value, stretching the I-frame interval (e.g. GOP for 144
+  while the encoder is pinned at 100 → 1.44 s instead of 1 s). Now uses
+  `query_live_fps()`; the 120→144 ceiling raise had widened this drift.
+- **Star6E debug-OSD "enc" row no longer shows `0x0`** (`src/star6e_runtime.c`)
+  — it printed the raw `video0.width/height` config (default `0/0` = auto)
+  instead of the resolved `image_width/height`; Maruko already did it right.
+- **AE pacer teardown join is now bounded** (`src/maruko_pipeline.c`) — the
+  pacer's steady-state loop calls `CUS3A_RunOnce`, which can stall inside the
+  SDK during an ISP fault; the previous unbounded `pthread_join` would then
+  wedge teardown/respawn. Now `pthread_timedjoin_np` (300 ms) + detach-on-
+  timeout. Device-verified: 0 spurious timeouts across mode-cycle teardowns.
+- **Star6E fps rebind restores on encoder-apply failure**
+  (`src/star6e_controls.c`) — a post-bind encoder/scene fps write failure no
+  longer leaves VPE→VENC bound at the new fps while the caller rolls back.
+- **CPU% debug-OSD window corrected to the documented ~1 s**
+  (`src/debug_osd.c`, `OSD_CPU_RING` 3→2 — was a 1.5 s span).
+- **Upstream hygiene**: dropped `.serena/` tooling config from tracking (now
+  gitignored) and four transient handoff/investigation docs; clarified the
+  retired `throttle_mode` dead-code comments so they don't read as live bugs.
+
 ## [0.24.0] - 2026-07-04
 
 IMX335 gets a **144fps ultra-low-latency mode** + a `WAYBEAM_NO_3A` debug

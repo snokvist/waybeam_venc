@@ -999,7 +999,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			(unsigned)ps->sensor.plane.capt.height,
 			ps->sensor.fps, ps->sensor.mode_index);
 		debug_osd_text(ps->debug_osd, 3, "enc", "%ux%u h265",
-			vcfg->video0.width, vcfg->video0.height);
+			ps->image_width, ps->image_height);
 
 		{
 			int osd_row = 4;

@@ -370,10 +370,13 @@ static void *cus3a_thread(void *arg)
 				avg_y = (unsigned int)(sumlin / total);
 				dbg_bx = bx;
 				dbg_by = by;
-				/* 2D stride-128 kept as diagnostic. NOTE: even the
-				 * correct packed read gives uAvgY~4 uniformly on a
-				 * lit scene — the stat scale/update itself is
-				 * suspect, not the divisor. Metering unresolved. */
+				/* 2D stride-128 kept as diagnostic. This avg_y fed
+				 * ONLY the retired throttle controller (throttle_mode
+				 * is hard-wired off — see maruko_cus3a.h); in native
+				 * mode the SDK owns the AE loop, so this readout is
+				 * diagnostic-only and drives nothing live. (Historical:
+				 * the packed read reported uAvgY~4 on a lit scene; the
+				 * stat scale was never resolved, but it is inert.) */
 				dbg_avg_lin = (unsigned int)(sum2d / total);
 				can_drive = 1;
 			}
@@ -445,9 +448,13 @@ static void *cus3a_thread(void *arg)
 		}
 
 		/* ── AE control law: 3-stage cascade ───────────────────── */
-		/* Throttle mode only.  In native mode the SDK's NATIVE AE
-		 * runs in 3A_Proc_0 at sensor rate and we'd just stomp on
-		 * its output here. */
+		/* RETIRED / DEAD CODE — throttle_mode is hard-wired off
+		 * (maruko_cus3a.h: "retired; must be 0"), so this whole block
+		 * is unreachable at runtime and kept only for reference. In
+		 * native mode the SDK's AE runs in 3A_Proc_0 at sensor rate and
+		 * driving exposure here would stomp its output. Physical removal
+		 * is deferred to a separate device-verified change (it threads
+		 * through the live native AE thread). */
 		if (s->cfg.throttle_mode && can_drive) {
 			/* P1 — log-domain IIR proportional controller (replaces
 			 * the ~20% bang-bang cascade).  Converge total exposure

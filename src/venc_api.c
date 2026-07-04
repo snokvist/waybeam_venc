@@ -1492,8 +1492,21 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		}
 		if (!(cfg->video0.scene_threshold > 0) &&
 		    touched && (touched->video_fps || touched->video_gop)) {
+			/* Base the GOP frame count on the fps the encoder is
+			 * actually running at, not the committed request: a live
+			 * fps above the current sensor mode's max is clamped to
+			 * sensor_fps for the bind (see PIPELINE_LIVE_FPS_MAX), so
+			 * using the unclamped request here would stretch the
+			 * I-frame interval (GOP frames for 144 while the encoder
+			 * is pinned at 100 -> 1.44s instead of the intended 1s). */
+			uint32_t gop_fps = cfg->video0.fps;
+			if (g_cb->query_live_fps) {
+				uint32_t live_fps = g_cb->query_live_fps();
+				if (live_fps > 0)
+					gop_fps = live_fps;
+			}
 			gop_frames = pipeline_common_gop_frames(
-				cfg->video0.gop_size, cfg->video0.fps);
+				cfg->video0.gop_size, gop_fps);
 			rc = g_cb->apply_gop(gop_frames);
 			if (rc != 0)
 				return -1;
