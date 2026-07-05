@@ -1,5 +1,38 @@
 # History
 
+## [0.25.0] - 2026-07-05
+
+In-tree Star6E (Infinity6E) sensor drivers for IMX335 and IMX415 — the Star6E
+counterpart to the Maruko custom drivers. Previously Star6E had only prebuilt
+stock `.ko`; now the mode lineups are owned in-repo and buildable via
+`make drivers-star6e KSRC_STAR6E=<i6e-4.9.84-kernel>`. Both seeded from the
+OpenIPC infinity6e blueprints, HDR/DOL removed (the two HDR handles are `NULL`
+and the SEF handle made `static`, so the compiler dead-code-eliminates the
+whole HDR subtree). Device-verified on SSC338Q @192.168.1.13, 0 sustained
+drops on every mode.
+
+- **IMX335 — fps-ordered lineup with two new higher-FOV window-crop tiers**
+  (`drivers/sensor_imx335_star6e.c`, `documentation/STAR6E_IMX335_MODES.md`):
+  2560×1920@30 / @60, 2400×1350@90, **2176×1224@100** (new crop, VIF 99.8),
+  1920×1080@120, **1600×900@144** (new crop, VIF 143.3). The two crops push to
+  the highest FOV the I6E ISP sustains — measured ceiling ≈2.66 MPix@100 /
+  ≈1.44 MPix@144; over budget the ISP silently halves (0 fifo/skip logged), so
+  the VIF `/proc` FPS column is the truth signal. The Maruko I6C ceiling model
+  does not apply to I6E. No 50fps mode. `imx335_init_window_crop()` reuses the
+  proven 120fps analog/PLL base and overrides only the readout window + HMAX,
+  latching the geometry in standby (PR#156 discipline).
+- **IMX415 — stock fps-ordered lineup** (`drivers/sensor_imx415_star6e.c`,
+  `documentation/STAR6E_IMX415_MODES.md`): 3840×2160@30, 2560×1440@60,
+  1920×1080@90, 1472×816@120. Stock tables verbatim; no crop tiers.
+- **Build wiring** (`drivers/Makefile`, `Makefile`): `SOC=star6e` obj-m builds
+  both sensor objects; `make drivers-star6e` stages
+  `sensors/star6e/sensor_imx*_star6e.ko`.
+
+Note: venc persists `sensor.mode` in `/etc/waybeam.json`. These drivers expose
+fewer modes than the stock 11-mode IMX415 driver, so a persisted mode index
+beyond the new range makes venc fail mode-select and exit on boot — patch the
+config to a valid index when deploying over a box that ran the stock driver.
+
 ## [0.24.1] - 2026-07-04
 
 Pre-upstream-squash cleanup: adversarial review of the 0.22.0–0.24.0 range
