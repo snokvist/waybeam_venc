@@ -1,5 +1,28 @@
 # History
 
+## [0.26.0] - 2026-07-05
+
+Star6E IMX415: a new **non-binned 2304×1296@100fps** window-crop mode, plus
+warm-switch register safety. Follows the 0.25.0 in-tree Star6E drivers.
+
+- **2304×1296@100fps non-binned** (`drivers/sensor_imx415_star6e.c`, inserted
+  fps-ordered at idx3) — the widest 16:9 the I6E ISP sustains non-binned at
+  100fps: 2.99 MPix / ~299 MPix/s, device-verified 99.0 fps + 0 drops over a
+  30 s soak. Challenges the "must bin for FOV at high fps" assumption: native
+  sharp resolution (35% FOV area) where the stock 90/120 modes are 2×2 binned.
+  Enabled by (1) the 1485 Mbps link (`SYS_MODE=0x08`, reused from idx1's base,
+  no venc changes — Star6E's REALTIME bind carries it), (2) a **reduced HMAX**
+  (548) to beat the vertical-timing wall a fixed HMAX=652 would cap at ~89fps,
+  and (3) the I6E ISP sustaining ~300 MPix/s. The wall was device-mapped:
+  2304×1296 clean, 2432×1368 (333 MPix/s) drops, 2560×1440 halves.
+- **Warm-switch register safety** — the SDK keeps sensor registers across a
+  mode switch, and the stock non-binned tables (idx0/idx1) never wrote the
+  binning registers, so a warm switch binned→non-binned (e.g. 90→30) left 2×2
+  binning latched and corrupted the readout. The non-binned idx0/idx1 tables
+  and the new crop now write `0x3020/21/22=0x00` + all-pixel DIG_CLP
+  (`0x30D9=0x06`/`0x30DA=0x02`) explicitly in standby. Verified both
+  directions, 0 drops (120→30, 90→100, 120→60, 90→30).
+
 ## [0.25.0] - 2026-07-05
 
 In-tree Star6E (Infinity6E) sensor drivers for IMX335 and IMX415 — the Star6E
