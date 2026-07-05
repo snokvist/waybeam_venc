@@ -6,35 +6,44 @@ Status: **device-verified 2026-07-05** on SSC338Q (Infinity6E, kernel 4.9.84)
 to `sensors/star6e/sensor_imx415_star6e.ko`.
 
 Star6E counterpart to `drivers/sensor_imx415_maruko.c`. Ships the stock
-OpenIPC infinity6e linear tables plus **one new non-binned window-crop tier at
-100fps**, fps-ordered, with HDR/DOL removed.
+OpenIPC infinity6e linear tables plus a **non-binned sharp 100fps crop**, a
+**full-FOV binned 100fps** tier, and a **widened 60fps** output, fps-ordered,
+with HDR/DOL removed.
 
 ## Mode table (fps-ordered)
 
 | Idx | Resolution | fps | Readout | Link | Init function |
 |---|---|---|---|---|---|
 | 0 | 3840×2160 | 30  | all-pixel, **non-binned** | 891  | `pCus_init_8m_30fps_mipi4lane_linear` |
-| 1 | 2560×1440 | 60  | crop, **non-binned**      | 1485 | `pCus_init_5m_60fps_mipi4lane_linear` |
+| 1 | **2816×1584** | 60 | crop, **non-binned** (**widened** from 2560×1440) | 1485 | `pCus_init_5m_60fps_mipi4lane_linear` |
 | 2 | 1920×1080 | 90  | **2×2 binned** (full FOV) | 891  | `pCus_init_2m_90fps_mipi4lane_linear` |
-| 3 | **2304×1296** | **100** | crop, **non-binned** | 1485 | `pCus_init_window_2304x1296_100` **(NEW)** |
-| 4 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
+| 3 | 2304×1296 | 100 | crop, **non-binned** (sharp, 35% FOV) | 1485 | `pCus_init_window_2304x1296_100` |
+| 4 | **1920×1080** | **100** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_100fps_mipi4lane_linear` **(NEW)** |
+| 5 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
 
-HDR/DOL is not exposed (the two HDR handles are `NULL`; the compiler dead-code-
-eliminates the HDR subtree — no `_HDR` mode strings in the `.ko`).
+idx3 (sharp crop) and idx4 (full-FOV soft) are the two 100fps tradeoffs — kept
+as distinct modes. HDR/DOL is not exposed (the two HDR handles are `NULL`; the
+compiler dead-code-eliminates the HDR subtree — no `_HDR` strings in the `.ko`).
 
 ## Device verification (2026-07-05, .13)
 
-Method: pin `video0.fps=120` + `video0.size=auto`, switch only `sensor.mode`;
-true capture rate = the `Src/Dst`-ratio row FPS in `/proc/mi_modules/mi_vif/
-mi_vif0`. `dmesg` watched for sustained FIFO-FULL / Skip-IQ / FrmLost.
+Method: pin `video0.fps=120`, switch only `sensor.mode`; capture rate = the
+`Src/Dst`-ratio row FPS in `/proc/mi_modules/mi_vif/mi_vif0`; sensor rate =
+IsrCnt delta (1 ISR/frame, calibrated against the stock 120 mode where
+IsrCnt=enqueue=delivered). `dmesg` watched for FIFO-FULL / Skip-IQ / FrmLost.
 
 | Idx | Target fps | Measured VIF FPS | Sustained drops |
 |---|---|---|---|
 | 0 | 30  | 32.16  | 0 |
-| 1 | 60  | 59.51  | 0 |
+| 1 | 60  | 59.52 (2816×1584) | 0 |
 | 2 | 90  | 89.92  | 0 |
 | 3 | 100 | 99.00 (99.10 over a 30 s soak) | 0 |
-| 4 | 120 | 118.64 | 0 |
+| 4 | 100 | 100.00 over a 30 s soak (full-FOV binned) | 0 |
+| 5 | 120 | 118.64 | 0 |
+
+Warm mode-switch (SIGHUP, no power cycle) verified clean both directions across
+the binned/non-binned boundary, e.g. idx1→idx4 (99.90 fps) and idx4→idx1
+(59.52 fps, i2c-confirmed binning regs `0x3020/22=0x00` cleared).
 
 ## The non-binned 100fps mode (idx3)
 
@@ -76,6 +85,53 @@ No venc changes were needed: Star6E's REALTIME VIF→VPE bind and default CSI
 clock already carry the 1485 link (idx1 proves it), so a new 1485 mode is
 driver-only — unlike Maruko/I6C, which needed a FRAMEBASE bind + 288 MHz CSI
 clock keyed on a `link_mbps` field.
+
+## The full-FOV binned 100fps mode (idx4)
+
+**Goal:** 100fps at the *full sensor FOV* (unlike the sharp idx3 crop, which is
+35% FOV). Achieved by 2×2 binning (full-FOV, half-resolution/soft) — the same
+readout as the stock 90fps mode, pushed to 100.
+
+Naively pushing the stock 1920×1080 binned table to 100fps **halves** delivery:
+the sensor runs 100 but the VIF enqueues only ~50 with `DropCnt=0` (silent). The
+cause is **not** MIPI bandwidth, the ISP MPix ceiling, or bit depth (all
+device-ruled-out — 891 and 1485 both halve, 10bpp and 12bpp both halve, and
+207 MPix/s is well under the ~300 non-binned wall). It is the **binned
+vertical-timing wall**:
+
+- A 2×2-binned readout's `VMAX` must cover the **physical** lines scanned
+  (2 × output height = 2160 for 1080p) plus vertical blanking.
+- Frame rate is `≈ 74.25M / (VMAX × HMAX)` on the 891 binned clock, so at the
+  stock binned `HMAX=365` a 100fps frame caps `VMAX` at ~2023 — **below** the
+  2160 physical lines. The sensor can't complete the frame in `VMAX` line-times,
+  so the VIF waits two frames and delivers exactly half.
+
+**Fix (reduced-HMAX, same class as idx3):** shorten the line to `HMAX=328` so a
+100fps frame allows `VMAX=2250` (= 2160 + 90 vblank, matching the stock 90fps
+mode). `74.25M / (2250 × 328) ≈ 100.1fps`, and 2250 ≥ 2160 physical + vblank, so
+the frame completes. `HMAX=328` (10% below the stock 365) reads clean — 0 drops,
+no dmesg errors. Device-verified **100.00fps, 0 drops over a 30 s soak**. 891
+link, 12-bit, full 1920×1080 (`incrop (0,0,1920,1080)`).
+
+The table (`Sensor_2m_100fps_init_table_4lane_linear`) is the stock 90fps binned
+table with `HMAX 0x016D→0x0148` and `VMAX 0x08CA` (unchanged) — one register
+pair. It self-sets binning (`0x3020/21/22=0x01`) + binned DIG_CLP, so a warm
+switch into it is safe.
+
+## The widened 60fps mode (idx1)
+
+The stock 60fps table already scans a **2952×1656** window, but the mode
+advertised 2560×1440 and venc **center-cropped** the readout down to it
+(`incrop (196,108,2560,1440)`), discarding FOV for free. Widening the mode's
+output resolution to **2816×1584** (mode-table `senout` only — no sensor
+register change) un-crops most of the readout: FOV area rises from ~44% to ~58%
+of the sensor.
+
+The ceiling is the non-binned ISP wall (~300 MPix/s): the full 2952×1656@60 =
+293 MPix/s streams but shows startup FIFO-FULL; **2816×1584** (267 MPix/s) holds
+~10% headroom for the `mod_osd_render` overlay — verified 59.52fps, 0 drops,
+0 steady-state FIFO-FULL. (For maximum FOV without OSD, 2944×1656 is the widest
+clean 16:9.)
 
 ## Warm-switch safety (readout-mode register latch)
 

@@ -1,5 +1,31 @@
 # History
 
+## [0.27.0] - 2026-07-05
+
+Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@100fps** mode, and a **widened
+2816×1584@60fps** replacing the old 2560×1440. Both device-verified on .13.
+
+- **1920×1080@100fps full-FOV binned** (`drivers/sensor_imx415_star6e.c`,
+  `Sensor_2m_100fps_init_table_4lane_linear`, inserted fps-ordered at idx4) —
+  the *full sensor FOV* at 100fps (soft/binned), complementing the sharp
+  non-binned 2304×1296@100 (idx3) at the same fps. Device-verified 100.00 fps,
+  0 drops over a 30 s soak, warm-switch clean both directions.
+  The obstacle was the **binned vertical-timing wall**, not bandwidth or the ISP
+  MPix ceiling: a binned readout's VMAX must cover the *physical* lines read
+  (2×output_h = 2160) plus vblank, so at the stock binned HMAX=365 a 100fps
+  frame caps VMAX at ~2023 < 2160 and the VIF silently delivers *exactly half*
+  (~50 fps, DropCnt=0). Fix = the same reduced-HMAX trick as the non-binned
+  modes: HMAX 365→**328** lets VMAX be 2250 (=2160+90 vblank, matching the stock
+  90fps mode) at 100fps. Bit depth (10 vs 12bpp) and link (891 vs 1485) were
+  both ruled out as red herrings before the timing wall was identified.
+- **2816×1584@60fps** (idx1, widened from 2560×1440) — the stock 60fps table
+  already reads a 2952×1656 window but venc center-cropped it to 2560×1440,
+  discarding FOV. Widening the output to 2816×1584 (mode-table only, no sensor
+  register change) lifts FOV area from ~44% to ~58% of the sensor. Held at
+  ~2816-wide (267 MPix/s) rather than the full 2952 (293 MPix/s, startup
+  FIFO-FULL) to leave ISP headroom for the OSD overlay. Verified 59.52 fps,
+  0 drops, 0 steady-state FIFO-FULL.
+
 ## [0.26.0] - 2026-07-05
 
 Star6E IMX415: a new **non-binned 2304×1296@100fps** window-crop mode, plus
