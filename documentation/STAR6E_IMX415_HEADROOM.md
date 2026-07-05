@@ -206,11 +206,13 @@ horizontal lines** while the VIF still reports the full, correct fps (0 drops,
 Cause: a `WINMODE=0x04` (windowed-crop) binned readout needs a **larger HMAX
 than the full-frame `WINMODE=0x00` analog floor** (§2.2's 229–275). For a
 1728-wide binned crop the crop floor sits between **308 and 365**: HMAX=365
-renders clean (idx9/idx10, device-verified image), HMAX=308 corrupts. This also
-explains the **full-FOV 1920×1080 binned modes (idx2/4/6)**: to hit 100/120fps
-they drop HMAX to ~328/275, below their (wider, 3840-phys-column) crop floor, so
-they report correct fps but render the same black+colored-lines garbage. They
-are kept only for stock-index compatibility — **use idx9/idx10 instead**.
+renders clean (the wide-crop modes, device-verified image), HMAX=308 corrupts.
+This also explains the **full-FOV 1920×1080 binned 100/120fps modes**: to hit
+those rates they drop HMAX to ~328/275, below their (wider, 3840-phys-column)
+crop floor, so they report correct fps but render black+colored-lines garbage —
+they were **removed in v0.33.0**. The full-FOV binned **@90 is clean and kept**
+(90fps needs only HMAX≈365-equivalent, which stays above the floor). For
+higher-FOV binned at 100/120fps use the wide-crop modes instead.
 
 Practical rule for new binned crops: keep **HMAX ≥ 365**, then the frame rate
 caps the height (VMAX = 74.25e6/(fps·365) ≥ 2·H + vblank): ~972 lines at 100fps,

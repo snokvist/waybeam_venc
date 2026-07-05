@@ -1,5 +1,22 @@
 # History
 
+## [0.33.0] - 2026-07-05
+
+Star6E IMX415: **removed the two image-corrupt full-FOV binned modes** and settled
+on a clean 9-mode fps-ordered lineup.
+
+- Removed **1920×1080@100** and **1920×1080@120** (full-FOV 2×2-binned). They
+  reported correct fps but rendered black + colored horizontal lines on the I6E
+  ISP — to reach 100/120fps their HMAX drops to 328/275, below the wide binned
+  line's WINMODE=0x04 crop floor (~365). Init tables, thunks, enum entries, mode
+  rows and dispatch cases all deleted (no dead code).
+- **Kept 1920×1080@90** (full-FOV 2×2-binned, idx4): at 90fps HMAX stays above the
+  crop floor, so it renders a clean image — device-confirmed.
+- Final lineup (idx : res@fps): 0:4K@30, 1:4K@40, 2:2816×1584@60, 3:3840×1152@60,
+  4:1920×1080@90, 5:2304×1296@100, 6:1728×972@100, 7:1472×816@120, 8:1728×816@120.
+  Every mode renders a valid image; still strict fps order.
+- Docs (`STAR6E_IMX415_MODES.md`, `HEADROOM.md` §5.6) updated to match.
+
 ## [0.32.0] - 2026-07-05
 
 Star6E IMX415: **strict fps ordering** of the full 11-mode lineup. No behaviour
