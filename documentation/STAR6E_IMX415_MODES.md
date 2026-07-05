@@ -15,27 +15,35 @@ with HDR/DOL removed.
 | Idx | Resolution | fps | Readout | Link | Init function |
 |---|---|---|---|---|---|
 | 0 | 3840×2160 | 30  | all-pixel, **non-binned** | 891  | `pCus_init_8m_30fps_mipi4lane_linear` |
-| 1 | **2816×1584** | 60 | crop, **non-binned** (**widened** from 2560×1440) | 1485 | `pCus_init_5m_60fps_mipi4lane_linear` |
-| 2 | 1920×1080 | 90  | **2×2 binned** (full FOV) | 891  | `pCus_init_2m_90fps_mipi4lane_linear` |
-| 3 | 2304×1296 | 100 | crop, **non-binned** (sharp, 35% FOV) | 1485 | `pCus_init_window_2304x1296_100` |
-| 4 | **1920×1080** | **100** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_100fps_mipi4lane_linear` |
-| 5 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
-| 6 | **1920×1080** | **120** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_120fps_mipi4lane_linear` |
-| 7 | **3840×1152** | **60** | **non-binned, full WIDTH** (ultrawide 3.33:1) | 1485 | `pCus_init_uw_3840x1152_60_mipi4lane_linear` |
-| 8 | **3840×2160** | **40** | **non-binned, FULL 4K** (+33% over stock 4K@30) | 1485 | `pCus_init_8m_40fps_mipi4lane_linear` |
-| 9 | **1728×972** | **100** | **2×2 binned, WIDE CROP** (widest clean binned FOV @100) | 891 | `pCus_init_bc1728_100fps_mipi4lane_linear` **(NEW)** |
-| 10 | **1728×816** | **120** | **2×2 binned, wide crop** (widest clean binned FOV @120) | 891 | `pCus_init_bc1728_120fps_mipi4lane_linear` **(NEW)** |
+| 1 | **3840×2160** | **40** | **non-binned, FULL 4K** (+33% over stock 4K@30) | 1485 | `pCus_init_8m_40fps_mipi4lane_linear` |
+| 2 | **2816×1584** | 60 | crop, **non-binned** (**widened** from 2560×1440) | 1485 | `pCus_init_5m_60fps_mipi4lane_linear` |
+| 3 | **3840×1152** | 60 | **non-binned, full WIDTH** (ultrawide 3.33:1) | 1485 | `pCus_init_uw_3840x1152_60_mipi4lane_linear` |
+| 4 | 1920×1080 | 90  | **2×2 binned, full FOV** ⚠️ **corrupt** | 891  | `pCus_init_2m_90fps_mipi4lane_linear` |
+| 5 | 2304×1296 | 100 | crop, **non-binned** (sharp, 35% FOV) | 1485 | `pCus_init_window_2304x1296_100` |
+| 6 | **1920×1080** | **100** | **2×2 binned, full FOV** ⚠️ **corrupt** | 891 | `pCus_init_2m_100fps_mipi4lane_linear` |
+| 7 | **1728×972** | **100** | **2×2 binned, WIDE CROP** (widest clean binned FOV @100) | 891 | `pCus_init_bc1728_100fps_mipi4lane_linear` |
+| 8 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
+| 9 | **1920×1080** | **120** | **2×2 binned, full FOV** ⚠️ **corrupt** | 891 | `pCus_init_2m_120fps_mipi4lane_linear` |
+| 10 | **1728×816** | **120** | **2×2 binned, wide crop** (widest clean binned FOV @120) | 891 | `pCus_init_bc1728_120fps_mipi4lane_linear` |
 
-> **Full-FOV 1920×1080 binned (idx2/4/6) is image-corrupt on the I6E ISP** —
+> **Full-FOV 1920×1080 binned (idx4/6/9) is image-corrupt on the I6E ISP** —
 > it reports the correct fps but renders black with colored horizontal lines.
 > The `WINMODE=0x04` crop path needs `HMAX ≥ ~365` for a wide binned line, which
 > a 1728-wide crop clears but the 1920-wide full-FOV readout does not. Use the
-> **binned wide-crops idx9 (100fps) / idx10 (120fps)** for high-FOV binned video.
-> idx9/idx10 are device-verified clean (image + timing); idx2/4/6 are retained
+> **binned wide-crops idx7 (100fps) / idx10 (120fps)** for high-FOV binned video.
+> idx7/idx10 are device-verified clean (image + timing); idx4/6/9 are retained
 > only for stock-index compatibility and should not be selected.
 
-idx3 (sharp crop) and idx9 (widest binned) are the two 100fps tradeoffs — kept
-as distinct modes. HDR/DOL is not exposed (the two HDR handles are `NULL`; the
+idx5 (sharp crop) and idx7 (widest binned) are the two 100fps tradeoffs — kept
+as distinct modes.
+
+> **Note on indices:** the lineup was re-sorted into strict fps order in v0.32.0.
+> The two tables above and the driver are authoritative for current indices. The
+> narrative sub-sections further down were written against the earlier
+> append-order indices and refer to each mode primarily by resolution — trust the
+> resolution, not the parenthetical idx, in that prose.
+
+HDR/DOL is not exposed (the two HDR handles are `NULL`; the
 compiler dead-code-eliminates the HDR subtree — no `_HDR` strings in the `.ko`).
 
 ## Device verification (2026-07-05, .13)
@@ -48,28 +56,28 @@ IsrCnt=enqueue=delivered). `dmesg` watched for FIFO-FULL / Skip-IQ / FrmLost.
 | Idx | Target fps | Measured VIF FPS | Sustained drops |
 |---|---|---|---|
 | 0 | 30  | 32.16  | 0 |
-| 1 | 60  | 59.52 (2816×1584) | 0 |
-| 2 | 90  | 89.92  | 0 |
-| 3 | 100 | 99.00 (99.10 over a 30 s soak) | 0 |
-| 4 | 100 | 100.00 over a 30 s soak (full-FOV binned) | 0 |
-| 5 | 120 | 118.64 (1472×816 crop) | 0 |
-| 6 | 120 | 120.15 over a 20 s soak (full-FOV binned) | 0 |
-| 7 | 60  | 59.98 over a 15 s soak (ultrawide, incrop 3840×1152) | 0 |
-| 8 | 40  | 40.7 (sensor=enqueue=delivered, 0 steady FIFO-FULL) | 0 |
-| 9 | 100 | 100.0 (image eyeballed clean on HDMI) | 0 |
-| 10 | 120 | 119 (image eyeballed clean on HDMI) | 0 |
+| 1 | 40  | 40.7 (sensor=enqueue=delivered, 0 steady FIFO-FULL) | 0 |
+| 2 | 60  | 59.52 (2816×1584) | 0 |
+| 3 | 60  | 59.98 over a 15 s soak (ultrawide, incrop 3840×1152) | 0 |
+| 4 | 90  | 89.92 (fps only — **IMAGE CORRUPT**, do not use) | 0 |
+| 5 | 100 | 99.00 (99.10 over a 30 s soak) | 0 |
+| 6 | 100 | 100.00 over a 30 s soak (fps only — **IMAGE CORRUPT**) | 0 |
+| 7 | 100 | 100.0 (**image eyeballed clean** on HDMI) | 0 |
+| 8 | 120 | 118.64 (1472×816 crop) | 0 |
+| 9 | 120 | 120.15 over a 20 s soak (fps only — **IMAGE CORRUPT**) | 0 |
+| 10 | 120 | 119 (**image eyeballed clean** on HDMI) | 0 |
 
-idx9/idx10 are the **binned wide-crops** — the widest 2×2-binned FOV that renders
-clean at 100/120fps. Both clone the working idx5 1472×816 crop (`WINMODE=0x04`
-with an explicit centered window) and widen it to 1728. idx9 holds 972 lines at
+idx7/idx10 are the **binned wide-crops** — the widest 2×2-binned FOV that renders
+clean at 100/120fps. Both clone the working idx8 1472×816 crop (`WINMODE=0x04`
+with an explicit centered window) and widen it to 1728. idx7 holds 972 lines at
 100fps (HMAX=365, VMAX=2034); idx10 caps at 816 lines because 120fps forces
 VMAX≤1700 at the floor-clearing HMAX=365 — a taller frame drops HMAX below the
 crop's line-time floor and corrupts (black+colored-lines, the same failure as
-full-FOV 1920×1080 binned). Unlike the fps-only checks above, idx9/idx10 were
+full-FOV 1920×1080 binned). Unlike the fps-only checks above, idx7/idx10 were
 **image-verified on the display**, not just by counters.
 
-idx8 is **native full 4K at 40fps** — the clean full-4K ceiling. Cloned from the
-idx7 1485 base with a full-height window (VST=0, VWIDTH=4320), VMAX=2250,
+idx1 is **native full 4K at 40fps** — the clean full-4K ceiling. Cloned from the
+idx3 1485 base with a full-height window (VST=0, VWIDTH=4320), VMAX=2250,
 HMAX=825 (332 MPix/s). The two walls just above it were mapped on-device: 4K@42
 (HMAX=779, 352 MPix/s) hits the ISP throughput wall (FIFO-FULL, ~7% loss) and
 4K@45 (HMAX=733) breaches the sensor's analog HMAX floor (733 < floor ≤ 779,

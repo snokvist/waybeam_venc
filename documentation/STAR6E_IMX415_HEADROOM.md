@@ -6,6 +6,11 @@ review of the shipped lineup, and grounded speculation on what more is possible.
 All numbers device-measured on SSC338Q (Infinity6E, 4.9.84) + IMX415, 4-lane
 MIPI, bench box `.13` (2026-07-05).
 
+> **Note on indices:** this document predates the strict fps re-sort in v0.32.0
+> and refers to modes by their earlier append-order idx. Modes are unambiguous by
+> resolution@fps; see `STAR6E_IMX415_MODES.md` for current indices. The timing
+> model and physics here are index-independent.
+
 ## 1. The timing model (unified, both links)
 
 Every mode obeys one frame-rate law:

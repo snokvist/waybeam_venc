@@ -1,5 +1,25 @@
 # History
 
+## [0.32.0] - 2026-07-05
+
+Star6E IMX415: **strict fps ordering** of the full 11-mode lineup. No behaviour
+change per mode — only the resolution-table order and dispatch case indices were
+permuted so `sensor.mode` steps monotonically in frame rate.
+
+New index map (old → new): 0→0, 1→2, 2→4, 3→5, 4→6, 5→8, 6→9, 7→3, 8→1, 9→7,
+10→10. Resulting order (idx : res@fps): 0:4K@30, 1:4K@40, 2:2816×1584@60,
+3:3840×1152@60, 4:1920×1080@90, 5:2304×1296@100, 6:1920×1080@100, 7:1728×972@100,
+8:1472×816@120, 9:1920×1080@120, 10:1728×816@120.
+
+- The `imx415_mipi_linear[]` rows and the `pCus_SetVideoRes` cases were reordered
+  together; each case keeps its exact init table / vts_30fps / fps / line_period /
+  data_prec. Verified: `.ko` mode strings now enumerate in fps-ascending order.
+- The full-FOV binned corruption warning (idx4/6/9 in the new numbering) is
+  restated in the driver header and docs.
+- Doc tables (`STAR6E_IMX415_MODES.md`) re-sorted to match; narrative
+  sub-sections retain original-order idx labels (flagged inline) and identify
+  modes by resolution.
+
 ## [0.31.0] - 2026-07-05
 
 Star6E IMX415: two **binned wide-crop** modes (idx9/idx10) that give the widest

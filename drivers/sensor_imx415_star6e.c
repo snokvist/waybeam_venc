@@ -156,38 +156,45 @@ static struct { // LINEAR
         const char* strResDesc;
     } senstr;
 } imx415_mipi_linear[] = {
-    /* Star6E IMX415 lineup — fps-ordered, HDR removed.  All device-verified .13.
-     *  idx0 4K@30 non-binned 891.
-     *  idx1 2816x1584@60 non-binned 1485 — widened from 2560x1440 to ~max FOV
-     *       the I6E ISP holds at 60fps with OSD headroom (267 MPix/s).
-     *  idx2 1920x1080@90 2x2-binned (full FOV, stock).
-     *  idx3 2304x1296@100 non-binned 1485 crop — sharp, widest 16:9 at 100fps
-     *       (~299 MPix/s, at the non-binned ISP wall).
-     *  idx4 1920x1080@100 2x2-binned FULL-FOV (soft) — reduced-HMAX beats the
-     *       binned vertical-timing wall.  Complements idx3 (sharp vs full-FOV).
-     *  idx5 1472x816@120 2x2-binned crop (stock).
-     *  idx6 1920x1080@120 2x2-binned FULL-FOV (soft) — HMAX=275, the practical
-     *       full-width binned ceiling.  Full-FOV alternative to the idx5 crop.
-     *  idx7 3840x1152@60 non-binned 1485 ULTRAWIDE — full sensor WIDTH, letterbox
-     *       (3.33:1); HMAX=1022 (idx0 full-width line), VMAX=1211.  265 MPix/s.
-     *  idx8 3840x2160@40 non-binned 1485 FULL 4K — native 4K at 40fps (+33% over
-     *       the stock idx0 4K@30).  HMAX=825, VMAX=2250, 332 MPix/s.  This is the
-     *       clean full-4K ceiling: 4K@42 hits the ISP throughput wall (~340) and
-     *       4K@45 breaches the sensor analog HMAX floor (733<floor<=779, clean
-     *       halve).  The i6c "288M CSI lever" is NOT available on i6e (kernel
-     *       rejects CUS_CSI_CLK_288M), so 216M is the ceiling — see
-     *       documentation/STAR6E_IMX415_HEADROOM.md §5.3-5.4. */
-    { LINEAR_RES_1, { 3840, 2160, 3,  30 }, { 0, 0, 3840, 2160 }, { "3840x2160@30fps"  } },
-    { LINEAR_RES_2, { 2816, 1584, 3,  60 }, { 0, 0, 2952, 1656 }, { "2816x1584@60fps"  } },
-    { LINEAR_RES_3, { 1920, 1080, 3,  90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps"  } },
-    { LINEAR_RES_4, { 2304, 1296, 3, 100 }, { 0, 0, 2304, 1296 }, { "2304x1296@100fps" } },
-    { LINEAR_RES_5, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
-    { LINEAR_RES_6, { 1472,  816, 3, 120 }, { 0, 0, 1472,  816 }, { "1472x816@120fps"  } },
-    { LINEAR_RES_7, { 1920, 1080, 3, 120 }, { 0, 0, 1920, 1080 }, { "1920x1080@120fps" } },
-    { LINEAR_RES_8, { 3840, 1152, 3,  60 }, { 0, 0, 3840, 1152 }, { "3840x1152@60fps"  } },
-    { LINEAR_RES_9, { 3840, 2160, 3,  40 }, { 0, 0, 3840, 2160 }, { "3840x2160@40fps"  } },
-    { LINEAR_RES_10, { 1728, 972, 3, 100 }, { 0, 0, 1728,  972 }, { "1728x972@100fps"  } },
-    { LINEAR_RES_11, { 1728, 816, 3, 120 }, { 0, 0, 1728,  816 }, { "1728x816@120fps"  } },
+    /* Star6E IMX415 lineup — strictly fps-ordered, HDR removed.  Device-verified .13.
+     *  idx0 3840x2160@30 non-binned 891 (stock 4K).
+     *  idx1 3840x2160@40 non-binned 1485 FULL 4K — native 4K +33% over idx0.  HMAX=825,
+     *       VMAX=2250, 332 MPix/s.  Clean full-4K ceiling: 4K@42 = ISP wall (~340),
+     *       4K@45 = analog HMAX floor (733<floor<=779, clean halve).  The i6c "288M CSI
+     *       lever" is NOT available on i6e (kernel rejects CUS_CSI_CLK_288M); 216M is the
+     *       ceiling.  See documentation/STAR6E_IMX415_HEADROOM.md §5.3-5.4.
+     *  idx2 2816x1584@60 non-binned 1485 — widened from 2560x1440 to ~max FOV at 60fps
+     *       (267 MPix/s, OSD headroom).
+     *  idx3 3840x1152@60 non-binned 1485 ULTRAWIDE — full sensor WIDTH, letterbox 3.33:1;
+     *       HMAX=1022 (idx0 full-width line), VMAX=1211.  265 MPix/s.
+     *  idx4 1920x1080@90 2x2-binned FULL-FOV (stock) — see WARNING below.
+     *  idx5 2304x1296@100 non-binned 1485 crop — sharp, widest 16:9 at 100fps (~299
+     *       MPix/s, at the non-binned ISP wall).
+     *  idx6 1920x1080@100 2x2-binned FULL-FOV — see WARNING below.
+     *  idx7 1728x972@100 2x2-binned WIDE CROP — widest binned FOV that renders CLEAN at
+     *       100fps (image-verified).  WINMODE=0x04 crop + explicit window, HMAX=365.
+     *  idx8 1472x816@120 2x2-binned crop (stock).
+     *  idx9 1920x1080@120 2x2-binned FULL-FOV — see WARNING below.
+     *  idx10 1728x816@120 2x2-binned wide crop — widest binned FOV CLEAN at 120fps
+     *       (image-verified).  Same 1728 width as idx7; height 816 (120fps caps VMAX at
+     *       1700 at the floor-clearing HMAX=365).  17% wider than idx8.
+     *
+     *  WARNING: the full-FOV 1920x1080 binned modes (idx4/6/9) report correct fps but
+     *  render BLACK + colored horizontal lines on the I6E ISP — the WINMODE=0x04 crop
+     *  needs HMAX>=~365 for a wide binned line, which their reduced-HMAX (275/328) to
+     *  reach 90-120fps falls below.  Retained for stock-index compat; use the binned
+     *  WIDE-CROP idx7 (100fps) / idx10 (120fps) for high-FOV binned video.  See §5.6. */
+    { LINEAR_RES_1,  { 3840, 2160, 3,  30 }, { 0, 0, 3840, 2160 }, { "3840x2160@30fps"  } },
+    { LINEAR_RES_2,  { 3840, 2160, 3,  40 }, { 0, 0, 3840, 2160 }, { "3840x2160@40fps"  } },
+    { LINEAR_RES_3,  { 2816, 1584, 3,  60 }, { 0, 0, 2952, 1656 }, { "2816x1584@60fps"  } },
+    { LINEAR_RES_4,  { 3840, 1152, 3,  60 }, { 0, 0, 3840, 1152 }, { "3840x1152@60fps"  } },
+    { LINEAR_RES_5,  { 1920, 1080, 3,  90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps"  } },
+    { LINEAR_RES_6,  { 2304, 1296, 3, 100 }, { 0, 0, 2304, 1296 }, { "2304x1296@100fps" } },
+    { LINEAR_RES_7,  { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
+    { LINEAR_RES_8,  { 1728,  972, 3, 100 }, { 0, 0, 1728,  972 }, { "1728x972@100fps"  } },
+    { LINEAR_RES_9,  { 1472,  816, 3, 120 }, { 0, 0, 1472,  816 }, { "1472x816@120fps"  } },
+    { LINEAR_RES_10, { 1920, 1080, 3, 120 }, { 0, 0, 1920, 1080 }, { "1920x1080@120fps" } },
+    { LINEAR_RES_11, { 1728,  816, 3, 120 }, { 0, 0, 1728,  816 }, { "1728x816@120fps"  } },
 };
 
 static struct { // HDR
@@ -3324,7 +3331,7 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     handle->video_res_supported.ulcur_res = res_idx;
 
     switch (res_idx) {
-    case 0:
+    case 0: // 3840x2160@30 — non-binned 891, stock 4K
         handle->video_res_supported.ulcur_res = 0;
         handle->pCus_sensor_init = pCus_init_8m_30fps_mipi4lane_linear;
         vts_30fps = 2250;
@@ -3334,91 +3341,8 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         handle->data_prec = CUS_DATAPRECISION_12;
         break;
 
-    case 1:
+    case 1: // 3840x2160@40 — full 4K, non-binned 1485, HMAX=825 (332 MPix/s)
         handle->video_res_supported.ulcur_res = 1;
-        handle->pCus_sensor_init = pCus_init_5m_60fps_mipi4lane_linear;
-        vts_30fps = 1900;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 60;
-        Preview_line_period = 8736; // 16.6ms/1900 = 8736ns;
-        handle->data_prec = CUS_DATAPRECISION_10;
-        break;
-
-    case 2:
-        handle->video_res_supported.ulcur_res = 2;
-        handle->pCus_sensor_init = pCus_init_2m_90fps_mipi4lane_linear;
-        vts_30fps = 2250;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 90;
-        Preview_line_period = 4933; // 11.1ms/2250 = 4933ns;
-        handle->data_prec = CUS_DATAPRECISION_12;
-        break;
-
-    /* idx3: 2304x1296@100 — non-binned 1485 window crop (10-bit like idx1),
-     * HMAX=548 -> line 7343ns.  Widest 16:9 the I6E ISP holds at 100fps. */
-    case 3:
-        handle->video_res_supported.ulcur_res = 3;
-        handle->pCus_sensor_init = pCus_init_window_2304x1296_100;
-        vts_30fps = 1360;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 100;
-        Preview_line_period = 7343;
-        handle->data_prec = CUS_DATAPRECISION_10;
-        break;
-
-    /* idx4: 1920x1080@100 — FULL-FOV 2x2-BINNED, soft, full sensor FOV.
-     * Reduced-HMAX=328 (vs stock binned 365) so VMAX=2250 covers the 2160
-     * physical lines + vblank at 100fps — beats the binned vertical-timing wall
-     * (stock HMAX halves to 50).  891 link, 12-bit.  Verified 100.00fps 0-drop. */
-    case 4:
-        handle->video_res_supported.ulcur_res = 4;
-        handle->pCus_sensor_init = pCus_init_2m_100fps_mipi4lane_linear;
-        vts_30fps = 2250;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 100;
-        Preview_line_period = 4428; // 891 binned line, HMAX=328;
-        handle->data_prec = CUS_DATAPRECISION_12; // stock binned modes are 12bpp
-        break;
-
-    case 5:
-        handle->video_res_supported.ulcur_res = 5;
-        handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
-        vts_30fps = 1700;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 120;
-        Preview_line_period = 4882; // 8.3ms/1700 = 4882ns;
-        handle->data_prec = CUS_DATAPRECISION_12;
-        break;
-
-    /* idx6: 1920x1080@120 — FULL-FOV 2x2-BINNED (soft).  Same as idx4 one notch
-     * faster: HMAX=275 (line 3712ns, just above the full-width binned analog
-     * floor ~250-275), VMAX=2250.  Full sensor FOV at 120 — vs the cropped
-     * idx5.  891 link, 12-bit.  Verified 119.96fps 0-drop 0-FIFO-FULL. */
-    case 6:
-        handle->video_res_supported.ulcur_res = 6;
-        handle->pCus_sensor_init = pCus_init_2m_120fps_mipi4lane_linear;
-        vts_30fps = 2250;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 120;
-        Preview_line_period = 3712; // 891 binned line, HMAX=275;
-        handle->data_prec = CUS_DATAPRECISION_12;
-        break;
-
-    /* idx7: 3840x1152@60 — ULTRAWIDE (full sensor width, letterbox) non-binned
-     * 1485.  HMAX=1022 (idx0 full-width line), VMAX=1211 => 60fps; 1211 >= 1152
-     * physical + vblank.  ISP 265 MPix/s.  10-bit. */
-    case 7:
-        handle->video_res_supported.ulcur_res = 7;
-        handle->pCus_sensor_init = pCus_init_uw_3840x1152_60_mipi4lane_linear;
-        vts_30fps = 1211;
-        params->expo.vts = vts_30fps;
-        params->expo.fps = 60;
-        Preview_line_period = 13760; // HMAX=1022 line @ 60fps;
-        handle->data_prec = CUS_DATAPRECISION_10;
-        break;
-
-    case 8: // 3840x2160@40 — full 4K, non-binned 1485, HMAX=825 (332 MPix/s)
-        handle->video_res_supported.ulcur_res = 8;
         handle->pCus_sensor_init = pCus_init_8m_40fps_mipi4lane_linear;
         vts_30fps = 2250;
         params->expo.vts = vts_30fps;
@@ -3427,8 +3351,63 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         handle->data_prec = CUS_DATAPRECISION_10;
         break;
 
-    case 9: // 1728x972@100 — 2x2-binned WIDE CROP, HMAX=365, VMAX=2034
-        handle->video_res_supported.ulcur_res = 9;
+    case 2: // 2816x1584@60 — non-binned 1485, widened crop (267 MPix/s)
+        handle->video_res_supported.ulcur_res = 2;
+        handle->pCus_sensor_init = pCus_init_5m_60fps_mipi4lane_linear;
+        vts_30fps = 1900;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 60;
+        Preview_line_period = 8736; // 16.6ms/1900 = 8736ns;
+        handle->data_prec = CUS_DATAPRECISION_10;
+        break;
+
+    /* case 3: 3840x1152@60 — ULTRAWIDE (full sensor width, letterbox) non-binned
+     * 1485.  HMAX=1022 (idx0 full-width line), VMAX=1211 => 60fps; 1211 >= 1152
+     * physical + vblank.  ISP 265 MPix/s.  10-bit. */
+    case 3:
+        handle->video_res_supported.ulcur_res = 3;
+        handle->pCus_sensor_init = pCus_init_uw_3840x1152_60_mipi4lane_linear;
+        vts_30fps = 1211;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 60;
+        Preview_line_period = 13760; // HMAX=1022 line @ 60fps;
+        handle->data_prec = CUS_DATAPRECISION_10;
+        break;
+
+    case 4: // 1920x1080@90 — FULL-FOV 2x2-binned (stock); IMAGE-CORRUPT, see hdr WARNING
+        handle->video_res_supported.ulcur_res = 4;
+        handle->pCus_sensor_init = pCus_init_2m_90fps_mipi4lane_linear;
+        vts_30fps = 2250;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 90;
+        Preview_line_period = 4933; // 11.1ms/2250 = 4933ns;
+        handle->data_prec = CUS_DATAPRECISION_12;
+        break;
+
+    /* case 5: 2304x1296@100 — non-binned 1485 window crop (10-bit), HMAX=548 ->
+     * line 7343ns.  Widest 16:9 the I6E ISP holds at 100fps. */
+    case 5:
+        handle->video_res_supported.ulcur_res = 5;
+        handle->pCus_sensor_init = pCus_init_window_2304x1296_100;
+        vts_30fps = 1360;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 100;
+        Preview_line_period = 7343;
+        handle->data_prec = CUS_DATAPRECISION_10;
+        break;
+
+    case 6: // 1920x1080@100 — FULL-FOV 2x2-binned; IMAGE-CORRUPT, see hdr WARNING
+        handle->video_res_supported.ulcur_res = 6;
+        handle->pCus_sensor_init = pCus_init_2m_100fps_mipi4lane_linear;
+        vts_30fps = 2250;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 100;
+        Preview_line_period = 4428; // 891 binned line, HMAX=328;
+        handle->data_prec = CUS_DATAPRECISION_12;
+        break;
+
+    case 7: // 1728x972@100 — 2x2-binned WIDE CROP (clean), HMAX=365, VMAX=2034
+        handle->video_res_supported.ulcur_res = 7;
         handle->pCus_sensor_init = pCus_init_bc1728_100fps_mipi4lane_linear;
         vts_30fps = 2034;
         params->expo.vts = vts_30fps;
@@ -3437,7 +3416,27 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         handle->data_prec = CUS_DATAPRECISION_12;
         break;
 
-    case 10: // 1728x816@120 — 2x2-binned wide crop, HMAX=365, VMAX=1700
+    case 8: // 1472x816@120 — 2x2-binned crop (stock)
+        handle->video_res_supported.ulcur_res = 8;
+        handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
+        vts_30fps = 1700;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 120;
+        Preview_line_period = 4882; // 8.3ms/1700 = 4882ns;
+        handle->data_prec = CUS_DATAPRECISION_12;
+        break;
+
+    case 9: // 1920x1080@120 — FULL-FOV 2x2-binned; IMAGE-CORRUPT, see hdr WARNING
+        handle->video_res_supported.ulcur_res = 9;
+        handle->pCus_sensor_init = pCus_init_2m_120fps_mipi4lane_linear;
+        vts_30fps = 2250;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 120;
+        Preview_line_period = 3712; // 891 binned line, HMAX=275;
+        handle->data_prec = CUS_DATAPRECISION_12;
+        break;
+
+    case 10: // 1728x816@120 — 2x2-binned wide crop (clean), HMAX=365, VMAX=1700
         handle->video_res_supported.ulcur_res = 10;
         handle->pCus_sensor_init = pCus_init_bc1728_120fps_mipi4lane_linear;
         vts_30fps = 1700;
