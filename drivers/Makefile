@@ -32,7 +32,7 @@ obj-m := sensor_config.o sensor_imx415_maruko.o sensor_imx335_maruko.o
 else ifeq ($(SOC),star6e)
 CROSS    ?= $(abspath $(THIS_DIR)/../toolchain/toolchain.sigmastar-infinity6e/bin/arm-openipc-linux-gnueabihf-)
 EXTRA_CFLAGS += -I$(I6E_INC) -I$(KSRC)/drivers/sstar/include
-obj-m := sensor_config.o sensor_imx335_star6e.o
+obj-m := sensor_config.o sensor_imx335_star6e.o sensor_imx415_star6e.o
 else
 $(error Unsupported SOC '$(SOC)'; expected 'maruko' or 'star6e')
 endif
