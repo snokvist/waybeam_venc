@@ -58,41 +58,35 @@ tracking the 59-vs-29.6 fps ratio. So the fps gap is **not** a configuration dif
 
 ## Lessons for waybeam — teardown / wedge / zombie hardening
 
-waybeam configures the pipeline **once and never tears it down cleanly in-process**; majestic
-performs an **ordered teardown + defensive unbind** that waybeam lacks. This is directly
-relevant to our known `venc_teardown_regression` / SigmaStar-zombie / reboot-required issues:
+> **CORRECTION (2026-07-05):** this section was drafted from the experiment branch before the
+> current master teardown was audited. A full code audit —
+> **`documentation/MARUKO_PIPELINE_HARDENING.md`** — found the premise below is **stale**: master
+> already implements or deliberately supersedes every item here. See that doc's §2 verdict table.
+> The original majestic observations are kept below for reference, each annotated with the
+> audited reality.
 
-1. **Ordered ISP teardown:** majestic does `MI_ISP_DisableOutputPort` → `MI_ISP_StopChannel`
-   → `MI_ISP_DestroyChannel` (and the analogous SCL/VPE/VIF/RGN teardown), *then*
-   `MI_SYS_UnBindChnPort` for every bound pair. waybeam's teardown path
-   (`maruko_pipeline.c:737` `fnDisablePort`/`fnStopChannel`/`fnDestroyChannel`) exists but is
-   only the error-unwind; a full ordered graceful teardown + **UnBindChnPort of all 4 binds**
-   before module destroy is worth adopting to avoid leaving MI_SYS in a half-bound state
-   (a prime zombie/wedge cause — see `[[venc_teardown_regression]]`, `[[venc_star6e_reinit_fragility]]`).
-2. **Defensive UnBind-before-Bind** (majestic's `MI_SYS_UnBindChnPort` in the *setup* path):
-   clears any stale binding so a warm restart/reconfigure doesn't fail "already bound." Cheap
-   insurance for our respawn paths (`[[venc_sighup_respawn]]`, `[[venc_resilience_reboot_required]]`).
-3. **Runtime reconfigure without full teardown:** majestic has a
-   `DisableOutputPort → SetOutputPortParam → EnableOutputPort` runtime path (binary `0x72612`) —
-   a way to change output params live without destroying the channel/binds. Useful for our
-   live mode-switch instead of a full respawn.
-4. **We resolve all the needed symbols already** (`maruko_mi.c:306-325`:
-   `fnDisablePort/fnStopChannel/fnDestroyChannel/fnEnablePort/fnSetPortConfig` etc.), so adopting
-   the ordered teardown/unbind is a pure sequencing change, no new SDK surface.
+majestic performs an ordered teardown + defensive unbind. When first written this looked like
+something waybeam lacked; the audit showed waybeam already does it (and more). Annotated:
 
-### Adoption checklist (concrete, low-risk)
+1. **Ordered ISP teardown** — majestic does `DisableOutputPort → StopChannel → DestroyChannel`
+   then `MI_SYS_UnBindChnPort` per pair. **Reality: already done, more thoroughly.**
+   `maruko_pipeline_teardown_graph` (`maruko_pipeline.c:4016-4176`) is a documented 8-step ordered
+   teardown that UnBinds all three binds (flag-guarded) *and* drains in-flight buffers first
+   (`maruko_wait_output_idle`) — a step majestic omits.
+2. **Defensive UnBind-before-Bind** in the setup path. **Reality: not needed.** Maruko fork+exec
+   **respawns** on every reinit (`maruko_runtime.c:118-156`), so `bind_maruko_pipeline` always runs
+   in a virgin process with nothing pre-bound.
+3. **Runtime reconfigure without full teardown.** **Reality: deliberately rejected.** In-process
+   reconfigure page-faulted and zombied the SoC (`maruko_runtime.c:132-151`); the respawn model
+   exists specifically to avoid it. Adopting this would regress.
+4. **Symbols already resolved** (`maruko_mi.c`) — true, and the teardown that uses them already
+   exists.
 
-| # | Change | Where | Fixes / hedges |
-|---|---|---|---|
-| 1 | Add `MI_SYS_UnBindChnPort` for all 4 binds, in reverse order, to the teardown path | `maruko_pipeline.c` teardown near `:737` | half-bound MI_SYS state → zombie/wedge on reinit `[[venc_teardown_regression]]` |
-| 2 | Call ordered `DisableOutputPort → StopChannel → DestroyChannel` per module (ISP/SCL/VIF/RGN) before unbind | same teardown path | leftover live channels blocking a clean respawn `[[venc_star6e_reinit_fragility]]` |
-| 3 | Defensive `UnBindChnPort` *before* each `BindChnPort2` in the setup path | `maruko_pipeline.c:2265` bind block | warm restart failing "already bound" `[[venc_sighup_respawn]]` |
-| 4 | Add a live `DisableOutputPort → SetOutputPortParam → EnableOutputPort` runtime path | new helper over resolved `fnDisablePort/fnSetPortConfig/fnEnablePort` | live mode-switch without a full respawn (avoids the reboot-required class `[[venc_resilience_reboot_required]]`) |
-
-None of these need a new SDK symbol — they reuse what `maruko_mi.c` already resolves. Each is
-independently testable on .12 (reinit-loop the pipeline and watch for MI_SYS zombies / MMA leak).
-Resolve the two teardown-only ISP symbols not yet bound (`MI_ISP_DestroyChannel` nr3,
-`MI_ISP_StopChannel` nr10) alongside the ones present if item 2 is taken up.
+**Net: no adoption checklist survives the audit.** The only residual work identified is cleanup
+(remove dead `maruko_stop_vpe`, refresh stale comments) — done in
+`MARUKO_PIPELINE_HARDENING.md` §4. The teardown-only ISP symbols (`MI_ISP_DestroyChannel` nr3,
+`MI_ISP_StopChannel` nr10) are intentionally *not* bound: master skips `ISP DestroyChannel` to
+avoid a CUS3A-mutex crash and lets `MI_SYS_Exit` reclaim the channel.
 
 ## fps-gap status (config exhausted)
 

@@ -1043,10 +1043,12 @@ static int maruko_wait_output_idle(const char *proc_path, int timeout_ms,
 #define MARUKO_PROC_ISP "/proc/mi_modules/mi_isp/mi_isp0"
 #define MARUKO_PROC_SCL "/proc/mi_modules/mi_scl/mi_scl0"
 
-/* Stop VPE channels only — keep devices and dlopen handles alive.
- * Used during reinit to avoid kernel mutex destruction. */
-/* Stop VPE channels only — skip ISP DestroyChannel which crashes
- * with "Mutex not initialized" when CUS3A state persists in kernel. */
+/* Stop the VPE channels (ISP quiesce + SCL destroy).  Reached only via
+ * teardown_graph (full shutdown) — Maruko fork+exec respawns on every
+ * reinit, so there is no in-process channel-recreate to guard.  The ISP
+ * DestroyChannel is skipped deliberately: the kernel ISP retains CUS3A
+ * mutex state that crashes a destroy+recreate cycle, and MI_SYS_Exit
+ * reclaims the channel on process exit. */
 static void maruko_stop_vpe_channels(void)
 {
 	/* Stop the producer (ISP) before destroying the consumer (SCL).
@@ -1068,23 +1070,6 @@ static void maruko_stop_vpe_channels(void)
 		(void)g_mi_scl.fnStopChannel(0, 0);
 		(void)g_mi_scl.fnDestroyChannel(0, 0);
 		g_mi_scl_chn_created = 0;
-	}
-}
-
-/* Full VPE stop — destroy devices and unload libs.
- * Used during final shutdown only. */
-static void maruko_stop_vpe(void)
-{
-	maruko_stop_vpe_channels();
-	g_mi_isp_chn_created = 0;
-	g_mi_scl_chn_created = 0;
-	if (g_mi_scl_dev_created) {
-		(void)g_mi_scl.fnDestroyDevice(0);
-		g_mi_scl_dev_created = 0;
-	}
-	if (g_mi_isp_dev_created) {
-		(void)g_mi_isp.fnDestroyDevice(0);
-		g_mi_isp_dev_created = 0;
 	}
 }
 
