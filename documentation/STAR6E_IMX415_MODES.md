@@ -18,8 +18,9 @@ with HDR/DOL removed.
 | 1 | **2816×1584** | 60 | crop, **non-binned** (**widened** from 2560×1440) | 1485 | `pCus_init_5m_60fps_mipi4lane_linear` |
 | 2 | 1920×1080 | 90  | **2×2 binned** (full FOV) | 891  | `pCus_init_2m_90fps_mipi4lane_linear` |
 | 3 | 2304×1296 | 100 | crop, **non-binned** (sharp, 35% FOV) | 1485 | `pCus_init_window_2304x1296_100` |
-| 4 | **1920×1080** | **100** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_100fps_mipi4lane_linear` **(NEW)** |
+| 4 | **1920×1080** | **100** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_100fps_mipi4lane_linear` |
 | 5 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
+| 6 | **1920×1080** | **120** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_120fps_mipi4lane_linear` **(NEW)** |
 
 idx3 (sharp crop) and idx4 (full-FOV soft) are the two 100fps tradeoffs — kept
 as distinct modes. HDR/DOL is not exposed (the two HDR handles are `NULL`; the
@@ -39,7 +40,14 @@ IsrCnt=enqueue=delivered). `dmesg` watched for FIFO-FULL / Skip-IQ / FrmLost.
 | 2 | 90  | 89.92  | 0 |
 | 3 | 100 | 99.00 (99.10 over a 30 s soak) | 0 |
 | 4 | 100 | 100.00 over a 30 s soak (full-FOV binned) | 0 |
-| 5 | 120 | 118.64 | 0 |
+| 5 | 120 | 118.64 (1472×816 crop) | 0 |
+| 6 | 120 | 120.15 over a 20 s soak (full-FOV binned) | 0 |
+
+idx6 is the full-FOV alternative to idx5's crop at 120fps: HMAX=275 (VMAX=2250 ≥
+2160 physical + vblank) sits just above the full-width binned analog HMAX floor
+(~250–275; HMAX=229 halves). It is the practical full-FOV binned fps ceiling —
+the ISP (~249 MPix/s here) would allow more, but the sensor's line-readout floor
+caps it near 120–130fps. See `STAR6E_IMX415_HEADROOM.md`.
 
 Warm mode-switch (SIGHUP, no power cycle) verified clean both directions across
 the binned/non-binned boundary, e.g. idx1→idx4 (99.90 fps) and idx4→idx1

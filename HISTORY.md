@@ -1,5 +1,20 @@
 # History
 
+## [0.28.0] - 2026-07-05
+
+Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@120fps** mode (idx6), added
+alongside the existing lineup (indices 0–5 unchanged).
+
+- **1920×1080@120fps full-FOV binned** (`Sensor_2m_120fps_init_table_4lane_linear`,
+  appended at idx6) — the full sensor FOV at 120fps (soft), a full-FOV
+  alternative to the stock 1472×816@120 crop (idx5, kept). Same reduced-HMAX
+  approach as idx4, one notch faster: HMAX=275 (line 3712 ns) with VMAX=2250,
+  which sits just above the full-width binned analog HMAX floor (~250–275;
+  HMAX=229 halves at 144fps). This is the practical full-FOV binned ceiling —
+  the ISP (249 MPix/s) would allow more, but the sensor's line-readout floor
+  caps it near 120–130fps. Device-verified 120.15fps, 0 drops, 0 FIFO-FULL over
+  a 20 s soak. See `STAR6E_IMX415_HEADROOM.md` for the full model.
+
 ## [0.27.0] - 2026-07-05
 
 Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@100fps** mode, and a **widened

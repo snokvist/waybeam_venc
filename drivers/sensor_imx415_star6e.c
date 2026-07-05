@@ -137,6 +137,7 @@ static struct { // LINEAR
         LINEAR_RES_4,
         LINEAR_RES_5,
         LINEAR_RES_6,
+        LINEAR_RES_7,
         LINEAR_RES_END } mode;
     // Sensor Output Image info
     struct _senout {
@@ -160,13 +161,16 @@ static struct { // LINEAR
      *       (~299 MPix/s, at the non-binned ISP wall).
      *  idx4 1920x1080@100 2x2-binned FULL-FOV (soft) — reduced-HMAX beats the
      *       binned vertical-timing wall.  Complements idx3 (sharp vs full-FOV).
-     *  idx5 1472x816@120 2x2-binned crop (stock). */
+     *  idx5 1472x816@120 2x2-binned crop (stock).
+     *  idx6 1920x1080@120 2x2-binned FULL-FOV (soft) — HMAX=275, the practical
+     *       full-width binned ceiling.  Full-FOV alternative to the idx5 crop. */
     { LINEAR_RES_1, { 3840, 2160, 3,  30 }, { 0, 0, 3840, 2160 }, { "3840x2160@30fps"  } },
     { LINEAR_RES_2, { 2816, 1584, 3,  60 }, { 0, 0, 2952, 1656 }, { "2816x1584@60fps"  } },
     { LINEAR_RES_3, { 1920, 1080, 3,  90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps"  } },
     { LINEAR_RES_4, { 2304, 1296, 3, 100 }, { 0, 0, 2304, 1296 }, { "2304x1296@100fps" } },
     { LINEAR_RES_5, { 1920, 1080, 3, 100 }, { 0, 0, 1920, 1080 }, { "1920x1080@100fps" } },
     { LINEAR_RES_6, { 1472,  816, 3, 120 }, { 0, 0, 1472,  816 }, { "1472x816@120fps"  } },
+    { LINEAR_RES_7, { 1920, 1080, 3, 120 }, { 0, 0, 1920, 1080 }, { "1920x1080@120fps" } },
 };
 
 static struct { // HDR
@@ -819,6 +823,134 @@ const static I2C_ARRAY Sensor_2m_100fps_init_table_4lane_linear[] = {
     { 0x3024, 0xCA }, // VMAX=0x08CA=2250 (>=2160 physical + vblank)
     { 0x3025, 0x08 }, //
     { 0x3028, 0x48 }, // HMAX=0x0148=328 (reduced from 365 to beat binned V-wall)
+    { 0x3029, 0x01 }, //
+    { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
+    { 0x3050, 0x08 }, // SHR0[19:0]
+    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x30D9, 0x02 }, // DIG_CLP_VSTART (binning 2/2)
+    { 0x30DA, 0x01 }, // DIG_CLP_VNUM (binning 2/2)
+    { 0x3116, 0x23 }, // INCKSEL2[7:0]
+    { 0x3118, 0xC6 }, // INCKSEL3[10:0]
+    { 0x311A, 0xE7 }, // INCKSEL4[10:0]
+    { 0x311E, 0x23 }, // INCKSEL5[7:0]
+    { 0x32D4, 0x21 }, // -
+    { 0x32EC, 0xA1 }, // -
+    { 0x3452, 0x7F }, // -
+    { 0x3453, 0x03 }, // -
+    { 0x358A, 0x04 }, // -
+    { 0x35A1, 0x02 }, // -
+    { 0x36BC, 0x0C }, // -
+    { 0x36CC, 0x53 }, // -
+    { 0x36CD, 0x00 }, // -
+    { 0x36CE, 0x3C }, // -
+    { 0x36D0, 0x8C }, // -
+    { 0x36D1, 0x00 }, // -
+    { 0x36D2, 0x71 }, // -
+    { 0x36D4, 0x3C }, // -
+    { 0x36D6, 0x53 }, // -
+    { 0x36D7, 0x00 }, // -
+    { 0x36D8, 0x71 }, // -
+    { 0x36DA, 0x8C }, // -
+    { 0x36DB, 0x00 }, // -
+    { 0x3701, 0x00 }, // ADBIT1[7:0]
+    { 0x3724, 0x02 }, // -
+    { 0x3726, 0x02 }, // -
+    { 0x3732, 0x02 }, // -
+    { 0x3734, 0x03 }, // -
+    { 0x3736, 0x03 }, // -
+    { 0x3742, 0x03 }, // -
+    { 0x3862, 0xE0 }, // -
+    { 0x38CC, 0x30 }, // -
+    { 0x38CD, 0x2F }, // -
+    { 0x395C, 0x0C }, // -
+    { 0x3A42, 0xD1 }, // -
+    { 0x3A4C, 0x77 }, // -
+    { 0x3AE0, 0x02 }, // -
+    { 0x3AEC, 0x0C }, // -
+    { 0x3B00, 0x2E }, // -
+    { 0x3B06, 0x29 }, // -
+    { 0x3B98, 0x25 }, // -
+    { 0x3B99, 0x21 }, // -
+    { 0x3B9B, 0x13 }, // -
+    { 0x3B9C, 0x13 }, // -
+    { 0x3B9D, 0x13 }, // -
+    { 0x3B9E, 0x13 }, // -
+    { 0x3BA1, 0x00 }, // -
+    { 0x3BA2, 0x06 }, // -
+    { 0x3BA3, 0x0B }, // -
+    { 0x3BA4, 0x10 }, // -
+    { 0x3BA5, 0x14 }, // -
+    { 0x3BA6, 0x18 }, // -
+    { 0x3BA7, 0x1A }, // -
+    { 0x3BA8, 0x1A }, // -
+    { 0x3BA9, 0x1A }, // -
+    { 0x3BAC, 0xED }, // -
+    { 0x3BAD, 0x01 }, // -
+    { 0x3BAE, 0xF6 }, // -
+    { 0x3BAF, 0x02 }, // -
+    { 0x3BB0, 0xA2 }, // -
+    { 0x3BB1, 0x03 }, // -
+    { 0x3BB2, 0xE0 }, // -
+    { 0x3BB3, 0x03 }, // -
+    { 0x3BB4, 0xE0 }, // -
+    { 0x3BB5, 0x03 }, // -
+    { 0x3BB6, 0xE0 }, // -
+    { 0x3BB7, 0x03 }, // -
+    { 0x3BB8, 0xE0 }, // -
+    { 0x3BBA, 0xE0 }, // -
+    { 0x3BBC, 0xDA }, // -
+    { 0x3BBE, 0x88 }, // -
+    { 0x3BC0, 0x44 }, // -
+    { 0x3BC2, 0x7B }, // -
+    { 0x3BC4, 0xA2 }, // -
+    { 0x3BC8, 0xBD }, // -
+    { 0x3BCA, 0xBD }, // -
+    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
+    { 0x4005, 0x06 }, //
+    { 0x400C, 0x00 }, // INCKSEL6
+    { 0x4018, 0x7F }, // TCLKPOST[15:0]
+    { 0x401A, 0x37 }, // TCLKPREPARE[15:0]
+    { 0x401C, 0x37 }, // TCLKTRAIL[15:0]
+    { 0x401E, 0xF7 }, // TCLKZERO[15:0]
+    { 0x401F, 0x00 }, //
+    { 0x4020, 0x3F }, // THSPREPARE[15:0]
+    { 0x4022, 0x6F }, // THSZERO[15:0]
+    { 0x4024, 0x3F }, // THSTRAIL[15:0]
+    { 0x4026, 0x5F }, // THSEXIT[15:0]
+    { 0x4028, 0x2F }, // TLPX[15:0]
+    { 0x4074, 0x01 }, // INCKSEL7 [2:0]
+    { 0xFFFF, 0x24 },
+    { 0x3002, 0x00 }, // Master mode start
+    { 0xFFFF, 0x10 },
+    { 0x3000, 0x00 }, // Operating
+};
+
+// 1920x1080@120fps — FULL-FOV 2x2-BINNED (soft, full sensor FOV) at 120fps.
+// Same idea as the 100fps table (reduced-HMAX beats the binned V-wall), one
+// notch faster: HMAX=275 (line 3712ns) is the practical floor for a full-
+// width binned line (HMAX=229 halves).  VMAX=2250 covers 2160 phys + vblank.
+// Verified 119.96fps, 0 drops, 0 FIFO-FULL (.13).  891 link, 12-bit.
+// The binned readout has a VERTICAL-TIMING wall: VMAX must cover the physical
+// lines read (2*output_h = 2160) plus vblank.  At the stock binned HMAX=365 a
+// 100fps frame caps VMAX at ~2023 < 2160 -> the sensor can't complete the frame
+// and the VIF delivers exactly half (~50, DropCnt=0).  Fix (same class as the
+// non-binned reduced-HMAX trick): shorten the line to HMAX=328 so VMAX can be
+// 2250 (= 2160 + 90 vblank, matching the stock 90fps mode) at 100fps.  Result:
+// full 1920x1080 @ 100.00fps, 0 drops over 30s (.13).  891 link, 12-bit.
+// Self-sets binning + binned DIG_CLP -> warm switch into this mode is safe.
+const static I2C_ARRAY Sensor_2m_120fps_init_table_4lane_linear[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
+    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    { 0x301C, 0x00 }, // WINMODE (full frame, reduced-HMAX 100fps)
+    { 0x3020, 0x01 }, // HADD (horizontal binning)
+    { 0x3021, 0x01 }, // VADD (vertical binning)
+    { 0x3022, 0x01 }, // ADDMODE (binning 2/2)
+    { 0x3024, 0xCA }, // VMAX=0x08CA=2250 (>=2160 physical + vblank)
+    { 0x3025, 0x08 }, //
+    { 0x3028, 0x13 }, // HMAX=0x0113=275 -> 120fps (VMAX=2250 still >= 2160+vblank)
     { 0x3029, 0x01 }, //
     { 0x3031, 0x00 }, // ADBIT (10bit)
     { 0x3033, 0x05 }, // SYS_MODE (891Mbps)
@@ -2166,6 +2298,32 @@ static int pCus_init_2m_100fps_mipi4lane_linear(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+static int pCus_init_2m_120fps_mipi4lane_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+
+    if (pCus_CheckSensorProductID(handle) == FAIL) {
+        return FAIL;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_2m_120fps_init_table_4lane_linear); i++) {
+        if (Sensor_2m_120fps_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_2m_120fps_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_2m_120fps_init_table_4lane_linear[i].reg, Sensor_2m_120fps_init_table_4lane_linear[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+
+    return SUCCESS;
+}
+
 static int pCus_init_1m_120fps_mipi4lane_linear(ms_cus_sensor* handle)
 {
     int i, cnt = 0;
@@ -2581,6 +2739,20 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         params->expo.vts = vts_30fps;
         params->expo.fps = 120;
         Preview_line_period = 4882; // 8.3ms/1700 = 4882ns;
+        handle->data_prec = CUS_DATAPRECISION_12;
+        break;
+
+    /* idx6: 1920x1080@120 — FULL-FOV 2x2-BINNED (soft).  Same as idx4 one notch
+     * faster: HMAX=275 (line 3712ns, just above the full-width binned analog
+     * floor ~250-275), VMAX=2250.  Full sensor FOV at 120 — vs the cropped
+     * idx5.  891 link, 12-bit.  Verified 119.96fps 0-drop 0-FIFO-FULL. */
+    case 6:
+        handle->video_res_supported.ulcur_res = 6;
+        handle->pCus_sensor_init = pCus_init_2m_120fps_mipi4lane_linear;
+        vts_30fps = 2250;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 120;
+        Preview_line_period = 3712; // 891 binned line, HMAX=275;
         handle->data_prec = CUS_DATAPRECISION_12;
         break;
 
