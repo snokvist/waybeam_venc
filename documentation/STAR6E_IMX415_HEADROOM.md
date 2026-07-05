@@ -117,11 +117,15 @@ by venc's AE within ~1s; live `video0.fps` persists to config.
 
 ## 5. Headroom — what more is possible
 
-### 5.1 Proven this session (ready to ship)
-- **1920×1080@120 full-FOV binned** (HMAX=275) — verified 119.96fps, 0-drop,
-  0 FIFO-FULL. **Strictly better than the stock crippled 1472×816@120 crop
-  (idx5)**: full sensor FOV instead of a crop, same fps, same softness. Prime
-  candidate to replace or join idx5.
+### 5.1 Proven & shipped
+- **1920×1080@120 full-FOV binned** (idx6, HMAX=275) — 119.96fps, 0-drop,
+  0 FIFO-FULL. Full sensor FOV instead of the idx5 crop, same fps.
+- **3840×1152@60 ultrawide** (idx7) — full sensor *width*, letterbox 3.33:1,
+  59.98fps 0-drop. Built on idx1's 1485 base, window widened to 3840 + height
+  cropped to 1152, HMAX=1022 (idx0's proven full-width line → no analog-floor
+  risk), VMAX=1211. 265 MPix/s. Height is HMAX-bounded to ~1160; a taller
+  3840×1296 (2.96:1) needs HMAX≈917 (below idx0, ISP at ~299) — a riskier
+  stretch, not shipped.
 
 ### 5.2 Bounded / characterized
 - **Full-FOV binned ceiling ≈ 120–130fps.** 144 (HMAX=229) breaches the analog
@@ -135,8 +139,6 @@ by venc's AE within ~1s; live `video0.fps` persists to config.
 - **4K at 35fps**: 3840×2160@35 = 299 MPix/s. Needs the 1485 link (891 caps 4K
   ~30fps by MIPI) and HMAX≈943 (< idx0's 1022, i.e. above the 4K analog floor —
   plausible). Would be the highest-res mode.
-- **Ultrawide full-horizontal-FOV**: 3840×1300@60 (100% sensor width, 2.95:1)
-  = 300 MPix/s. Needs a sensor-window widen to 3840 + the 1485 link.
 - **Higher-fps binned crops**: 1472×816@150 (180 MPix/s) — narrower line so a
   lower analog floor than full-width; likely reachable with reduced HMAX.
 

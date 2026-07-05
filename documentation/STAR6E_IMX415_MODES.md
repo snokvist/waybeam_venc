@@ -20,7 +20,8 @@ with HDR/DOL removed.
 | 3 | 2304×1296 | 100 | crop, **non-binned** (sharp, 35% FOV) | 1485 | `pCus_init_window_2304x1296_100` |
 | 4 | **1920×1080** | **100** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_100fps_mipi4lane_linear` |
 | 5 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
-| 6 | **1920×1080** | **120** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_120fps_mipi4lane_linear` **(NEW)** |
+| 6 | **1920×1080** | **120** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_120fps_mipi4lane_linear` |
+| 7 | **3840×1152** | **60** | **non-binned, full WIDTH** (ultrawide 3.33:1) | 1485 | `pCus_init_uw_3840x1152_60_mipi4lane_linear` **(NEW)** |
 
 idx3 (sharp crop) and idx4 (full-FOV soft) are the two 100fps tradeoffs — kept
 as distinct modes. HDR/DOL is not exposed (the two HDR handles are `NULL`; the
@@ -42,6 +43,15 @@ IsrCnt=enqueue=delivered). `dmesg` watched for FIFO-FULL / Skip-IQ / FrmLost.
 | 4 | 100 | 100.00 over a 30 s soak (full-FOV binned) | 0 |
 | 5 | 120 | 118.64 (1472×816 crop) | 0 |
 | 6 | 120 | 120.15 over a 20 s soak (full-FOV binned) | 0 |
+| 7 | 60  | 59.98 over a 15 s soak (ultrawide, incrop 3840×1152) | 0 |
+
+idx7 is the **ultrawide** — full sensor *width* at 60fps, letterboxed to 1152
+lines (3.33:1). Built on idx1's 1485 non-binned base with the window widened to
+3840 and height cropped to 1152; HMAX=1022 (idx0's proven full-width line, so no
+analog-floor risk) with VMAX=1211 clears both the vertical wall (1211 ≥ 1152 +
+vblank) and the ISP wall (265 MPix/s). The height is bounded by HMAX=1022 to
+~1160 lines; a taller 3840×1296 (2.96:1) would need HMAX≈917 — below idx0's line
+and with the ISP at ~299 MPix/s — so it is a riskier stretch, not shipped.
 
 idx6 is the full-FOV alternative to idx5's crop at 120fps: HMAX=275 (VMAX=2250 ≥
 2160 physical + vblank) sits just above the full-width binned analog HMAX floor

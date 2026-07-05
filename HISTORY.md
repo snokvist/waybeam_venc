@@ -1,5 +1,21 @@
 # History
 
+## [0.29.0] - 2026-07-05
+
+Star6E IMX415: an **ultrawide 3840×1152@60fps** mode (idx7) — full sensor
+*width* at 60fps, appended alongside the lineup (indices 0–6 unchanged).
+
+- **3840×1152@60fps ultrawide** (`Sensor_uw_3840x1152_60_init_table_4lane_linear`,
+  idx7) — 100% horizontal FOV, letterboxed to 1152 lines (3.33:1), non-binned
+  on the 1485 link. Built on idx1's 1485 base with the window widened to full
+  3840 and height cropped to 1152; HMAX=1022 (idx0's proven full-width line, so
+  no analog-floor risk), VMAX=1211 → 60fps, which clears the vertical wall
+  (1211 ≥ 1152 physical + vblank) and the ISP wall (265 MPix/s). Device-verified
+  59.98fps, 0 drops, 0 FIFO-FULL over a 15 s soak (`incrop 0,0,3840,1152`).
+  Height is HMAX-bounded to ~1160; a taller 3840×1296 (2.96:1) would need
+  HMAX≈917 (below idx0's line, ISP at ~299 MPix/s) — a riskier stretch, left
+  out. See `STAR6E_IMX415_HEADROOM.md`.
+
 ## [0.28.0] - 2026-07-05
 
 Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@120fps** mode (idx6), added
