@@ -1,5 +1,28 @@
 # History
 
+## [0.31.0] - 2026-07-05
+
+Star6E IMX415: two **binned wide-crop** modes (idx9/idx10) that give the widest
+2×2-binned FOV which renders *clean* at 100/120fps, plus the diagnosis of why
+full-FOV 1920×1080 binned is corrupt on the I6E ISP.
+
+- **1728×972@100fps 2×2-binned wide crop** (`Sensor_bc1728_100fps_init_table_
+  4lane_linear`, idx9) — widest binned FOV (~80% of full-4K linear) that renders
+  clean at 100fps. HMAX=365, VMAX=2034, 891 link. Image-verified on the display.
+- **1728×816@120fps 2×2-binned wide crop** (`Sensor_bc1728_120fps_init_table_
+  4lane_linear`, idx10) — same 1728 width at 120fps. Height capped at 816 because
+  120fps forces HMAX=365/VMAX=1700 and a taller frame drops HMAX below the crop
+  floor. 17% wider than the idx5 1472×816 crop. Image-verified.
+- **Root-caused the black+colored-lines corruption**: the full-FOV 1920×1080
+  binned modes (idx2/4/6) report correct fps but render garbage on the I6E ISP —
+  the `WINMODE=0x04` crop path needs `HMAX ≥ ~365` for a wide binned line. A
+  1728-wide crop clears this; the 1920-wide full-FOV readout does not (its
+  reduced-HMAX≈308/328 falls below the floor → malformed readout). The binned
+  wide-crops keep HMAX=365 and stay clean. idx2/4/6 retained only for
+  stock-index compatibility; use idx9/idx10 for high-FOV binned video.
+- Both new modes clone the device-proven idx5 1472×816 crop (`WINMODE=0x04` +
+  explicit centered window) and widen it, changing only the window + VMAX/HMAX.
+
 ## [0.30.0] - 2026-07-05
 
 Star6E IMX415: a **native 3840×2160@40fps** full-4K mode (idx8), appended

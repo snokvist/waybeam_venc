@@ -22,9 +22,19 @@ with HDR/DOL removed.
 | 5 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
 | 6 | **1920×1080** | **120** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_120fps_mipi4lane_linear` |
 | 7 | **3840×1152** | **60** | **non-binned, full WIDTH** (ultrawide 3.33:1) | 1485 | `pCus_init_uw_3840x1152_60_mipi4lane_linear` |
-| 8 | **3840×2160** | **40** | **non-binned, FULL 4K** (+33% over stock 4K@30) | 1485 | `pCus_init_8m_40fps_mipi4lane_linear` **(NEW)** |
+| 8 | **3840×2160** | **40** | **non-binned, FULL 4K** (+33% over stock 4K@30) | 1485 | `pCus_init_8m_40fps_mipi4lane_linear` |
+| 9 | **1728×972** | **100** | **2×2 binned, WIDE CROP** (widest clean binned FOV @100) | 891 | `pCus_init_bc1728_100fps_mipi4lane_linear` **(NEW)** |
+| 10 | **1728×816** | **120** | **2×2 binned, wide crop** (widest clean binned FOV @120) | 891 | `pCus_init_bc1728_120fps_mipi4lane_linear` **(NEW)** |
 
-idx3 (sharp crop) and idx4 (full-FOV soft) are the two 100fps tradeoffs — kept
+> **Full-FOV 1920×1080 binned (idx2/4/6) is image-corrupt on the I6E ISP** —
+> it reports the correct fps but renders black with colored horizontal lines.
+> The `WINMODE=0x04` crop path needs `HMAX ≥ ~365` for a wide binned line, which
+> a 1728-wide crop clears but the 1920-wide full-FOV readout does not. Use the
+> **binned wide-crops idx9 (100fps) / idx10 (120fps)** for high-FOV binned video.
+> idx9/idx10 are device-verified clean (image + timing); idx2/4/6 are retained
+> only for stock-index compatibility and should not be selected.
+
+idx3 (sharp crop) and idx9 (widest binned) are the two 100fps tradeoffs — kept
 as distinct modes. HDR/DOL is not exposed (the two HDR handles are `NULL`; the
 compiler dead-code-eliminates the HDR subtree — no `_HDR` strings in the `.ko`).
 
@@ -46,6 +56,17 @@ IsrCnt=enqueue=delivered). `dmesg` watched for FIFO-FULL / Skip-IQ / FrmLost.
 | 6 | 120 | 120.15 over a 20 s soak (full-FOV binned) | 0 |
 | 7 | 60  | 59.98 over a 15 s soak (ultrawide, incrop 3840×1152) | 0 |
 | 8 | 40  | 40.7 (sensor=enqueue=delivered, 0 steady FIFO-FULL) | 0 |
+| 9 | 100 | 100.0 (image eyeballed clean on HDMI) | 0 |
+| 10 | 120 | 119 (image eyeballed clean on HDMI) | 0 |
+
+idx9/idx10 are the **binned wide-crops** — the widest 2×2-binned FOV that renders
+clean at 100/120fps. Both clone the working idx5 1472×816 crop (`WINMODE=0x04`
+with an explicit centered window) and widen it to 1728. idx9 holds 972 lines at
+100fps (HMAX=365, VMAX=2034); idx10 caps at 816 lines because 120fps forces
+VMAX≤1700 at the floor-clearing HMAX=365 — a taller frame drops HMAX below the
+crop's line-time floor and corrupts (black+colored-lines, the same failure as
+full-FOV 1920×1080 binned). Unlike the fps-only checks above, idx9/idx10 were
+**image-verified on the display**, not just by counters.
 
 idx8 is **native full 4K at 40fps** — the clean full-4K ceiling. Cloned from the
 idx7 1485 base with a full-height window (VST=0, VWIDTH=4320), VMAX=2250,

@@ -121,8 +121,13 @@ by venc's AE within ~1s; live `video0.fps` persists to config.
 - **3840×2160@40 full 4K** (idx8, HMAX=825, VMAX=2250) — native 4K at 40fps,
   +33% over the stock idx0 4K@30. 40.7fps sensor=enqueue=delivered, 0-drop,
   0 steady FIFO-FULL (332 MPix/s). The clean full-4K ceiling (§5.3).
-- **1920×1080@120 full-FOV binned** (idx6, HMAX=275) — 119.96fps, 0-drop,
-  0 FIFO-FULL. Full sensor FOV instead of the idx5 crop, same fps.
+- **1728×972@100 binned wide crop** (idx9, HMAX=365, VMAX=2034) — the widest
+  2×2-binned FOV that renders *clean* at 100fps (~80% of full-4K linear),
+  **image-verified** on the display. Clones the idx5 1472×816 crop
+  (`WINMODE=0x04` + explicit centered window) widened to 1728. See §5.6.
+- **1728×816@120 binned wide crop** (idx10, HMAX=365, VMAX=1700) — same 1728
+  width at 120fps; height capped at 816 (120fps forces VMAX≤1700 at the
+  floor-clearing HMAX=365). 17% wider than idx5. Image-verified.
 - **3840×1152@60 ultrawide** (idx7) — full sensor *width*, letterbox 3.33:1,
   59.98fps 0-drop. Built on idx1's 1485 base, window widened to 3840 + height
   cropped to 1152, HMAX=1022 (idx0's proven full-width line → no analog-floor
@@ -186,3 +191,22 @@ pixel-rate, not bit-rate limited).
 - Bit-depth reduction for fps (ISP wall is pixel-limited).
 - Pushing HMAX below the analog floor (silent halve / likely image damage).
 - HDR/DOL modes (halve fps, add ISP load; deliberately removed).
+
+### 5.6 The binned WINMODE=0x04 crop HMAX floor (a 5th failure mode)
+The four walls in §2 all produce a *silent halve*. Device testing of binned
+wide-crops surfaced a **fifth, distinct** symptom: **black frames with colored
+horizontal lines** while the VIF still reports the full, correct fps (0 drops,
+0 FIFO-FULL) and exposure is normal — a *malformed readout*, not a timing halve.
+
+Cause: a `WINMODE=0x04` (windowed-crop) binned readout needs a **larger HMAX
+than the full-frame `WINMODE=0x00` analog floor** (§2.2's 229–275). For a
+1728-wide binned crop the crop floor sits between **308 and 365**: HMAX=365
+renders clean (idx9/idx10, device-verified image), HMAX=308 corrupts. This also
+explains the **full-FOV 1920×1080 binned modes (idx2/4/6)**: to hit 100/120fps
+they drop HMAX to ~328/275, below their (wider, 3840-phys-column) crop floor, so
+they report correct fps but render the same black+colored-lines garbage. They
+are kept only for stock-index compatibility — **use idx9/idx10 instead**.
+
+Practical rule for new binned crops: keep **HMAX ≥ 365**, then the frame rate
+caps the height (VMAX = 74.25e6/(fps·365) ≥ 2·H + vblank): ~972 lines at 100fps,
+~816 at 120fps. Width is free up to the ~300 MPix/s ISP wall.
