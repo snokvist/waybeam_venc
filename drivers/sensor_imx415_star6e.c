@@ -139,6 +139,7 @@ static struct { // LINEAR
         LINEAR_RES_6,
         LINEAR_RES_7,
         LINEAR_RES_8,
+        LINEAR_RES_9,
         LINEAR_RES_END } mode;
     // Sensor Output Image info
     struct _senout {
@@ -166,7 +167,14 @@ static struct { // LINEAR
      *  idx6 1920x1080@120 2x2-binned FULL-FOV (soft) — HMAX=275, the practical
      *       full-width binned ceiling.  Full-FOV alternative to the idx5 crop.
      *  idx7 3840x1152@60 non-binned 1485 ULTRAWIDE — full sensor WIDTH, letterbox
-     *       (3.33:1); HMAX=1022 (idx0 full-width line), VMAX=1211.  265 MPix/s. */
+     *       (3.33:1); HMAX=1022 (idx0 full-width line), VMAX=1211.  265 MPix/s.
+     *  idx8 3840x2160@40 non-binned 1485 FULL 4K — native 4K at 40fps (+33% over
+     *       the stock idx0 4K@30).  HMAX=825, VMAX=2250, 332 MPix/s.  This is the
+     *       clean full-4K ceiling: 4K@42 hits the ISP throughput wall (~340) and
+     *       4K@45 breaches the sensor analog HMAX floor (733<floor<=779, clean
+     *       halve).  The i6c "288M CSI lever" is NOT available on i6e (kernel
+     *       rejects CUS_CSI_CLK_288M), so 216M is the ceiling — see
+     *       documentation/STAR6E_IMX415_HEADROOM.md §5.3-5.4. */
     { LINEAR_RES_1, { 3840, 2160, 3,  30 }, { 0, 0, 3840, 2160 }, { "3840x2160@30fps"  } },
     { LINEAR_RES_2, { 2816, 1584, 3,  60 }, { 0, 0, 2952, 1656 }, { "2816x1584@60fps"  } },
     { LINEAR_RES_3, { 1920, 1080, 3,  90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps"  } },
@@ -175,6 +183,7 @@ static struct { // LINEAR
     { LINEAR_RES_6, { 1472,  816, 3, 120 }, { 0, 0, 1472,  816 }, { "1472x816@120fps"  } },
     { LINEAR_RES_7, { 1920, 1080, 3, 120 }, { 0, 0, 1920, 1080 }, { "1920x1080@120fps" } },
     { LINEAR_RES_8, { 3840, 1152, 3,  60 }, { 0, 0, 3840, 1152 }, { "3840x1152@60fps"  } },
+    { LINEAR_RES_9, { 3840, 2160, 3,  40 }, { 0, 0, 3840, 2160 }, { "3840x2160@40fps"  } },
 };
 
 static struct { // HDR
@@ -698,6 +707,137 @@ const static I2C_ARRAY Sensor_uw_3840x1152_60_init_table_4lane_linear[] = {
     { 0xFFFF, 0x10 },
     { 0x3000, 0x00 }, // Operating
 };
+
+// 3840x2160@40fps — full 4K, non-binned 1485, native 4K at 40fps (idx8).
+// Clean full-4K ceiling (332 MPix/s); 42fps hits the ISP wall, 45fps the
+// sensor analog HMAX floor.  Cloned from the ultrawide 1485 base: full-height
+// window (VST=0/VWIDTH=4320), VMAX=2250, HMAX=825.
+const static I2C_ARRAY Sensor_8m_40fps_init_table_4lane_linear[] = {
+    { 0x3000, 0x01 }, // Standby
+    { 0x3002, 0x01 }, // Master mode stop
+    { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
+    { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    /* warm-safe: force non-binned all-pixel readout so a switch from a binned
+     * mode (idx2/idx4) doesn't leave 2x2 binning + binned DIG_CLP latched */
+    { 0x3020, 0x00 }, // HADD
+    { 0x3021, 0x00 }, // VADD
+    { 0x3022, 0x00 }, // ADDMODE (non-binned)
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel)
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel)
+    { 0x301C, 0x04 }, // WINMODE (cropping mode)
+    { 0x3024, 0xCA }, // VMAX=0x08CA=2250
+    { 0x3025, 0x08 }, //
+    { 0x3028, 0x39 }, // HMAX=0x0339=825 (40fps full-4K/1485)
+    { 0x3029, 0x03 }, //
+    { 0x3031, 0x00 }, // ADBIT (10bit)
+    { 0x3032, 0x00 }, //
+    { 0x3033, 0x08 }, // SYS_MODE
+    { 0x3040, 0x00 }, // PIX_HST=0
+    { 0x3041, 0x00 }, //
+    { 0x3042, 0x00 }, // PIX_HWIDTH=0x0F00=3840 (full width)
+    { 0x3043, 0x0F }, //
+    { 0x3044, 0x00 }, // PIX_VST=0 (full height)
+    { 0x3045, 0x00 }, //
+    { 0x3046, 0xE0 }, // PIX_VWIDTH=0x10E0=4320 (=2160 lines)
+    { 0x3047, 0x10 }, //
+    { 0x3050, 0x08 }, // SHR0[19:0]
+    { 0x30C1, 0x00 }, // XVS_DRV[1:0]
+    { 0x3116, 0x23 }, // INCKSEL2
+    { 0x3118, 0xA5 }, // INCKSEL3
+    { 0x311A, 0xE7 }, // INCKSEL4
+    { 0x311E, 0x23 }, // INCKSEL5
+    { 0x32D4, 0x21 }, // -
+    { 0x32EC, 0xA1 }, // -
+    { 0x3452, 0x7F }, // -
+    { 0x3453, 0x03 }, // -
+    { 0x358A, 0x04 }, // -
+    { 0x35A1, 0x02 }, // -
+    { 0x36BC, 0x0C }, // -
+    { 0x36CC, 0x53 }, // -
+    { 0x36CD, 0x00 }, // -
+    { 0x36CE, 0x3C }, // -
+    { 0x36D0, 0x8C }, // -
+    { 0x36D1, 0x00 }, // -
+    { 0x36D2, 0x71 }, // -
+    { 0x36D4, 0x3C }, // -
+    { 0x36D6, 0x53 }, // -
+    { 0x36D7, 0x00 }, // -
+    { 0x36D8, 0x71 }, // -
+    { 0x36DA, 0x8C }, // -
+    { 0x36DB, 0x00 }, // -
+    { 0x3701, 0x00 }, // ADBIT1[7:0]
+    { 0x3724, 0x02 }, // -
+    { 0x3726, 0x02 }, // -
+    { 0x3732, 0x02 }, // -
+    { 0x3734, 0x03 }, // -
+    { 0x3736, 0x03 }, // -
+    { 0x3742, 0x03 }, // -
+    { 0x3862, 0xE0 }, // -
+    { 0x38CC, 0x30 }, // -
+    { 0x38CD, 0x2F }, // -
+    { 0x395C, 0x0C }, // -
+    { 0x3A42, 0xD1 }, // -
+    { 0x3A4C, 0x77 }, // -
+    { 0x3AE0, 0x02 }, // -
+    { 0x3AEC, 0x0C }, // -
+    { 0x3B00, 0x2E }, // -
+    { 0x3B06, 0x29 }, // -
+    { 0x3B98, 0x25 }, // -
+    { 0x3B99, 0x21 }, // -
+    { 0x3B9B, 0x13 }, // -
+    { 0x3B9C, 0x13 }, // -
+    { 0x3B9D, 0x13 }, // -
+    { 0x3B9E, 0x13 }, // -
+    { 0x3BA1, 0x00 }, // -
+    { 0x3BA2, 0x06 }, // -
+    { 0x3BA3, 0x0B }, // -
+    { 0x3BA4, 0x10 }, // -
+    { 0x3BA5, 0x14 }, // -
+    { 0x3BA6, 0x18 }, // -
+    { 0x3BA7, 0x1A }, // -
+    { 0x3BA8, 0x1A }, // -
+    { 0x3BA9, 0x1A }, // -
+    { 0x3BAC, 0xED }, // -
+    { 0x3BAD, 0x01 }, // -
+    { 0x3BAE, 0xF6 }, // -
+    { 0x3BAF, 0x02 }, // -
+    { 0x3BB0, 0xA2 }, // -
+    { 0x3BB1, 0x03 }, // -
+    { 0x3BB2, 0xE0 }, // -
+    { 0x3BB3, 0x03 }, // -
+    { 0x3BB4, 0xE0 }, // -
+    { 0x3BB5, 0x03 }, // -
+    { 0x3BB6, 0xE0 }, // -
+    { 0x3BB7, 0x03 }, // -
+    { 0x3BB8, 0xE0 }, // -
+    { 0x3BBA, 0xE0 }, // -
+    { 0x3BBC, 0xDA }, // -
+    { 0x3BBE, 0x88 }, // -
+    { 0x3BC0, 0x44 }, // -
+    { 0x3BC2, 0x7B }, // -
+    { 0x3BC4, 0xA2 }, // -
+    { 0x3BC8, 0xBD }, // -
+    { 0x3BCA, 0xBD }, // -
+    { 0x4004, 0xC0 }, // TXCLKESC_FREQ[15:0]
+    { 0x4005, 0x06 }, //
+    { 0x400C, 0x01 }, // INCKSEL6
+    { 0x4018, 0xA7 }, // TCLKPOST
+    { 0x401A, 0x57 }, // TCLKPREPARE
+    { 0x401C, 0x5F }, // TCLKTRAIL
+    { 0x401E, 0x97 }, // TCLKZERO
+    { 0x401F, 0x01 }, //
+    { 0x4020, 0x5F }, // THSPREPARE
+    { 0x4022, 0xAF }, // THSZERO
+    { 0x4024, 0x5F }, // THSTRAIL
+    { 0x4026, 0x9F }, // THSEXIT
+    { 0x4028, 0x4F }, // TLPX
+    { 0x4074, 0x00 }, // INCKSEL7
+    { 0xFFFF, 0x24 },
+    { 0x3002, 0x00 }, // Master mode start
+    { 0xFFFF, 0x10 },
+    { 0x3000, 0x00 }, // Operating
+};
+
 
 // 1920x1080@90fps
 const static I2C_ARRAY Sensor_2m_90fps_init_table_4lane_linear[] = {
@@ -2204,6 +2344,10 @@ static int pCus_poweron(ms_cus_sensor* handle, u32 idx)
     sensor_if->PowerOff(idx, handle->pwdn_POLARITY); // Powerdn Pull Low
     sensor_if->Reset(idx, handle->reset_POLARITY); // Rst Pull Low
     sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
+    /* 216M for ALL modes.  The Maruko/i6c "288M CSI lever" is NOT portable to
+     * i6e — this SoC's vendor CSI driver rejects 288000 kHz (dmesg
+     * "[Drv_CSISetClk] Not supported CSI CLK 288000" → sensor never powers on).
+     * 216M is the implemented ceiling and sustains every 1485Mbps mode we ship. */
     sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_216M);
     sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, ENABLE);
     sensor_if->SetCSI_LongPacketType(idx, 0, 0x1C00, 0);
@@ -2366,6 +2510,32 @@ static int pCus_init_uw_3840x1152_60_mipi4lane_linear(ms_cus_sensor* handle)
         } else {
             cnt = 0;
             while (SensorReg_Write(Sensor_uw_3840x1152_60_init_table_4lane_linear[i].reg, Sensor_uw_3840x1152_60_init_table_4lane_linear[i].data) != SUCCESS) {
+                cnt++;
+                if (cnt >= 10) {
+                    SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
+                    return FAIL;
+                }
+            }
+        }
+    }
+
+    return SUCCESS;
+}
+
+static int pCus_init_8m_40fps_mipi4lane_linear(ms_cus_sensor* handle)
+{
+    int i, cnt = 0;
+
+    if (pCus_CheckSensorProductID(handle) == FAIL) {
+        return FAIL;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(Sensor_8m_40fps_init_table_4lane_linear); i++) {
+        if (Sensor_8m_40fps_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_8m_40fps_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_8m_40fps_init_table_4lane_linear[i].reg, Sensor_8m_40fps_init_table_4lane_linear[i].data) != SUCCESS) {
                 cnt++;
                 if (cnt >= 10) {
                     SENSOR_EMSG("[%s:%d]Sensor init fail!!\n", __FUNCTION__, __LINE__);
@@ -2928,6 +3098,16 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         params->expo.vts = vts_30fps;
         params->expo.fps = 60;
         Preview_line_period = 13760; // HMAX=1022 line @ 60fps;
+        handle->data_prec = CUS_DATAPRECISION_10;
+        break;
+
+    case 8: // 3840x2160@40 — full 4K, non-binned 1485, HMAX=825 (332 MPix/s)
+        handle->video_res_supported.ulcur_res = 8;
+        handle->pCus_sensor_init = pCus_init_8m_40fps_mipi4lane_linear;
+        vts_30fps = 2250;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 40;
+        Preview_line_period = 11111; // HMAX=825 line;
         handle->data_prec = CUS_DATAPRECISION_10;
         break;
 

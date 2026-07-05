@@ -21,7 +21,8 @@ with HDR/DOL removed.
 | 4 | **1920×1080** | **100** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_100fps_mipi4lane_linear` |
 | 5 | 1472×816  | 120 | **2×2 binned** (crop)     | 891  | `pCus_init_1m_120fps_mipi4lane_linear` |
 | 6 | **1920×1080** | **120** | **2×2 binned, FULL FOV** (soft) | 891 | `pCus_init_2m_120fps_mipi4lane_linear` |
-| 7 | **3840×1152** | **60** | **non-binned, full WIDTH** (ultrawide 3.33:1) | 1485 | `pCus_init_uw_3840x1152_60_mipi4lane_linear` **(NEW)** |
+| 7 | **3840×1152** | **60** | **non-binned, full WIDTH** (ultrawide 3.33:1) | 1485 | `pCus_init_uw_3840x1152_60_mipi4lane_linear` |
+| 8 | **3840×2160** | **40** | **non-binned, FULL 4K** (+33% over stock 4K@30) | 1485 | `pCus_init_8m_40fps_mipi4lane_linear` **(NEW)** |
 
 idx3 (sharp crop) and idx4 (full-FOV soft) are the two 100fps tradeoffs — kept
 as distinct modes. HDR/DOL is not exposed (the two HDR handles are `NULL`; the
@@ -44,6 +45,15 @@ IsrCnt=enqueue=delivered). `dmesg` watched for FIFO-FULL / Skip-IQ / FrmLost.
 | 5 | 120 | 118.64 (1472×816 crop) | 0 |
 | 6 | 120 | 120.15 over a 20 s soak (full-FOV binned) | 0 |
 | 7 | 60  | 59.98 over a 15 s soak (ultrawide, incrop 3840×1152) | 0 |
+| 8 | 40  | 40.7 (sensor=enqueue=delivered, 0 steady FIFO-FULL) | 0 |
+
+idx8 is **native full 4K at 40fps** — the clean full-4K ceiling. Cloned from the
+idx7 1485 base with a full-height window (VST=0, VWIDTH=4320), VMAX=2250,
+HMAX=825 (332 MPix/s). The two walls just above it were mapped on-device: 4K@42
+(HMAX=779, 352 MPix/s) hits the ISP throughput wall (FIFO-FULL, ~7% loss) and
+4K@45 (HMAX=733) breaches the sensor's analog HMAX floor (733 < floor ≤ 779,
+clean silent halve). Neither is clock-fixable — the i6c 288MHz CSI lever is not
+available on i6e. See `STAR6E_IMX415_HEADROOM.md` §5.3–5.4.
 
 idx7 is the **ultrawide** — full sensor *width* at 60fps, letterboxed to 1152
 lines (3.33:1). Built on idx1's 1485 non-binned base with the window widened to

@@ -1,5 +1,27 @@
 # History
 
+## [0.30.0] - 2026-07-05
+
+Star6E IMX415: a **native 3840×2160@40fps** full-4K mode (idx8), appended
+alongside the lineup (indices 0–7 unchanged), plus the resolution of the
+ISP/CSI-clock investigation.
+
+- **3840×2160@40fps full 4K** (`Sensor_8m_40fps_init_table_4lane_linear`, idx8)
+  — native 4K at 40fps, +33% over the stock idx0 4K@30. Non-binned on the 1485
+  link, full-height window (VST=0/VWIDTH=4320), VMAX=2250, HMAX=825 (332 MPix/s).
+  Device-verified on `.13`: sensor=enqueue=delivered=40.8fps, 0 drops, 0
+  steady-state FIFO-FULL.
+- This is the **clean full-4K ceiling**. Bench probes established the two walls
+  just above it: 4K@42 (HMAX=779, 352 MPix/s) hits the ISP throughput wall
+  (FIFO-FULL, ~7% loss); 4K@45 (HMAX=733) breaches the sensor's analog HMAX
+  floor (733<floor≤779) with a clean silent halve. Neither is clock-fixable.
+- **ISP/CSI-clock lever — resolved as unavailable on i6e.** The Maruko/i6c 288MHz
+  CSI-MAC lever does not port: this SoC's vendor CSI driver rejects
+  `CUS_CSI_CLK_288M` (dmesg `[Drv_CSISetClk] Not supported CSI CLK 288000` →
+  sensor never powers on). 216M is the hard CSI ceiling; the driver pins it for
+  all modes with an explanatory comment. See
+  `documentation/STAR6E_IMX415_HEADROOM.md` §5.3-5.4.
+
 ## [0.29.0] - 2026-07-05
 
 Star6E IMX415: an **ultrawide 3840×1152@60fps** mode (idx7) — full sensor

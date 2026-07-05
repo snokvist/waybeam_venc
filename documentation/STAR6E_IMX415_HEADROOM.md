@@ -118,6 +118,9 @@ by venc's AE within ~1s; live `video0.fps` persists to config.
 ## 5. Headroom — what more is possible
 
 ### 5.1 Proven & shipped
+- **3840×2160@40 full 4K** (idx8, HMAX=825, VMAX=2250) — native 4K at 40fps,
+  +33% over the stock idx0 4K@30. 40.7fps sensor=enqueue=delivered, 0-drop,
+  0 steady FIFO-FULL (332 MPix/s). The clean full-4K ceiling (§5.3).
 - **1920×1080@120 full-FOV binned** (idx6, HMAX=275) — 119.96fps, 0-drop,
   0 FIFO-FULL. Full sensor FOV instead of the idx5 crop, same fps.
 - **3840×1152@60 ultrawide** (idx7) — full sensor *width*, letterbox 3.33:1,
@@ -132,25 +135,52 @@ by venc's AE within ~1s; live `video0.fps` persists to config.
   HMAX floor. So 120 is the practical full-FOV binned max; ~128fps might squeak
   in (HMAX≈258) but is near the floor and risky.
 
-### 5.3 Plausible, untested (within the envelope, worth a probe)
-- **Sharp non-binned 1440p at mid-fps**: 2560×1440@75 = 277 MPix/s (< 300),
-  a native-sharp 1440p75. Needs the 1485 link + a widened non-binned window
-  (idx3's crop helper generalizes to this).
-- **4K at 35fps**: 3840×2160@35 = 299 MPix/s. Needs the 1485 link (891 caps 4K
-  ~30fps by MIPI) and HMAX≈943 (< idx0's 1022, i.e. above the 4K analog floor —
-  plausible). Would be the highest-res mode.
-- **Higher-fps binned crops**: 1472×816@150 (180 MPix/s) — narrower line so a
-  lower analog floor than full-width; likely reachable with reduced HMAX.
+### 5.3 Full-4K high-fps — MEASURED (2026-07-05, bench probes on .13)
+Probed full 3840×2160 non-binned on the 1485 link (VMAX=2250, varying HMAX),
+delta-sampling VIF `IsrCnt` vs `EnqCnt` over 5 s in **steady state** (cold-boot
+FIFO-FULL is AE-settling noise — discard the first ~15 s):
 
-### 5.4 The one big lever — raising the ISP wall
-Every ceiling above bottoms out on the **~300 MPix/s ISP throughput wall**. On
-Maruko/I6C the analogous wall was moved by bumping the CSI/ISP clock (288 MHz,
-keyed on a `link_mbps` field). Star6E currently rides the SoC's default ISP/VPE
-clocks (the REALTIME bind). **If the I6E ISP/VPE clock is tunable**, every mode
-here scales proportionally — e.g. a +30% ISP clock would turn full-FOV binned
-144fps and 4K@45 into possibilities. This is unexplored and the highest-value
-next investigation. Bit depth is *not* a lever (the wall is pixel-rate, not
-bit-rate limited).
+| Mode | HMAX | MPix/s | sensor fps | enqueue fps | FIFO-FULL/5s | verdict |
+|---|---|---|---|---|---|---|
+| 4K@36 | 917 | 299 | 36.6 | 36.6 | 0 | **clean** |
+| 4K@40 | 825 | 332 | 40.8 | 40.8 | 0 | **clean — ceiling** |
+| 4K@42 | 779 | 352 | 43.0 | 39.8 | 16 | ISP-wall (~7% loss) |
+| 4K@45 | 733 | 373 | 45.6 | 22.8 | 0 | analog-floor **halve** |
+
+**Clean full-4K ceiling = 4K@40** (a native 4K mode, +33% fps over stock 4K@30).
+Two *distinct* walls sit just above it, and the halve/FIFO-FULL signatures tell
+them apart:
+- **4K@42** — FIFO-FULL present, ~7% frame loss → the **ISP throughput wall**
+  (~340 MPix/s for wide 4K lines). Note this is *not* pure MPix/s: 2432×1368@**100**
+  = 333 dropped, but 4K@**40** = 332 is clean — lower fps gives the ISP more time
+  per frame at equal pixel rate, and a 3840-wide line stresses the ISP line-FIFO
+  harder than a 2432-wide one.
+- **4K@45** — clean halve (sensor 45.6 → enqueue 22.8) with **zero** FIFO-FULL →
+  the **sensor analog HMAX floor** (733 < floor ≤ 779 for a 3840-column non-binned
+  line). This is the sensor's own horizontal readout time, independent of any SoC
+  clock.
+
+Other still-plausible probes (untested): 2560×1440@75 non-binned (277 MPix/s);
+1472×816@150 binned crop (180, narrow line → low analog floor).
+
+### 5.4 The ISP/CSI-clock lever — RESOLVED: not available on I6E
+The Maruko/I6C playbook raises the wall by bumping the CSI-MAC clock to 288 MHz
+(`SetCSI_Clk(CUS_CSI_CLK_288M)`, keyed on a `link_mbps` field). **This does not
+port to I6E.** Tested on .13: the I6E vendor CSI driver *rejects* 288 MHz —
+`dmesg: [Drv_CSISetClk] Not supported CSI CLK 288000` → the sensor never powers
+on → "Sensor is abnormal" → waybeam crash-loops. `CUS_CSI_CLK_288M` is declared
+in the I6E header (=5) but unimplemented in the blob; **216 MHz is the hard
+CSI-MAC ceiling** here (no step between 216 and the unsupported 288). Every 1485
+mode we ship already runs fine at 216M, so the driver pins 216M and keeps
+`link_mbps` as metadata only.
+
+Consequently **4K@45 is not reachable on I6E by any available means**: the CSI
+clock is capped, the sensor analog floor (§5.3) is a hardware readout limit, and
+the ISP throughput isn't tunable through the cus-sensor interface. The only
+remaining theoretical lever is the **SCL/ISP core clock** (`DrvSclModuleClkInit`
+logs a 345 MHz default) — but that lives in the kernel/DTS, not the sensor
+driver, and is a much deeper change. Bit depth is *not* a lever (the wall is
+pixel-rate, not bit-rate limited).
 
 ### 5.5 Not worth pursuing
 - Bit-depth reduction for fps (ISP wall is pixel-limited).
