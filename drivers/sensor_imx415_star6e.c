@@ -135,6 +135,7 @@ static struct { // LINEAR
         LINEAR_RES_2,
         LINEAR_RES_3,
         LINEAR_RES_4,
+        LINEAR_RES_5,
         LINEAR_RES_END } mode;
     // Sensor Output Image info
     struct _senout {
@@ -149,10 +150,15 @@ static struct { // LINEAR
         const char* strResDesc;
     } senstr;
 } imx415_mipi_linear[] = {
-    { LINEAR_RES_1, { 3840, 2160, 3, 30 }, { 0, 0, 3840, 2160 }, { "3840x2160@30fps" } },
-    { LINEAR_RES_2, { 2560, 1440, 3, 60 }, { 0, 0, 2952, 1656 }, { "2560x1440@60fps" } },
-    { LINEAR_RES_3, { 1920, 1080, 3, 90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps" } },
-    { LINEAR_RES_4, { 1472, 816, 3, 120 }, { 0, 0, 1472, 816 }, { "1472x816@120fps" } },
+    /* Final Star6E IMX415 lineup — fps-ordered, HDR removed.  idx0/1 non-binned
+     * (891/1485), idx2/4 stock 2x2-binned (full FOV), idx3 the new non-binned
+     * 1485 window crop: the widest 16:9 the I6E ISP sustains at 100fps
+     * (2.99 MPix / ~299 MPix/s; the wall is ~300-330, device-mapped on .13). */
+    { LINEAR_RES_1, { 3840, 2160, 3,  30 }, { 0, 0, 3840, 2160 }, { "3840x2160@30fps"  } },
+    { LINEAR_RES_2, { 2560, 1440, 3,  60 }, { 0, 0, 2952, 1656 }, { "2560x1440@60fps"  } },
+    { LINEAR_RES_3, { 1920, 1080, 3,  90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps"  } },
+    { LINEAR_RES_4, { 2304, 1296, 3, 100 }, { 0, 0, 2304, 1296 }, { "2304x1296@100fps" } },
+    { LINEAR_RES_5, { 1472,  816, 3, 120 }, { 0, 0, 1472,  816 }, { "1472x816@120fps"  } },
 };
 
 static struct { // HDR
@@ -307,6 +313,13 @@ const static I2C_ARRAY Sensor_8m_30fps_init_table_4lane_linear[] = {
     { 0x3002, 0x01 }, // Master mode stop
     { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
     { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    /* warm-safe: force non-binned all-pixel readout so a switch from a binned
+     * mode (idx2/idx4) doesn't leave 2x2 binning + binned DIG_CLP latched */
+    { 0x3020, 0x00 }, // HADD
+    { 0x3021, 0x00 }, // VADD
+    { 0x3022, 0x00 }, // ADDMODE (non-binned)
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel)
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel)
     { 0x3024, 0xCA }, // VMAX
     { 0x3025, 0x08 }, //
     { 0x3028, 0xFE }, // HMAX
@@ -417,6 +430,13 @@ const static I2C_ARRAY Sensor_5m_60fps_init_table_4lane_linear[] = {
     { 0x3002, 0x01 }, // Master mode stop
     { 0x3008, 0x5D }, // BCWAIT_TIME[9:0]
     { 0x300A, 0x42 }, // CPWAIT_TIME[9:0]
+    /* warm-safe: force non-binned all-pixel readout so a switch from a binned
+     * mode (idx2/idx4) doesn't leave 2x2 binning + binned DIG_CLP latched */
+    { 0x3020, 0x00 }, // HADD
+    { 0x3021, 0x00 }, // VADD
+    { 0x3022, 0x00 }, // ADDMODE (non-binned)
+    { 0x30D9, 0x06 }, // DIG_CLP_VSTART (all-pixel)
+    { 0x30DA, 0x02 }, // DIG_CLP_VNUM (all-pixel)
     { 0x301C, 0x04 }, // WINMODE (cropping mode)
     { 0x3024, 0xB8 }, // VMAX
     { 0x3025, 0x06 }, //
@@ -2201,6 +2221,95 @@ static int pCus_init_2m_30fps_mipi4lane_HDR_DOL(ms_cus_sensor* handle)
     return SUCCESS;
 }
 
+/* ── Non-binned 1485 window-crop probe modes ──────────────────────────────
+ * All crops derive from the proven idx1 base (Sensor_5m_60fps_init_table_4lane
+ * _linear, non-binned 2952x1656 @1485 Mbps, SYS_MODE 0x08).  The helper replays
+ * that base but holds back its 4-entry standby-exit tail
+ * ({0xFFFF},{0x3002,0x00},{0xFFFF},{0x3000,0x00}), injects the per-mode geometry
+ * override IN STANDBY, then re-issues the exit — latching the window before
+ * streaming (PR#156 discipline).
+ *
+ * Every geo table WRITES THE READOUT-MODE REGISTERS EXPLICITLY
+ * (0x3020/21/22 = 0x00 non-binned, 0x30D9=0x06 / 0x30DA=0x02 DIG_CLP all-pixel)
+ * so a warm switch from a binned mode (idx2/idx4) does not leave 2x2 binning
+ * latched — the Maruko IMX415 warm-switch trap.  WINMODE 0x301C=0x04 (crop) is
+ * re-asserted.  Window formula (16:9, centered):
+ *   HST(0x3040/41)=(3864-W)/2  HWIDTH(0x3042/43)=W
+ *   VST(0x3044/45)=2192-H       VWIDTH(0x3046/47)=2*H   (half-line units)
+ * VMAX(0x3024/25) sets pacing; HMAX(0x3028/29) overridden only where a shorter
+ * line is needed to fit a taller window into a 100fps frame. */
+
+/* idx3: 2304x1296@100 — HMAX=548 (reduced from base 652), VMAX=1360.
+ * The widest 16:9 the I6E ISP sustains non-binned at 100fps: 2.99 MPix /
+ * ~299 MPix/s, just under the device-mapped ~300-330 MPix/s wall (2432x1368
+ * at 333 MPix/s halves).  HMAX is cut so 1296 active lines fit a 100fps frame
+ * (the vertical-timing wall a fixed HMAX=652 would cap at ~89fps). */
+static const I2C_ARRAY imx415_geo_2304x1296_100[] = {
+    { 0x301C, 0x04 }, { 0x3020, 0x00 }, { 0x3021, 0x00 }, { 0x3022, 0x00 },
+    { 0x30D9, 0x06 }, { 0x30DA, 0x02 },
+    { 0x3024, 0x50 }, { 0x3025, 0x05 }, // VMAX 1360
+    { 0x3028, 0x24 }, { 0x3029, 0x02 }, // HMAX 548 (reduced)
+    { 0x3040, 0x0C }, { 0x3041, 0x03 }, // HST 780
+    { 0x3042, 0x00 }, { 0x3043, 0x09 }, // HWIDTH 2304
+    { 0x3044, 0x80 }, { 0x3045, 0x03 }, // VST 896
+    { 0x3046, 0x20 }, { 0x3047, 0x0A }, // VWIDTH 2592
+};
+
+static int imx415_init_window_crop_1485(ms_cus_sensor* handle,
+    const I2C_ARRAY* geo, int geo_len)
+{
+    int i, cnt;
+    int base_len = ARRAY_SIZE(Sensor_5m_60fps_init_table_4lane_linear);
+
+    if (pCus_CheckSensorProductID(handle) == FAIL) {
+        return FAIL;
+    }
+
+    /* 1. idx1 1485 base, holding back the 4-entry standby-exit tail */
+    for (i = 0; i < base_len - 4; i++) {
+        if (Sensor_5m_60fps_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_5m_60fps_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_5m_60fps_init_table_4lane_linear[i].reg,
+                       Sensor_5m_60fps_init_table_4lane_linear[i].data) != SUCCESS) {
+                if (++cnt >= 10)
+                    return FAIL;
+            }
+        }
+    }
+
+    /* 2. crop geometry + warm-safe readout-mode override, still in standby */
+    for (i = 0; i < geo_len; i++) {
+        cnt = 0;
+        while (SensorReg_Write(geo[i].reg, geo[i].data) != SUCCESS) {
+            if (++cnt >= 10)
+                return FAIL;
+        }
+    }
+
+    /* 3. re-issue the held-back standby-exit tail */
+    for (i = base_len - 4; i < base_len; i++) {
+        if (Sensor_5m_60fps_init_table_4lane_linear[i].reg == 0xffff) {
+            SENSOR_MSLEEP(Sensor_5m_60fps_init_table_4lane_linear[i].data);
+        } else {
+            cnt = 0;
+            while (SensorReg_Write(Sensor_5m_60fps_init_table_4lane_linear[i].reg,
+                       Sensor_5m_60fps_init_table_4lane_linear[i].data) != SUCCESS) {
+                if (++cnt >= 10)
+                    return FAIL;
+            }
+        }
+    }
+    return SUCCESS;
+}
+
+static int pCus_init_window_2304x1296_100(ms_cus_sensor* handle)
+{
+    return imx415_init_window_crop_1485(handle, imx415_geo_2304x1296_100,
+        ARRAY_SIZE(imx415_geo_2304x1296_100));
+}
+
 static int pCus_GetVideoResNum(ms_cus_sensor* handle, u32* ulres_num)
 {
     *ulres_num = handle->video_res_supported.num_res;
@@ -2281,8 +2390,20 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         handle->data_prec = CUS_DATAPRECISION_12;
         break;
 
+    /* idx3: 2304x1296@100 — non-binned 1485 window crop (10-bit like idx1),
+     * HMAX=548 -> line 7343ns.  Widest 16:9 the I6E ISP holds at 100fps. */
     case 3:
         handle->video_res_supported.ulcur_res = 3;
+        handle->pCus_sensor_init = pCus_init_window_2304x1296_100;
+        vts_30fps = 1360;
+        params->expo.vts = vts_30fps;
+        params->expo.fps = 100;
+        Preview_line_period = 7343;
+        handle->data_prec = CUS_DATAPRECISION_10;
+        break;
+
+    case 4:
+        handle->video_res_supported.ulcur_res = 4;
         handle->pCus_sensor_init = pCus_init_1m_120fps_mipi4lane_linear;
         vts_30fps = 1700;
         params->expo.vts = vts_30fps;
