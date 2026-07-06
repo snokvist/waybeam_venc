@@ -4,7 +4,9 @@
 - **Branch introducing the mode:** `feature/star6e-imx335-imx415-sensor-modes` (mode not yet on `master`)
 - **Sensor mode:** IMX335 Star6E `LINEAR_RES_6` = `1600x900@144fps`, idx 5
   (`drivers/sensor_imx335_star6e.c:156`)
-- **Status:** root cause localized and device-verified; **fix not yet applied**
+- **Status:** ✅ **RESOLVED & device-verified** — see "Resolution" below.
+  Real root cause is a **hard 120 fps VENC encoder-input ceiling**, not the
+  SetFps-fallback theory first recorded here (kept below for the record).
 - **Device under test:** SSC338Q / Infinity6E ground-truth unit, `10.6.0.1`
   (`waybeam` daemon on `:80`, `flashd` on `:8070`), 2026-07-06
 
@@ -24,6 +26,69 @@ On the 144 fps IMX335 mode only, the encoder emits **~4.7× the configured
 `qpDelta` is a *minor* secondary contributor only: at fps=144, `qpDelta=-12`
 → 15454 kbps vs `qpDelta=0` → 12716 kbps. The dominant term is the fps
 mismatch below.
+
+## Resolution (device-verified 2026-07-06, `10.6.0.1`)
+
+### Real root cause — VENC 120 fps hard ceiling
+
+The Infinity6E VENC block **rejects any encoder input frame rate > 120 fps and
+silently resets it to 30/1**. Kernel log at boot into the 144 mode:
+
+```
+[MI ERR]: _MI_VENC_VerifyFps[3251]: Input invalid FPS:144/1 is over 120, set 30/1 by default
+```
+
+So the encoder's rate-control fps was reset to **30** while the VPE→VENC bind
+delivered ~143 frames/s → CBR budgeted `3000/30` per frame and emitted 143 of
+them → `143/30 ≈ 4.7×` overshoot. Boundary probe confirms the exact ceiling:
+
+| set fps | VENC accepts | SrcFrmRate | wire kbps |
+|---|---|---|---|
+| 120 | yes | 120/1 | 3059 ✓ |
+| 121 | no → reset 30 | 30/1 | 11971 ✗ |
+| 144 | no → reset 30 | 30/1 | ~14100 ✗ |
+
+The `state->sensor.fps == 30` value (SetFps-fallback, described in the original
+analysis below) is a *red herring*: it happens to equal the VENC default, but
+even forcing the encoder-create fps to 144 (`venc_fps` fix) does **not** help —
+144 is simply rejected by `_MI_VENC_VerifyFps` and reset to 30 anyway. The
+binding constraint is the 120 fps hardware ceiling.
+
+### Fix (implemented)
+
+Clamp the encoder input rate and the VPE→VENC bind **dst** to
+`STAR6E_VENC_INPUT_FPS_MAX = 120` (`include/star6e_pipeline.h`). A >120 sensor
+mode now encodes cleanly at 120: the framebase bind keeps its **src** at the
+real sensor rate (~143) and drops the surplus to a 120 fps **dst** that VENC
+accepts. Sites:
+
+- `src/star6e_pipeline.c` — create-path `venc_fps` derivation + both
+  `bind_dst_fps` computations (framing + non-framing branches) capped to 120;
+  GOP now derived from the capped `venc_fps` (`gopSize 2 s × 120 = 240`).
+- `src/star6e_controls.c` `apply_fps()` — live-set path caps the bind dst /
+  encoder fps to 120 (src stays at the true sensor rate so the link drops).
+
+### Verified after fix (config still `fps=144`, `bitrate=3000`)
+
+```
+SrcFrmRate 120/1   RC_GOP 240   VENC_Fps1s 120.17   chn kbps 2942
+wire = 3263 kbps   (was 15381)   no new _MI_VENC_VerifyFps resets
+live POST /set video0.fps=144 → SrcFrmRate 120/1, wire 3233 kbps
+```
+
+### Open product decision (for the user)
+
+The mode is advertised as `1600x900@144fps` (driver desc + WebUI) but the VENC
+can only **encode ≤120 fps**, so it now produces a **120 fps** stream. Options:
+(a) relabel the mode to `1600x900@120fps` (honest); (b) keep the 143 fps sensor
+timing but accept the 120 fps encode (current behaviour — slightly-higher-FOV
+120 option vs the existing `1920x1080@120`); (c) drop idx 5 entirely since
+`1920x1080@120` already covers the 120 fps tier at higher resolution. The code
+fix is correct under all three; only the label/lineup is a judgement call.
+
+---
+
+## Original analysis (superseded — kept for the record)
 
 ## Root cause (confirmed)
 

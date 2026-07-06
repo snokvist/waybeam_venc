@@ -354,6 +354,12 @@ static int apply_fps(uint32_t fps)
 			sensor_fps);
 		fps = sensor_fps;
 	}
+	/* VENC rejects an input rate > 120 (resets to 30/1, wrecking CBR); cap the
+	 * bind DST / encoder rate so a live set on a >120 mode encodes at the
+	 * ceiling.  sensor_fps stays at the true rate: it is the bind SOURCE, so
+	 * the framebase link drops the surplus (e.g. 143 -> 120). */
+	if (fps > STAR6E_VENC_INPUT_FPS_MAX)
+		fps = STAR6E_VENC_INPUT_FPS_MAX;
 
 	MI_SYS_UnBindChnPort(&g_star6e_control_ctx.vpe_port,
 		&g_star6e_control_ctx.venc_port);
