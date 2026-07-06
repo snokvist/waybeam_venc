@@ -1,5 +1,24 @@
 # History
 
+## [0.34.0] - 2026-07-06
+
+Star6E IMX415: **hide four modes from the SDK/WebUI enumeration while keeping
+them compiled in the driver.**
+
+- New `imx415_linear_visible[] = {1, 2, 4, 6, 8}` maps table indices to the
+  SDK-enumerated list. The capability loop enumerates only those (so `num_res`
+  = 5) and `pCus_SetVideoRes()` maps the SDK index back to the table index,
+  re-asserting `ulcur_res`. All 9 mode tables and dispatch cases stay compiled
+  — re-enabling a hidden mode is a one-line edit (add its table index back).
+- **Visible (5, fps-ordered):** 0:3840×2160@40, 1:2816×1584@60, 2:1920×1080@90,
+  3:1728×972@100, 4:1728×816@120.
+- **Hidden (4, kept in driver):** table idx 0 (4K@30), 3 (3840×1152@60),
+  5 (2304×1296@100), 7 (1472×816@120).
+- **Note:** the SDK-enumerated indices shifted (now 0–4). Configs referencing
+  the old 0–8 indices must be remapped — e.g. the bench box `/etc/waybeam.json`
+  moved `"mode": 6` → `"mode": 3` to keep 1728×972@100. Device-verified on .13:
+  enumerates 5 modes, mode 3 runs clean at 100fps, 0 drops.
+
 ## [0.33.0] - 2026-07-05
 
 Star6E IMX415: **removed the two image-corrupt full-FOV binned modes** and settled

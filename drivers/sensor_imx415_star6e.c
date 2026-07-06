@@ -191,6 +191,18 @@ static struct { // LINEAR
     { LINEAR_RES_9,  { 1728,  816, 3, 120 }, { 0, 0, 1728,  816 }, { "1728x816@120fps"  } },
 };
 
+/* Modes exposed to the MI sensor layer (SDK/WebUI enumeration), in display
+ * order.  Values are TABLE indices into imx415_mipi_linear[] above.  Every
+ * mode's table row and SetVideoRes dispatch case stays compiled in — modes
+ * omitted here are simply HIDDEN (not enumerated, not auto-selected), not
+ * removed.  Re-enable a hidden mode by adding its table index back to this
+ * list.  Currently hidden: 0 (4K@30), 3 (3840x1152@60), 5 (2304x1296@100),
+ * 7 (1472x816@120).  The SDK-enumerated index maps back to the table index
+ * via this array in pCus_SetVideoRes(). */
+static const int imx415_linear_visible[] = { 1, 2, 4, 6, 8 };
+#define IMX415_LINEAR_VISIBLE_NUM \
+    ((int)(sizeof(imx415_linear_visible) / sizeof(imx415_linear_visible[0])))
+
 static struct { // HDR
     // Modify it based on number of support resolution
     enum { HDR_RES_1 = 0,
@@ -3020,7 +3032,11 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
 
     handle->video_res_supported.ulcur_res = res_idx;
 
-    switch (res_idx) {
+    /* res_idx is the SDK-enumerated index (0..num_res-1); map it to the driver
+     * TABLE index so hidden modes stay reachable in code but not via the SDK.
+     * ulcur_res is re-asserted to res_idx after the switch (the per-case
+     * assignments below set the table index and are harmless dead writes). */
+    switch (imx415_linear_visible[res_idx]) {
     case 0: // 3840x2160@30 — non-binned 891, stock 4K
         handle->video_res_supported.ulcur_res = 0;
         handle->pCus_sensor_init = pCus_init_8m_30fps_mipi4lane_linear;
@@ -3122,6 +3138,8 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         break;
     }
 
+    /* Re-assert the SDK-enumerated index (per-case bodies set the table index). */
+    handle->video_res_supported.ulcur_res = res_idx;
     return SUCCESS;
 }
 
@@ -3778,18 +3796,20 @@ int cus_camsensor_init_handle_linear(ms_cus_sensor* drv_handle)
     //    resolution capability       //
     ////////////////////////////////////
     handle->video_res_supported.ulcur_res = 0; // default resolution index is 0.
-    // handle->video_res_supported.num_res = LINEAR_RES_END;
-    for (res = 0; res < LINEAR_RES_END; res++) {
+    // Enumerate only the VISIBLE modes (imx415_linear_visible[]); hidden modes
+    // stay compiled in the table + dispatch but are not exposed to the SDK.
+    for (res = 0; res < IMX415_LINEAR_VISIBLE_NUM; res++) {
+        int t = imx415_linear_visible[res];
         handle->video_res_supported.num_res = res + 1;
-        handle->video_res_supported.res[res].width = imx415_mipi_linear[res].senif.preview_w;
-        handle->video_res_supported.res[res].height = imx415_mipi_linear[res].senif.preview_h;
-        handle->video_res_supported.res[res].max_fps = imx415_mipi_linear[res].senout.max_fps;
-        handle->video_res_supported.res[res].min_fps = imx415_mipi_linear[res].senout.min_fps;
-        handle->video_res_supported.res[res].crop_start_x = imx415_mipi_linear[res].senif.crop_start_X;
-        handle->video_res_supported.res[res].crop_start_y = imx415_mipi_linear[res].senif.crop_start_y;
-        handle->video_res_supported.res[res].nOutputWidth = imx415_mipi_linear[res].senout.width;
-        handle->video_res_supported.res[res].nOutputHeight = imx415_mipi_linear[res].senout.height;
-        sprintf(handle->video_res_supported.res[res].strResDesc, imx415_mipi_linear[res].senstr.strResDesc);
+        handle->video_res_supported.res[res].width = imx415_mipi_linear[t].senif.preview_w;
+        handle->video_res_supported.res[res].height = imx415_mipi_linear[t].senif.preview_h;
+        handle->video_res_supported.res[res].max_fps = imx415_mipi_linear[t].senout.max_fps;
+        handle->video_res_supported.res[res].min_fps = imx415_mipi_linear[t].senout.min_fps;
+        handle->video_res_supported.res[res].crop_start_x = imx415_mipi_linear[t].senif.crop_start_X;
+        handle->video_res_supported.res[res].crop_start_y = imx415_mipi_linear[t].senif.crop_start_y;
+        handle->video_res_supported.res[res].nOutputWidth = imx415_mipi_linear[t].senout.width;
+        handle->video_res_supported.res[res].nOutputHeight = imx415_mipi_linear[t].senout.height;
+        sprintf(handle->video_res_supported.res[res].strResDesc, imx415_mipi_linear[t].senstr.strResDesc);
     }
 
     ////////////////////////////////////
