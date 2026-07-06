@@ -1962,10 +1962,9 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		bind_dst_fps = vcfg->video0.fps;
 		if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
 			bind_dst_fps = bind_src_fps;
-		/* VENC rejects an input rate > 120 (resets to 30); cap the delivered
-		 * rate so a >120 sensor mode encodes cleanly at the ceiling. */
-		if (bind_dst_fps > STAR6E_VENC_INPUT_FPS_MAX)
-			bind_dst_fps = STAR6E_VENC_INPUT_FPS_MAX;
+		/* Deliver the TRUE sensor rate to VENC (e.g. ~143 for the 144 mode) so
+		 * the encoder actually outputs it.  The RC fpsNum is separately capped
+		 * to STAR6E_VENC_INPUT_FPS_MAX below — see venc_fps. */
 
 		ret = g_framing->setup_ports(state, bind_src_fps, bind_dst_fps);
 		if (ret != 0) {
@@ -1995,10 +1994,9 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		bind_dst_fps = vcfg->video0.fps;
 		if (bind_dst_fps == 0 || bind_dst_fps > bind_src_fps)
 			bind_dst_fps = bind_src_fps;
-		/* VENC rejects an input rate > 120 (resets to 30); cap the delivered
-		 * rate so a >120 sensor mode encodes cleanly at the ceiling. */
-		if (bind_dst_fps > STAR6E_VENC_INPUT_FPS_MAX)
-			bind_dst_fps = STAR6E_VENC_INPUT_FPS_MAX;
+		/* Deliver the TRUE sensor rate to VENC (e.g. ~143 for the 144 mode) so
+		 * the encoder actually outputs it.  The RC fpsNum is separately capped
+		 * to STAR6E_VENC_INPUT_FPS_MAX below — see venc_fps. */
 
 		ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
 			bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);

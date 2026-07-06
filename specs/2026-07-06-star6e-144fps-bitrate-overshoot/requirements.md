@@ -54,37 +54,60 @@ even forcing the encoder-create fps to 144 (`venc_fps` fix) does **not** help �
 144 is simply rejected by `_MI_VENC_VerifyFps` and reset to 30 anyway. The
 binding constraint is the 120 fps hardware ceiling.
 
-### Fix (implemented)
+### Key correction — the VENC DOES encode 143 fps
 
-Clamp the encoder input rate and the VPE→VENC bind **dst** to
-`STAR6E_VENC_INPUT_FPS_MAX = 120` (`include/star6e_pipeline.h`). A >120 sensor
-mode now encodes cleanly at 120: the framebase bind keeps its **src** at the
-real sensor rate (~143) and drops the surplus to a 120 fps **dst** that VENC
-accepts. Sites:
+The 120 limit is on the **rate-control fps _parameter_ only**, NOT on encode
+throughput.  `/proc` shows `VENC Fps_1s = 143` — the block genuinely encodes
+143 fps.  `_MI_VENC_VerifyFps` merely refuses to let you *tell the rate
+controller* a number > 120, and resets that parameter to 30.  So a "cap the
+output to 120 fps" fix (an earlier attempt) needlessly throttles a stream the
+hardware can actually produce.  Two dead ends ruled out on device:
 
-- `src/star6e_pipeline.c` — create-path `venc_fps` derivation + both
-  `bind_dst_fps` computations (framing + non-framing branches) capped to 120;
-  GOP now derived from the capped `venc_fps` (`gopSize 2 s × 120 = 240`).
-- `src/star6e_controls.c` `apply_fps()` — live-set path caps the bind dst /
-  encoder fps to 120 (src stays at the true sensor rate so the link drops).
+- **Cap delivery to 120 fps** — works (clean CBR) but gives a 120 fps stream,
+  not the 144 the mode promises.  Rejected: throughput isn't the constraint.
+- **Linear bitrate compensation** (`bitrate × rc_fps/actual`) — NOT robust: at
+  a tiny per-frame budget the encoder hits its QP ceiling and can't compress
+  that small, so the `output = bitrate × actual/rc_fps` model breaks.  Measured:
+  `fps=144, bitrate=629 (=3000×30/143)` produced **3738 kbps**, not ~3000.
 
-### Verified after fix (config still `fps=144`, `bitrate=3000`)
+### Fix (implemented & device-verified) — decouple delivery from RC fps
+
+Deliver the **true** sensor rate to VENC (the encoder outputs 143 fps) but cap
+only the **rate-control `fpsNum`** to `STAR6E_VENC_INPUT_FPS_MAX = 120`
+(`include/star6e_pipeline.h`) so `_MI_VENC_VerifyFps` never resets it to 30.
+`rc_fps = 120` vs a 143 delivered rate leaves only ~19 % CBR overshoot (`143/120
+= 1.19×`) with QP in its normal regime — vs the ~4.7× before.  Sites:
+
+- `src/star6e_pipeline.c` — create-path `venc_fps` (RC) capped to 120; the two
+  `bind_dst_fps` computations deliver the TRUE rate (no 120 cap); GOP derived
+  from the capped RC fps (`2 s × 120 = 240` frames ≈ 1.68 s at 143 fps).
+- `src/star6e_controls.c` `apply_fps()` — bind DST = true fps (delivers 143),
+  `apply_encoder_fps(rc_fps)` with `rc_fps = min(fps, 120)`.
+
+### Verified after fix (config `fps=144`, `bitrate=3000`, same scene)
 
 ```
-SrcFrmRate 120/1   RC_GOP 240   VENC_Fps1s 120.17   chn kbps 2942
-wire = 3263 kbps   (was 15381)   no new _MI_VENC_VerifyFps resets
-live POST /set video0.fps=144 → SrcFrmRate 120/1, wire 3233 kbps
+RC SrcFrmRate 120/1   actual Fps_1s 143.0   RC_GOP 240   no fps reset
+wire ≈ 4080–4188 kbps   (fps=60 baseline on same scene ≈ 3300)
 ```
 
-### Open product decision (for the user)
+True 144 fps output, ~1.2–1.25× over target (RC budgets for 120, emits 143).
 
-The mode is advertised as `1600x900@144fps` (driver desc + WebUI) but the VENC
-can only **encode ≤120 fps**, so it now produces a **120 fps** stream. Options:
-(a) relabel the mode to `1600x900@120fps` (honest); (b) keep the 143 fps sensor
-timing but accept the 120 fps encode (current behaviour — slightly-higher-FOV
-120 option vs the existing `1920x1080@120`); (c) drop idx 5 entirely since
-`1920x1080@120` already covers the 120 fps tier at higher resolution. The code
-fix is correct under all three; only the label/lineup is a judgement call.
+### Follow-up (optional, for exact CBR)
+
+To remove the residual ~20 % overshoot, compensate the encoder bitrate by
+`rc_fps / delivered_fps` (= 120/143 ≈ 0.84) wherever the CBR target is set
+(create `venc_max_rate`, live `apply_bitrate`, and re-applied on `apply_fps`
+since the factor tracks fps).  This is safe here — unlike the failed low-budget
+test, `rc_fps=120` keeps the per-frame budget out of the QP-saturation regime.
+Deferred: 3 call-sites + a stored factor in the control ctx; the core "true
+144 fps" behaviour already works without it.
+
+### Note on mode labelling
+
+The mode now genuinely delivers ~143 fps, so the `1600x900@144fps` label is
+honest.  No relabel needed (supersedes the earlier "must relabel to 120"
+note).
 
 ---
 
