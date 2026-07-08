@@ -138,6 +138,9 @@ void maruko_pipeline_zoom_status(MarukoZoomStatus *out);
 int maruko_pipeline_framing_setup(MarukoBackendContext *ctx,
   const VencConfig *vcfg);
 void maruko_pipeline_framing_stop(void);
+/** Live pause for the active framing module (video0.pause_stab). Returns 0 on
+ *  success, -1 if no framing module is active. */
+int maruko_pipeline_set_pause_stab(bool paused);
 
 /** Reload the ISP tuning bin against the running pipeline.
  *  configured_path is the new bin location (NULL/empty falls back to

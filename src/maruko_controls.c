@@ -1108,6 +1108,11 @@ static int maruko_apply_zoom(double pct, double x, double y)
 	return maruko_pipeline_apply_zoom(backend, pct, x, y);
 }
 
+static int maruko_apply_pause_stab(bool paused)
+{
+	return maruko_pipeline_set_pause_stab(paused);
+}
+
 static int maruko_apply_isp_bin(const char *path)
 {
 	if (!g_ctx.backend)
@@ -1139,6 +1144,7 @@ static const VencApplyCallbacks g_maruko_apply_cb = {
 	.query_transport_status = maruko_query_transport_status,
 	.query_audio_status = maruko_query_audio_status,
 	.apply_zoom = maruko_apply_zoom,
+	.apply_pause_stab = maruko_apply_pause_stab,
 	.apply_isp_bin = maruko_apply_isp_bin,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
 };

@@ -1737,6 +1737,15 @@ void maruko_pipeline_framing_stop(void)
 	}
 }
 
+/* Live pause for the active framing module (video0.pause_stab).  Mirrors
+ * star6e_pipeline_set_pause_stab. */
+int maruko_pipeline_set_pause_stab(bool paused)
+{
+	if (g_maruko_framing && g_maruko_framing->set_live)
+		return g_maruko_framing->set_live("pause", paused ? "1" : "0");
+	return -1;
+}
+
 /* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
  * only updates x/y.  Updates the *target*; the ramp thread tweens
  * `current` toward it via maruko_pan_apply_locked.  pct is accepted to
