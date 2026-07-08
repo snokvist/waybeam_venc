@@ -44,6 +44,14 @@ STAB ?= 1
 ifeq ($(STAB),1)
 STAR6E_ONLY_SRC += src/star6e_framing_stab.c
 endif
+# Phase-1 SCL bench for the Maruko stab port (DEVELOPMENT ONLY).  STAB_BENCH=1
+# compiles src/maruko_stab_bench.c + defines HAVE_STAB_BENCH; the default 0
+# keeps it out of production images entirely.  Even when compiled in, the bench
+# is inert unless WAYBEAM_STAB_BENCH is set in the environment at launch.
+STAB_BENCH ?= 0
+ifeq ($(STAB_BENCH),1)
+MARUKO_ONLY_SRC += src/maruko_stab_bench.c
+endif
 RECORDER_SRC := src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c
 LIB_RUNPATH ?= /usr/lib
 COMMON_LDFLAGS := -s -Wl,-rpath,$(LIB_RUNPATH) -Wl,--no-as-needed
@@ -58,6 +66,9 @@ DRV := vendor-libs/maruko
 DRV_EXTRA :=
 SOC_CFLAGS :=
 SOC_DEFS := -DPLATFORM_STAR6E -DPLATFORM_MARUKO -DHAVE_BACKEND_MARUKO=1
+ifeq ($(STAB_BENCH),1)
+SOC_DEFS += -DHAVE_STAB_BENCH=1
+endif
 SOC_LDFLAGS :=
 SOC_LIBS := -lm
 BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group

@@ -170,6 +170,44 @@ Mitigation ladder if 1b is marginal: (a) dedup — skip the write when the rect 
 unchanged; (b) raise `STAB_DETECT_EVERY` (against the author's explicit warning);
 (c) `stab-fill` (no SCL poke) — blocked by R1.
 
+#### Phase 1 RESULTS — GATE PASSED (2026-07-08, device .233, IMX415 1080×720@~50fps)
+
+Benched via an in-venc, env-gated probe (`src/maruko_stab_bench.c`, built with
+`STAB_BENCH=1`, run with `WAYBEAM_STAB_BENCH=1a|1b|1c|1d`). It lives in-process
+because a second process cannot attach to MI_SCL's per-process channel state.
+Note: config fps is 144 but the sensor actually delivers ~50fps.
+
+- **1a — PASS.** Port-2 tap (384×384 raw, `compress=0`) delivered **49.4 fps**
+  (149 frames / 3.01 s), intervals mean/min/max **20.1 / 17.7 / 21.2 ms** — tracks
+  the real source rate, no gaps. Drain-loop CPU ≈ 20% of one core.
+  **Gotcha found:** an *unbound* SCL output port produces **0 frames** for GetBuf
+  until `MI_SYS_SetChnOutputPortDepth(0, &port, 2, 4)` gives it a user-frame queue
+  (i6c ABI has a leading `u16 soc_id`; mirrors `star6e_framing_stab.c:1624`). The
+  Phase-3 `maruko_framing_stab.c` MUST call this after `EnableOutputPort(2)`.
+- **1b — PASS (the pivotal gate).** Hammered port-0 `SetOutputPortParam` (full
+  struct, ±1px crop.x) at 30/60/90/144 Hz for 4 s each. Every rung: **errs=0**,
+  per-call latency **~0.020 ms mean** (max 0.035–0.049 ms; a lone 0.773 ms blip at
+  144 Hz), and the SCL processed a clean **~50 fps THROUGHOUT** (199–200 frames per
+  4 s window, read from `/proc/mi_modules/mi_scl/mi_scl0` `TotalKickoff`). Host RTP
+  on :5600 held steady ~1200 pkts/s across all rungs — no dropout. **No** FIFO
+  stall / scaler renegotiation / MMU storm / reinit. **The 30 Hz pan-ramp cap
+  (`MARUKO_PAN_RAMP_TICK_MS`) was conservative, not a hardware limit** — stab can
+  emit every frame. R4 is retired.
+- **1c — partial.** `SetOutputPortParam` on port 2 with **odd** `crop.x`
+  (base+1, base+3) returned **0** — no API-level 2-px rejection. Whether the
+  scaler honours a 1-px offset or silently rounds is NOT yet verified (needs a
+  drained-frame content correlation); keep the 2-px-even assumption until proven.
+- **1d — PASS.** Full loop (tap → `MI_IVE_Shift_Detector` → port-0 emit) ran
+  **44.2 fps sustained** (266 frames / 6.0 s), **265/265 emits** applied with
+  ret=0, detector **17.9 ms CPU / 21.8 ms wall** per call. No MMU/watchdog/FIFO
+  warnings; clean teardown across 5 SIGTERM cycles. At the source ~50 fps,
+  detect-every-frame nets ~44 fps stabilized (matches the cost model; the 144 fps
+  config needs the documented fps downgrade).
+
+**Verdict: proceed to Phase 2.** stab-in-this-shape is viable on Maruko; no
+mitigation-ladder fallback needed. Carry two facts into Phase 3: the port-depth
+call (1a) and the still-open 1-px-vs-2-px content granularity (1c).
+
 ### Phase 2 — Extract the Kalman
 `src/star6e_framing_stab.c`: constants `:230-237`, globals `:311-320`,
 seed/validate `:458-481`, filter+pause-glide+clamp `:1322-1379` (core predict/update

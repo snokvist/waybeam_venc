@@ -12,6 +12,7 @@
 #include "maruko_cus3a.h"
 #include "maruko_output.h"
 #include "maruko_recorder.h"
+#include "maruko_stab_bench.h"
 #include "maruko_ts_recorder.h"
 #include "maruko_video.h"
 #include "output_socket.h"
@@ -3427,11 +3428,19 @@ static void maruko_pipeline_init_streaming(MarukoBackendContext *ctx,
 	rt->venc_fd = maruko_mi_venc_get_fd(ctx->venc_device, ctx->venc_channel);
 	rt->last_activity_us = wb_monotonic_us();
 	rt->last_warn_us = rt->last_activity_us;
+
+	/* Phase-1 stab SCL bench (development builds only; no-op stub in
+	 * production).  Runs once, inert unless WAYBEAM_STAB_BENCH is set. */
+	maruko_stab_bench_maybe_start(ctx);
 }
 
 static void maruko_pipeline_cleanup_streaming(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt)
 {
+	/* Join the bench thread before tearing down ports (mirrors the stab
+	 * teardown ordering rule: never disable a tapped port with the reader
+	 * still live). */
+	maruko_stab_bench_stop();
 	if (rt->venc_fd >= 0) {
 		maruko_mi_venc_close_fd(ctx->venc_device, ctx->venc_channel);
 		rt->venc_fd = -1;

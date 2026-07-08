@@ -1,6 +1,7 @@
 # Maruko (Infinity6C) `video.framing` stab / stab-fill parity
 
-Status: **Phase 0 complete (IVE unblocked). Phase 1 (bench) is the go/no-go gate.**
+Status: **Phase 0 + Phase 1 complete — GATE PASSED (see plan.md Phase 1 RESULTS).
+Stab viable on Maruko; proceeding to Phase 2 (extract Kalman).**
 Date: 2026-07-08
 Devices: `root@192.168.2.233` (i6c / SSC378QE, OpenIPC, musl)
 
