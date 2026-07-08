@@ -44,12 +44,20 @@
 
 #if HAVE_FRAMING_STAB
 
-/* ── detector geometry (mirrors STAB_SHIFT_* in star6e_framing_stab.c) ─────── */
-#define STAB_TAP_W        384
-#define STAB_TAP_H        384
-#define STAB_BOX          256
-#define STAB_PYRAMID      3
-#define STAB_SEARCH_RANGE 96
+/* ── detector geometry ─────────────────────────────────────────────────────
+ * Maruko deliberately runs the CHEAPER Shift_Detector config (256 crop / 128
+ * box / 2-level pyramid) rather than Star6E's full 384/256/3.  Rationale: the
+ * i6c is SINGLE-CORE, and the detector is NEON software — the full config is
+ * ~17 ms/frame which pegs the one A7 core at 100% (~85% of the 20 ms budget at
+ * 50 fps).  The cheaper config is ~8 ms/frame (~65% core) and also copies less
+ * per frame (256x256 vs 384x384 tap), keeping every-frame detection at 50 fps
+ * with headroom, at the documented cost of slightly noisier estimates.  Bump
+ * back to 384/256/3 only if a dual-core i6-class part is ever targeted. */
+#define STAB_TAP_W        256
+#define STAB_TAP_H        256
+#define STAB_BOX          128
+#define STAB_PYRAMID      2
+#define STAB_SEARCH_RANGE 64
 #define STAB_TAP_PORT     2
 #define STAB_DEFAULT_PCT  90   /* fallback framing window when cfg is out of range */
 
