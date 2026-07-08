@@ -43,6 +43,7 @@ STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c 
 STAB ?= 1
 ifeq ($(STAB),1)
 STAR6E_ONLY_SRC += src/star6e_framing_stab.c
+MARUKO_ONLY_SRC += src/maruko_framing_stab.c
 endif
 # Phase-1 SCL bench for the Maruko stab port (DEVELOPMENT ONLY).  STAB_BENCH=1
 # compiles src/maruko_stab_bench.c + defines HAVE_STAB_BENCH; the default 0
@@ -66,6 +67,9 @@ DRV := vendor-libs/maruko
 DRV_EXTRA :=
 SOC_CFLAGS :=
 SOC_DEFS := -DPLATFORM_STAR6E -DPLATFORM_MARUKO -DHAVE_BACKEND_MARUKO=1
+ifeq ($(STAB),1)
+SOC_DEFS += -DHAVE_FRAMING_STAB=1
+endif
 ifeq ($(STAB_BENCH),1)
 SOC_DEFS += -DHAVE_STAB_BENCH=1
 endif

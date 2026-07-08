@@ -98,6 +98,10 @@ static int maruko_runner_init(void *opaque)
 	if (ret != 0)
 		return ret;
 
+	/* Bring up the framing module (video0.framing="stab") now that the SCL
+	 * base crop is set and VENC is bound.  No-op when framing is off. */
+	(void)maruko_pipeline_framing_setup(backend, &ctx->vcfg);
+
 	maruko_iq_init();
 	maruko_bind_controls(ctx);
 	maruko_reset_scene(backend);
