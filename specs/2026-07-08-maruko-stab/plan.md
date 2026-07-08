@@ -227,6 +227,28 @@ int max_x, int max_y, int *acc_x, int *acc_y)`. Refactor Star6E onto it first.
 > control law for both" (`:220-229`). Its 4 tuning constants must not drift. This is
 > the justified exception.
 
+#### Phase 2 RESULTS — DONE (2026-07-08)
+
+Extracted to `include/framing_kalman.h` + `src/framing_kalman.c` (in `HELPER_SRC`,
+so both backends link it): `FramingKalman` state struct (facc + per-axis
+estimate/uncertainty + q/r), `framing_kalman_reset(k, q, r)` (validate+seed),
+`framing_kalman_step(k, meas_dx, meas_dy, paused, tau, max_x, max_y, &acc_x,
+&acc_y)`. Star6E refactored onto it (`star6e_framing_stab.c` −60 lines net): the 6
+Kalman globals → one `FramingKalman g_stab_kalman`, the `facc_*` thread-locals
+folded in, `configure()` calls `_reset`, the thread calls `_step`.
+
+**Gate met via numerical proof, not a device downgrade.** The Star6E bench device
+(.201) runs the *upstream* 0.34.0 line, ahead of this fork's 0.24.1 — deploying
+the 0.24.1 build would regress it and muddy any before/after. Instead
+`tests/test_framing_kalman.c` runs the ORIGINAL inline math (verbatim `ref_step`)
+and the extracted `framing_kalman_step` side-by-side over five 20 000-step
+randomized streams (shakes, big pans, pause bursts + transitions, varied
+tau/clamp/q/r) and asserts the applied acc AND full internal state match
+**bit-for-bit** every step — plus reset q/r-bounds + paused-idle cases. All pass
+(suite: 1713/0). Both backends build clean; Maruko binary size unchanged (Kalman
+dead-stripped there until Phase 3 wires it). On-device Star6E smoke deferred
+(binary compiles clean, math proven identical; fold into the next star6e deploy).
+
 ### Phase 3 — `maruko_framing_stab.c` (`stab` only)
 - `include/maruko_framing.h` (same vtable, `setup_ports(MarukoBackendContext*, …)`).
 - `include/maruko_framing_host.h` — needs a **rect-taking** `maruko_emit_ae_crop()`;
