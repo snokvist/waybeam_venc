@@ -1,5 +1,25 @@
 # History
 
+## [0.34.1] - 2026-07-09
+
+Star6E IMX335: **true 144fps encode — decouple VENC delivery from the RC
+fpsNum parameter.** Supersedes the earlier cap-to-120 approach.
+
+- The i6e VENC encodes 143fps fine; the 120 ceiling is only on the
+  rate-control `fpsNum` parameter — `_MI_VENC_VerifyFps` rejects RC fps > 120
+  and silently resets it to 30, wrecking CBR (3000 kbps → ~15 Mbps at 143fps).
+- Fix: deliver the **true** sensor rate to VENC (encodes 143) but cap only the
+  RC `fpsNum` to `STAR6E_VENC_INPUT_FPS_MAX` (120) so `VerifyFps` never resets.
+  `rc_fps=120` vs `143` delivered = ~1.19× CBR overshoot (QP normal regime)
+  instead of 4.7×.
+- `star6e_pipeline.c`: create-path `venc_fps` (RC) capped to 120; both
+  `bind_dst` deliver the true rate; GOP from the capped RC fps (240).
+  `star6e_controls.c`: `apply_fps()` bind dst = true fps,
+  `apply_encoder_fps(rc_fps)`.
+- Device-verified (fps=144): RC SrcFrmRate 120/1, actual Fps_1s 143.0, no
+  VerifyFps reset, wire ~4080–4188 kbps. Optional follow-up: bitrate
+  compensation ×120/143 for exact CBR.
+
 ## [0.34.0] - 2026-07-06
 
 Star6E IMX415: **hide four modes from the SDK/WebUI enumeration while keeping

@@ -341,6 +341,7 @@ static int apply_fps(uint32_t fps)
 {
 	MI_S32 bind_ret;
 	uint32_t sensor_fps;
+	uint32_t rc_fps;
 
 	if (fps == 0 || fps > PIPELINE_LIVE_FPS_MAX)
 		return -1;
@@ -354,6 +355,12 @@ static int apply_fps(uint32_t fps)
 			sensor_fps);
 		fps = sensor_fps;
 	}
+	/* Decouple delivery from rate control: the VPE->VENC bind DELIVERS the
+	 * true fps (VENC encodes it fine — the block does ~143fps), but the RC
+	 * fpsNum is capped to STAR6E_VENC_INPUT_FPS_MAX because _MI_VENC_VerifyFps
+	 * resets any RC fps > 120 to 30/1 (which wrecks CBR).  rc_fps=120 vs a 143
+	 * delivered rate leaves only ~19% CBR overshoot instead of ~4.7x. */
+	rc_fps = fps > STAR6E_VENC_INPUT_FPS_MAX ? STAR6E_VENC_INPUT_FPS_MAX : fps;
 
 	MI_SYS_UnBindChnPort(&g_star6e_control_ctx.vpe_port,
 		&g_star6e_control_ctx.venc_port);
@@ -369,7 +376,7 @@ static int apply_fps(uint32_t fps)
 		return -1;
 	}
 
-	if (apply_encoder_fps(fps) != 0 || apply_scene_fps(fps) != 0) {
+	if (apply_encoder_fps(rc_fps) != 0 || apply_scene_fps(rc_fps) != 0) {
 		/* Bind succeeded but the encoder/scene fps write failed —
 		 * restore the bind to sensor_fps:sensor_fps so we don't leave
 		 * VPE->VENC bound at the new fps while the caller treats the
@@ -384,7 +391,8 @@ static int apply_fps(uint32_t fps)
 		return -1;
 	}
 
-	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
+	printf("> FPS delivered %u, RC fpsNum %u (bind %u:%u)\n", fps, rc_fps,
+		sensor_fps, fps);
 	return 0;
 }
 
