@@ -308,17 +308,81 @@ Live-only list `:898-912` includes `video0.framing`. `pause_stab` not-persisted 
 wired to a new `maruko_pipeline_set_pause_stab()` mirroring
 `star6e_pipeline.c:1000-1005` / `star6e_controls.c:277-280`.
 
-### Phase 5 — `stab-fill`: DEFER
-Strictly larger on Maruko than on Star6E. Requires dropping port0 to `compress=0`
-and re-binding FRAMEBASE (as `maruko_jpeg` does for port1), losing the RING
-zero-copy path. Only attempt if Phase 1b fails *and* stabilization is still wanted.
+### Phase 5 — `stab-fill` (PLANNED — user-requested 2026-07-09; was DEFER)
 
-stab-fill-only surface (for reference): helpers `star6e_framing_stab.c:649-1051`
-(`uv_pa/uv_va` `:655-669`, `make_i8_plane` `:672-682`, `fill_i8_rect` `:687-731`,
-`blit_i8_rect` `:734-790`, `copy_y_to_sw` `:796-833`, `send_frame_to_venc_fill`
-`:840-983`, `blit_thread_main` `:987-1027`, `fill_queue_blit` `:1030-1051`),
-`setup_ports_fill` `:1464-1509`, second module struct `:2015-2026`, blit thread at
-`SCHED_FIFO VENC_RT_PRIO` `:1718-1735`.
+**What it is.** Unlike `stab` (HW-crop → tighter FOV), `stab-fill` keeps the encode
+**full-resolution** and floats the stabilized window inside it, filling the exposed
+edge with **black** (letterbox that moves with the shake). No FOV loss; the shift
+budget comes from `stab_crop_pct` (the black-border budget), not a crop.
+
+**How Star6E does it (the reference — all in `src/star6e_framing_stab.c`).** It is a
+fully **manual software compose**, NOT a HW crop:
+1. `setup_ports_fill` (`:1404-1449`): port0 = encode dims, `compress=I6_COMPR_NONE`,
+   **NOT bound to VENC** (`bound_vpe_venc=0`); `SetChnOutputPortDepth(&vpe0,4,8)`.
+   The detector drains port0 itself via `MI_SYS_ChnOutputPortGetBuf`.
+2. Per frame (`send_frame_to_venc_fill` `:816-959`): **`MI_SYS_ChnInputPortGetBuf`
+   on the VENC input port** → `MI_SYS_BufFillPa` the 4 black strips (Y=16, UV=128,
+   fill value replicated across 32 bits) → `MI_SYS_BufBlitPa` the shifted Y+UV
+   content → **`MI_SYS_ChnInputPortPutBuf`** to hand the composed frame to VENC.
+3. Optional `SCHED_FIFO` blit thread (`:963-1003`) + single-slot handoff
+   (`fill_queue_blit` `:1006-1027`) + 2-slot `sw_detect` Y-copy ring so the detector
+   isn't blocked on the compose. Kalman + detector tap are **shared with `stab`**;
+   only the emit differs. Both presets share one vtable, switched by `g_stab_fill_mode`
+   (set in `stab_fill_prepare` `:1782-1937`, which passes `enc=src` — no shrink).
+4. `stab_sys_in_get_buf/in_put_buf/blit_pa/fill_pa` fn-ptrs dlsym'd
+   (`MI_SYS_ChnInputPortGetBuf/PutBuf`, `MI_SYS_BufBlitPa/FillPa`).
+
+**THE PIVOTAL MARUKO GATE (Phase 5a — bench FIRST, like 1b was for stab).**
+Star6E pushes composed frames into an **unbound** VENC input port via
+`MI_SYS_ChnInputPortGetBuf/PutBuf`. But Maruko creates VENC with
+`I6C_VENC_SRC_CONF_RING_DMA` (`maruko_pipeline.c:~2055`) and feeds it **only** via
+the SCL→VENC **RING** bind (`:~2391`, `I6_SYS_LINK_RING`). The i6c JPEG path uses a
+FRAMEBASE **bind** (`maruko_jpeg.c:132-152`), still HW-fed — no manual push anywhere
+in the Maruko sources. **Open question that decides everything:** can an i6c VENC
+channel be put in a manual-push input mode (some `I6C_VENC_SRC_CONF_*` other than
+RING_DMA) and accept `MI_SYS_ChnInputPortGetBuf/PutBuf` composed frames? The
+`MI_SYS_ChnInputPort*` / `BufBlitPa` / `BufFillPa` **symbols dlsym fine on i6c**
+(Phase-3 recon), but symbol-present ≠ VENC-accepts-pushes.
+- **Bench:** create VENC unbound with each non-RING src-conf value, push one
+  hand-composed MMA frame via `ChnInputPortGetBuf`→fill/blit→`PutBuf`, confirm it
+  emits an encoded frame on `:5600`. Reuse the `maruko_stab_bench.c` harness style.
+- **If it passes:** port star6e's compose path (Phases 5b–5e below).
+- **If it FAILS:** manual push is impossible on i6c VENC → fall back to a **HW
+  compositor**: DIVP (i6c has it — `star6e_pip_apis` memory notes DIVP/VPE/RGN for
+  i6c PiP) or an `MI_RGN` canvas — blit the stabilized SCL output into a black
+  canvas surface, then FRAMEBASE-bind THAT to VENC. Larger still; scope as its own
+  spec. Worst case: document stab-fill as i6c-infeasible and ship stab-only.
+
+**If 5a passes — the port (mirror Star6E, reuse the stab module):**
+- 5b. Add a fill-mode branch to `maruko_framing_stab.c` (mirror `g_stab_fill_mode`),
+  OR a sibling `maruko_framing_stab_fill.c` sharing the detector/Kalman. Prefer the
+  in-module flag (Star6E's proven shape — one vtable, `g_fill_mode` switch).
+- 5c. `maruko_stab_setup_ports` fill branch: port0 `compress=0`, **skip the
+  SCL→VENC RING bind** (or unbind it), `SetChnOutputPortDepth(port0,4,8)`, put VENC
+  in the manual-push mode 5a found. Detector drains **port0** (not the port-2 tap)
+  in fill mode — it needs the full frame to compose. (Reconcile with the port-2 tap:
+  fill can reuse port0's full frame for both detect-crop and compose.)
+- 5d. Port `uv_pa/uv_va`, `make_i8_plane`, `fill_i8_rect` (32-bit-replicated fill),
+  `blit_i8_rect`, `copy_y_to_sw`, `send_frame_to_venc_fill`, the `SCHED_FIFO` blit
+  thread + single-slot handoff + 2-slot sw_detect ring. Verbatim-adapt with the i6c
+  `StabSysFrameData_t`/`BufConf` layouts (already mirrored in the bench).
+- 5e. Un-gate: `venc_config.c` preset table already has `stab-fill`; drop it from the
+  dashboard `optDisabled` set (`web/dashboard.html`) + update the tooltip; regen
+  `venc_webui.c`. (No `venc_api` field gate — the stab knobs already un-gated in P4.)
+
+**Risks specific to stab-fill.** (R-F1) 5a is a hard go/no-go — high chance the i6c
+VENC rejects manual push, forcing the DIVP/RGN fallback (much larger). (R-F2) the
+compose is CPU pixel work (fill+blit) — on the single-core i6c this stacks on the
+~8ms detector; may need the SCHED_FIFO blit thread just to hold fps, and even then
+could force an fps cap. (R-F3) leaving VENC unbound + manual-push changes the
+teardown order — `framing_stop` must quiesce the compose/blit before VENC teardown;
+re-derive the D-state-safe sequence (Maruko is more reinit-fragile than Star6E).
+(R-F4) `BufBlitPa`/`BufFillPa` physical-address semantics unverified on i6c — confirm
+they take MIU physicals like the IVE ioctl did.
+
+**Effort:** ~Phase-3-sized if 5a passes; a separate multi-day spec if it fails and the
+DIVP/RGN fallback is needed. Recommend running the 5a bench as a standalone step
+before committing to the full port.
 
 ## Corrections to prior notes
 

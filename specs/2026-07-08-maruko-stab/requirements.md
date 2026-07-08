@@ -116,8 +116,12 @@ Consequences:
 
 ## Scope
 
-**In scope:** `framing=stab` on Maruko (Phases 1–4 in `plan.md`).
-**Out of scope / deferred:** `framing=stab-fill` (see R1 — port0 is IFC-compressed).
+**In scope:** `framing=stab` on Maruko (Phases 1–4, ALL DONE — see `plan.md`).
+**`framing=stab-fill`:** now PLANNED (user-requested 2026-07-09), Phase 5 in
+`plan.md`. Gated on a pivotal unknown (Phase 5a): can the i6c VENC accept manually
+pushed input frames (`MI_SYS_ChnInputPortGetBuf/PutBuf`)? Star6E's compose path
+depends on it; Maruko VENC is RING_DMA-fed today. Bench 5a before the full port; if
+it fails, fall back to a DIVP/RGN HW compose (its own spec).
 
 ## Acceptance criteria
 
