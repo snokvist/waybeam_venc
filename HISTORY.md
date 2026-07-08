@@ -1,5 +1,239 @@
 # History
 
+## [0.34.1] - 2026-07-09
+
+Star6E IMX335: **true 144fps encode — decouple VENC delivery from the RC
+fpsNum parameter.** Supersedes the earlier cap-to-120 approach.
+
+- The i6e VENC encodes 143fps fine; the 120 ceiling is only on the
+  rate-control `fpsNum` parameter — `_MI_VENC_VerifyFps` rejects RC fps > 120
+  and silently resets it to 30, wrecking CBR (3000 kbps → ~15 Mbps at 143fps).
+- Fix: deliver the **true** sensor rate to VENC (encodes 143) but cap only the
+  RC `fpsNum` to `STAR6E_VENC_INPUT_FPS_MAX` (120) so `VerifyFps` never resets.
+  `rc_fps=120` vs `143` delivered = ~1.19× CBR overshoot (QP normal regime)
+  instead of 4.7×.
+- `star6e_pipeline.c`: create-path `venc_fps` (RC) capped to 120; both
+  `bind_dst` deliver the true rate; GOP from the capped RC fps (240).
+  `star6e_controls.c`: `apply_fps()` bind dst = true fps,
+  `apply_encoder_fps(rc_fps)`.
+- Device-verified (fps=144): RC SrcFrmRate 120/1, actual Fps_1s 143.0, no
+  VerifyFps reset, wire ~4080–4188 kbps. Optional follow-up: bitrate
+  compensation ×120/143 for exact CBR.
+
+## [0.34.0] - 2026-07-06
+
+Star6E IMX415: **hide four modes from the SDK/WebUI enumeration while keeping
+them compiled in the driver.**
+
+- New `imx415_linear_visible[] = {1, 2, 4, 6, 8}` maps table indices to the
+  SDK-enumerated list. The capability loop enumerates only those (so `num_res`
+  = 5) and `pCus_SetVideoRes()` maps the SDK index back to the table index,
+  re-asserting `ulcur_res`. All 9 mode tables and dispatch cases stay compiled
+  — re-enabling a hidden mode is a one-line edit (add its table index back).
+- **Visible (5, fps-ordered):** 0:3840×2160@40, 1:2816×1584@60, 2:1920×1080@90,
+  3:1728×972@100, 4:1728×816@120.
+- **Hidden (4, kept in driver):** table idx 0 (4K@30), 3 (3840×1152@60),
+  5 (2304×1296@100), 7 (1472×816@120).
+- **Note:** the SDK-enumerated indices shifted (now 0–4). Configs referencing
+  the old 0–8 indices must be remapped — e.g. the bench box `/etc/waybeam.json`
+  moved `"mode": 6` → `"mode": 3` to keep 1728×972@100. Device-verified on .13:
+  enumerates 5 modes, mode 3 runs clean at 100fps, 0 drops.
+
+## [0.33.0] - 2026-07-05
+
+Star6E IMX415: **removed the two image-corrupt full-FOV binned modes** and settled
+on a clean 9-mode fps-ordered lineup.
+
+- Removed **1920×1080@100** and **1920×1080@120** (full-FOV 2×2-binned). They
+  reported correct fps but rendered black + colored horizontal lines on the I6E
+  ISP — to reach 100/120fps their HMAX drops to 328/275, below the wide binned
+  line's WINMODE=0x04 crop floor (~365). Init tables, thunks, enum entries, mode
+  rows and dispatch cases all deleted (no dead code).
+- **Kept 1920×1080@90** (full-FOV 2×2-binned, idx4): at 90fps HMAX stays above the
+  crop floor, so it renders a clean image — device-confirmed.
+- Final lineup (idx : res@fps): 0:4K@30, 1:4K@40, 2:2816×1584@60, 3:3840×1152@60,
+  4:1920×1080@90, 5:2304×1296@100, 6:1728×972@100, 7:1472×816@120, 8:1728×816@120.
+  Every mode renders a valid image; still strict fps order.
+- Docs (`STAR6E_IMX415_MODES.md`, `HEADROOM.md` §5.6) updated to match.
+
+## [0.32.0] - 2026-07-05
+
+Star6E IMX415: **strict fps ordering** of the full 11-mode lineup. No behaviour
+change per mode — only the resolution-table order and dispatch case indices were
+permuted so `sensor.mode` steps monotonically in frame rate.
+
+New index map (old → new): 0→0, 1→2, 2→4, 3→5, 4→6, 5→8, 6→9, 7→3, 8→1, 9→7,
+10→10. Resulting order (idx : res@fps): 0:4K@30, 1:4K@40, 2:2816×1584@60,
+3:3840×1152@60, 4:1920×1080@90, 5:2304×1296@100, 6:1920×1080@100, 7:1728×972@100,
+8:1472×816@120, 9:1920×1080@120, 10:1728×816@120.
+
+- The `imx415_mipi_linear[]` rows and the `pCus_SetVideoRes` cases were reordered
+  together; each case keeps its exact init table / vts_30fps / fps / line_period /
+  data_prec. Verified: `.ko` mode strings now enumerate in fps-ascending order.
+- The full-FOV binned corruption warning (idx4/6/9 in the new numbering) is
+  restated in the driver header and docs.
+- Doc tables (`STAR6E_IMX415_MODES.md`) re-sorted to match; narrative
+  sub-sections retain original-order idx labels (flagged inline) and identify
+  modes by resolution.
+
+## [0.31.0] - 2026-07-05
+
+Star6E IMX415: two **binned wide-crop** modes (idx9/idx10) that give the widest
+2×2-binned FOV which renders *clean* at 100/120fps, plus the diagnosis of why
+full-FOV 1920×1080 binned is corrupt on the I6E ISP.
+
+- **1728×972@100fps 2×2-binned wide crop** (`Sensor_bc1728_100fps_init_table_
+  4lane_linear`, idx9) — widest binned FOV (~80% of full-4K linear) that renders
+  clean at 100fps. HMAX=365, VMAX=2034, 891 link. Image-verified on the display.
+- **1728×816@120fps 2×2-binned wide crop** (`Sensor_bc1728_120fps_init_table_
+  4lane_linear`, idx10) — same 1728 width at 120fps. Height capped at 816 because
+  120fps forces HMAX=365/VMAX=1700 and a taller frame drops HMAX below the crop
+  floor. 17% wider than the idx5 1472×816 crop. Image-verified.
+- **Root-caused the black+colored-lines corruption**: the full-FOV 1920×1080
+  binned modes (idx2/4/6) report correct fps but render garbage on the I6E ISP —
+  the `WINMODE=0x04` crop path needs `HMAX ≥ ~365` for a wide binned line. A
+  1728-wide crop clears this; the 1920-wide full-FOV readout does not (its
+  reduced-HMAX≈308/328 falls below the floor → malformed readout). The binned
+  wide-crops keep HMAX=365 and stay clean. idx2/4/6 retained only for
+  stock-index compatibility; use idx9/idx10 for high-FOV binned video.
+- Both new modes clone the device-proven idx5 1472×816 crop (`WINMODE=0x04` +
+  explicit centered window) and widen it, changing only the window + VMAX/HMAX.
+
+## [0.30.0] - 2026-07-05
+
+Star6E IMX415: a **native 3840×2160@40fps** full-4K mode (idx8), appended
+alongside the lineup (indices 0–7 unchanged), plus the resolution of the
+ISP/CSI-clock investigation.
+
+- **3840×2160@40fps full 4K** (`Sensor_8m_40fps_init_table_4lane_linear`, idx8)
+  — native 4K at 40fps, +33% over the stock idx0 4K@30. Non-binned on the 1485
+  link, full-height window (VST=0/VWIDTH=4320), VMAX=2250, HMAX=825 (332 MPix/s).
+  Device-verified on `.13`: sensor=enqueue=delivered=40.8fps, 0 drops, 0
+  steady-state FIFO-FULL.
+- This is the **clean full-4K ceiling**. Bench probes established the two walls
+  just above it: 4K@42 (HMAX=779, 352 MPix/s) hits the ISP throughput wall
+  (FIFO-FULL, ~7% loss); 4K@45 (HMAX=733) breaches the sensor's analog HMAX
+  floor (733<floor≤779) with a clean silent halve. Neither is clock-fixable.
+- **ISP/CSI-clock lever — resolved as unavailable on i6e.** The Maruko/i6c 288MHz
+  CSI-MAC lever does not port: this SoC's vendor CSI driver rejects
+  `CUS_CSI_CLK_288M` (dmesg `[Drv_CSISetClk] Not supported CSI CLK 288000` →
+  sensor never powers on). 216M is the hard CSI ceiling; the driver pins it for
+  all modes with an explanatory comment. See
+  `documentation/STAR6E_IMX415_HEADROOM.md` §5.3-5.4.
+
+## [0.29.0] - 2026-07-05
+
+Star6E IMX415: an **ultrawide 3840×1152@60fps** mode (idx7) — full sensor
+*width* at 60fps, appended alongside the lineup (indices 0–6 unchanged).
+
+- **3840×1152@60fps ultrawide** (`Sensor_uw_3840x1152_60_init_table_4lane_linear`,
+  idx7) — 100% horizontal FOV, letterboxed to 1152 lines (3.33:1), non-binned
+  on the 1485 link. Built on idx1's 1485 base with the window widened to full
+  3840 and height cropped to 1152; HMAX=1022 (idx0's proven full-width line, so
+  no analog-floor risk), VMAX=1211 → 60fps, which clears the vertical wall
+  (1211 ≥ 1152 physical + vblank) and the ISP wall (265 MPix/s). Device-verified
+  59.98fps, 0 drops, 0 FIFO-FULL over a 15 s soak (`incrop 0,0,3840,1152`).
+  Height is HMAX-bounded to ~1160; a taller 3840×1296 (2.96:1) would need
+  HMAX≈917 (below idx0's line, ISP at ~299 MPix/s) — a riskier stretch, left
+  out. See `STAR6E_IMX415_HEADROOM.md`.
+
+## [0.28.0] - 2026-07-05
+
+Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@120fps** mode (idx6), added
+alongside the existing lineup (indices 0–5 unchanged).
+
+- **1920×1080@120fps full-FOV binned** (`Sensor_2m_120fps_init_table_4lane_linear`,
+  appended at idx6) — the full sensor FOV at 120fps (soft), a full-FOV
+  alternative to the stock 1472×816@120 crop (idx5, kept). Same reduced-HMAX
+  approach as idx4, one notch faster: HMAX=275 (line 3712 ns) with VMAX=2250,
+  which sits just above the full-width binned analog HMAX floor (~250–275;
+  HMAX=229 halves at 144fps). This is the practical full-FOV binned ceiling —
+  the ISP (249 MPix/s) would allow more, but the sensor's line-readout floor
+  caps it near 120–130fps. Device-verified 120.15fps, 0 drops, 0 FIFO-FULL over
+  a 20 s soak. See `STAR6E_IMX415_HEADROOM.md` for the full model.
+
+## [0.27.0] - 2026-07-05
+
+Star6E IMX415: a **full-FOV 2×2-binned 1920×1080@100fps** mode, and a **widened
+2816×1584@60fps** replacing the old 2560×1440. Both device-verified on .13.
+
+- **1920×1080@100fps full-FOV binned** (`drivers/sensor_imx415_star6e.c`,
+  `Sensor_2m_100fps_init_table_4lane_linear`, inserted fps-ordered at idx4) —
+  the *full sensor FOV* at 100fps (soft/binned), complementing the sharp
+  non-binned 2304×1296@100 (idx3) at the same fps. Device-verified 100.00 fps,
+  0 drops over a 30 s soak, warm-switch clean both directions.
+  The obstacle was the **binned vertical-timing wall**, not bandwidth or the ISP
+  MPix ceiling: a binned readout's VMAX must cover the *physical* lines read
+  (2×output_h = 2160) plus vblank, so at the stock binned HMAX=365 a 100fps
+  frame caps VMAX at ~2023 < 2160 and the VIF silently delivers *exactly half*
+  (~50 fps, DropCnt=0). Fix = the same reduced-HMAX trick as the non-binned
+  modes: HMAX 365→**328** lets VMAX be 2250 (=2160+90 vblank, matching the stock
+  90fps mode) at 100fps. Bit depth (10 vs 12bpp) and link (891 vs 1485) were
+  both ruled out as red herrings before the timing wall was identified.
+- **2816×1584@60fps** (idx1, widened from 2560×1440) — the stock 60fps table
+  already reads a 2952×1656 window but venc center-cropped it to 2560×1440,
+  discarding FOV. Widening the output to 2816×1584 (mode-table only, no sensor
+  register change) lifts FOV area from ~44% to ~58% of the sensor. Held at
+  ~2816-wide (267 MPix/s) rather than the full 2952 (293 MPix/s, startup
+  FIFO-FULL) to leave ISP headroom for the OSD overlay. Verified 59.52 fps,
+  0 drops, 0 steady-state FIFO-FULL.
+
+## [0.26.0] - 2026-07-05
+
+Star6E IMX415: a new **non-binned 2304×1296@100fps** window-crop mode, plus
+warm-switch register safety. Follows the 0.25.0 in-tree Star6E drivers.
+
+- **2304×1296@100fps non-binned** (`drivers/sensor_imx415_star6e.c`, inserted
+  fps-ordered at idx3) — the widest 16:9 the I6E ISP sustains non-binned at
+  100fps: 2.99 MPix / ~299 MPix/s, device-verified 99.0 fps + 0 drops over a
+  30 s soak. Challenges the "must bin for FOV at high fps" assumption: native
+  sharp resolution (35% FOV area) where the stock 90/120 modes are 2×2 binned.
+  Enabled by (1) the 1485 Mbps link (`SYS_MODE=0x08`, reused from idx1's base,
+  no venc changes — Star6E's REALTIME bind carries it), (2) a **reduced HMAX**
+  (548) to beat the vertical-timing wall a fixed HMAX=652 would cap at ~89fps,
+  and (3) the I6E ISP sustaining ~300 MPix/s. The wall was device-mapped:
+  2304×1296 clean, 2432×1368 (333 MPix/s) drops, 2560×1440 halves.
+- **Warm-switch register safety** — the SDK keeps sensor registers across a
+  mode switch, and the stock non-binned tables (idx0/idx1) never wrote the
+  binning registers, so a warm switch binned→non-binned (e.g. 90→30) left 2×2
+  binning latched and corrupted the readout. The non-binned idx0/idx1 tables
+  and the new crop now write `0x3020/21/22=0x00` + all-pixel DIG_CLP
+  (`0x30D9=0x06`/`0x30DA=0x02`) explicitly in standby. Verified both
+  directions, 0 drops (120→30, 90→100, 120→60, 90→30).
+
+## [0.25.0] - 2026-07-05
+
+In-tree Star6E (Infinity6E) sensor drivers for IMX335 and IMX415 — the Star6E
+counterpart to the Maruko custom drivers. Previously Star6E had only prebuilt
+stock `.ko`; now the mode lineups are owned in-repo and buildable via
+`make drivers-star6e KSRC_STAR6E=<i6e-4.9.84-kernel>`. Both seeded from the
+OpenIPC infinity6e blueprints, HDR/DOL removed (the two HDR handles are `NULL`
+and the SEF handle made `static`, so the compiler dead-code-eliminates the
+whole HDR subtree). Device-verified on SSC338Q @192.168.1.13, 0 sustained
+drops on every mode.
+
+- **IMX335 — fps-ordered lineup with two new higher-FOV window-crop tiers**
+  (`drivers/sensor_imx335_star6e.c`, `documentation/STAR6E_IMX335_MODES.md`):
+  2560×1920@30 / @60, 2400×1350@90, **2176×1224@100** (new crop, VIF 99.8),
+  1920×1080@120, **1600×900@144** (new crop, VIF 143.3). The two crops push to
+  the highest FOV the I6E ISP sustains — measured ceiling ≈2.66 MPix@100 /
+  ≈1.44 MPix@144; over budget the ISP silently halves (0 fifo/skip logged), so
+  the VIF `/proc` FPS column is the truth signal. The Maruko I6C ceiling model
+  does not apply to I6E. No 50fps mode. `imx335_init_window_crop()` reuses the
+  proven 120fps analog/PLL base and overrides only the readout window + HMAX,
+  latching the geometry in standby (PR#156 discipline).
+- **IMX415 — stock fps-ordered lineup** (`drivers/sensor_imx415_star6e.c`,
+  `documentation/STAR6E_IMX415_MODES.md`): 3840×2160@30, 2560×1440@60,
+  1920×1080@90, 1472×816@120. Stock tables verbatim; no crop tiers.
+- **Build wiring** (`drivers/Makefile`, `Makefile`): `SOC=star6e` obj-m builds
+  both sensor objects; `make drivers-star6e` stages
+  `sensors/star6e/sensor_imx*_star6e.ko`.
+
+Note: venc persists `sensor.mode` in `/etc/waybeam.json`. These drivers expose
+fewer modes than the stock 11-mode IMX415 driver, so a persisted mode index
+beyond the new range makes venc fail mode-select and exit on boot — patch the
+config to a valid index when deploying over a box that ran the stock driver.
+
 ## [0.24.1] - 2026-07-04
 
 Pre-upstream-squash cleanup: adversarial review of the 0.22.0–0.24.0 range

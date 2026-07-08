@@ -17,6 +17,13 @@ CC_MARUKO_BIN := $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 # SDK and pass it on the command line.
 KSRC_MARUKO ?=
 
+# Infinity6E kernel source for building the Star6E sensor .ko via
+# drivers/Makefile. KSRC_STAR6E must point at an Infinity6E 4.9.84 kernel
+# source tree (arch/arm + top-level Makefile), matching the target device's
+# running kernel. Not hosted in this repo; pass it on the command line, e.g.
+# the OpenIPC builder output at builder/openipc/output/build/linux-custom.
+KSRC_STAR6E ?=
+
 STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
 MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
 
@@ -101,7 +108,7 @@ CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
 LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
 
 .PHONY: help all build lint stage clean toolchain toolchain-maruko ksrc-maruko \
-        drivers-maruko maruko-pull maruko-deploy maruko-full json_cli regscan \
+        drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
         webui webui-check
@@ -120,6 +127,8 @@ help:
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
 	@echo "  make ksrc-maruko KSRC_MARUKO=/path/to/kernel  Validate Infinity6C kernel source tree"
 	@echo "  make drivers-maruko KSRC_MARUKO=/path/to/kernel  Build sensors/maruko/sensor_imx*_maruko.ko"
+	@echo "  make ksrc-star6e KSRC_STAR6E=/path/to/kernel  Validate Infinity6E 4.9.84 kernel source tree"
+	@echo "  make drivers-star6e KSRC_STAR6E=/path/to/kernel  Build sensors/star6e/sensor_imx*_star6e.ko"
 	@echo "  make json_cli SOC_BUILD=maruko  Build out/<soc>/json_cli (vendored from waybeam-hub)"
 	@echo "  make regscan SOC_BUILD=maruko   Build out/<soc>/regscan (IMX335/IMX415 i2c register dumper)"
 	@echo "  make maruko-pull HOST=root@<ip>  Pull libs/drivers/isp-bins from a device"
@@ -333,6 +342,40 @@ drivers-maruko: toolchain-maruko ksrc-maruko
 	@echo ""
 	@echo "Built modules in sensors/maruko/:"
 	@ls -lh sensors/maruko/*.ko 2>/dev/null || echo "  (none — check drivers/ build output)"
+
+# ── Star6E drivers ────────────────────────────────────────────────────
+#
+# Validate that KSRC_STAR6E points at a usable Infinity6E 4.9.84 kernel
+# tree.  It must match the target device's running kernel build (vermagic),
+# so prefer the exact OpenIPC builder output that produced the device
+# firmware, e.g. builder/openipc/output/build/linux-custom:
+#
+#   make drivers-star6e KSRC_STAR6E=/path/to/infinity6e-kernel
+#
+ksrc-star6e:
+	@if [ -z "$(KSRC_STAR6E)" ]; then \
+		echo "ERROR: KSRC_STAR6E is not set."; \
+		echo "       Pass KSRC_STAR6E=/path/to/infinity6e-kernel on the command line."; \
+		echo "       The Infinity6E 4.9.84 kernel source is not hosted by this repo."; \
+		echo "       Use the OpenIPC builder output (linux-custom) that built the"; \
+		echo "       device firmware so module vermagic matches the target."; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(KSRC_STAR6E)" ] || [ ! -f "$(KSRC_STAR6E)/Makefile" ] || [ ! -d "$(KSRC_STAR6E)/arch/arm" ]; then \
+		echo "ERROR: KSRC_STAR6E=$(KSRC_STAR6E) is not a valid kernel source tree"; \
+		echo "       (need a directory containing Makefile and arch/arm/)."; \
+		exit 1; \
+	fi
+	@echo "Using Star6E kernel source at $(KSRC_STAR6E)"
+
+drivers-star6e: toolchain ksrc-star6e
+	$(MAKE) -C drivers sensor SOC=star6e KSRC="$(KSRC_STAR6E)" \
+		CROSS="$(abspath $(TOOLCHAIN_DIR))/bin/arm-openipc-linux-gnueabihf-"
+	@mkdir -p sensors/star6e
+	@cp -f drivers/sensor_imx*_star6e.ko sensors/star6e/ 2>/dev/null || true
+	@echo ""
+	@echo "Built modules in sensors/star6e/:"
+	@ls -lh sensors/star6e/*_star6e.ko 2>/dev/null || echo "  (none — check drivers/ build output)"
 
 # ── Maruko deploy convenience wrappers ────────────────────────────────
 
