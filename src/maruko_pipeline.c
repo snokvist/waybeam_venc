@@ -11,7 +11,10 @@
 #include "maruko_controls.h"
 #include "maruko_cus3a.h"
 #include "maruko_output.h"
+#include "maruko_framing.h"
+#include "maruko_framing_host.h"
 #include "maruko_recorder.h"
+#include "maruko_stab_bench.h"
 #include "maruko_ts_recorder.h"
 #include "maruko_video.h"
 #include "output_socket.h"
@@ -1642,6 +1645,107 @@ static void maruko_pan_ramp_stop(void)
 		pthread_join(th, NULL);
 }
 
+/* ── Framing-module registry (parallel of star6e_pipeline.c:60-88) ─────────── */
+#define MARUKO_FRAMING_MAX 4
+static const MarukoFramingModule *g_maruko_framing_registry[MARUKO_FRAMING_MAX];
+static int g_maruko_framing_count;
+static const MarukoFramingModule *g_maruko_framing;
+
+void maruko_framing_register(const MarukoFramingModule *m)
+{
+	if (m && g_maruko_framing_count < MARUKO_FRAMING_MAX)
+		g_maruko_framing_registry[g_maruko_framing_count++] = m;
+}
+
+const MarukoFramingModule *maruko_framing_select(const VencConfig *vcfg)
+{
+	int i;
+	for (i = 0; i < g_maruko_framing_count; i++)
+		if (g_maruko_framing_registry[i]->enabled(vcfg))
+			return g_maruko_framing_registry[i];
+	return NULL;
+}
+
+void maruko_framing_register_builtins(void)
+{
+	if (g_maruko_framing_count > 0)
+		return;   /* idempotent */
+#if HAVE_FRAMING_STAB
+	{
+		extern const MarukoFramingModule maruko_framing_stab;
+		maruko_framing_register(&maruko_framing_stab);
+	}
+#endif
+}
+
+/* Host callbacks for framing modules — thin wrappers over the file-static
+ * helpers above (see include/maruko_framing_host.h). */
+void maruko_framing_apply_ae_crop(MarukoBackendContext *ctx,
+	double pct, double x, double y)
+{
+	maruko_apply_ae_crop(ctx, pct, x, y);
+}
+void maruko_framing_pan_ramp_stop(void)
+{
+	maruko_pan_ramp_stop();
+}
+
+/* Select + bring up the framing module for this run.  Called after
+ * configure_graph — scl_crop is set, VENC is bound, the SCL ports are up.
+ * Returns 0 whether or not a module engaged (g_maruko_framing == NULL if not). */
+int maruko_pipeline_framing_setup(MarukoBackendContext *ctx,
+	const VencConfig *vcfg)
+{
+	const MarukoFramingModule *m;
+	uint32_t ew = 0, eh = 0;
+
+	g_maruko_framing = NULL;
+	if (!ctx || !vcfg)
+		return 0;
+	m = maruko_framing_select(vcfg);
+	if (!m)
+		return 0;
+	if (m->prepare)
+		(void)m->prepare(vcfg, ctx->scl_crop_w, ctx->scl_crop_h, &ew, &eh);
+	if (m->setup_ports &&
+	    m->setup_ports(ctx, ctx->sensor.fps, ctx->sensor.fps) != 0) {
+		fprintf(stderr,
+			"> [maruko] framing '%s' setup_ports failed — off\n",
+			m->preset_name);
+		return 0;
+	}
+	if (m->start && m->start() != 0) {
+		fprintf(stderr, "> [maruko] framing '%s' start failed — off\n",
+			m->preset_name);
+		if (m->stop)
+			m->stop();
+		return 0;
+	}
+	g_maruko_framing = m;
+	printf("> [maruko] framing '%s' active\n", m->preset_name);
+	return 0;
+}
+
+/* Stop the active framing module (join detector, disable tap) — MUST run before
+ * teardown_graph disables the SCL port0 the module drives. */
+void maruko_pipeline_framing_stop(void)
+{
+	if (g_maruko_framing) {
+		if (g_maruko_framing->stop)
+			g_maruko_framing->stop();
+		g_maruko_framing = NULL;
+	}
+}
+
+/* Live pause for the active framing module (video0.pause_stab).  Mirrors
+ * star6e_pipeline_set_pause_stab. */
+int maruko_pipeline_set_pause_stab(bool paused)
+{
+	if (g_maruko_framing && g_maruko_framing->set_live)
+		return g_maruko_framing->set_live("pause", paused ? "1" : "0");
+	return -1;
+}
+
 /* Live pan: zoom_pct is MUT_RESTART (encoder dim change), so the live path
  * only updates x/y.  Updates the *target*; the ramp thread tweens
  * `current` toward it via maruko_pan_apply_locked.  pct is accepted to
@@ -1652,6 +1756,17 @@ int maruko_pipeline_apply_zoom(MarukoBackendContext *ctx,
 	if (!ctx) return -1;
 	if (!isfinite(pct) || !isfinite(x) || !isfinite(y))
 		return -1;
+
+	/* A framing module (stab) owns the SCL port-0 crop and runs its own pan
+	 * ramp-free.  Route x/y pan to it and swallow the zoom/ramp path so the
+	 * two never fight over port 0 (R2).  Mirrors star6e_pipeline.c's
+	 * active()->set_pan override. */
+	if (g_maruko_framing && g_maruko_framing->active &&
+	    g_maruko_framing->active()) {
+		if (g_maruko_framing->set_pan)
+			g_maruko_framing->set_pan(x, y);
+		return 0;
+	}
 	if (pct <= 0.0 || pct >= 1.0) {
 		maruko_pipeline_clear_zoom_status();
 		pthread_mutex_lock(&g_maruko_pan_ramp.lock);
@@ -2085,6 +2200,9 @@ int maruko_pipeline_init(MarukoBackendContext *ctx)
 		return ret;
 	}
 	ctx->system_initialized = 1;
+
+	/* Register compiled-in framing modules (idempotent). */
+	maruko_framing_register_builtins();
 
 	/* Set HW clocks AFTER MI_SYS_Init (kernel modules now loaded)
 	 * but BEFORE ISP/SCL device creation (which locks clocks). */
@@ -3427,11 +3545,19 @@ static void maruko_pipeline_init_streaming(MarukoBackendContext *ctx,
 	rt->venc_fd = maruko_mi_venc_get_fd(ctx->venc_device, ctx->venc_channel);
 	rt->last_activity_us = wb_monotonic_us();
 	rt->last_warn_us = rt->last_activity_us;
+
+	/* Phase-1 stab SCL bench (development builds only; no-op stub in
+	 * production).  Runs once, inert unless WAYBEAM_STAB_BENCH is set. */
+	maruko_stab_bench_maybe_start(ctx);
 }
 
 static void maruko_pipeline_cleanup_streaming(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt)
 {
+	/* Join the bench thread before tearing down ports (mirrors the stab
+	 * teardown ordering rule: never disable a tapped port with the reader
+	 * still live). */
+	maruko_stab_bench_stop();
 	if (rt->venc_fd >= 0) {
 		maruko_mi_venc_close_fd(ctx->venc_device, ctx->venc_channel);
 		rt->venc_fd = -1;
@@ -4002,6 +4128,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 {
 	if (!ctx)
 		return;
+
+	/* Stop the framing module FIRST: it joins its detector thread and
+	 * disables its SCL tap port before we tear down port0 / the SCL channel
+	 * below (R6 — never disable the tapped port with the reader still live). */
+	maruko_pipeline_framing_stop();
 
 	venc_api_clear_active_precrop();
 	maruko_pipeline_clear_zoom_status();

@@ -463,7 +463,8 @@ int venc_config_apply_framing_preset(const char *name, VencConfigVideo *v)
 	 * low/medium/high presets traded border vs magnification and only the
 	 * middle one felt right, so they were collapsed into one.  Unknown values
 	 * (incl. the never-shipped low/medium/high) fall back to "off" on load.
-	 * Star6E only; no-op on Maruko.  Source auto-clamps to <=1920x1080.
+	 * Both backends (Star6E via VPE crop, Maruko via SCL crop —
+	 * src/maruko_framing_stab.c).  Source auto-clamps to <=1920x1080.
 	 *
 	 * Zoom presets — zoom_pct = 1 / magnification (e.g. 2x -> 0.50).  Both
 	 * backends; zoom_x/zoom_y pan live (stab is always centered).

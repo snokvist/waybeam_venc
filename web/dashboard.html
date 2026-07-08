@@ -616,7 +616,7 @@ const TOOLTIPS = {
 
 'video0.zoomY':'Digital zoom crop center Y, 0 = top and 1 = bottom. Applied live',
 
-'video0.framing':'Framing mode — what the VPE crop does. off = full image. stab = image stabilization, crop+shrink (Star6E only; centered 80% crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY are ignored — stab is always centered; live pauseStab toggle). stab-fill = image stabilization, floating image on a black border (Star6E only; encode stays full-res, stabCropPct sets the shift/border budget; live pauseStab toggle). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart. Maruko/I6C: stab and stab-fill are unavailable (stabilization needs the IVE block, absent on this SoC) — those two options are disabled there; off/zoom work on both backends',
+'video0.framing':'Framing mode — the crop the pipeline applies. off = full image. stab = image stabilization, crop+shrink (both backends: Star6E via VPE crop, Maruko via SCL crop; centered crop, source auto-clamped to <=1920x1080 to keep fps; stabilizes ch0 only; zoomX/zoomY pan the stabilized window; live pauseStab toggle). stab-fill = image stabilization, floating image on a black border (Star6E only for now; encode stays full-res, stabCropPct sets the shift/border budget; live pauseStab toggle). zoom-1.25x/1.50x/1.75x/2x/3x/4x = pure digital zoom (both backends; zoomX/zoomY pan the crop live; no upscale — higher zoom emits a smaller frame). Requires restart. Maruko/I6C: stab-fill is not yet ported — that option is disabled there; off/zoom/stab work on both backends',
 
 'debug.showOsd':'Enable debug OSD overlay on the live stream (Star6E composites at the VPE port; with stabilization on, the stats panel anchor tracks the moving crop window so it stays put in the encoded view). Requires restart',
 
@@ -1046,14 +1046,14 @@ function renderSettings(){
       } else if(ft === 'enum'){
 
         const labels = (key==='sensor.mode' && window._modeLabels) ? window._modeLabels : null;
-        // On Maruko the framing stab / stab-fill presets are inert (no IVE
-        // block) — disable those two options so they can't be selected. The
-        // field stays enabled; off/zoom presets work on both backends.
+        // Maruko now supports framing=stab (IVE via the BSP libmi_ive + the
+        // SCL crop path); only stab-fill is not yet ported there. Disable just
+        // that one option. off/zoom/stab work on both backends.
         const optDisabled = (key==='video0.framing' && backendName==='maruko')
-          ? new Set(['stab','stab-fill']) : null;
+          ? new Set(['stab-fill']) : null;
         const opts = ENUMS[key].map(o => {
           const na = optDisabled && optDisabled.has(o);
-          const lbl = (labels?labels[o]||o:o) + (na ? ' (N/A — no IVE)' : '');
+          const lbl = (labels?labels[o]||o:o) + (na ? ' (N/A on Maruko)' : '');
           return `<option value="${o}" ${o===String(val)?'selected':''}${na?' disabled':''}>${lbl}</option>`;
         }).join('');
         const coerce = typeof val === 'number' ? 'parseInt(this.value)' : 'this.value';

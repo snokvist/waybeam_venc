@@ -339,33 +339,25 @@ static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
 	"Kept-frame percentage for framing=stab / stab-fill. 0 = preset default "
 	"(80, API only); 60..100 = explicit crop %. Smaller = bigger dead border "
-	"= more room to absorb motion but more zoomed-in. Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"= more room to absorb motion but more zoomed-in. Requires restart."
 };
 static const FieldUi ui_stab_recenter_speed = {
 	"Stabilization", "Recenter speed", "number", 0, 3600, 5, NULL,
 	"How fast the stabilized window glides back to centre after motion "
 	"(decay time-constant in frames). 0 = stick (never recenters); higher = "
-	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"slower, gentler return. Production default 180 (~3s @60fps). Requires restart."
 };
 static const FieldUi ui_stab_kalman_q = {
 	"Stabilization", "Pan response (Q)", "number", 0.001, 1.0, 0.005, NULL,
 	"Kalman process noise — how fast the view follows slow pans. Higher = "
 	"tracks pans sooner / weaker hold; lower = holds tighter, more locked. "
-	"Shared by stab + stab-fill. Default 0.03. Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"Shared by stab + stab-fill. Default 0.03. Requires restart."
 };
 static const FieldUi ui_stab_kalman_r = {
 	"Stabilization", "Smoothness (R)", "number", 0.1, 50.0, 0.1, NULL,
 	"Kalman measurement noise — output smoothness. Higher = smoother but "
 	"laggier; lower = snappier, more jitter passes through. Shared by stab + "
-	"stab-fill. Default 2.0. Requires restart. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"stab-fill. Default 2.0. Requires restart."
 };
 
 /* UI descriptor for video0.pause_stab — the live stab pause.  Rendered as a
@@ -375,9 +367,7 @@ static const FieldUi ui_pause_stab = {
 	"Stabilization", "Pause stab", "toggle", 0, 0, 0, NULL,
 	"Live pause for framing=stab and stab-fill: glide the stabilized window / "
 	"floating image back to centre (software ramp, no rebind). No effect under "
-	"framing=off or zoom. "
-	"Maruko/I6C: unavailable — stabilization needs the IVE block, absent on "
-	"this SoC; disabled here."
+	"framing=off or zoom."
 };
 
 static const FieldDesc g_fields[] = {
@@ -586,23 +576,11 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	    strcmp(canonical_key, "isp.keep_aspect") == 0)
 		return 0;
 
-	/* Image stabilization is unavailable on Maruko/I6C: the motion detector
-	 * needs the IVE (MVE) hardware block, which fails to initialise on this
-	 * SoC (MI_IVE_Create -> MI_MVE_Init mmap/IC-check fault, all libs).  The
-	 * framing=stab / stab-fill presets are therefore inert here, so advertise
-	 * the whole stabilization tuning group unsupported: the WebUI greys the
-	 * controls and the set-path rejects changes.  Kept in the schema (not
-	 * removed) so a future CPU/NEON block-matcher can re-enable them without a
-	 * config migration.  (video0.framing itself stays supported — its off/zoom
-	 * presets work on both backends; only its stab options are gated, in the
-	 * dashboard.) */
-	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
-	    (strcmp(canonical_key, "video0.stab_crop_pct") == 0 ||
-	     strcmp(canonical_key, "video0.stab_recenter_speed") == 0 ||
-	     strcmp(canonical_key, "video0.stab_kalman_q") == 0 ||
-	     strcmp(canonical_key, "video0.stab_kalman_r") == 0 ||
-	     strcmp(canonical_key, "video0.pause_stab") == 0))
-		return 0;
+	/* Image stabilization (video0.framing=stab + the stab_* / pause_stab tuning
+	 * group) is now supported on Maruko/I6C: the IVE motion detector works once
+	 * the BSP-matched libmi_ive.so is installed (see the builder osdrv override),
+	 * driven by src/maruko_framing_stab.c.  No backend gate — the knobs are live
+	 * on both SoCs.  (stab-fill remains Star6E-only, gated in the dashboard.) */
 
 	return 1;
 }

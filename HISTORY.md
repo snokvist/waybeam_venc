@@ -1,5 +1,36 @@
 # History
 
+## [0.35.0] - 2026-07-09
+
+Maruko (Infinity6C): **`video0.framing = "stab"` — IVE stabilization on i6c,
+at parity with Star6E.** The motion detector (`MI_IVE_Shift_Detector`) was
+previously dead on Maruko (`MI_IVE_Create` failed); the root cause was a
+userspace blob vintage mismatch, not a kernel bug.
+
+- **Blob unblock:** swap **only** `libmi_ive.so` for the BSP uClibc build
+  (md5 `d608368e`, ive tag `c6a1e30`), which does its IC-version check via
+  `/dev/mstar_ive0` ioctls instead of raw-mmapping `/dev/mem` (which EINVALs
+  on this firmware). Do **not** also swap `libmi_sys`/`libmi_common` — the BSP
+  variants segfault on the musl rootfs. Delivered as a builder osdrv override
+  (builder#24).
+- **Cost model, stated honestly:** the detector is SigmaStar's NEON software
+  vision lib (`Simd::Neon`), **not** HW-accelerated — ~17 ms/call on one A7.
+  i6c is single-core, so the config is cheapened to 256 tap / 128 box / 2-level
+  pyramid (core 100%→55%, keeps 50 fps) at a documented noise cost.
+- **Shared Kalman:** the control law is extracted to `framing_kalman.{c,h}`,
+  linked by both backends; the Star6E refactor onto it is proven bit-identical
+  by `tests/test_framing_kalman.c`. Maruko stabilizes in the SCL-input domain
+  (crop + center-tap share one surface — simpler than Star6E's precrop path).
+- **Teardown:** the detector thread is joined **before** the tap port is
+  disabled (avoids an MI_SYS MMU-callback storm → watchdog); verified clean
+  across repeated start/stop cycles, zero MMU resets.
+- **Knobs un-gated on Maruko:** `stab_crop_pct`, `recenter_speed`,
+  `stab_kalman_q`, `stab_kalman_r`, `pause_stab` now validate/apply and the
+  WebUI no longer greys them out. `pause_stab` glides the frame home.
+- **`framing = "stab-fill"` is planned, not yet shipped** on Maruko — it hinges
+  on whether the i6c VENC accepts manually pushed input frames (RING_DMA-fed
+  today); see `specs/2026-07-08-maruko-stab/plan.md` Phase 5.
+
 ## [0.34.1] - 2026-07-09
 
 Star6E IMX335: **true 144fps encode — decouple VENC delivery from the RC

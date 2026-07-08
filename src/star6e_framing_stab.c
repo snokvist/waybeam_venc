@@ -1,6 +1,7 @@
 #include "star6e_framing_stab.h"
 #include "star6e_framing_host.h"
 #include "star6e_pipeline.h"
+#include "framing_kalman.h"
 #include "imu_ring.h"
 
 #include <dlfcn.h>
@@ -217,24 +218,10 @@ typedef MI_S32 (*stab_ive_shift_fn_t)(StabIveHandle_t handle,
  * resort; it trades stabilization quality for fps. */
 #define STAB_DETECT_EVERY   1
 
-/* Kalman trajectory smoother — the SINGLE control law for both "stab" and
- * "stab-fill" (ported from the reference Python stabilizer, processVar /
- * measVar).  The filter smooths the cumulative position estimate; the applied
- * compensation is the high-pass component (facc − X_estimate) so slow camera
- * pans pass through unchanged while fast shake is removed, and the estimate
- * eases the offset back to centre on its own (no separate EMA / gated
- * recenter).  Q (process noise / pan response) and R (measurement noise /
- * smoothness) are exposed as config knobs (video0.stab_kalman_q / _r); these
- * are the defaults the presets seed and the fallback if a hand-edited config
- * supplies an out-of-range value. */
-#define STAB_KALMAN_Q_DEFAULT  0.03   /* matches Python processVar */
-#define STAB_KALMAN_R_DEFAULT  2.0    /* matches Python measVar */
-/* Sane bounds for a hand-edited config (the HTTP validator enforces tighter
- * UI ranges; configure() falls back to the defaults outside these). */
-#define STAB_KALMAN_Q_MIN  0.0001
-#define STAB_KALMAN_Q_MAX  5.0
-#define STAB_KALMAN_R_MIN  0.01
-#define STAB_KALMAN_R_MAX  200.0
+/* The Kalman trajectory smoother — the SINGLE control law for both "stab" and
+ * "stab-fill" — now lives in the SoC-agnostic helper framing_kalman.{c,h}
+ * (shared with the Maruko backend so the tuning constants can't drift).  The
+ * state + defaults + bounds moved there; this file just seeds and steps it. */
 
 static stab_sys_get_fd_fn_t g_stab_sys_get_fd;
 static stab_sys_close_fd_fn_t g_stab_sys_close_fd;
@@ -308,16 +295,14 @@ static uint32_t g_stab_pre_w;
 static uint32_t g_stab_pre_h;
 static uint32_t g_stab_crop_percent;
 static uint32_t g_stab_recenter_period;   /* pauseStab glide rate (frames); 0=default */
-/* Kalman state — smoothed cumulative position (X_estimate) and its uncertainty
- * (P_estimate), one per axis.  Reset in star6e_stab_configure.  Q/R are set
- * from config there (MUT_RESTART, fixed for the run) so they need no lock —
- * never written after init.  Both "stab" and "stab-fill" use this filter. */
-static double g_stab_kalman_x_est;
-static double g_stab_kalman_x_p = 1.0;
-static double g_stab_kalman_y_est;
-static double g_stab_kalman_y_p = 1.0;
-static double g_stab_kalman_q = STAB_KALMAN_Q_DEFAULT;
-static double g_stab_kalman_r = STAB_KALMAN_R_DEFAULT;
+/* Kalman state (facc trajectory + per-axis estimate/uncertainty + q/r).  Reset
+ * in star6e_stab_configure via framing_kalman_reset (MUT_RESTART, fixed for the
+ * run) so q/r need no lock — never written after init.  Both "stab" and
+ * "stab-fill" use this filter. */
+static FramingKalman g_stab_kalman = {
+	0.0, 0.0, 0.0, 0.0, 1.0, 1.0,
+	FRAMING_KALMAN_Q_DEFAULT, FRAMING_KALMAN_R_DEFAULT
+};
 /* stab-fill runtime bypass (video0.pauseStab).  Software-only (D13): when set,
  * the detector glides the applied offset back to centre via the recenter ramp
  * and the compose feeds the unshifted full frame — no HW rebind, no thread
@@ -455,15 +440,12 @@ static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 			crop_pct, &g_stab_enc_w, &g_stab_enc_h);
 	}
 
-	/* Kalman tuning knobs (q = process noise / pan response, r = measurement
-	 * noise / smoothness).  Each falls back to the compile-time default when
-	 * out of sane bounds, so a hand-edited config (which bypasses the HTTP
-	 * validator) can never freeze or destabilize the loop (q→0 stops tracking,
-	 * r→0 cancels all compensation). */
-	g_stab_kalman_q = (kalman_q >= STAB_KALMAN_Q_MIN &&
-		kalman_q <= STAB_KALMAN_Q_MAX) ? kalman_q : STAB_KALMAN_Q_DEFAULT;
-	g_stab_kalman_r = (kalman_r >= STAB_KALMAN_R_MIN &&
-		kalman_r <= STAB_KALMAN_R_MAX) ? kalman_r : STAB_KALMAN_R_DEFAULT;
+	/* Seed + reset the shared Kalman (validates q/r into bounds, zeroes the
+	 * trajectory/estimate — matches the Python "count == 0" init: facc=0, X=0,
+	 * P=1).  A hand-edited config that bypasses the HTTP validator can never
+	 * freeze or destabilize the loop; out-of-range q/r fall back to the
+	 * compile-time default. */
+	framing_kalman_reset(&g_stab_kalman, kalman_q, kalman_r);
 
 	/* recenter_speed now only sets the pauseStab glide-home rate (frames):
 	 * 0 = default ~30-frame ramp, lower = faster glide.  During normal
@@ -472,12 +454,6 @@ static void star6e_stab_configure(uint32_t src_w, uint32_t src_h,
 	g_stab_recenter_period = recenter_speed;
 	g_stab_pan_x_mil = star6e_stab_pan_clamp_mil(pan_x);
 	g_stab_pan_y_mil = star6e_stab_pan_clamp_mil(pan_y);
-
-	/* Reset Kalman state (matches the Python "count == 0" init: X=0, P=1). */
-	g_stab_kalman_x_est = 0.0;
-	g_stab_kalman_y_est = 0.0;
-	g_stab_kalman_x_p = 1.0;
-	g_stab_kalman_y_p = 1.0;
 	g_stab_paused = 0;
 }
 
@@ -1143,12 +1119,10 @@ static void *star6e_stab_thread_main(void *arg)
 	StabSysBufHandle_t prev_handle = 0;
 	StabIveImage_t prev_img;
 	int have_prev = 0;
-	/* Shake-correction offset accumulator.  Held in float (facc_*) so the
-	 * return-to-center decays exact-proportionally and both axes converge
-	 * along the true diagonal; acc_* are the rounded ints handed to the crop
-	 * and OSD each detect. */
-	double facc_x = 0.0;
-	double facc_y = 0.0;
+	/* Shake-correction offset accumulator now lives in g_stab_kalman (facc_*),
+	 * so the return-to-center decays exact-proportionally and both axes
+	 * converge along the true diagonal; acc_* are the rounded ints handed to
+	 * the crop and OSD each detect. */
 	/* Final low-pass on the APPLIED offset.  The accumulator/recenter math
 	 * can carry per-frame jitter (detector noise, 2-px crop quantization);
 	 * applied raw it shows as judder, and the geometry magnifies it
@@ -1323,60 +1297,26 @@ static void *star6e_stab_thread_main(void *arg)
 				int max_x;
 				int max_y;
 
-				facc_x += meas_dx;
-				facc_y += meas_dy;
-				max_x = star6e_stab_max_off_x();
-				max_y = star6e_stab_max_off_y();
+					max_x = star6e_stab_max_off_x();
+					max_y = star6e_stab_max_off_y();
 
-				/* Unified trajectory smoother (Kalman) for BOTH "stab" and
-				 * "stab-fill" — same control law, so identical settings give
-				 * identical return-to-centre feel; the only per-preset
-				 * difference is the emit step below (HW crop reprogram vs
-				 * software compose).  The applied compensation is the
-				 * high-pass component (facc − X_estimate): fast shake is
-				 * removed, slow pans pass through, and the estimate eases the
-				 * offset back to centre on its own — no separate EMA / gated
-				 * recenter (the Kalman subsumes both).  facc is NOT clamped
-				 * (the filter is recursive on the trajectory; clamping creates
-				 * artifacts) — only the final acc is clamped to the border
-				 * budget.  Q (g_stab_kalman_q, pan response) and R
-				 * (g_stab_kalman_r, smoothness) come from config (MUT_RESTART,
-				 * fixed for the run), read directly (never written). */
-				if (g_stab_paused) {
-					/* Software pause (D13): glide the applied offset to centre
-					 * via the recenter ramp — undo this tick's measurement so
-					 * facc decays instead of re-accumulating, then shrink facc
-					 * + the estimate by (tau-1)/tau toward 0.  No HW rebind /
-					 * teardown.  g_stab_recenter_period sets the glide rate. */
-					uint32_t tau = g_stab_recenter_period ?
-						g_stab_recenter_period : 30;
-					double scale;
-					if (tau < 2) tau = 2;
-					scale = (double)(tau - 1) / (double)tau;
-					facc_x -= meas_dx;
-					facc_y -= meas_dy;
-					facc_x *= scale;
-					facc_y *= scale;
-					g_stab_kalman_x_est *= scale;
-					g_stab_kalman_y_est *= scale;
-					if (fabs(facc_x) < 0.5) facc_x = 0.0;
-					if (fabs(facc_y) < 0.5) facc_y = 0.0;
-				} else {
-					double pp_x = g_stab_kalman_x_p + g_stab_kalman_q;
-					double k_x  = pp_x / (pp_x + g_stab_kalman_r);
-					double pp_y = g_stab_kalman_y_p + g_stab_kalman_q;
-					double k_y  = pp_y / (pp_y + g_stab_kalman_r);
-					g_stab_kalman_x_est += k_x * (facc_x - g_stab_kalman_x_est);
-					g_stab_kalman_x_p = (1.0 - k_x) * pp_x;
-					g_stab_kalman_y_est += k_y * (facc_y - g_stab_kalman_y_est);
-					g_stab_kalman_y_p = (1.0 - k_y) * pp_y;
-				}
-				acc_x = (int)lround(facc_x - g_stab_kalman_x_est);
-				acc_y = (int)lround(facc_y - g_stab_kalman_y_est);
-				if (acc_x < -max_x) acc_x = -max_x;
-				if (acc_x >  max_x) acc_x =  max_x;
-				if (acc_y < -max_y) acc_y = -max_y;
-				if (acc_y >  max_y) acc_y =  max_y;
+					/* Unified trajectory smoother (Kalman) for BOTH "stab" and
+					 * "stab-fill" — the SINGLE control law in framing_kalman.c,
+					 * so identical settings give identical return-to-centre feel;
+					 * the only per-preset difference is the emit step below (HW
+					 * crop reprogram vs software compose).  The applied
+					 * compensation is the high-pass component (facc - estimate):
+					 * fast shake removed, slow pans pass through, the estimate
+					 * eases the offset back to centre on its own.  Pause (D13)
+					 * glides home via the recenter ramp; g_stab_recenter_period
+					 * sets the rate (0 = default 30-frame ramp). */
+					{
+						uint32_t tau = g_stab_recenter_period ?
+							g_stab_recenter_period : 30;
+						framing_kalman_step(&g_stab_kalman, meas_dx, meas_dy,
+							g_stab_paused, tau, max_x, max_y,
+							&acc_x, &acc_y);
+					}
 				dbg_frame++;
 				if ((dbg_frame % 120) == 0)
 					fprintf(stderr, "[waybeam] stab tick %d: meas=(%d,%d) "
@@ -1386,7 +1326,7 @@ static void *star6e_stab_thread_main(void *arg)
 						dbg_frame, meas_dx, meas_dy,
 						acc_x, acc_y, max_x, max_y,
 						g_stab_pan_x_mil, g_stab_pan_y_mil,
-						g_stab_kalman_q, g_stab_kalman_r, g_stab_paused,
+						g_stab_kalman.q, g_stab_kalman.r, g_stab_paused,
 						gyro_n, gyro_x, gyro_y, gyro_z);
 			} else {
 				if ((dbg_frame++ % 120) == 0)
@@ -1764,7 +1704,7 @@ static int star6e_stab_start(void)
 		"kalman(q=%.4f,r=%.2f) pauseGlide=%u\n",
 		g_stab_src_w, g_stab_src_h,
 		g_stab_enc_w, g_stab_enc_h, g_stab_crop_percent,
-		g_stab_kalman_q, g_stab_kalman_r, g_stab_recenter_period);
+		g_stab_kalman.q, g_stab_kalman.r, g_stab_recenter_period);
 	return 0;
 }
 
