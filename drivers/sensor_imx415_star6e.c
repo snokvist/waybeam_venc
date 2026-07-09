@@ -163,10 +163,12 @@ static struct { // LINEAR
      * (HMAX high enough at 90fps) and is KEPT.  For higher-FOV binned at 100/120fps
      * use the WIDE-CROP idx6/idx8.
      *  idx0 3840x2160@30 non-binned 891 (stock 4K).
-     *  idx1 3840x2160@40 non-binned 1485 FULL 4K — native 4K +33% over idx0.  HMAX=825,
-     *       VMAX=2250, 332 MPix/s.  Clean full-4K ceiling: 4K@42 = ISP wall (~340),
-     *       4K@45 = analog HMAX floor (clean halve).  The i6c "288M CSI lever" is NOT
-     *       available on i6e (kernel rejects CUS_CSI_CLK_288M); 216M is the ceiling.
+     *  idx1 3840x2160@33 non-binned 1485 FULL 4K — native 4K +11% over idx0.  HMAX=825,
+     *       VMAX=2700 (true ~33.3fps).  Retimed down from the 40fps experiment
+     *       (VMAX=2250, 332 MPix/s) which sat too close to the walls: 4K@42 =
+     *       ISP wall (~340), 4K@45 = analog HMAX floor (clean halve).  The i6c
+     *       "288M CSI lever" is NOT available on i6e (kernel rejects
+     *       CUS_CSI_CLK_288M); 216M is the ceiling.
      *       See documentation/STAR6E_IMX415_HEADROOM.md §5.3-5.4.
      *  idx2 2816x1584@60 non-binned 1485 — widened to ~max FOV at 60fps (267 MPix/s).
      *  idx3 3840x1152@60 non-binned 1485 ULTRAWIDE — full sensor WIDTH, letterbox
@@ -181,7 +183,7 @@ static struct { // LINEAR
      *       same 1728 width as idx6, height 816 (120fps caps VMAX=1700 at HMAX=365).
      *       17% wider than idx7. */
     { LINEAR_RES_1,  { 3840, 2160, 3,  30 }, { 0, 0, 3840, 2160 }, { "3840x2160@30fps"  } },
-    { LINEAR_RES_2,  { 3840, 2160, 3,  40 }, { 0, 0, 3840, 2160 }, { "3840x2160@40fps"  } },
+    { LINEAR_RES_2,  { 3840, 2160, 3,  33 }, { 0, 0, 3840, 2160 }, { "3840x2160@33fps"  } },
     { LINEAR_RES_3,  { 2816, 1584, 3,  60 }, { 0, 0, 2952, 1656 }, { "2816x1584@60fps"  } },
     { LINEAR_RES_4,  { 3840, 1152, 3,  60 }, { 0, 0, 3840, 1152 }, { "3840x1152@60fps"  } },
     { LINEAR_RES_5,  { 1920, 1080, 3,  90 }, { 0, 0, 1920, 1080 }, { "1920x1080@90fps"  } },
@@ -3047,12 +3049,14 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
         handle->data_prec = CUS_DATAPRECISION_12;
         break;
 
-    case 1: // 3840x2160@40 — full 4K, non-binned 1485, HMAX=825 (332 MPix/s)
+    case 1: // 3840x2160@33 — full 4K, non-binned 1485, HMAX=825; retimed
+             // from the 40fps experiment (overdriven): vts 2700 * 11111ns
+             // = 30.0ms -> true ~33.3fps, +11% over the stock 4K@30.
         handle->video_res_supported.ulcur_res = 1;
         handle->pCus_sensor_init = pCus_init_8m_40fps_mipi4lane_linear;
-        vts_30fps = 2250;
+        vts_30fps = 2700;
         params->expo.vts = vts_30fps;
-        params->expo.fps = 40;
+        params->expo.fps = 33;
         Preview_line_period = 11111; // HMAX=825 line;
         handle->data_prec = CUS_DATAPRECISION_10;
         break;
@@ -3546,10 +3550,12 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us)
     params->expo.expo_lef_us = us;
     expo_lines = (1000 * us) / Preview_line_period;
 
-    if (expo_lines > params->expo.vts) {
-        vts = expo_lines + 8;
-    } else
-        vts = params->expo.vts;
+    /* Fixed-framerate policy: clamp exposure to the frame budget
+     * (SHR0 floor = 12 raw -> 8 effective after the -4 below) instead
+     * of extending VMAX, which made delivered fps sag in dark scenes. */
+    if (expo_lines > params->expo.vts - 12)
+        expo_lines = params->expo.vts - 12;
+    vts = params->expo.vts;
     SHR0 = vts - expo_lines;
 
     if (SHR0 <= 12) // 8+4

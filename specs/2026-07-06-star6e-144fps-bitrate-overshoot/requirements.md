@@ -7,6 +7,14 @@
 - **Status:** ✅ **RESOLVED & device-verified** — see "Resolution" below.
   Real root cause is a **hard 120 fps VENC encoder-input ceiling**, not the
   SetFps-fallback theory first recorded here (kept below for the record).
+- **Addendum (2026-07-09, v0.38.0, bench `.201`):** the residual "~143.x,
+  wanders 142–143.5" delivery was a second, independent defect — the stock
+  driver **extends VMAX** when AE requests exposure ≥ the frame budget
+  (1880→1887 with AE pinned at the 1/144s ceiling), plus a ~0.2–0.5% real
+  pixel-clock deficit vs the K constant. Fixed in the driver by clamping
+  exposure to `vts-9` (fixed-framerate policy) and trimming the mode-5 seed
+  1880→1875. Verified: VMAX register pinned, VIF ~144.0–144.3, encoder
+  `Fps_1s` 144.00 sustained, wire ≈ 1.19× set bitrate as designed.
 - **Device under test:** SSC338Q / Infinity6E ground-truth unit, `10.6.0.1`
   (`waybeam` daemon on `:80`, `flashd` on `:8070`), 2026-07-06
 

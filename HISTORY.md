@@ -1,5 +1,35 @@
 # History
 
+## [0.38.0] - 2026-07-09
+
+Star6E sensor-driver mode quality: **fixed-framerate exposure policy + exact
+nominal fps landing** for the in-tree IMX335/IMX415 drivers. Device-verified
+on SSC338Q at 192.168.2.201 (IMX335).
+
+- **IMX335: exposure clamp instead of VMAX extension.** The stock
+  `SetAEUSecs`/`SetFPS` paths stretched VMAX whenever AE requested more than
+  the frame budget — with AE pinned at the 1/144s shutter ceiling (any
+  indoor scene) mode 5 ran at VMAX 1887 instead of 1880, delivering a
+  brightness-dependent 142–143.5fps instead of 144. Both sites now clamp
+  exposure to `vts - 9` (SHR floor); VMAX is pinned by construction.
+  Verified: encoder `Fps_1s` 144.00 sustained, VMAX register at seed.
+- **IMX335: empirical vts trims** — the real pixel clock runs ~0.2–0.5%
+  below the K constant; modes 2/3/4/5 seeds trimmed (3016→3001, 2707→2701,
+  2256→2250, 1880→1875) so delivered fps lands at/just above the label.
+- **IMX335: orientation (flip) rewrites fixed for the new lineup** — the
+  inherited M0F1/M1F1 block used stock indices: our idx 3 got the stock
+  1080p AREA3 value and idx 4/5 got no flip writes at all. Extended using
+  the verified `AREA3_ST_flipped = 4288 − normal` relation (idx3 3392,
+  idx4 3248, idx5 3068 + cropped-mode OB values). Not yet camera-verified
+  (bench runs flip=off).
+- **IMX335: mode 2 label corrected** to 2560×1440@90 (row said 2400×1350,
+  hardware reads out 2560×1440, Y_OUT=1460).
+- **IMX415: same fixed-framerate exposure clamp** in `SetAEUSecs`.
+- **IMX415: idx 1 retimed 4K@40 → 4K@~33.3** (VMAX 2250→2700 at HMAX=825):
+  the 40fps probe sat within ~5% of both the ISP throughput wall and the
+  analog HMAX floor; 33.3 keeps margin and still beats stock 4K@30 by ~11%.
+  Retime not yet device-verified (no IMX415 on the bench).
+
 ## [0.37.0] - 2026-07-09
 
 Stabilization: **Maruko `video0.framing = stab-fill`** — full-FOV

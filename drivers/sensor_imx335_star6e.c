@@ -150,7 +150,7 @@ static struct { // LINEAR
      * 2176x1224@100 = 2.66 MPix (VIF 99.5), 1600x900@144 = 1.44 MPix (VIF 143). */
     { LINEAR_RES_1, { 2560, 1920, 3,  30 }, { 0, 0, 2560, 1920 }, { "2560x1920@30fps"  } },
     { LINEAR_RES_2, { 2560, 1920, 3,  60 }, { 0, 0, 2560, 1920 }, { "2560x1920@60fps"  } },
-    { LINEAR_RES_3, { 2400, 1350, 3,  90 }, { 0, 0, 2560, 1440 }, { "2400x1350@90fps"  } },
+    { LINEAR_RES_3, { 2560, 1440, 3,  90 }, { 0, 0, 2560, 1440 }, { "2560x1440@90fps"  } },
     { LINEAR_RES_4, { 2176, 1224, 3, 100 }, { 0, 0, 2176, 1224 }, { "2176x1224@100fps" } },
     { LINEAR_RES_5, { 1920, 1080, 3, 120 }, { 0, 0, 1920, 1080 }, { "1920x1080@120fps" } },
     { LINEAR_RES_6, { 1600,  900, 3, 144 }, { 0, 0, 1600,  900 }, { "1600x900@144fps"  } },
@@ -1738,7 +1738,9 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     case 2:
         handle->video_res_supported.ulcur_res = 2;
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m90fps_linear;
-        vts_30fps = 3016;
+        /* Stock 3016 delivered 89.56 (real pixel clock ~0.5% below
+         * nominal); 3001 lands 90.0 (device-verified method, mode 5). */
+        vts_30fps = 3001;
         Preview_MAX_FPS = 90;
         Preview_line_period = 3684;
         break;
@@ -1749,7 +1751,8 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     case 3:
         handle->video_res_supported.ulcur_res = 3;
         handle->pCus_sensor_init = pCus_init_window_2176x1224;
-        vts_30fps = 2707;
+        /* Nominal 2707 delivered 99.80; 2701 lands 100.0. */
+        vts_30fps = 2701;
         Preview_MAX_FPS = 100;
         Preview_line_period = 3694;
         break;
@@ -1757,7 +1760,8 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     case 4:
         handle->video_res_supported.ulcur_res = 4;
         handle->pCus_sensor_init = pCus_init_mipi4lane_5m120fps_linear;
-        vts_30fps = 2256;
+        /* Stock 2256 delivered 119.72; 2250 lands 120.0. */
+        vts_30fps = 2250;
         Preview_MAX_FPS = 120;
         Preview_line_period = 3694;
         break;
@@ -1766,7 +1770,10 @@ static int pCus_SetVideoRes(ms_cus_sensor* handle, u32 res_idx)
     case 5:
         handle->video_res_supported.ulcur_res = 5;
         handle->pCus_sensor_init = pCus_init_window_1600x900;
-        vts_30fps = 1880;
+        /* Nominal K/(275*144) = 1880, but the real pixel clock runs
+         * ~0.2% below K: measured 143.7fps delivered at vts 1880.
+         * 1875 lands the delivered rate at 144.0 (device-verified). */
+        vts_30fps = 1875;
         Preview_MAX_FPS = 144;
         Preview_line_period = 3694;
         break;
@@ -1921,9 +1928,31 @@ static int DoOrien(ms_cus_sensor* handle, CUS_CAMSENSOR_ORIT orit)
                 SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
                 SensorReg_Write(0x30D9, 0x10);
             } else if (handle->video_res_supported.ulcur_res == 3) {
+                /* Flipped AREA3_ST = 4288 - normal ST (pattern verified
+                 * against the three stock modes).  2176x1224 crop:
+                 * 4288 - 896 = 3392.  The inherited 3248 here was the
+                 * STOCK driver's res-3 (1920x1080) value. */
                 SensorReg_Write(mirr_flip_table[i].reg, mirr_flip_table[i].data);
-                SensorReg_Write(0x3074, 0xB0); // AREA3_ST_ADR
+                SensorReg_Write(0x3074, 0x40); // AREA3_ST_ADR 3392
+                SensorReg_Write(0x3075, 0x0D);
+                SensorReg_Write(0x30C6, 0x12); // BLACK_OFSET_AD
+                SensorReg_Write(0x30CE, 0x64); // UNRD_LINE_MAX
+                SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
+                SensorReg_Write(0x30D9, 0x10);
+            } else if (handle->video_res_supported.ulcur_res == 4) {
+                /* 1920x1080: 4288 - 1040 = 3248 (stock res-3 values). */
+                SensorReg_Write(mirr_flip_table[i].reg, mirr_flip_table[i].data);
+                SensorReg_Write(0x3074, 0xB0); // AREA3_ST_ADR 3248
                 SensorReg_Write(0x3075, 0x0C);
+                SensorReg_Write(0x30C6, 0x12); // BLACK_OFSET_AD
+                SensorReg_Write(0x30CE, 0x64); // UNRD_LINE_MAX
+                SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
+                SensorReg_Write(0x30D9, 0x10);
+            } else if (handle->video_res_supported.ulcur_res == 5) {
+                /* 1600x900 crop: 4288 - 1220 = 3068. */
+                SensorReg_Write(mirr_flip_table[i].reg, mirr_flip_table[i].data);
+                SensorReg_Write(0x3074, 0xFC); // AREA3_ST_ADR 3068
+                SensorReg_Write(0x3075, 0x0B);
                 SensorReg_Write(0x30C6, 0x12); // BLACK_OFSET_AD
                 SensorReg_Write(0x30CE, 0x64); // UNRD_LINE_MAX
                 SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
@@ -1953,9 +1982,26 @@ static int DoOrien(ms_cus_sensor* handle, CUS_CAMSENSOR_ORIT orit)
                 SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
                 SensorReg_Write(0x30D9, 0x10);
             } else if (handle->video_res_supported.ulcur_res == 3) {
+                /* See M0F1 case: flipped AREA3_ST = 4288 - normal ST. */
                 SensorReg_Write(mirr_flip_table[i].reg, mirr_flip_table[i].data);
-                SensorReg_Write(0x3074, 0xB0); // AREA3_ST_ADR
+                SensorReg_Write(0x3074, 0x40); // AREA3_ST_ADR 3392
+                SensorReg_Write(0x3075, 0x0D);
+                SensorReg_Write(0x30C6, 0x12); // BLACK_OFSET_AD
+                SensorReg_Write(0x30CE, 0x64); // UNRD_LINE_MAX
+                SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
+                SensorReg_Write(0x30D9, 0x10);
+            } else if (handle->video_res_supported.ulcur_res == 4) {
+                SensorReg_Write(mirr_flip_table[i].reg, mirr_flip_table[i].data);
+                SensorReg_Write(0x3074, 0xB0); // AREA3_ST_ADR 3248
                 SensorReg_Write(0x3075, 0x0C);
+                SensorReg_Write(0x30C6, 0x12); // BLACK_OFSET_AD
+                SensorReg_Write(0x30CE, 0x64); // UNRD_LINE_MAX
+                SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
+                SensorReg_Write(0x30D9, 0x10);
+            } else if (handle->video_res_supported.ulcur_res == 5) {
+                SensorReg_Write(mirr_flip_table[i].reg, mirr_flip_table[i].data);
+                SensorReg_Write(0x3074, 0xFC); // AREA3_ST_ADR 3068
+                SensorReg_Write(0x3075, 0x0B);
                 SensorReg_Write(0x30C6, 0x12); // BLACK_OFSET_AD
                 SensorReg_Write(0x30CE, 0x64); // UNRD_LINE_MAX
                 SensorReg_Write(0x30D8, 0x4C); // UNREAD_ED_ADR
@@ -1986,7 +2032,6 @@ static int pCus_GetFPS(ms_cus_sensor* handle)
 
 static int pCus_SetFPS(ms_cus_sensor* handle, u32 fps)
 {
-    u32 vts = 0;
     imx335_params* params = (imx335_params*)handle->private_data;
     u32 max_fps = handle->video_res_supported.res[handle->video_res_supported.ulcur_res].max_fps;
     u32 min_fps = handle->video_res_supported.res[handle->video_res_supported.ulcur_res].min_fps;
@@ -2006,12 +2051,10 @@ static int pCus_SetFPS(ms_cus_sensor* handle, u32 fps)
         return FAIL;
     }
 
-    if (params->expo.expo_lines > params->expo.vts - 2) {
-        vts = params->expo.expo_lines + 8;
-    } else {
-        vts = params->expo.vts;
-    }
-    params->expo.vts = vts;
+    /* Fixed-framerate policy: keep the computed vts; pCus_SetAEUSecs()
+     * clamps the exposure to the frame budget instead of the stock
+     * vts = expo_lines + 8 extension (which held VMAX at 1887 in mode 5
+     * whenever AE sat at the 1/144s ceiling -> 143.4fps, never 144.0). */
     pCus_SetAEUSecs(handle, params->expo.expo_lef_us);
 
     params->dirty = true;
@@ -2131,12 +2174,15 @@ static int pCus_SetAEUSecs(ms_cus_sensor* handle, u32 us)
     lines = (1000 * us) / Preview_line_period;
     if (lines < 9)
         lines = 9;
+    /* Fixed-framerate policy: clamp exposure to the frame budget (SHR
+     * floor = 9 blanking lines) instead of extending VMAX.  The stock
+     * vts = lines + 1 extension makes delivered fps sag with scene
+     * brightness (AE pinned at 1/fps stretches every frame). */
+    if (lines > params->expo.vts - 9)
+        lines = params->expo.vts - 9;
     params->expo.expo_lines = lines;
 
-    if (lines > params->expo.vts - 1)
-        vts = lines + 1;
-    else
-        vts = params->expo.vts;
+    vts = params->expo.vts;
 
     SENSOR_DMSG("[%s] us %u, lines %u, vts %u\n", __FUNCTION__,
         us,
