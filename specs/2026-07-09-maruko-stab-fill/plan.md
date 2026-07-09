@@ -117,6 +117,44 @@ clean, dmesg clean. F4 un-gate done. `record.mode=dual` refused under
 stab-fill (RING chn 1 can't coexist with frame-base chn 0 — the one F0a truth
 that still stands).
 
+### Reinit-switch hardening (post-implementation, same day)
+
+Adversarial resolution/sensor-mode/preset switching (~40 API reinits) exposed
+three issues, all fixed pre-merge:
+
+1. **Teardown wedge (BOTH stab presets, root cause pre-existing).** A
+   user-drained SCL port whose consumer thread is joined before the port stops
+   producing pins SCL/ISP working tasks → the ISP→SCL REALTIME unbind's
+   unbounded kernel flush wedges in D-state (`MI_SYS_IMPL_FlushRealTimeOutputBuf`)
+   → zombie or hardware-watchdog reset.  Reproduced from stab-fill (port0),
+   plain stab (the port-2 tap — meaning v0.35.0 was exposed), and the factory
+   binary (pre-existing SDK race, first logged 2026-07-03).  Fix: two-phase
+   stop — drain-only thread keeps consuming through the port disable, joined
+   after (`maruko_framing_stab_finish_stop`).  Cut incidence ~10×.
+2. **Residual race → teardown watchdog.** One wedge in ~20 switches survived
+   the drain (SCL working task pinned with the FIFO empty).  CONTROL TEST:
+   `framing=off` wedged on its FIRST size-change reinit — the residual race is
+   GENERIC and pre-existing (no stab code in the path; the factory binary and
+   the 2026-07-03 hangs match).  Userspace ordering cannot close it, so the
+   roadmap's teardown watchdog is now shipped: 12 s deadline at teardown entry
+   → `reboot(RB_AUTOBOOT)` — bounded, logged, self-recovering (~45 s outage)
+   instead of open-ended limbo.  Observed working repeatedly during the
+   barrage (device self-recovered every residual event, no manual
+   intervention).  Net: reinit switching is now strictly MORE reliable than
+   master in every framing mode.
+3. **Live fps change stalled the fill VENC dead.** `maruko_apply_fps` used an
+   SCL→VENC RING unbind/rebind as the fps divider — illegal on the frame-base
+   manual-fed VENC.  Fill mode now updates the VENC input's USERINJECT FRC
+   (src:dst) instead; live fps 50↔30 device-verified.
+
+Observed behavior note: fill-mode stabilization sensitivity scales with the
+ENCODE resolution — the detector measures on the encode-domain frame (Star6E
+design parity), so at small sizes (e.g. 640×360 from a 2952-wide sensor, one
+encode pixel ≈ 4.6 sensor pixels) small shakes quantize to zero measurement.
+Plain `stab` does not have this property: its tap is a 1:1 SCL-INPUT-domain
+crop, full-resolution motion sensing at any encode size.  Documented as
+inherent; prefer `stab` for very small encodes.
+
 ## If F0 passes — the port
 
 ### F1 — compose helpers (port Star6E's fill/blit to i6c)

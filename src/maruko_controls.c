@@ -4,6 +4,8 @@
 #include "maruko_audio.h"
 #include "maruko_bindings.h"
 #include "maruko_cus3a.h"
+#include "maruko_framing.h"
+#include "maruko_framing_host.h"
 #include "maruko_iq.h"
 #include "maruko_output.h"
 #include "maruko_pipeline.h"
@@ -296,17 +298,32 @@ static int maruko_apply_fps(uint32_t fps)
 		fps = sensor_fps;
 	}
 
-	MI_SYS_UnBindChnPort(&g_ctx.vpe_port, &g_ctx.venc_port);
-	bind_ret = MI_SYS_BindChnPort2(&g_ctx.vpe_port,
-		&g_ctx.venc_port, sensor_fps, fps,
-		I6_SYS_LINK_RING, 0);
-	if (bind_ret != 0) {
-		printf("> Rebind SCL->VENC at %u:%u fps failed %d, restoring\n",
-			sensor_fps, fps, bind_ret);
-		MI_SYS_BindChnPort2(&g_ctx.vpe_port,
-			&g_ctx.venc_port, sensor_fps, sensor_fps,
+	/* stab-fill: there is NO SCL→VENC bind — the VENC is NORMAL_FRMBASE and
+	 * manually fed.  The unbind/RING-rebind fps-divider below would force a
+	 * RING bind onto the frame-base input and stall the encoder dead
+	 * (device-reproduced: live fps set → instant "no encoder data" abort).
+	 * The fill-mode divider is the VENC input port's USERINJECT FRC. */
+#if HAVE_FRAMING_STAB
+	if (maruko_framing_fill_graph_ready()) {
+		if (maruko_framing_stab_fill_set_fps(sensor_fps, fps) != 0) {
+			printf("> FPS %u: fill FRC update failed\n", fps);
+			return -1;
+		}
+	} else
+#endif
+	{
+		MI_SYS_UnBindChnPort(&g_ctx.vpe_port, &g_ctx.venc_port);
+		bind_ret = MI_SYS_BindChnPort2(&g_ctx.vpe_port,
+			&g_ctx.venc_port, sensor_fps, fps,
 			I6_SYS_LINK_RING, 0);
-		return -1;
+		if (bind_ret != 0) {
+			printf("> Rebind SCL->VENC at %u:%u fps failed %d, restoring\n",
+				sensor_fps, fps, bind_ret);
+			MI_SYS_BindChnPort2(&g_ctx.vpe_port,
+				&g_ctx.venc_port, sensor_fps, sensor_fps,
+				I6_SYS_LINK_RING, 0);
+			return -1;
+		}
 	}
 
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,

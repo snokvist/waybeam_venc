@@ -152,6 +152,10 @@ static volatile int g_paused;
 
 static pthread_t g_thread;
 static volatile int g_running;
+static volatile int g_drain_only;   /* teardown phase 1 (both presets): no IVE/
+                                     * compose, pure GetBuf/PutBuf until the
+                                     * phase-2 join (finish_stop) */
+static void drain_user_port(int port);
 static volatile int g_tap_active;
 static int g_ive_created;
 static int g_ive_handle;
@@ -1009,6 +1013,15 @@ static void *maruko_stab_fill_thread_main(void *arg)
 			continue;
 		}
 
+		/* Teardown phase 1 (drain-only): keep releasing port0 frames so the
+		 * SCL/ISP working queues can quiesce while the pipeline disables the
+		 * port — but no IVE (buffers may be going away) and no compose (the
+		 * VENC is being stopped).  Phase 2 (finish_stop) joins us. */
+		if (g_drain_only) {
+			SysPutBuf(h);
+			continue;
+		}
+
 		{
 			struct timespec cts;
 			clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts);
@@ -1161,6 +1174,15 @@ static void *maruko_stab_thread_main(void *arg)
 			if (fd < 0) usleep(1000);
 			continue;
 		}
+		/* Teardown phase 1 (drain-only): keep releasing tap frames so the
+		 * SCL/ISP working queues can quiesce — no IVE.  Same hazard as the
+		 * fill port0: an unconsumed user port pins the ISP→SCL REALTIME
+		 * unbind flush (device-reproduced from plain stab on a size-change
+		 * reinit, 2026-07-09). */
+		if (g_drain_only) {
+			SysPutBuf(h);
+			continue;
+		}
 		y = (MI_U8 *)buf.stFrameData.pVirAddr[0];
 		stride = buf.stFrameData.u32Stride[0];
 		if (y && stride >= g_det.crop) {
@@ -1256,15 +1278,25 @@ static int maruko_stab_start(void)
 
 static void maruko_stab_stop(void)
 {
-	/* R6: JOIN the detector BEFORE disabling the tap port.  The thread holds
-	 * no port buffer across iterations (PutBuf every frame), but joining first
-	 * still guarantees no in-flight IVE read races the DisablePort — the same
-	 * _MI_SYS_MMU_Callback storm that resets Star6E.  Never SIGKILL. */
+	/* Teardown is TWO-PHASE for BOTH presets.  The camera keeps producing
+	 * into the user-drained SCL port (fill: port0; stab: the port-2 tap)
+	 * until that port is disabled — if the consumer thread is joined first,
+	 * the port's in-flight SCL working tasks lose their consumer, which pins
+	 * the ISP's REALTIME deliveries, and the ISP→SCL unbind's UNBOUNDED
+	 * kernel flush spins forever (MI_SYS_IMPL_FlushRealTimeOutputBuf D-state
+	 * → process zombie or hardware-watchdog reset; device-reproduced from
+	 * BOTH presets on reinit switches, 2026-07-09).  Phase 1 (here): flip
+	 * the thread to drain-only — no IVE, no compose, pure GetBuf/PutBuf — so
+	 * consumption continues WHILE the ports are disabled and SCL/ISP
+	 * quiesce.  Phase 2 (maruko_framing_stab_finish_stop, called from
+	 * teardown Step-0 after DisablePort(0,0,0)): disable the tap (fill has
+	 * no tap), join, sweep the residue, free the IVE state. */
 	if (g_running) {
-		g_running = 0;
-		pthread_join(g_thread, NULL);
-		memset(&g_thread, 0, sizeof(g_thread));
+		g_drain_only = 1;
+		return;
 	}
+
+	/* Never-started (setup/start failure): plain cleanup. */
 	if (g_tap_active) {
 		stab_tap_disable();
 		g_tap_active = 0;
@@ -1274,6 +1306,36 @@ static void maruko_stab_stop(void)
 		IveDestroy(g_ive_handle);
 		g_ive_created = 0;
 	}
+	g_ctx = NULL;
+}
+
+/* Teardown phase 2 — called from the pipeline teardown right after port0 is
+ * disabled: disable the stab tap (its drain thread is still consuming, and in
+ * drain-only mode there is no in-flight IVE read to race — the original R6
+ * concern), give the last in-flight frame one period to land, join the
+ * thread, sweep any residual FIFO entries, free the IVE state.  Idempotent;
+ * no-op unless phase 1 armed. */
+void maruko_framing_stab_finish_stop(void)
+{
+	if (!g_drain_only)
+		return;
+	if (g_tap_active) {
+		stab_tap_disable();
+		g_tap_active = 0;
+	}
+	usleep(30000);   /* one frame period: let final in-flight tasks land */
+	if (g_running) {
+		g_running = 0;
+		pthread_join(g_thread, NULL);
+		memset(&g_thread, 0, sizeof(g_thread));
+	}
+	drain_user_port(g_fill_mode ? 0 : STAB_TAP_PORT);
+	ive_free(&g_a); ive_free(&g_b); ive_free(&g_dx); ive_free(&g_dy);
+	if (g_ive_created) {
+		IveDestroy(g_ive_handle);
+		g_ive_created = 0;
+	}
+	g_drain_only = 0;
 	g_ctx = NULL;
 }
 
@@ -1296,6 +1358,57 @@ static void maruko_stab_set_pan(double x, double y)
 static int maruko_stab_active(void)
 {
 	return g_running;
+}
+
+/* Fill-mode live-fps divider: re-issue the VENC input port's USERINJECT FRC
+ * with dst < src so the scheduler drops the excess pushed frames — the
+ * frame-base equivalent of the RING bind's src:dst fps trick.  Returns -1
+ * when fill isn't running (caller falls back / errors). */
+int maruko_framing_stab_fill_set_fps(uint32_t src_fps, uint32_t dst_fps)
+{
+	StabFillFrc_t frc = {
+		.eType = STABFILL_FRC_USERINJECT,
+		.eStrategy = STABFILL_FRC_BY_RATIO,
+		.u32SrcFrameRate = src_fps,
+		.u32DstFrameRate = dst_fps,
+	};
+	MI_S32 ret;
+
+	if (!g_fill_mode || !g_running || !SysInFrc)
+		return -1;
+	ret = SysInFrc(&g_fill_venc_in, &frc);
+	fprintf(stderr, "[maruko-stab] fill: live fps FRC %u:%u ret=%d\n",
+		src_fps, dst_fps, (int)ret);
+	return ret == 0 ? 0 : -1;
+}
+
+/* Release every frame still queued on a user-drained SCL chn-0 output port
+ * (fill: port0; stab: the port-2 tap).  Called with the consumer thread
+ * already joined and the port disabled — a residual queue pins SCL/ISP
+ * working tasks and wedges the ISP→SCL REALTIME unbind flush in unbounded
+ * D-state.  Bounded, idempotent, safe when nothing is queued. */
+static void drain_user_port(int port)
+{
+	MI_SYS_ChnPort_t p;
+	int drained = 0, i;
+
+	if (!SysGetBuf || !SysPutBuf)
+		return;
+	memset(&p, 0, sizeof(p));
+	p.module = I6_SYS_MOD_SCL;
+	p.port = (unsigned)port;
+	for (i = 0; i < 32; i++) {
+		StabBufInfo_t buf;
+		MI_S32 h = -1;
+		memset(&buf, 0, sizeof(buf));
+		if (SysGetBuf(&p, &buf, &h) != 0)
+			break;
+		SysPutBuf(h);
+		drained++;
+	}
+	if (drained)
+		fprintf(stderr, "[maruko-stab] drained %d residual frame(s) from "
+			"port %d\n", drained, port);
 }
 
 /* Debug-OSD snapshot: last detector measurement + Kalman correction (both in

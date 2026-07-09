@@ -35,6 +35,35 @@ SSC378QE at IMX415 1080×720@50 (visual + 5-cycle teardown soak, 0 MMU resets).
 - The 5a probe's BufConf ABI is corrected in-tree so the archived bench now
   reports the true answer.
 
+Reinit hardening (found by adversarial resolution/sensor-mode switch testing
+with the stab presets active — ~40 API-driven reinit switches on `.233`):
+
+- **Two-phase stab teardown (BOTH presets).** Joining the consumer thread of a
+  user-drained SCL port (fill: port0; stab: the port-2 tap) while the camera
+  still produces pins SCL/ISP working tasks, and the ISP→SCL REALTIME unbind's
+  UNBOUNDED kernel flush then wedges in uninterruptible D-state
+  (`MI_SYS_IMPL_FlushRealTimeOutputBuf`) — ending as a zombie process or a
+  hardware-watchdog reset.  Device-reproduced from stab-fill AND plain stab on
+  size/preset switches; retroactively explains the 2026-07-03 teardown hangs.
+  Now: `framing_stop` flips the thread to drain-only (no IVE/compose, pure
+  GetBuf/PutBuf) so consumption continues while the ports are disabled;
+  teardown joins + sweeps the residue afterwards (`finish_stop`).  Cut the
+  wedge incidence from ~1-in-2 (fill) to <1-in-20 across the switch barrage.
+- **Teardown watchdog (roadmap item, now shipped).** The residual SDK race is
+  GENERIC and pre-existing — control test: `framing=off` wedged on its first
+  size-change reinit, no stab code in the path (matches the 2026-07-03 hangs
+  and the factory binary wedging identically).  It cannot be closed from
+  userspace ordering, so a watchdog armed at teardown entry forces
+  `reboot(RB_AUTOBOOT)` after 12 s if teardown has not completed — a bounded,
+  logged, self-recovering ~45 s reboot instead of open-ended D-state limbo
+  (no sysrq on I6C; SIGKILL leaves an MI zombie).  Benefits every mode, not
+  just the stab presets.
+- **Live fps change under stab-fill fixed.** `maruko_apply_fps` re-bound
+  SCL→VENC RING as its fps divider — on the frame-base manual-fed VENC that
+  stalls the encoder dead (instant "no encoder data" abort, device-reproduced).
+  In fill mode the divider is now the VENC input port's USERINJECT FRC
+  (src:dst), applied live with no graph change.
+
 ## [0.36.0] - 2026-07-09
 
 Stabilization: **`video0.stab_accuracy` — a shared high/medium/low detector

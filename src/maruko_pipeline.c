@@ -40,6 +40,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <string.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -4249,10 +4250,48 @@ cleanup:
 	return result;
 }
 
+/* Teardown watchdog.  The i6c MI teardown can wedge in an UNBOUNDED kernel
+ * flush (MI_SYS_IMPL_FlushRealTimeOutputBuf, uninterruptible D-state) when an
+ * SCL/ISP working task is pinned at unbind time — a long-standing SDK race
+ * (first logged 2026-07-03; reproduced from stab, stab-fill AND the factory
+ * binary on 2026-07-09).  The stab two-phase drain removes the dominant
+ * trigger, but the residual race cannot be closed from userspace ordering
+ * alone.  A wedged teardown is unrecoverable (no sysrq on I6C; SIGKILL leaves
+ * an MI zombie): the only outcome is a silent dead encoder until the HARDWARE
+ * watchdog eventually resets.  So: arm a deadline at teardown entry — if
+ * teardown hasn't completed in time, log and reboot(RB_AUTOBOOT) for a
+ * bounded, deterministic recovery instead of open-ended limbo. */
+#define MARUKO_TEARDOWN_WATCHDOG_S 12
+static volatile int g_teardown_done;
+
+static void *maruko_teardown_watchdog_main(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < MARUKO_TEARDOWN_WATCHDOG_S * 10; i++) {
+		if (g_teardown_done)
+			return NULL;
+		usleep(100000);
+	}
+	fprintf(stderr, "ERROR: [maruko] teardown wedged for %ds (MI flush "
+		"D-state) — forcing reboot for deterministic recovery\n",
+		MARUKO_TEARDOWN_WATCHDOG_S);
+	sync();
+	(void)reboot(RB_AUTOBOOT);
+	return NULL;
+}
+
 void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 {
+	pthread_t wdt;
+	int wdt_armed;
+
 	if (!ctx)
 		return;
+
+	g_teardown_done = 0;
+	wdt_armed = pthread_create(&wdt, NULL,
+		maruko_teardown_watchdog_main, NULL) == 0;
 
 	/* Stop the framing module FIRST: it joins its detector thread and
 	 * disables its SCL tap port before we tear down port0 / the SCL channel
@@ -4360,6 +4399,17 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		(void)g_mi_scl.fnDisablePort(0, 0, 0);
 		(void)maruko_wait_output_idle(MARUKO_PROC_SCL, 100, 1);
 	}
+#if HAVE_FRAMING_STAB
+	/* stab-fill teardown phase 2: the drain-only fill thread (armed by
+	 * maruko_pipeline_framing_stop above) kept consuming port0 WHILE the
+	 * port was disabled, so the SCL/ISP working queues could quiesce — an
+	 * unconsumed port0 pins them and wedges the ISP→SCL REALTIME unbind
+	 * flush in unbounded D-state (MI_SYS_IMPL_FlushRealTimeOutputBuf →
+	 * zombie or watchdog reset; both device-reproduced on reinit switches,
+	 * 2026-07-09).  Join it and sweep the residue now.  No-op unless the
+	 * fill module armed phase 1. */
+	maruko_framing_stab_finish_stop();
+#endif
 
 	/* stab-fill: the VENC's only producer (the fill compose thread) was
 	 * joined by maruko_pipeline_framing_stop above, so the manual-feed leg is
@@ -4419,6 +4469,11 @@ void maruko_pipeline_teardown_graph(MarukoBackendContext *ctx)
 		(void)MI_SNR_Disable(ctx->sensor.pad_id);
 		ctx->sensor_enabled = 0;
 	}
+
+	/* Teardown completed within the deadline — disarm the watchdog. */
+	g_teardown_done = 1;
+	if (wdt_armed)
+		(void)pthread_join(wdt, NULL);
 }
 
 void maruko_pipeline_teardown(MarukoBackendContext *ctx)
