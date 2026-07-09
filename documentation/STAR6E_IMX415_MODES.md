@@ -15,7 +15,7 @@ with HDR/DOL removed.
 | Idx | Resolution | fps | Readout | Link | Init function |
 |---|---|---|---|---|---|
 | 0 | 3840×2160 | 30  | all-pixel, **non-binned** | 891  | `pCus_init_8m_30fps_mipi4lane_linear` |
-| 1 | **3840×2160** | **40** | **non-binned, FULL 4K** (+33% over stock 4K@30) | 1485 | `pCus_init_8m_40fps_mipi4lane_linear` |
+| 1 | **3840×2160** | **33** | **non-binned, FULL 4K** (true ~33.3fps, +11% over stock 4K@30) | 1485 | `pCus_init_8m_40fps_mipi4lane_linear` |
 | 2 | **2816×1584** | 60 | crop, **non-binned** (**widened** from 2560×1440) | 1485 | `pCus_init_5m_60fps_mipi4lane_linear` |
 | 3 | **3840×1152** | 60 | **non-binned, full WIDTH** (ultrawide 3.33:1) | 1485 | `pCus_init_uw_3840x1152_60_mipi4lane_linear` |
 | 4 | 1920×1080 | 90 | **2×2 binned, full FOV** (clean at 90fps) | 891 | `pCus_init_2m_90fps_mipi4lane_linear` |
@@ -45,6 +45,12 @@ as distinct modes.
 HDR/DOL is not exposed (the two HDR handles are `NULL`; the
 compiler dead-code-eliminates the HDR subtree — no `_HDR` strings in the `.ko`).
 
+**Fixed-framerate exposure policy:** like the IMX335 star6e driver,
+`pCus_SetAEUSecs` clamps the requested exposure to the frame budget (SHR0
+floor) instead of extending VMAX, so delivered fps never sags when AE pins
+at the 1/fps shutter ceiling. See `STAR6E_IMX335_MODES.md` for the
+device-verified analysis.
+
 ## Device verification (2026-07-05, .13)
 
 Method: pin `video0.fps=120`, switch only `sensor.mode`; capture rate = the
@@ -55,7 +61,7 @@ IsrCnt=enqueue=delivered). `dmesg` watched for FIFO-FULL / Skip-IQ / FrmLost.
 | Idx | Target fps | Measured VIF FPS | Sustained drops |
 |---|---|---|---|
 | 0 | 30  | 32.16  | 0 |
-| 1 | 40  | 40.7 (sensor=enqueue=delivered, 0 steady FIFO-FULL) | 0 |
+| 1 | 40  | 40.7 (sensor=enqueue=delivered, 0 steady FIFO-FULL) — retimed to 33 (VMAX 2700) after this run; the retime itself is not yet device-verified | 0 |
 | 2 | 60  | 59.52 (2816×1584) | 0 |
 | 3 | 60  | 59.98 over a 15 s soak (ultrawide, incrop 3840×1152) | 0 |
 | 4 | 90  | 89.92 (**image clean** on HDMI) | 0 |
@@ -73,13 +79,15 @@ crop's line-time floor and corrupts (black+colored-lines, the same failure as
 full-FOV 1920×1080 binned). Unlike the fps-only checks above, idx7/idx10 were
 **image-verified on the display**, not just by counters.
 
-idx1 is **native full 4K at 40fps** — the clean full-4K ceiling. Cloned from the
-idx3 1485 base with a full-height window (VST=0, VWIDTH=4320), VMAX=2250,
-HMAX=825 (332 MPix/s). The two walls just above it were mapped on-device: 4K@42
-(HMAX=779, 352 MPix/s) hits the ISP throughput wall (FIFO-FULL, ~7% loss) and
-4K@45 (HMAX=733) breaches the sensor's analog HMAX floor (733 < floor ≤ 779,
-clean silent halve). Neither is clock-fixable — the i6c 288MHz CSI lever is not
-available on i6e. See `STAR6E_IMX415_HEADROOM.md` §5.3–5.4.
+idx1 is **native full 4K, retimed to ~33.3fps** (VMAX=2700 at the same
+HMAX=825 line). It began life as the 4K@40 ceiling probe (VMAX=2250,
+332 MPix/s), which sat uncomfortably close to two walls mapped on-device:
+4K@42 (HMAX=779, 352 MPix/s) hits the ISP throughput wall (FIFO-FULL, ~7%
+loss) and 4K@45 (HMAX=733) breaches the sensor's analog HMAX floor
+(733 < floor ≤ 779, clean silent halve). 33.3fps keeps a comfortable margin
+while still beating stock 4K@30 by ~11%. Neither wall is clock-fixable —
+the i6c 288MHz CSI lever is not available on i6e. See
+`STAR6E_IMX415_HEADROOM.md` §5.3–5.4.
 
 idx7 is the **ultrawide** — full sensor *width* at 60fps, letterboxed to 1152
 lines (3.33:1). Built on idx1's 1485 non-binned base with the window widened to

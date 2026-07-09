@@ -20,6 +20,11 @@ typedef struct {
 	MI_SYS_ChnPort_t vpe_port;
 	MI_SYS_ChnPort_t venc_port;
 	volatile uint32_t sensor_fps;
+	/* Current VPE->VENC bind delivery rate (true frames reaching the
+	 * encoder) — above STAR6E_VENC_INPUT_FPS_MAX this exceeds the RC
+	 * fpsNum and the bitrate budget must be compensated (see
+	 * rc_compensate_kbps). */
+	volatile uint32_t delivered_fps;
 	uint32_t frame_width;
 	uint32_t frame_height;
 	Star6ePipelineState *pipeline;
@@ -175,11 +180,27 @@ static int apply_rc_qp_delta(const MI_VENC_ChnAttr_t *attr, MI_VENC_RcParam_t *p
 	}
 }
 
+/* Exact-CBR compensation for >STAR6E_VENC_INPUT_FPS_MAX modes: the RC
+ * budgets kbps at rc_fps (capped 120) while the bind delivers more frames,
+ * so the wire rate is kbps * delivered/rc (~1.19x at 144).  Scale the
+ * encoder budget down so the wire lands on the configured bitrate.  Safe
+ * with rc_fps=120: the per-frame budget stays large enough that QP does
+ * not saturate (the naive version was only rejected when RC wrongly
+ * budgeted 30fps — see specs/2026-07-06-star6e-144fps-bitrate-overshoot). */
+static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
+{
+	if (delivered_fps > STAR6E_VENC_INPUT_FPS_MAX)
+		kbps = (uint32_t)((uint64_t)kbps * STAR6E_VENC_INPUT_FPS_MAX /
+			delivered_fps);
+	return kbps;
+}
+
 static int apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
 
+	kbps = rc_compensate_kbps(kbps, g_star6e_control_ctx.delivered_fps);
 	if (kbps > VENC_BITRATE_MAX_KBPS)
 		kbps = VENC_BITRATE_MAX_KBPS;
 	if (kbps < VENC_BITRATE_MIN_KBPS)
@@ -373,6 +394,7 @@ static int apply_fps(uint32_t fps)
 		MI_SYS_BindChnPort2(&g_star6e_control_ctx.vpe_port,
 			&g_star6e_control_ctx.venc_port, sensor_fps, sensor_fps,
 			I6_SYS_LINK_FRAMEBASE, 0);
+		g_star6e_control_ctx.delivered_fps = sensor_fps;
 		return -1;
 	}
 
@@ -388,7 +410,24 @@ static int apply_fps(uint32_t fps)
 		MI_SYS_BindChnPort2(&g_star6e_control_ctx.vpe_port,
 			&g_star6e_control_ctx.venc_port, sensor_fps, sensor_fps,
 			I6_SYS_LINK_FRAMEBASE, 0);
+		g_star6e_control_ctx.delivered_fps = sensor_fps;
 		return -1;
+	}
+
+	/* Delivered rate changed — if the exact-CBR compensation factor
+	 * changed with it (either side above the RC cap), re-program the
+	 * encoder budget from the committed config so the wire rate stays
+	 * on video0.bitrate. */
+	{
+		uint32_t old_delivered = g_star6e_control_ctx.delivered_fps;
+		uint32_t cfg_kbps = g_star6e_control_ctx.vcfg ?
+			g_star6e_control_ctx.vcfg->video0.bitrate : 0;
+
+		g_star6e_control_ctx.delivered_fps = fps;
+		if (cfg_kbps > 0 &&
+		    rc_compensate_kbps(cfg_kbps, old_delivered) !=
+		    rc_compensate_kbps(cfg_kbps, fps))
+			(void)apply_bitrate(cfg_kbps);
 	}
 
 	printf("> FPS delivered %u, RC fpsNum %u (bind %u:%u)\n", fps, rc_fps,
@@ -1204,6 +1243,12 @@ void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)
 	g_star6e_control_ctx.venc_port = pipeline->venc_port;
 	g_star6e_control_ctx.sensor_fps = pipeline->sensor.mode.maxFps ?
 		pipeline->sensor.mode.maxFps : pipeline->video.sensor_framerate;
+	/* Mirror the create-path VPE->VENC bind: delivery = video0.fps
+	 * clamped to the mode's true rate (0 = full rate). */
+	g_star6e_control_ctx.delivered_fps = g_star6e_control_ctx.sensor_fps;
+	if (vcfg->video0.fps &&
+	    vcfg->video0.fps < g_star6e_control_ctx.delivered_fps)
+		g_star6e_control_ctx.delivered_fps = vcfg->video0.fps;
 	g_star6e_control_ctx.frame_width = pipeline->image_width;
 	g_star6e_control_ctx.frame_height = pipeline->image_height;
 	g_star6e_control_ctx.pipeline = pipeline;

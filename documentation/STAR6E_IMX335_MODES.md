@@ -33,7 +33,7 @@ Maruko I6C ceiling model does **not** apply to I6E (see below).
 |---|---|---|---|---|---|---|
 | 0 | 2560×1920 | 30  | 4:3  | 147 | `pCus_init_mipi4lane_5m30fps_linear`  | stock (full readout) |
 | 1 | 2560×1920 | 60  | 4:3  | 295 | `pCus_init_mipi4lane_5m60fps_linear`  | stock |
-| 2 | 2400×1350 | 90  | 16:9 | 292 | `pCus_init_mipi4lane_5m90fps_linear`  | stock |
+| 2 | 2560×1440 | 90  | 16:9 | 332 | `pCus_init_mipi4lane_5m90fps_linear`  | stock |
 | 3 | 2176×1224 | 100 | 16:9 | 266 | `pCus_init_window_2176x1224`          | **NEW** window crop |
 | 4 | 1920×1080 | 120 | 16:9 | 249 | `pCus_init_mipi4lane_5m120fps_linear` | stock |
 | 5 | 1600×900  | 144 | 16:9 | 207 | `pCus_init_window_1600x900`           | **NEW** window crop |
@@ -54,6 +54,12 @@ value). `dmesg` watched for sustained FIFO-FULL / Skip-IQ / FrmLost.
 | 3 | 100 | 99.80  | 0 |
 | 4 | 120 | 119.40 | 0 |
 | 5 | 144 | 143.28 | 0 |
+
+Re-verified 2026-07-09 on `.201` after the fixed-framerate exposure clamp +
+vts trims (v0.38.0): mode 2 = 90.00±0.09, mode 3 = 100.00, mode 4 =
+120.0±0.2, mode 5 = **143.99 steady** (encoder `Fps_1s` 144.00). The
+pre-trim shortfalls in the table above were the stock VMAX-extension
+behavior + the ~0.2–0.5% real-clock deficit, both now corrected.
 
 Every mode came up clean on the first try — no per-mode tuning. Mode
 switching triggers its own pipeline reinit (`reinit_pending`), so setting
@@ -79,7 +85,9 @@ Probe results that set idx 3 and idx 5 (measured VIF on .13):
 | 1664×936  | 144 | 1.56 | 71.6 | halved |
 | **1600×900** | **144** | **1.44** | **143** | **chosen (144 tier)** |
 
-Stock references: 2400×1350@90 = 89.3, 1920×1080@120 = 119.6.
+Stock references: 2560×1440@90 = 89.3, 1920×1080@120 = 119.6. (The mode-2
+entry was long mislabeled 2400×1350 — the stock 90fps table reads out
+2560×1440, Y_OUT=1460.)
 
 ## Window-crop geometry
 
@@ -115,8 +123,41 @@ vts_30fps(mode) = K / (HMAX × max_fps)
 Preview_line_period ∝ HMAX   (3694 ns at HMAX=275)
 ```
 
-Crop seeds in the driver: idx 3 (100fps) `vts_30fps=2707`, idx 5 (144fps)
-`vts_30fps=1880`; both `Preview_line_period=3694`.
+Crop seeds in the driver: idx 3 (100fps) `vts_30fps=2701`, idx 5 (144fps)
+`vts_30fps=1875`; both `Preview_line_period=3694`.
+
+### Empirical vts trim (nominal-fps landing)
+
+The real pixel clock runs ~0.2–0.5% below the K constant, so nominal vts
+seeds deliver slightly under the labeled fps (e.g. 143.7 at vts 1880, 119.7
+at 2256). The seeds for modes 2/3/4/5 are trimmed a few lines below nominal
+(3016→3001, 2707→2701, 2256→2250, 1880→1875) so the **delivered** rate lands
+at/just above the label. Modes 0/1 measured at/over nominal and keep stock
+seeds.
+
+## Fixed-framerate exposure policy
+
+The stock driver extends VMAX whenever AE requests an exposure longer than
+the frame budget (`SetAEUSecs`: `vts = lines + 1`; `SetFPS`:
+`vts = expo_lines + 8`). With AE pinned at the 1/fps shutter ceiling (any
+indoor scene at 144fps) this held VMAX at 1887 instead of 1880 — delivered
+fps sagged to ~143.4 and **wandered with scene brightness** (142–143.5
+observed). Both sites now clamp exposure to `vts - 9` (the SHR floor) and
+never touch VMAX: frame rate is constant by construction, and AE compensates
+the ~0.5% exposure loss with gain. Device-verified: VMAX register pinned at
+the seed value, encoder `Fps_1s` = 144.00 sustained.
+
+## Orientation (flip) per-mode OB rewrites
+
+The stock M0F1/M1F1 orientation path rewrites `AREA3_ST_ADR` (0x3074/75) and
+the OB block (0x30C6/0x30CE/0x30D8) per mode, following
+`AREA3_ST_flipped = 4288 − AREA3_ST_normal`. The inherited block only covered
+stock indices 0–3 with stock geometry: our idx 3 (2176×1224) was getting the
+stock 1080p value (3248 instead of 3392) and idx 4/5 got **no flip writes at
+all** (not even the mirror/flip base registers). Fixed: idx 3 → 3392,
+idx 4 → 3248, idx 5 → 3068, all with the cropped-mode OB values
+(0x30C6=0x12, 0x30CE=0x64). Flip in modes 3–5 is code-verified against the
+formula but not yet camera-verified (bench runs flip=off).
 
 ## Full-res mode 0 all-pixel reset
 
