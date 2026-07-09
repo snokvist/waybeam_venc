@@ -1,8 +1,11 @@
 # Maruko (Infinity6C) `video0.framing = stab-fill` via module-bind compose
 
-Status: **Scoping (L3).** Feasibility SETTLED (viable via module-bind, not
-direct VENC push — see Background). Next executable step: Phase F0 de-risking
-bench.
+Status: **SHIPPED (v0.37.0, 2026-07-09)** — via **direct VENC push**, NOT the
+module-bind bridge this spec scoped: Phase 5a's "no direct push" device result
+turned out to be a BufConf ABI artifact (see plan.md "OUTCOME"). All acceptance
+criteria met on `.233` (visual + 5-cycle teardown soak + 5.8 ms/frame CPU).
+The Background below is retained as written for the record; read it together
+with the OUTCOME correction.
 Date: 2026-07-09
 Device: `root@192.168.2.233` (i6c / SSC378QE, OpenIPC, musl)
 Supersedes: the "Phase 5" stab-fill sketch in

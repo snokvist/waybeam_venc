@@ -48,29 +48,33 @@ typedef struct {                               /* == StabBufInfo_t (proven) */
 	union { PrbFrame_t stFrameData; MI_U8 pad[512]; };
 	MI_U8 u8CusFlag;
 } PrbBufInfo_t;
-typedef struct {                               /* == MI_SYS_FrameBufExtraConfig_t */
-	MI_U16 u16BufHAlignment, u16BufVAlignment, u16BufChromaAlignment;
-	MI_BOOL bClearPadding;
-} PrbExtra_t;
-typedef struct {                               /* == MI_SYS_FrameBufConfig_t */
+/* i6c MI_SYS_BufConf_t (mi_sys_datatype.h:503).  HISTORY: the original 5a run
+ * used a Star6E-shaped layout (no bDirectBuf/bCrcCheck, extra-conf inside the
+ * frame cfg) AND eBufType=0 — which is BUFDATA_RAW on i6c, not FRAME.  Both
+ * errors made the pushes silently degenerate, so 5a's "VENC does not encode
+ * manual pushes" device result was an ARTIFACT: with this corrected layout the
+ * direct push encodes at the full sensor rate (the shipped stab-fill path). */
+typedef struct {                               /* == MI_SYS_BufFrameConfig_t */
 	MI_U16 u16Width, u16Height;
 	int eFrameScanMode;
 	int eFormat;
-	PrbExtra_t stFrameBufExtraConf;
 	int eCompressMode;
 } PrbFrameCfg_t;
 typedef struct {                               /* == MI_SYS_BufConf_t */
-	int eBufType;
-	MI_U32 u32Flags;
-	MI_U64 u64TargetPts;
-	union {
+	int eBufType;                              /* offset 0 */
+	MI_U32 u32Flags;                           /* offset 4 */
+	MI_U64 u64TargetPts;                       /* offset 8 */
+	MI_U8 bDirectBuf;                          /* offset 16 */
+	MI_U8 bCrcCheck;                           /* offset 17 (pad → 24) */
+	union {                                    /* offset 24, align 8 */
 		PrbFrameCfg_t stFrameCfg;
 		struct { MI_U32 u32Size; } stRawCfg;
+		MI_U64 align8_;
+		MI_U8 pad[64];
 	};
-	MI_U8 u8CusFlag;
 } PrbBufConf_t;
 
-#define PRB_BUFDATA_FRAME 0   /* MI_SYS_BUFDATA_FRAME */
+#define PRB_BUFDATA_FRAME 1   /* E_MI_SYS_BUFDATA_FRAME (RAW=0 on i6c!) */
 
 typedef MI_S32 (*prb_in_get_t)(i6_sys_bind *, PrbBufConf_t *, PrbBufInfo_t *,
 	MI_S32 *, MI_S32);

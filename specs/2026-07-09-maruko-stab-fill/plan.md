@@ -78,6 +78,45 @@ be measured at F5 — or via a **destructive** dev-0 ring-swap bench first
 Clean, non-disruptive probing is exhausted. **DECISION PENDING** (see
 requirements "Open decision").
 
+## OUTCOME (Option A executed, 2026-07-09 — SHIPPED v0.37.0)
+
+Option A (straight to F1/F2) was chosen and **succeeded the same day**, with a
+finding that rewrites the Background:
+
+**Phase 5a's device result was an ABI ARTIFACT — the i6c H.265 VENC DOES
+encode direct manual pushes.** Three silent i6e→i6c ABI divergences broke both
+the 5a and F0a probes' `MI_SYS_BufConf_t`:
+1. `E_MI_SYS_BUFDATA_FRAME` is **1** on i6c (`RAW = 0`) — the probes pushed
+   RAW-typed buffers.
+2. i6c `BufConf` carries `bDirectBuf` + `bCrcCheck` between `u64TargetPts` and
+   the config union → the union sits at offset **24**, not 16 (Star6E shape) —
+   the SDK read w=0/h=0 and returned degenerate zero buffers with `ret=0`.
+3. i6c `BufFrameConfig` has NO embedded `FrameBufExtraConfig`.
+
+With the corrected layout, `ChnInputPortGetBuf/PutBuf` into a `NORMAL_FRMBASE`
+VENC(0,0) input encodes at the full 50 fps (`FinishCnt` tracks pushes 1:1,
+DropCnt 0). Two more required pieces:
+- `MI_SYS_SetChnInputPortFrc(USERINJECT, fps/fps)` on the unbound input port —
+  without it the port sits at 0/0 FRC (harmless for VENC, fatal for SCL — see
+  below).
+- `MI_SYS_BufBlitPa`/`BufFillPa` exist in i6c libmi_sys (leading `u16SocId`
+  arg) — the compose is HW-blit like Star6E, ~3.0 ms/frame wall.
+
+**The SCL-inject bridge (F0a topology) was implemented first and abandoned:**
+SCL chn 1 accepts injected input (queues in `UsrInjectQ`) but its scheduler
+never dispatches the tasks (`workingTask_cnt=0` forever) regardless of FRC,
+input crop, or SDK bring-up ordering. Academic now — the direct push obviates
+the bridge entirely.
+
+**Shipped shape (v0.37.0):** identical to Star6E's — port0 RAW+unbound →
+drain/detect/Kalman → HW-blit compose → push to VENC. Measured on `.233`
+(IMX415 1080×720@50, `stab_accuracy=low`): detect 5.2 ms + compose 3.0 ms =
+**5.8 ms/frame thread CPU** (~29% of the A7). Visual confirmed (floating image
+on black border, live on the dev-host viewer); 5/5 SIGTERM teardown cycles
+clean, dmesg clean. F4 un-gate done. `record.mode=dual` refused under
+stab-fill (RING chn 1 can't coexist with frame-base chn 0 — the one F0a truth
+that still stands).
+
 ## If F0 passes — the port
 
 ### F1 — compose helpers (port Star6E's fill/blit to i6c)

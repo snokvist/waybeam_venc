@@ -19,4 +19,9 @@ void maruko_framing_apply_ae_crop(MarukoBackendContext *ctx,
  * the SCL port-0 crop while it is active (R2: single occupied crop stage). */
 void maruko_framing_pan_ramp_stop(void);
 
+/* 1 when the pipeline graph was configured for stab-fill this run (VENC in
+ * NORMAL_FRMBASE + unbound, SCL port0 RAW + unbound).  The fill module checks
+ * this in setup_ports — pushing into a RING-configured VENC would starve. */
+int maruko_framing_fill_graph_ready(void);
+
 #endif /* MARUKO_FRAMING_HOST_H */

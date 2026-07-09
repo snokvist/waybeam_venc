@@ -5,16 +5,17 @@
 
 /* Phase 5a go/no-go bench for Maruko (i6c) stab-fill.
  *
- * Star6E's stab-fill composes each frame in software and hands it to VENC via
- * MI_SYS_ChnInputPortGetBuf/PutBuf (an unbound VENC input port).  Maruko's VENC
- * is created with I6C_VENC_SRC_CONF_RING_DMA and fed ONLY by the SCL->VENC RING
- * bind — nothing pushes manually anywhere in the i6c sources.  The pivotal
- * question that decides whether stab-fill is portable to i6c: can an i6c VENC
- * channel be put in a non-RING (manual-push) src-conf and accept pushed frames?
- *
- * This probe creates a SEPARATE VENC channel in each candidate non-RING mode,
- * pushes a handful of hand-filled gray frames, and reports whether the channel
- * emits an encoded bitstream (Query.curPacks > 0 / GetStream succeeds).
+ * VERDICT HISTORY: the original 5a run concluded "the i6c VENC does not encode
+ * manual pushes".  That device result was an ABI ARTIFACT — the probe's
+ * BufConf used eBufType=0 (BUFDATA_RAW on i6c, not FRAME) and a Star6E-shaped
+ * union offset, so every push was silently degenerate.  With the corrected
+ * i6c MI_SYS_BufConf_t (now fixed in this probe too) the direct manual push
+ * DOES encode at the full sensor rate — it is the shipped stab-fill feed path
+ * (see src/maruko_framing_stab.c fill mode).  Also note: only VENC channels
+ * 0..2 exist (MI_VENC_MAX_CHN_NUM_PER_DC=3), and a sibling frame-base channel
+ * cannot coexist with a RING-fed chn 0 on the single H26x device (SYS/BUSY),
+ * so this sibling-channel probe understates what the real single-channel
+ * frame-base graph can do.
  *
  * Env-gated: only runs when MARUKO_STABFILL_PROBE is set.  Called once after
  * channel-0 is up; tears its probe channel down cleanly (never SIGKILL).

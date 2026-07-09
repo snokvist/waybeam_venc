@@ -1,5 +1,40 @@
 # History
 
+## [0.37.0] - 2026-07-09
+
+Stabilization: **Maruko `video0.framing = stab-fill`** — full-FOV
+stabilization (the whole frame floats on a moving black border, no crop-in) on
+the Infinity6C, completing stab parity with Star6E. Device-verified on
+SSC378QE at IMX415 1080×720@50 (visual + 5-cycle teardown soak, 0 MMU resets).
+
+- **The Phase 5a "i6c VENC cannot be manually pushed" device result is
+  OVERTURNED** — it was an ABI artifact. The i6c `MI_SYS_BufConf_t` differs
+  from Star6E's in three load-bearing ways: `E_MI_SYS_BUFDATA_FRAME` is **1**
+  (0 is `RAW`!), the struct carries `bDirectBuf`+`bCrcCheck` before the config
+  union (union at offset 24, not 16), and `BufFrameConfig` has no embedded
+  extra-conf. With the corrected layout, `MI_SYS_ChnInputPortGetBuf/PutBuf`
+  straight into a `NORMAL_FRMBASE` VENC input **encodes at the full sensor
+  rate** — so Maruko stab-fill uses the same manual-feed shape as Star6E; no
+  SCL bridge or FRAME_BASE bind needed.
+- Graph rewire (only when `framing == "stab-fill"`): SCL port0 → RAW +
+  unbound, drained by the fill thread; VENC created `NORMAL` (frame-base)
+  with `StartRecvPic` deferred to post-graph; no VENC ring pool. `off`/`zoom`/
+  `stab` keep the zero-copy RING leg untouched. Requires the unbound VENC
+  input port to be given `MI_SYS_SetChnInputPortFrc(USERINJECT, fps/fps)`.
+- Fill loop (in `maruko_framing_stab.c`, second registered module sharing the
+  detector/Kalman/`stab_accuracy` with `stab`): drain port0 → detect on the
+  centre patch → Kalman → compose (shift + Y=16/UV=128 borders) via
+  `MI_SYS_BufBlitPa`/`BufFillPa` (present on i6c, leading-SocId signatures) →
+  push. Measured: detect 5.2 ms + compose 3.0 ms ≈ **5.8 ms/frame thread CPU**
+  (~29% of the single A7 at 50 fps) at `stab_accuracy=low`.
+- `stab_crop_pct` is the float/border budget (max_off = enc·(100−pct)/200 per
+  side); `pause_stab` glide-home works unchanged.
+- WebUI: `stab-fill` un-gated on Maruko (reverses the #165 disable); tooltip
+  updated. `record.mode=dual` is refused under stab-fill (chn 1 is RING-fed —
+  can't mix with a frame-base chn 0 on the one H26x device).
+- The 5a probe's BufConf ABI is corrected in-tree so the archived bench now
+  reports the true answer.
+
 ## [0.36.0] - 2026-07-09
 
 Stabilization: **`video0.stab_accuracy` — a shared high/medium/low detector

@@ -155,6 +155,89 @@ static volatile int g_running;
 static volatile int g_tap_active;
 static int g_ive_created;
 static int g_ive_handle;
+static IveImage_t g_a, g_b, g_dx, g_dy;   /* detector ping-pong + result imgs */
+
+/* ── stab-fill state (mirror of star6e g_stab_fill_mode) ──────────────────────
+ * Full-FOV floating-on-black: SCL(0,0) port0 outputs the whole base crop at
+ * encode dims RAW and UNBOUND; the fill thread drains it, detects on the
+ * centre patch, and composes a shifted+black-bordered copy straight into the
+ * (NORMAL_FRMBASE, unbound) VENC input port — the same shape as Star6E.
+ * Phase 5a's "the i6c VENC cannot be manually pushed" was an ABI artifact
+ * (eBufType=0 is BUFDATA_RAW on i6c + a Star6E-shaped BufConf union offset);
+ * with the corrected MI_SYS_BufConf_t below the direct push encodes at the
+ * full sensor rate.  Set by the stab-fill prepare(), cleared by the plain
+ * stab prepare(). */
+static volatile int g_fill_mode;
+static uint32_t g_enc_w, g_enc_h;      /* encode dims == port0 output dims */
+static MI_SYS_ChnPort_t g_fill_venc_in;  /* compose target: the VENC input port */
+
+/* Debug-OSD snapshot — the detector/fill threads publish the last measurement
+ * and Kalman correction here; the pipeline's debug-OSD loop renders a "stab"/
+ * "sfil" row from it (see maruko_framing_stab_osd_status). */
+static volatile int g_osd_acc_x, g_osd_acc_y;
+static volatile int g_osd_meas_x, g_osd_meas_y;
+
+/* i6c MI_SYS_BufConf_t ABI (mi_sys_datatype.h:503 — VERIFIED against the SDK
+ * headers, NOT the Star6E layout: i6c inserts bDirectBuf+bCrcCheck before the
+ * union, its BufFrameConfig has NO embedded ExtraConf, and the union holds
+ * MI_PHY (u64) members so it sits 8-aligned at offset 24 on ARM32.  Getting
+ * this wrong is silent: GetBuf returns 0 with a zeroed degenerate buffer (the
+ * SDK reads w=0/h=0) — the exact first-bring-up failure. */
+typedef struct {                               /* == MI_SYS_BufFrameConfig_t */
+	MI_U16 u16Width, u16Height;
+	int eFrameScanMode;
+	int eFormat;
+	int eCompressMode;
+} StabFillFrameCfg_t;
+typedef struct {                               /* == MI_SYS_BufConf_t */
+	int eBufType;                              /* offset 0 */
+	MI_U32 u32Flags;                           /* offset 4 */
+	MI_U64 u64TargetPts;                       /* offset 8 */
+	MI_U8 bDirectBuf;                          /* offset 16 */
+	MI_U8 bCrcCheck;                           /* offset 17 (pad → 24) */
+	union {                                    /* offset 24, align 8 */
+		StabFillFrameCfg_t stFrameCfg;
+		struct { MI_U32 u32Size; } stRawCfg;
+		MI_U64 align8_;                        /* union carries MI_PHY members */
+		MI_U8 pad[64];                         /* >= sizeof largest member */
+	};
+} StabFillBufConf_t;
+
+/* i6c blit/fill/inject symbols (fill mode only; leading u16SocId unlike i6e):
+ *   MI_SYS_BufFillPa(soc, FrameData*, u32Val, WindowRect*)
+ *   MI_SYS_BufBlitPa(soc, DstFrameData*, DstRect*, SrcFrameData*, SrcRect*) */
+typedef MI_S32 (*fn_in_getbuf)(MI_SYS_ChnPort_t *, StabFillBufConf_t *,
+	StabBufInfo_t *, MI_S32 *, MI_S32);
+typedef MI_S32 (*fn_in_putbuf)(MI_S32, StabBufInfo_t *, MI_U8);
+typedef MI_S32 (*fn_blit_pa)(MI_U16, StabFrame_t *, StabRect_t *,
+	StabFrame_t *, StabRect_t *);
+typedef MI_S32 (*fn_fill_pa)(MI_U16, StabFrame_t *, MI_U32, StabRect_t *);
+/* Input-port frame-rate control.  An injected (unbound) input port comes up
+ * with 0/0 FRC and the SCL scheduler never runs its queued tasks (proc shows
+ * UsrInjectQ_cnt piling with workingTask_cnt=0 until NOBUF) — it must be told
+ * its rate with eType=E_MI_SYS_FRC_TYPE_USERINJECT. */
+typedef struct {                               /* == MI_SYS_ChnPortFrcAttr_t */
+	int eType;                                 /* 1 = USERINJECT */
+	int eStrategy;                             /* 0 = BY_RATIO */
+	MI_U32 u32SrcFrameRate;
+	MI_U32 u32DstFrameRate;
+} StabFillFrc_t;
+typedef MI_S32 (*fn_in_frc)(MI_SYS_ChnPort_t *, StabFillFrc_t *);
+typedef MI_S32 (*fn_get_pts)(MI_U16, MI_U64 *);
+static fn_in_getbuf SysInGetBuf;
+static fn_in_putbuf SysInPutBuf;
+static fn_blit_pa   SysBlitPa;
+static fn_fill_pa   SysFillPa;
+static fn_in_frc    SysInFrc;
+static fn_get_pts   SysGetCurPts;
+
+#define STABFILL_FRC_USERINJECT 1   /* E_MI_SYS_FRC_TYPE_USERINJECT */
+#define STABFILL_FRC_BY_RATIO   0   /* E_MI_SYS_FRC_STRATEGY_BY_RATIO */
+
+/* i6c enum: E_MI_SYS_BUFDATA_RAW=0, FRAME=1 (mi_sys_datatype.h:226) — NOT 0
+ * as on Star6E.  Type 0 makes GetBuf attempt a giant RAW alloc (u32Size read
+ * from the union = width|height<<16) and return a degenerate zero buffer. */
+#define STABFILL_BUFDATA_FRAME 1   /* E_MI_SYS_BUFDATA_FRAME */
 
 /* ── small helpers ─────────────────────────────────────────────────────────── */
 static double now_ms(void)
@@ -232,6 +315,7 @@ static int maruko_stab_prepare(const VencConfig *vcfg, uint32_t src_w,
 	/* Resolve the shared detector level once, before the tap / IVE images are
 	 * sized in setup_ports.  "auto" -> "low" on single-core Maruko. */
 	g_det = framing_stab_detector_params(vcfg->video0.stab_accuracy, "low");
+	g_fill_mode = 0;   /* stab-fill prepare opts in (mirror star6e_stab_configure) */
 	g_crop_pct = stab_pct(vcfg);
 	g_recenter_period = vcfg->video0.stab_recenter_speed;
 	g_cfg_q = vcfg->video0.stab_kalman_q;
@@ -360,6 +444,607 @@ static void stab_tap_disable(void)
 	(void)g_mi_scl.fnDisablePort(0, 0, STAB_TAP_PORT);
 }
 
+/* ── stab-fill manual-compose helpers (port of star6e_framing_stab.c:625-959;
+ * the i6c ABI differences: leading-SocId blit/fill signatures, the i6c
+ * MI_SYS_BufConf_t layout, and BUFDATA_FRAME=1) ───────────────────────────── */
+
+static int load_fill_syms(void)
+{
+	if (SysInGetBuf && SysBlitPa)
+		return 0;
+	if (load_syms() != 0 || !g_sys_lib)
+		return -1;
+	SysInGetBuf = (fn_in_getbuf)dlsym(g_sys_lib, "MI_SYS_ChnInputPortGetBuf");
+	SysInPutBuf = (fn_in_putbuf)dlsym(g_sys_lib, "MI_SYS_ChnInputPortPutBuf");
+	SysBlitPa   = (fn_blit_pa)  dlsym(g_sys_lib, "MI_SYS_BufBlitPa");
+	SysFillPa   = (fn_fill_pa)  dlsym(g_sys_lib, "MI_SYS_BufFillPa");
+	SysInFrc    = (fn_in_frc)   dlsym(g_sys_lib, "MI_SYS_SetChnInputPortFrc");
+	SysGetCurPts = (fn_get_pts) dlsym(g_sys_lib, "MI_SYS_GetCurPts");
+	if (!SysInGetBuf || !SysInPutBuf || !SysBlitPa || !SysFillPa) {
+		fprintf(stderr, "[maruko-stab] fill: missing MI_SYS compose symbols "
+			"(inget=%p input=%p blit=%p fill=%p)\n", (void *)SysInGetBuf,
+			(void *)SysInPutBuf, (void *)SysBlitPa, (void *)SysFillPa);
+		return -1;
+	}
+	return 0;
+}
+
+static MI_U64 fill_uv_pa(const StabFrame_t *f, uint32_t h)
+{
+	if (f->phyAddr[1])
+		return f->phyAddr[1];
+	return f->phyAddr[0] + (MI_U64)f->u32Stride[0] * h;
+}
+static void *fill_uv_va(const StabFrame_t *f, uint32_t h)
+{
+	if (f->pVirAddr[1])
+		return f->pVirAddr[1];
+	if (!f->pVirAddr[0])
+		return NULL;
+	return (void *)((uint8_t *)f->pVirAddr[0] + (size_t)f->u32Stride[0] * h);
+}
+
+/* Build an I8 (mono-plane) descriptor so fill/blit treat Y and UV separately. */
+static void fill_make_i8_plane(StabFrame_t *out, MI_U64 phy, void *vir,
+	int width, int height, int stride)
+{
+	memset(out, 0, sizeof(*out));
+	out->ePixelFormat = (int)I6_PIXFMT_I8;
+	out->u16Width = (MI_U16)width;
+	out->u16Height = (MI_U16)height;
+	out->phyAddr[0] = phy;
+	out->pVirAddr[0] = vir;
+	out->u32Stride[0] = (MI_U32)stride;
+}
+
+/* Clipped, even-aligned BufFillPa.  CRITICAL (star6e finding): BufFillPa
+ * writes 32-bit words — replicate the byte across all four lanes or the plane
+ * stripes (Y=16 raw → green bars). */
+static int fill_i8_rect(StabFrame_t *plane, int x, int y, int w, int h,
+	MI_U32 value)
+{
+	StabRect_t r;
+	MI_U32 v, fill32;
+	MI_S32 ret;
+
+	if (!plane || !plane->phyAddr[0])
+		return -1;
+	if (w <= 0 || h <= 0)
+		return 0;
+	x &= ~1;
+	w &= ~1;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > plane->u16Width)
+		w = plane->u16Width - x;
+	if (y + h > plane->u16Height)
+		h = plane->u16Height - y;
+	w &= ~1;
+	if (w <= 0 || h <= 0)
+		return 0;
+
+	memset(&r, 0, sizeof(r));
+	r.x = (MI_U16)x;
+	r.y = (MI_U16)y;
+	r.w = (MI_U16)w;
+	r.h = (MI_U16)h;
+	v = value & 0xffu;
+	fill32 = v | (v << 8) | (v << 16) | (v << 24);
+	ret = SysFillPa(0, plane, fill32, &r);
+	if (ret != 0) {
+		static int warned;
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "[maruko-stab] fill: MI_SYS_BufFillPa ret=0x%x "
+				"rect=%d,%d %dx%d val=%u\n", (unsigned)ret, x, y, w, h,
+				(unsigned)value);
+		}
+		return ret;
+	}
+	return 0;
+}
+
+/* Clipped, even-aligned BufBlitPa of an I8 rect from src to dst. */
+static int fill_blit_i8_rect(StabFrame_t *dst, int dst_x, int dst_y,
+	StabFrame_t *src, int src_x, int src_y, int w, int h)
+{
+	StabRect_t sr, dr;
+	MI_S32 ret;
+
+	if (!dst || !src || !dst->phyAddr[0] || !src->phyAddr[0])
+		return -1;
+	if (w <= 0 || h <= 0)
+		return 0;
+	dst_x &= ~1;
+	src_x &= ~1;
+	w &= ~1;
+	if (src_x < 0) { int d = -src_x; src_x = 0; dst_x += d; w -= d; }
+	if (src_y < 0) { int d = -src_y; src_y = 0; dst_y += d; h -= d; }
+	if (dst_x < 0) { int d = -dst_x; dst_x = 0; src_x += d; w -= d; }
+	if (dst_y < 0) { int d = -dst_y; dst_y = 0; src_y += d; h -= d; }
+	if (src_x + w > src->u16Width)
+		w = src->u16Width - src_x;
+	if (dst_x + w > dst->u16Width)
+		w = dst->u16Width - dst_x;
+	if (src_y + h > src->u16Height)
+		h = src->u16Height - src_y;
+	if (dst_y + h > dst->u16Height)
+		h = dst->u16Height - dst_y;
+	w &= ~1;
+	if (w <= 0 || h <= 0)
+		return 0;
+
+	memset(&sr, 0, sizeof(sr));
+	memset(&dr, 0, sizeof(dr));
+	sr.x = (MI_U16)src_x; sr.y = (MI_U16)src_y;
+	sr.w = (MI_U16)w;     sr.h = (MI_U16)h;
+	dr.x = (MI_U16)dst_x; dr.y = (MI_U16)dst_y;
+	dr.w = (MI_U16)w;     dr.h = (MI_U16)h;
+	ret = SysBlitPa(0, dst, &dr, src, &sr);
+	if (ret != 0) {
+		static int warned;
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "[maruko-stab] fill: MI_SYS_BufBlitPa ret=0x%x "
+				"src=%d,%d %dx%d dst=%d,%d\n", (unsigned)ret,
+				src_x, src_y, w, h, dst_x, dst_y);
+		}
+		return ret;
+	}
+	return 0;
+}
+
+/* Max per-axis float (encode-pixel domain): the black-border budget set by
+ * stab_crop_pct — enc * (100-pct)/200 per side (pct=90 → 5% per side). */
+static int fill_max_off_x(void)
+{
+	return (int)((g_enc_w * (100u - g_crop_pct)) / 200u);
+}
+static int fill_max_off_y(void)
+{
+	return (int)((g_enc_h * (100u - g_crop_pct)) / 200u);
+}
+
+/* PTS in the MI timebase (MI_SYS_GetCurPts) — the SCL FRC/scheduler compares
+ * injected-frame PTS against it, so a wall-clock PTS can park frames forever.
+ * Falls back to CLOCK_MONOTONIC µs if the symbol is absent. */
+static uint64_t fill_pts_us(void)
+{
+	struct timespec ts;
+	if (SysGetCurPts) {
+		MI_U64 pts = 0;
+		if (SysGetCurPts(0, &pts) == 0)
+			return (uint64_t)pts;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+/* stab-fill compose: GetBuf a fresh VENC-input frame, BufFillPa the four
+ * exposed black strips (Y=16, UV=128), BufBlitPa the in-bounds source content
+ * at the shifted sub-rect, PutBuf (→ VENC encodes it).  src dim ==
+ * dst dim == encode dim; off_x/off_y are the accumulated shake compensation in
+ * encode pixels.  Port of star6e_stab_send_frame_to_venc_fill. */
+static int fill_compose_to_venc(const StabBufInfo_t *src_buf,
+	int off_x, int off_y)
+{
+	MI_SYS_ChnPort_t target;
+	StabFillBufConf_t conf;
+	StabBufInfo_t dst_buf;
+	StabFrame_t *dst;
+	const StabFrame_t *src;
+	StabFrame_t src_y_plane, dst_y_plane, src_uv_plane, dst_uv_plane;
+	MI_S32 handle = 0;
+	int src_w, src_h, dst_w, dst_h;
+	int src_x, src_y, dst_x, dst_y, copy_w, copy_h;
+	int uv_dst_y, uv_copy_h, uv_h;
+	MI_U64 src_uv, dst_uv;
+	MI_S32 ret;
+
+	src = &src_buf->stFrameData;
+	src_w = src->u16Width ? src->u16Width : (int)g_enc_w;
+	src_h = src->u16Height ? src->u16Height : (int)g_enc_h;
+	dst_w = (int)g_enc_w;
+	dst_h = (int)g_enc_h;
+	if (dst_w != src_w || dst_h != src_h) {
+		static int warned;
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "[maruko-stab] fill: size mismatch src=%dx%d "
+				"dst=%dx%d\n", src_w, src_h, dst_w, dst_h);
+		}
+		return -1;
+	}
+
+	target = g_fill_venc_in;
+
+	memset(&conf, 0, sizeof(conf));
+	conf.eBufType = STABFILL_BUFDATA_FRAME;
+	conf.u64TargetPts = fill_pts_us();
+	conf.stFrameCfg.u16Width = (MI_U16)dst_w;
+	conf.stFrameCfg.u16Height = (MI_U16)dst_h;
+	conf.stFrameCfg.eFormat = I6_PIXFMT_YUV420SP;
+	conf.stFrameCfg.eFrameScanMode = 0;   /* PROGRESSIVE */
+	memset(&dst_buf, 0, sizeof(dst_buf));
+	ret = SysInGetBuf(&target, &conf, &dst_buf, &handle, 20);
+	if (ret != 0) {
+		static int warned;
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "[maruko-stab] fill: VENC-input ChnInputPortGetBuf "
+				"ret=%d (0x%x)\n", (int)ret, (unsigned)ret);
+		}
+		return ret;
+	}
+	dst = &dst_buf.stFrameData;
+	/* SDK inject discipline: the pushed BufInfo carries the PTS explicitly. */
+	dst_buf.u64Pts = conf.u64TargetPts;
+
+	{
+		static int dumped;
+		if (!dumped) {
+			dumped = 1;
+			fprintf(stderr, "[maruko-stab] fill: first compose: src "
+				"%ux%u str=%u/%u phy=%llx/%llx vir=%p  dst %ux%u "
+				"str=%u/%u phy=%llx/%llx vir=%p fmt=%d\n",
+				src->u16Width, src->u16Height, src->u32Stride[0],
+				src->u32Stride[1], (unsigned long long)src->phyAddr[0],
+				(unsigned long long)src->phyAddr[1], src->pVirAddr[0],
+				dst->u16Width, dst->u16Height, dst->u32Stride[0],
+				dst->u32Stride[1], (unsigned long long)dst->phyAddr[0],
+				(unsigned long long)dst->phyAddr[1], dst->pVirAddr[0],
+				dst->ePixelFormat);
+		}
+	}
+
+	/* NV12 needs even offsets; clamp to the border budget. */
+	off_x &= ~1;
+	off_y &= ~1;
+	{
+		int max_x = fill_max_off_x(), max_y = fill_max_off_y();
+		if (off_x < -max_x) off_x = -max_x;
+		if (off_x >  max_x) off_x =  max_x;
+		if (off_y < -max_y) off_y = -max_y;
+		if (off_y >  max_y) off_y =  max_y;
+	}
+	if (off_x >= 0) { src_x = off_x; dst_x = 0; copy_w = src_w - off_x; }
+	else            { src_x = 0; dst_x = -off_x; copy_w = src_w + off_x; }
+	if (off_y >= 0) { src_y = off_y; dst_y = 0; copy_h = src_h - off_y; }
+	else            { src_y = 0; dst_y = -off_y; copy_h = src_h + off_y; }
+	src_x &= ~1; src_y &= ~1;
+	dst_x &= ~1; dst_y &= ~1;
+	copy_w &= ~1; copy_h &= ~1;
+	if (copy_w <= 0 || copy_h <= 0) {
+		SysInPutBuf(handle, &dst_buf, 1);
+		return -1;
+	}
+
+	src_uv = fill_uv_pa(src, (uint32_t)src_h);
+	dst_uv = fill_uv_pa(dst, (uint32_t)dst_h);
+	if (!src_uv || !dst_uv) {
+		static int warned;
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "[maruko-stab] fill: NULL uv pa "
+				"(src=%llx dst=%llx)\n", (unsigned long long)src_uv,
+				(unsigned long long)dst_uv);
+		}
+		SysInPutBuf(handle, &dst_buf, 1);
+		return -1;
+	}
+	fill_make_i8_plane(&src_y_plane, src->phyAddr[0], src->pVirAddr[0],
+		src_w, src_h, (int)src->u32Stride[0]);
+	fill_make_i8_plane(&dst_y_plane, dst->phyAddr[0], dst->pVirAddr[0],
+		dst_w, dst_h, (int)dst->u32Stride[0]);
+	fill_make_i8_plane(&src_uv_plane, src_uv, fill_uv_va(src, (uint32_t)src_h),
+		src_w, src_h / 2, (int)(src->u32Stride[1] ?
+			src->u32Stride[1] : src->u32Stride[0]));
+	fill_make_i8_plane(&dst_uv_plane, dst_uv, fill_uv_va(dst, (uint32_t)dst_h),
+		dst_w, dst_h / 2, (int)(dst->u32Stride[1] ?
+			dst->u32Stride[1] : dst->u32Stride[0]));
+
+	/* Black strips around the shifted content (Y=16, UV=128). */
+	uv_dst_y  = dst_y / 2;
+	uv_copy_h = copy_h / 2;
+	uv_h      = dst_h / 2;
+	if (dst_x > 0) {
+		fill_i8_rect(&dst_y_plane, 0, 0, dst_x, dst_h, 16);
+		fill_i8_rect(&dst_uv_plane, 0, 0, dst_x, uv_h, 128);
+	}
+	if (dst_x + copy_w < dst_w) {
+		fill_i8_rect(&dst_y_plane, dst_x + copy_w, 0,
+			dst_w - (dst_x + copy_w), dst_h, 16);
+		fill_i8_rect(&dst_uv_plane, dst_x + copy_w, 0,
+			dst_w - (dst_x + copy_w), uv_h, 128);
+	}
+	if (dst_y > 0) {
+		fill_i8_rect(&dst_y_plane, dst_x, 0, copy_w, dst_y, 16);
+		fill_i8_rect(&dst_uv_plane, dst_x, 0, copy_w, uv_dst_y, 128);
+	}
+	if (dst_y + copy_h < dst_h) {
+		fill_i8_rect(&dst_y_plane, dst_x, dst_y + copy_h,
+			copy_w, dst_h - (dst_y + copy_h), 16);
+		fill_i8_rect(&dst_uv_plane, dst_x, uv_dst_y + uv_copy_h,
+			copy_w, uv_h - (uv_dst_y + uv_copy_h), 128);
+	}
+
+	/* Copy the in-bounds Y rect, then the UV rect (Y pos/height halved). */
+	ret = fill_blit_i8_rect(&dst_y_plane, dst_x, dst_y,
+		&src_y_plane, src_x, src_y, copy_w, copy_h);
+	if (ret != 0)
+		goto err;
+	ret = fill_blit_i8_rect(&dst_uv_plane, dst_x, dst_y / 2,
+		&src_uv_plane, src_x, src_y / 2, copy_w, copy_h / 2);
+	if (ret != 0)
+		goto err;
+
+	ret = SysInPutBuf(handle, &dst_buf, 0);
+	if (ret != 0) {
+		static int warned;
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "[maruko-stab] fill: VENC-input ChnInputPortPutBuf "
+				"ret=%d (0x%x)\n", (int)ret, (unsigned)ret);
+		}
+	}
+	return ret;
+
+err:
+	SysInPutBuf(handle, &dst_buf, 1);
+	return ret;
+}
+
+/* Copy the centre Y crop of a drained port0 frame into an IVE image (clamped,
+ * 16/2-aligned — port of star6e_stab_copy_y_to_sw). */
+static int fill_copy_y_to_ive(IveImage_t *dst, const StabBufInfo_t *src_buf)
+{
+	int src_w, src_h, stride, crop_w, crop_h, crop_x, crop_y, row;
+	const uint8_t *src_p;
+	uint8_t *dst_p;
+
+	if (!dst || !dst->apu8VirAddr[0] || !src_buf->stFrameData.pVirAddr[0])
+		return -1;
+	src_w = (int)src_buf->stFrameData.u16Width;
+	src_h = (int)src_buf->stFrameData.u16Height;
+	stride = (int)src_buf->stFrameData.u32Stride[0];
+	crop_w = g_det.crop;
+	crop_h = g_det.crop;
+	if (crop_w > src_w) crop_w = src_w;
+	if (crop_h > src_h) crop_h = src_h;
+	crop_w &= ~15;
+	crop_h &= ~1;
+	crop_x = ((src_w - crop_w) / 2) & ~15;
+	crop_y = ((src_h - crop_h) / 2) & ~1;
+	if (crop_x < 0) crop_x = 0;
+	if (crop_y < 0) crop_y = 0;
+
+	src_p = (const uint8_t *)src_buf->stFrameData.pVirAddr[0] +
+		(size_t)crop_y * stride + crop_x;
+	dst_p = dst->apu8VirAddr[0];
+	for (row = 0; row < crop_h; row++) {
+		memcpy(dst_p, src_p, (size_t)crop_w);
+		src_p += stride;
+		dst_p += dst->azu16Stride[0];
+	}
+	SysFlush(dst->apu8VirAddr[0],
+		(MI_U32)dst->azu16Stride[0] * (MI_U32)crop_h);
+	return 0;
+}
+
+/* ── stab-fill vtable: prepare / setup_ports / drain thread ────────────────── */
+
+static int maruko_stab_fill_enabled(const VencConfig *vcfg)
+{
+	return strcmp(vcfg->video0.framing, "stab-fill") == 0;
+}
+
+/* Encode dims unchanged (video0.size): port0 SCL-downscales the FULL base crop
+ * to the encode size; stab_crop_pct bounds the float/black-border budget
+ * rather than shrinking the output (mirror star6e_stab_fill_prepare). */
+static int maruko_stab_fill_prepare(const VencConfig *vcfg, uint32_t src_w,
+	uint32_t src_h, uint32_t *enc_w, uint32_t *enc_h)
+{
+	(void)src_w; (void)src_h;
+	g_det = framing_stab_detector_params(vcfg->video0.stab_accuracy, "low");
+	g_crop_pct = stab_pct(vcfg);
+	g_recenter_period = vcfg->video0.stab_recenter_speed;
+	g_cfg_q = vcfg->video0.stab_kalman_q;
+	g_cfg_r = vcfg->video0.stab_kalman_r;
+	g_pan_x_mil = 500;
+	g_pan_y_mil = 500;
+	g_paused = 0;
+	g_fill_mode = 1;
+	if (enc_w) *enc_w = vcfg->video0.width;
+	if (enc_h) *enc_h = vcfg->video0.height;
+	return 0;
+}
+
+/* Fill setup: NO detector tap (the detector reads the centre patch of the full
+ * port0 frame) and NO port-0 crop writes.  Port0 was configured RAW + left
+ * unbound by the pipeline (cfg.framing=="stab-fill"); give it a user-frame
+ * queue and verify the graph is in manual-feed shape. */
+static int maruko_stab_fill_setup_ports(MarukoBackendContext *ctx,
+	uint32_t src_fps, uint32_t dst_fps)
+{
+	MI_SYS_ChnPort_t port0;
+	MI_S32 ret;
+
+	(void)src_fps; (void)dst_fps;
+	if (!ctx)
+		return -1;
+	if (load_fill_syms() != 0)
+		return -1;
+	if (!maruko_framing_fill_graph_ready()) {
+		fprintf(stderr, "[maruko-stab] fill: graph not configured for "
+			"stab-fill — refusing to push into a RING-fed VENC\n");
+		return -1;
+	}
+	g_ctx = ctx;
+	/* Compose target: the (unbound, NORMAL_FRMBASE) VENC input port. */
+	memset(&g_fill_venc_in, 0, sizeof(g_fill_venc_in));
+	g_fill_venc_in.module  = I6_SYS_MOD_VENC;
+	g_fill_venc_in.device  = (unsigned)ctx->venc_device;
+	g_fill_venc_in.channel = (unsigned)ctx->venc_channel;
+	g_fill_venc_in.port    = 0;
+	g_enc_w = ctx->cfg.image_width;
+	g_enc_h = ctx->cfg.image_height;
+	/* AE metering + max-off reference: the whole encode frame. */
+	g_src_w = g_enc_w;
+	g_src_h = g_enc_h;
+	g_win_w = g_enc_w;
+	g_win_h = g_enc_h;
+	if (g_enc_w < (uint32_t)g_det.crop + 2 ||
+	    g_enc_h < (uint32_t)g_det.crop + 2) {
+		fprintf(stderr, "[maruko-stab] fill: encode %ux%u too small for "
+			"%dx%d detect crop\n", g_enc_w, g_enc_h, g_det.crop, g_det.crop);
+		g_ctx = NULL;
+		return -1;
+	}
+	g_tap_active = 0;   /* no tap port in fill mode */
+
+	/* R2 still applies: nothing else may write the SCL port-0 config. */
+	maruko_framing_pan_ramp_stop();
+
+	/* Unbound port0 needs a user-frame queue or GetBuf sees 0 frames
+	 * (Phase-1 1a finding; star6e fill uses (4,8)). */
+	memset(&port0, 0, sizeof(port0));
+	port0.module = I6_SYS_MOD_SCL;
+	port0.port = 0;
+	ret = SysSetDepth(0, &port0, 4, 8);
+	if (ret != 0) {
+		fprintf(stderr, "[maruko-stab] fill: port0 SetChnOutputPortDepth "
+			"-> %d\n", (int)ret);
+		g_ctx = NULL;
+		return -1;
+	}
+
+	/* Tell the scheduler the VENC input port's frame rate — an injected
+	 * (unbound) input port defaults to 0/0 FRC.  USERINJECT + BY_RATIO at
+	 * the sensor rate matches the SDK's user-inject discipline. */
+	if (SysInFrc) {
+		StabFillFrc_t frc = {
+			.eType = STABFILL_FRC_USERINJECT,
+			.eStrategy = STABFILL_FRC_BY_RATIO,
+			.u32SrcFrameRate = ctx->sensor.fps,
+			.u32DstFrameRate = ctx->sensor.fps,
+		};
+		ret = SysInFrc(&g_fill_venc_in, &frc);
+		fprintf(stderr, "[maruko-stab] fill: VENC-input SetChnInputPortFrc"
+			"(USERINJECT %u/%u) ret=%d\n",
+			ctx->sensor.fps, ctx->sensor.fps, (int)ret);
+	}
+	framing_kalman_reset(&g_kalman, g_cfg_q, g_cfg_r);
+	fprintf(stderr, "[maruko-stab] fill: manual-drain mode (encode %ux%u, "
+		"pct=%u, max_off %dx%d, detect crop %dx%d)\n", g_enc_w, g_enc_h,
+		g_crop_pct, fill_max_off_x(), fill_max_off_y(),
+		g_det.crop, g_det.crop);
+	return 0;
+}
+
+/* Fill drain thread: drain port0 (full encode-dim RAW frame) → detect on the
+ * centre patch → Kalman → compose shifted+bordered copy into the VENC input →
+ * release the port0 buffer.  Every drained frame is composed and pushed (the
+ * frame-base VENC has no other producer); detection needs a previous frame so
+ * the first frame goes out with acc=(0,0).  Per-frame cost is instrumented —
+ * the pivotal F0 number on the single A7. */
+static void *maruko_stab_fill_thread_main(void *arg)
+{
+	MI_SYS_ChnPort_t port0;
+	MI_S32 fd = -1;
+	int have_prev = 0, cur = 0, frames = 0, send_fail = 0;
+	int acc_x = 0, acc_y = 0;
+	double det_ms = 0.0, comp_ms = 0.0, cpu_ms = 0.0;
+	int left = ((g_det.crop - g_det.box) / 2) & ~1;
+	int top  = ((g_det.crop - g_det.box) / 2) & ~1;
+	IveShiftCtrl_t ctrl = {
+		.enMode = E_IVE_SHIFT_MODE_SINGLE,
+		.pyramid_level = g_det.pyramid, .search_range = g_det.search,
+		.u16Left = (MI_U16)left, .u16Top = (MI_U16)top,
+		.u16Width = g_det.box, .u16Height = g_det.box,
+	};
+	(void)arg;
+
+	memset(&port0, 0, sizeof(port0));
+	port0.module = I6_SYS_MOD_SCL;
+	port0.port = 0;
+	if (SysGetFd) (void)SysGetFd(&port0, &fd);
+
+	while (g_running) {
+		StabBufInfo_t buf;
+		MI_S32 h = -1;
+		IveImage_t *prev = (cur & 1) ? &g_b : &g_a;
+		IveImage_t *curr = (cur & 1) ? &g_a : &g_b;
+		double t0, t1, t2, c0, c1;
+
+		if (fd >= 0) {
+			fd_set rf; struct timeval tv = {0, 100000};
+			FD_ZERO(&rf); FD_SET(fd, &rf);
+			if (select(fd + 1, &rf, NULL, NULL, &tv) <= 0) continue;
+		}
+		memset(&buf, 0, sizeof(buf));
+		if (SysGetBuf(&port0, &buf, &h) != 0) {
+			if (fd < 0) usleep(1000);
+			continue;
+		}
+
+		c0 = now_ms();   /* wall; CPU tracked via thread clock below */
+		{
+			struct timespec cts;
+			clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts);
+			c1 = cts.tv_sec * 1000.0 + cts.tv_nsec / 1e6;
+		}
+		t0 = now_ms();
+		if (fill_copy_y_to_ive(curr, &buf) == 0 && have_prev) {
+			MI_S32 r = IveShift(g_ive_handle, prev, curr, &g_dx, &g_dy,
+				&ctrl, 1);
+			if (r == 0) {
+				double meas_dx, meas_dy;
+				uint32_t tau;
+				SysFlush(g_dx.apu8VirAddr[0], g_dx.azu16Stride[0]);
+				SysFlush(g_dy.apu8VirAddr[0], g_dy.azu16Stride[0]);
+				/* STAB_SHIFT_SIGN_{X,Y} = -1 (star6e parity). */
+				meas_dx = -(double)((signed char *)g_dx.apu8VirAddr[0])[0];
+				meas_dy = -(double)((signed char *)g_dy.apu8VirAddr[0])[0];
+				tau = g_recenter_period ? g_recenter_period : 30;
+				framing_kalman_step(&g_kalman, meas_dx, meas_dy,
+					g_paused, tau, fill_max_off_x(), fill_max_off_y(),
+					&acc_x, &acc_y);
+				g_osd_meas_x = (int)meas_dx;
+				g_osd_meas_y = (int)meas_dy;
+				g_osd_acc_x = acc_x;
+				g_osd_acc_y = acc_y;
+			}
+		}
+		t1 = now_ms();
+
+		if (fill_compose_to_venc(&buf, acc_x, acc_y) != 0)
+			send_fail++;
+		t2 = now_ms();
+
+		SysPutBuf(h);
+		have_prev = 1;
+		cur++;
+
+		det_ms += (t1 - t0);
+		comp_ms += (t2 - t1);
+		{
+			struct timespec cts;
+			clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts);
+			cpu_ms += (cts.tv_sec * 1000.0 + cts.tv_nsec / 1e6) - c1;
+		}
+		(void)c0;
+		if (++frames % 250 == 0) {
+			fprintf(stderr, "[maruko-stab] fill: %d frames | detect %.1f ms "
+				"| compose %.1f ms | thread CPU %.1f ms/frame | acc=(%d,%d) "
+				"send_fail=%d\n", frames, det_ms / 250.0, comp_ms / 250.0,
+				cpu_ms / 250.0, acc_x, acc_y, send_fail);
+			det_ms = comp_ms = cpu_ms = 0.0;
+		}
+	}
+	if (fd >= 0 && SysCloseFd) SysCloseFd(fd);
+	return NULL;
+}
+
 /* ── vtable: setup_ports — compute geometry (scl_crop now known), enable tap ─ */
 static int maruko_stab_setup_ports(MarukoBackendContext *ctx,
 	uint32_t src_fps, uint32_t dst_fps)
@@ -412,8 +1097,6 @@ static int maruko_stab_setup_ports(MarukoBackendContext *ctx,
 }
 
 /* ── detector thread ───────────────────────────────────────────────────────── */
-static IveImage_t g_a, g_b, g_dx, g_dy;
-
 static void *maruko_stab_thread_main(void *arg)
 {
 	MI_SYS_ChnPort_t bind;
@@ -479,6 +1162,10 @@ static void *maruko_stab_thread_main(void *arg)
 				tau = g_recenter_period ? g_recenter_period : 30;
 				framing_kalman_step(&g_kalman, meas_dx, meas_dy,
 					g_paused, tau, max_x, max_y, &acc_x, &acc_y);
+				g_osd_meas_x = (int)meas_dx;
+				g_osd_meas_y = (int)meas_dy;
+				g_osd_acc_x = acc_x;
+				g_osd_acc_y = acc_y;
 				maruko_stab_apply_crop(acc_x, acc_y);
 				if ((++dbg % 120) == 0)
 					fprintf(stderr, "[maruko-stab] meas=(%.0f,%.0f) "
@@ -498,7 +1185,9 @@ static void *maruko_stab_thread_main(void *arg)
 /* ── vtable: start / stop ──────────────────────────────────────────────────── */
 static int maruko_stab_start(void)
 {
-	if (!g_tap_active) {
+	/* Fill mode has no tap — the detector reads the drained port0 frame — and
+	 * the thread is mandatory (it is the frame-base VENC's only producer). */
+	if (!g_fill_mode && !g_tap_active) {
 		fprintf(stderr, "[maruko-stab] no tap — detector disabled\n");
 		return 0;
 	}
@@ -520,16 +1209,22 @@ static int maruko_stab_start(void)
 		return -1;
 	}
 	g_running = 1;
-	if (pthread_create(&g_thread, NULL, maruko_stab_thread_main, NULL) != 0) {
+	if (pthread_create(&g_thread, NULL, g_fill_mode ?
+	    maruko_stab_fill_thread_main : maruko_stab_thread_main, NULL) != 0) {
 		g_running = 0;
 		ive_free(&g_a); ive_free(&g_b); ive_free(&g_dx); ive_free(&g_dy);
 		IveDestroy(g_ive_handle); g_ive_created = 0;
 		fprintf(stderr, "[maruko-stab] thread spawn failed\n");
 		return -1;
 	}
-	fprintf(stderr, "[maruko-stab] detector running (win %ux%u, max_off "
-		"%d/%d)\n", g_win_w, g_win_h, (int)(g_src_w - g_win_w) / 2,
-		(int)(g_src_h - g_win_h) / 2);
+	if (g_fill_mode)
+		fprintf(stderr, "[maruko-stab] fill drain+compose running "
+			"(enc %ux%u, max_off %d/%d)\n", g_enc_w, g_enc_h,
+			fill_max_off_x(), fill_max_off_y());
+	else
+		fprintf(stderr, "[maruko-stab] detector running (win %ux%u, max_off "
+			"%d/%d)\n", g_win_w, g_win_h, (int)(g_src_w - g_win_w) / 2,
+			(int)(g_src_h - g_win_h) / 2);
 	return 0;
 }
 
@@ -576,6 +1271,24 @@ static int maruko_stab_active(void)
 {
 	return g_running;
 }
+
+/* Debug-OSD snapshot: last detector measurement + Kalman correction (both in
+ * stab pixels — SCL-input px for "stab", encode px for "stab-fill").  Returns
+ * 0 when no stab thread is running (row hidden).  Called from the pipeline's
+ * 1 Hz debug-OSD refresh (see maruko_framing.h). */
+int maruko_framing_stab_osd_status(int *acc_x, int *acc_y,
+	int *meas_x, int *meas_y, int *paused, int *fill)
+{
+	if (!g_running)
+		return 0;
+	if (acc_x)  *acc_x = g_osd_acc_x;
+	if (acc_y)  *acc_y = g_osd_acc_y;
+	if (meas_x) *meas_x = g_osd_meas_x;
+	if (meas_y) *meas_y = g_osd_meas_y;
+	if (paused) *paused = g_paused;
+	if (fill)   *fill = g_fill_mode;
+	return 1;
+}
 static int maruko_stab_set_live(const char *key, const char *val)
 {
 	if (!key) return -1;
@@ -593,6 +1306,22 @@ const MarukoFramingModule maruko_framing_stab = {
 	.enabled       = maruko_stab_enabled,
 	.prepare       = maruko_stab_prepare,
 	.setup_ports   = maruko_stab_setup_ports,
+	.start         = maruko_stab_start,
+	.stop          = maruko_stab_stop,
+	.apply_ae_crop = maruko_stab_apply_ae_crop,
+	.set_pan       = maruko_stab_set_pan,
+	.active        = maruko_stab_active,
+	.set_live      = maruko_stab_set_live,
+};
+
+/* "stab-fill" shares start/stop/set_live with "stab" (they branch on
+ * g_fill_mode); prepare/setup_ports are fill-specific.  apply_ae_crop is
+ * shared too — fill sets win==src so the AE meter covers the full frame. */
+const MarukoFramingModule maruko_framing_stab_fill = {
+	.preset_name   = "stab-fill",
+	.enabled       = maruko_stab_fill_enabled,
+	.prepare       = maruko_stab_fill_prepare,
+	.setup_ports   = maruko_stab_fill_setup_ports,
 	.start         = maruko_stab_start,
 	.stop          = maruko_stab_stop,
 	.apply_ae_crop = maruko_stab_apply_ae_crop,

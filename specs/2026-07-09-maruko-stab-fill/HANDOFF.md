@@ -1,5 +1,14 @@
 # Maruko stab-fill — HANDOFF (Phase F0a complete → F1/F2 decision)
 
+> **RESOLVED 2026-07-09 — SHIPPED v0.37.0.** Option A was executed and landed
+> the same day. The pivotal twist: §2's premise partially dissolved — Phase
+> 5a's "the i6c VENC cannot be manually pushed" device result was a BufConf
+> ABI artifact (BUFDATA_FRAME=1 on i6c, union at offset 24), and with the
+> corrected layout the **direct VENC push encodes** — so the module-bind
+> bridge in §3/§6 was never needed; the shipped shape is Star6E's
+> (compose → push → VENC). See `plan.md` "OUTCOME" for the full record.
+> This file is retained as the pre-implementation snapshot.
+
 **Audience:** the next implementer (Fable) picking up deep troubleshooting +
 implementation. Read `requirements.md` and `plan.md` (incl. "Phase F0a RESULTS")
 first; this file is the current-state brief + the architectural decision.
