@@ -15,6 +15,7 @@
 #include "maruko_framing_host.h"
 #include "maruko_recorder.h"
 #include "maruko_stab_bench.h"
+#include "maruko_stabfill_probe.h"
 #include "maruko_ts_recorder.h"
 #include "maruko_video.h"
 #include "output_socket.h"
@@ -2134,6 +2135,11 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 
 		printf("> [maruko][probe] dual-VENC SDK probe END\n");
 	}
+
+	/* Phase 5a stab-fill go/no-go: does the i6c VENC accept manual
+	 * ChnInputPort pushes? (env-gated; see maruko_stabfill_probe.h). */
+	if (getenv("MARUKO_STABFILL_PROBE"))
+		maruko_stabfill_probe_run((int)venc_dev, &attr, width, height);
 
 	return 0;
 }

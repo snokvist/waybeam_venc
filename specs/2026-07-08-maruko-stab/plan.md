@@ -353,6 +353,41 @@ RING_DMA) and accept `MI_SYS_ChnInputPortGetBuf/PutBuf` composed frames? The
   canvas surface, then FRAMEBASE-bind THAT to VENC. Larger still; scope as its own
   spec. Worst case: document stab-fill as i6c-infeasible and ship stab-only.
 
+### Phase 5a RESULTS — 2026-07-09, device `.233` (bench `src/maruko_stabfill_probe.c`, env `MARUKO_STABFILL_PROBE=1`)
+
+**Verdict: manual push does NOT drive the i6c VENC encoder → the Star6E
+ChnInputPort compose path is NOT portable to i6c. Fall back to a bind-fed HW
+compositor (DIVP/RGN) or ship stab-only.**
+
+Probed a fresh sibling VENC channel (chn 4/5) in each non-RING src-conf while
+channel 0 ran normally. Two arming methods, both fail to produce output:
+
+1. **`I6C_VENC_SRC_CONF_NORMAL` + `StartRecvPic`** — `SetInputSourceConfig`=0
+   (accepted), `StartRecvPic`=0, `MI_SYS_ChnInputPortGetBuf`/`PutBuf` **12/12
+   succeed** (the input port ACCEPTS pushed frames, returns mapped planes), but
+   **`Query.curPacks` stays 0 — zero encoded packets emitted.** Same for
+   `I6C_VENC_SRC_CONF_HW_SYNC`.
+2. **`StartRecvPicEx(s32RecvPicNum=-1)`** (dlsym'd from libmi_venc; the main
+   pipeline only uses plain `StartRecvPic`) — **rejected outright, ret
+   `-1610473469`** for both NORMAL and HW_SYNC.
+
+**Encoder proven functional in the same binary** (isolates the finding to the
+push path, not a broken build): main channel 0 (RING_DMA-fed) encodes at
+Fps_1s 49.84, 8034 kbps concurrently.
+
+**Residual confounder (honest):** the bench pushed to a SIBLING channel while
+ch0 held the RING encoder; real stab-fill would put the MAIN channel itself in
+manual-push (no RING). Definitively ruling that out needs a standalone harness
+(VIF→ISP→SCL→manual-compose→VENC ch0), a much larger build. But: push is
+accepted-yet-not-encoded and the continuous-receive Ex-arm is rejected, so the
+manual-push feed is not the i6c encode trigger via any accessible path.
+
+**Recommended path:** the DIVP/RGN fallback uses the **bind** feed (which
+demonstrably works — ch0 RING encodes), so it sidesteps the manual-push
+limitation: DIVP blits the shifted SCL frame into a black canvas surface,
+FRAMEBASE-**bind** that canvas to VENC. Its own spec (multi-day). Alternative:
+ship stab-only on Maruko and mark stab-fill i6c-deferred.
+
 **If 5a passes — the port (mirror Star6E, reuse the stab module):**
 - 5b. Add a fill-mode branch to `maruko_framing_stab.c` (mirror `g_stab_fill_mode`),
   OR a sibling `maruko_framing_stab_fill.c` sharing the detector/Kalman. Prefer the
