@@ -38,6 +38,7 @@ extern int test_intra_refresh(void);
 extern int test_venc_jpeg(void);
 extern int test_mdns_beacon(void);
 extern int test_framing_kalman(void);
+extern int test_framing_stab_accuracy(void);
 
 int main(void)
 {
@@ -140,6 +141,9 @@ int main(void)
 
 	printf("\n--- test_framing_kalman ---\n");
 	failures += test_framing_kalman();
+
+	printf("\n--- test_framing_stab_accuracy ---\n");
+	failures += test_framing_stab_accuracy();
 
 	printf("\n=== Results: %d passed, %d failed ===\n",
 		g_test_pass_count, g_test_fail_count);

@@ -29,6 +29,7 @@
 #include "maruko_mi.h"          /* g_mi_scl */
 #include "maruko_bindings.h"    /* i6c_scl_port */
 #include "framing_kalman.h"
+#include "framing_stab_accuracy.h"
 #include "venc_config.h"
 
 #include <dlfcn.h>
@@ -45,19 +46,17 @@
 #if HAVE_FRAMING_STAB
 
 /* ── detector geometry ─────────────────────────────────────────────────────
- * Maruko deliberately runs the CHEAPER Shift_Detector config (256 crop / 128
- * box / 2-level pyramid) rather than Star6E's full 384/256/3.  Rationale: the
- * i6c is SINGLE-CORE, and the detector is NEON software — the full config is
- * ~17 ms/frame which pegs the one A7 core at 100% (~85% of the 20 ms budget at
- * 50 fps).  The cheaper config is ~8 ms/frame (~65% core) and also copies less
- * per frame (256x256 vs 384x384 tap), keeping every-frame detection at 50 fps
- * with headroom, at the documented cost of slightly noisier estimates.  Bump
- * back to 384/256/3 only if a dual-core i6-class part is ever targeted. */
-#define STAB_TAP_W        256
-#define STAB_TAP_H        256
-#define STAB_BOX          128
-#define STAB_PYRAMID      2
-#define STAB_SEARCH_RANGE 64
+ * The Shift_Detector crop/box/pyramid/search geometry is now the shared,
+ * user-selectable `video0.stab_accuracy` level — resolved from the ONE table in
+ * framing_stab_accuracy.h so Star6E and Maruko cannot drift.  On Maruko
+ * "auto" maps to "low" (256/128/2): the i6c is SINGLE-CORE and the detector is
+ * NEON software, so the full "high" config (~17 ms/frame) would peg the one A7
+ * core; "low" is ~8 ms/frame (~65% core) and copies less per frame (256x256 vs
+ * 384x384 tap), holding every-frame detection at 50 fps with headroom, at a
+ * documented slight-noise cost.  A user on a lighter sensor mode can pick
+ * "medium"/"high".  g_det is resolved once in prepare(); every geometry site
+ * below reads g_det.{crop,box,pyramid,search}. */
+static FramingStabDetector g_det = { 256, 128, 2, 64 };  /* Maruko default = "low" */
 #define STAB_TAP_PORT     2
 #define STAB_DEFAULT_PCT  90   /* fallback framing window when cfg is out of range */
 
@@ -230,6 +229,9 @@ static int maruko_stab_prepare(const VencConfig *vcfg, uint32_t src_w,
 	uint32_t src_h, uint32_t *enc_w, uint32_t *enc_h)
 {
 	(void)src_w; (void)src_h;
+	/* Resolve the shared detector level once, before the tap / IVE images are
+	 * sized in setup_ports.  "auto" -> "low" on single-core Maruko. */
+	g_det = framing_stab_detector_params(vcfg->video0.stab_accuracy, "low");
 	g_crop_pct = stab_pct(vcfg);
 	g_recenter_period = vcfg->video0.stab_recenter_speed;
 	g_cfg_q = vcfg->video0.stab_kalman_q;
@@ -318,8 +320,8 @@ static int stab_tap_enable(void)
 	int cx, cy;
 	MI_S32 ret;
 
-	cx = ((int)g_src_w - STAB_TAP_W) / 2;
-	cy = ((int)g_src_h - STAB_TAP_H) / 2;
+	cx = ((int)g_src_w - g_det.crop) / 2;
+	cy = ((int)g_src_h - g_det.crop) / 2;
 	if (cx < 0) cx = 0;
 	if (cy < 0) cy = 0;
 	cx &= ~1; cy &= ~1;
@@ -327,10 +329,10 @@ static int stab_tap_enable(void)
 	memset(&p, 0, sizeof(p));
 	p.crop.x = (unsigned short)((int)g_scl_crop_x + cx);
 	p.crop.y = (unsigned short)((int)g_scl_crop_y + cy);
-	p.crop.width = STAB_TAP_W;
-	p.crop.height = STAB_TAP_H;
-	p.output.width = STAB_TAP_W;
-	p.output.height = STAB_TAP_H;
+	p.crop.width = g_det.crop;
+	p.crop.height = g_det.crop;
+	p.output.width = g_det.crop;
+	p.output.height = g_det.crop;
 	p.pixFmt = I6_PIXFMT_YUV420SP;
 	p.compress = (i6_common_compr)0;   /* RAW — CPU reads the Y plane */
 	ret = g_mi_scl.fnSetPortConfig(0, 0, STAB_TAP_PORT, &p);
@@ -378,9 +380,9 @@ static int maruko_stab_setup_ports(MarukoBackendContext *ctx,
 		g_ctx = NULL;
 		return -1;
 	}
-	if (g_src_w < STAB_TAP_W + 2 || g_src_h < STAB_TAP_H + 2) {
+	if (g_src_w < g_det.crop + 2 || g_src_h < g_det.crop + 2) {
 		fprintf(stderr, "[maruko-stab] base %ux%u too small for %dx%d tap\n",
-			g_src_w, g_src_h, STAB_TAP_W, STAB_TAP_H);
+			g_src_w, g_src_h, g_det.crop, g_det.crop);
 		g_ctx = NULL;
 		return -1;
 	}
@@ -405,7 +407,7 @@ static int maruko_stab_setup_ports(MarukoBackendContext *ctx,
 	maruko_stab_apply_crop(0, 0);
 	fprintf(stderr, "[maruko-stab] base %ux%u @(%u,%u) win %ux%u (pct=%u) "
 		"tap %dx%d\n", g_src_w, g_src_h, g_scl_crop_x, g_scl_crop_y,
-		g_win_w, g_win_h, g_crop_pct, STAB_TAP_W, STAB_TAP_H);
+		g_win_w, g_win_h, g_crop_pct, g_det.crop, g_det.crop);
 	return 0;
 }
 
@@ -419,13 +421,13 @@ static void *maruko_stab_thread_main(void *arg)
 	int have_prev = 0, cur = 0, dbg = 0;
 	int max_x = (int)(g_src_w - g_win_w) / 2;
 	int max_y = (int)(g_src_h - g_win_h) / 2;
-	int left = ((STAB_TAP_W - STAB_BOX) / 2) & ~1;
-	int top  = ((STAB_TAP_H - STAB_BOX) / 2) & ~1;
+	int left = ((g_det.crop - g_det.box) / 2) & ~1;
+	int top  = ((g_det.crop - g_det.box) / 2) & ~1;
 	IveShiftCtrl_t ctrl = {
 		.enMode = E_IVE_SHIFT_MODE_SINGLE,
-		.pyramid_level = STAB_PYRAMID, .search_range = STAB_SEARCH_RANGE,
+		.pyramid_level = g_det.pyramid, .search_range = g_det.search,
 		.u16Left = (MI_U16)left, .u16Top = (MI_U16)top,
-		.u16Width = STAB_BOX, .u16Height = STAB_BOX,
+		.u16Width = g_det.box, .u16Height = g_det.box,
 	};
 	(void)arg;
 
@@ -452,12 +454,12 @@ static void *maruko_stab_thread_main(void *arg)
 		}
 		y = (MI_U8 *)buf.stFrameData.pVirAddr[0];
 		stride = buf.stFrameData.u32Stride[0];
-		if (y && stride >= STAB_TAP_W) {
-			for (int r = 0; r < STAB_TAP_H; r++)
+		if (y && stride >= g_det.crop) {
+			for (int r = 0; r < g_det.crop; r++)
 				memcpy(curr->apu8VirAddr[0] + (size_t)r * curr->azu16Stride[0],
-				       y + (size_t)r * stride, STAB_TAP_W);
+				       y + (size_t)r * stride, g_det.crop);
 			SysFlush(curr->apu8VirAddr[0],
-				(MI_U32)curr->azu16Stride[0] * STAB_TAP_H);
+				(MI_U32)curr->azu16Stride[0] * g_det.crop);
 		}
 		SysPutBuf(h);
 
@@ -508,8 +510,8 @@ static int maruko_stab_start(void)
 		return -1;
 	}
 	g_ive_created = 1;
-	if (ive_alloc(&g_a, STAB_TAP_W, STAB_TAP_H, E_IVE_IMAGE_TYPE_U8C1) ||
-	    ive_alloc(&g_b, STAB_TAP_W, STAB_TAP_H, E_IVE_IMAGE_TYPE_U8C1) ||
+	if (ive_alloc(&g_a, g_det.crop, g_det.crop, E_IVE_IMAGE_TYPE_U8C1) ||
+	    ive_alloc(&g_b, g_det.crop, g_det.crop, E_IVE_IMAGE_TYPE_U8C1) ||
 	    ive_alloc(&g_dx, 1, 1, E_IVE_IMAGE_TYPE_S8C1) ||
 	    ive_alloc(&g_dy, 1, 1, E_IVE_IMAGE_TYPE_S8C1)) {
 		fprintf(stderr, "[maruko-stab] IVE image alloc failed\n");

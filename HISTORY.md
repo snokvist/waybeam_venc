@@ -1,5 +1,31 @@
 # History
 
+## [0.36.0] - 2026-07-09
+
+Stabilization: **`video0.stab_accuracy` — a shared high/medium/low detector
+level, replacing the silent per-backend divergence.** The Shift_Detector
+geometry (crop/box/pyramid/search) was hardcoded differently in each backend
+(Star6E 384/256/3, Maruko 256/128/2) — invisible to users and impossible to
+tune per sensor mode.
+
+- New enum field `video0.stab_accuracy = auto | high | medium | low`, shared by
+  both backends and by both stab presets (`stab` + `stab-fill`). One geometry
+  table in `include/framing_stab_accuracy.h` — the two backends now resolve
+  through it, so they cannot drift again.
+  - **high** 384/256/3/96 (smoothest) · **medium** 320/192/3/80 (new middle
+    step) · **low** 256/128/2/64 (cheapest). All keep margin = (crop−box)/2 =
+    64px. The detector is NEON software, so the level is the CPU/quality lever.
+- **`auto` (default) resolves per-backend** — high on Star6E, low on
+  single-core Maruko — so an unset field reproduces each backend's previous
+  behaviour exactly (zero regression on upgrade).
+- Data-driven WebUI: the field carries `FieldUi` metadata (`control:"select"`),
+  so the dashboard renders the dropdown straight from `/api/v1/capabilities` —
+  no `dashboard.html` edit or webui-blob rebuild. Supported on both backends
+  (no Maruko gate); MUT_RESTART.
+- Tests: `tests/test_framing_stab_accuracy.c` pins the level table, the 64px
+  margin invariant, per-backend `auto` resolution and lenient unknown→fallback;
+  plus config load + API set/validate guards. Suite 1744/0.
+
 ## [0.35.0] - 2026-07-09
 
 Maruko (Infinity6C): **`video0.framing = "stab"` — IVE stabilization on i6c,
