@@ -2,6 +2,7 @@
 #include "star6e_framing_host.h"
 #include "star6e_pipeline.h"
 #include "framing_kalman.h"
+#include "framing_stab_accuracy.h"
 #include "imu_ring.h"
 
 #include <dlfcn.h>
@@ -191,21 +192,20 @@ typedef MI_S32 (*stab_ive_shift_fn_t)(StabIveHandle_t handle,
 	StabIveImage_t *dst_x, StabIveImage_t *dst_y,
 	StabIveShiftDetectCtrl_t *ctrl, MI_BOOL instant);
 
-/* Shift_Detector geometry.  On Star6E there is no IVE kernel module, so
- * MI_IVE_Shift_Detector runs as a userspace CPU fallback — it is the
- * dominant per-frame stab cost (~19ms on the A7), independent of the crop
- * resolution.  These are the FULL 384/256/3 values: a larger correlation
- * box and a 3-level pyramid give noticeably smoother motion estimates than
- * the cheapened 256/128/2 config (which was tried for fps but produced
- * visibly jittery/shaky stabilization — the estimates are noisier and the
- * offset is applied raw every frame).  Smoothness was chosen over the fps
- * the cheaper detector bought.  margin = (crop-box)/2 = 64px and
- * SEARCH_RANGE = 96 are unchanged. */
-#define STAB_SHIFT_CROP_W   384
-#define STAB_SHIFT_CROP_H   384
-#define STAB_BOX_SIZE       256
-#define STAB_PYRAMID        3
-#define STAB_SEARCH_RANGE   96
+/* Shift_Detector geometry is now the shared, user-selectable
+ * `video0.stab_accuracy` level — resolved from the ONE table in
+ * framing_stab_accuracy.h so Star6E and Maruko cannot drift.  On Star6E there
+ * is no IVE kernel module, so MI_IVE_Shift_Detector runs as a userspace NEON
+ * CPU fallback — the dominant per-frame stab cost (~19ms on the A7), roughly
+ * independent of crop resolution.  "auto" maps to "high" (384/256/3): a larger
+ * correlation box and 3-level pyramid give noticeably smoother estimates than
+ * the cheaper configs (which produce visibly jittery stabilization — noisier
+ * estimates, offset applied raw every frame).  Smoothness was chosen as the
+ * Star6E default; a user can trade it for fps by picking "medium"/"low".
+ * g_det is resolved once per prepare(); every geometry site reads
+ * g_det.{crop,box,pyramid,search}.  margin = (crop-box)/2 = 64px at every
+ * level. */
+static FramingStabDetector g_det = { 384, 256, 3, 96 };  /* Star6E default = "high" */
 #define STAB_SHIFT_SIGN_X   (-1)
 #define STAB_SHIFT_SIGN_Y   (-1)
 /* Run the (CPU-bound) detector every Nth drained frame.  N=1 (detect +
@@ -1080,7 +1080,7 @@ static int star6e_stab_estimate_shift(StabIveImage_t *prev_img,
 {
 	int img_w = (int)curr_img->u16Width;
 	int img_h = (int)curr_img->u16Height;
-	int box = STAB_BOX_SIZE;
+	int box = g_det.box;
 	int left, top;
 	MI_S32 ret;
 
@@ -1092,8 +1092,8 @@ static int star6e_stab_estimate_shift(StabIveImage_t *prev_img,
 	{
 		StabIveShiftDetectCtrl_t ctrl = {
 			.enMode = STAB_E_IVE_SHIFT_DETECT_MODE_SINGLE,
-			.pyramid_level = STAB_PYRAMID,
-			.search_range = STAB_SEARCH_RANGE,
+			.pyramid_level = g_det.pyramid,
+			.search_range = g_det.search,
 			.u16Left = (MI_U16)left,
 			.u16Top = (MI_U16)top,
 			.u16Width = (MI_U16)box,
@@ -1162,14 +1162,14 @@ static void *star6e_stab_thread_main(void *arg)
 	}
 
 	if (g_stab_fill_mode) {
-		if (star6e_stab_alloc_ive_image(&sw_detect[0], STAB_SHIFT_CROP_W,
-		    STAB_SHIFT_CROP_H, STAB_E_IVE_IMAGE_TYPE_U8C1) == 0 &&
-		    star6e_stab_alloc_ive_image(&sw_detect[1], STAB_SHIFT_CROP_W,
-		    STAB_SHIFT_CROP_H, STAB_E_IVE_IMAGE_TYPE_U8C1) == 0) {
+		if (star6e_stab_alloc_ive_image(&sw_detect[0], g_det.crop,
+		    g_det.crop, STAB_E_IVE_IMAGE_TYPE_U8C1) == 0 &&
+		    star6e_stab_alloc_ive_image(&sw_detect[1], g_det.crop,
+		    g_det.crop, STAB_E_IVE_IMAGE_TYPE_U8C1) == 0) {
 			sw_detect_ok = 1;
 			fprintf(stderr, "[waybeam] stab-fill: sw_detect active "
 				"(%dx%d x2) — blit thread decoupled from IVE\n",
-				STAB_SHIFT_CROP_W, STAB_SHIFT_CROP_H);
+				g_det.crop, g_det.crop);
 		} else {
 			fprintf(stderr, "[waybeam] WARNING: stab-fill sw_detect "
 				"alloc failed — falling back to single-threaded blit\n");
@@ -1235,7 +1235,7 @@ static void *star6e_stab_thread_main(void *arg)
 		}
 
 		if (star6e_stab_make_center_y_crop(&curr_img, &curr_buf,
-		    STAB_SHIFT_CROP_W, STAB_SHIFT_CROP_H) != 0) {
+		    g_det.crop, g_det.crop) != 0) {
 			g_stab_sys_out_put_buf(curr_handle);
 			continue;
 		}
@@ -1245,7 +1245,7 @@ static void *star6e_stab_thread_main(void *arg)
 		 * IVE reference frame.  Re-point curr_img at the sw copy. */
 		if (g_stab_fill_mode && sw_detect_ok) {
 			star6e_stab_copy_y_to_sw(&sw_detect[sw_idx], &curr_buf,
-				STAB_SHIFT_CROP_W, STAB_SHIFT_CROP_H);
+				g_det.crop, g_det.crop);
 			curr_img.apu8VirAddr[0]  = sw_detect[sw_idx].apu8VirAddr[0];
 			curr_img.aphyPhyAddr[0]  = sw_detect[sw_idx].aphyPhyAddr[0];
 			curr_img.azu16Stride[0]  = sw_detect[sw_idx].azu16Stride[0];
@@ -1510,8 +1510,8 @@ static int star6e_stab_setup_ports(Star6ePipelineState *state,
 
 	/* port1: 256x256 centre detector tap — the BSP-dependent step. */
 	memset(&port, 0, sizeof(port));
-	port.output.width = STAB_SHIFT_CROP_W;
-	port.output.height = STAB_SHIFT_CROP_H;
+	port.output.width = g_det.crop;
+	port.output.height = g_det.crop;
 	port.pixFmt = I6_PIXFMT_YUV420SP;
 	port.compress = I6_COMPR_NONE;
 	ret = MI_VPE_SetPortMode(0, 1, &port);
@@ -1526,8 +1526,8 @@ static int star6e_stab_setup_ports(Star6ePipelineState *state,
 		 * output.  The detector then measures motion in image pixels —
 		 * identical to the legacy centre crop — so the accumulator and
 		 * clamps stay mode-agnostic (image domain). */
-		int dw = star6e_stab_img_to_pre_x(STAB_SHIFT_CROP_W) & ~1;
-		int dh = star6e_stab_img_to_pre_y(STAB_SHIFT_CROP_H) & ~1;
+		int dw = star6e_stab_img_to_pre_x(g_det.crop) & ~1;
+		int dh = star6e_stab_img_to_pre_y(g_det.crop) & ~1;
 		int dcx, dcy;
 		if (dw < 2) dw = 2;
 		if (dh < 2) dh = 2;
@@ -1566,7 +1566,7 @@ static int star6e_stab_setup_ports(Star6ePipelineState *state,
 		g_stab_tap_active = 1;
 		fprintf(stderr, "[waybeam] stab: HW-crop mode (port0->VENC bind, "
 			"port1 %dx%d detector tap)\n",
-			STAB_SHIFT_CROP_W, STAB_SHIFT_CROP_H);
+			g_det.crop, g_det.crop);
 	} else {
 		/* No detector tap on this BSP: keep the bound static centre crop,
 		 * no shake compensation (never the legacy manual drain). */
@@ -1873,6 +1873,9 @@ static int star6e_stab_active(void)
 static int star6e_stab_prepare(const VencConfig *vcfg, uint32_t src_w,
 	uint32_t src_h, uint32_t *enc_w, uint32_t *enc_h)
 {
+	/* Resolve the shared detector level before the tap/IVE images are sized.
+	 * "auto" -> "high" on Star6E (its historical full config). */
+	g_det = framing_stab_detector_params(vcfg->video0.stab_accuracy, "high");
 	if (src_w > 1920 || src_h > 1080) {
 		uint64_t rw = (uint64_t)1920 * 1000 / src_w;
 		uint64_t rh = (uint64_t)1080 * 1000 / src_h;
@@ -1907,6 +1910,8 @@ static int star6e_stab_prepare(const VencConfig *vcfg, uint32_t src_w,
 static int star6e_stab_fill_prepare(const VencConfig *vcfg, uint32_t src_w,
 	uint32_t src_h, uint32_t *enc_w, uint32_t *enc_h)
 {
+	/* stab-fill shares the same detector; resolve its level too. */
+	g_det = framing_stab_detector_params(vcfg->video0.stab_accuracy, "high");
 	if (src_w > 1920 || src_h > 1080) {
 		uint64_t rw = (uint64_t)1920 * 1000 / src_w;
 		uint64_t rh = (uint64_t)1080 * 1000 / src_h;

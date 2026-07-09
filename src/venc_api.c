@@ -1,5 +1,6 @@
 #include "venc_api.h"
 #include "device_id.h"
+#include "framing_stab_accuracy.h"
 #include "idr_rate_limit.h"
 #include "intra_refresh.h"
 #include "pipeline_common.h"
@@ -359,6 +360,17 @@ static const FieldUi ui_stab_kalman_r = {
 	"laggier; lower = snappier, more jitter passes through. Shared by stab + "
 	"stab-fill. Default 2.0. Requires restart."
 };
+static const char *const stab_accuracy_opts[] = {
+	"auto", "high", "medium", "low", NULL
+};
+static const FieldUi ui_stab_accuracy = {
+	"Stabilization", "Detector accuracy", "select", 0, 0, 0, stab_accuracy_opts,
+	"Motion-detector geometry / CPU cost (the NEON detector is the dominant "
+	"per-frame stab cost). high=384/256/3 smoothest; medium=320/192/3; "
+	"low=256/128/2 cheapest. auto = per-backend default (high on Star6E, low on "
+	"single-core Maruko). Higher costs more CPU — pick to fit your resolution / "
+	"fps. Shared by stab + stab-fill. Requires restart."
+};
 
 /* UI descriptor for video0.pause_stab — the live stab pause.  Rendered as a
  * toggle in the "Stabilization" group purely from capabilities (the field is
@@ -474,6 +486,7 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(video0, stab_kalman_q,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_q),
 	FIELD_UI(video0, stab_kalman_r,       FT_DOUBLE, MUT_RESTART, &ui_stab_kalman_r),
 	FIELD_UI(video0, stab_recenter_speed, FT_UINT,   MUT_RESTART, &ui_stab_recenter_speed),
+	FIELD_UI(video0, stab_accuracy,       FT_STRING, MUT_RESTART, &ui_stab_accuracy),
 	/* Runtime stab pause (D13 software ramp) — MUT_LIVE, not persisted.  Carries
 	 * UI metadata so the dashboard renders it data-driven (no static SECTIONS
 	 * row; it isn't in /api/v1/config). */
@@ -535,6 +548,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.stabRecenterSpeed", "video0.stab_recenter_speed" },
 	{ "video0.stabKalmanQ", "video0.stab_kalman_q" },
 	{ "video0.stabKalmanR", "video0.stab_kalman_r" },
+	{ "video0.stabAccuracy", "video0.stab_accuracy" },
 	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
@@ -797,6 +811,10 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (v < 0.1 || v > 50.0)
 			return "stab_kalman_r must be in range [0.1, 50.0] "
 				"(smoothness; higher = smoother but laggier)";
+	}
+	if (strcmp(key, "video0.stab_accuracy") == 0) {
+		if (!framing_stab_accuracy_valid(cfg->video0.stab_accuracy))
+			return "stab_accuracy must be one of: auto, high, medium, low";
 	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)

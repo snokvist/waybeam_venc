@@ -1,5 +1,6 @@
 #include "venc_config.h"
 #include "venc_api.h"
+#include "framing_stab_accuracy.h"
 #include "pipeline_common.h"
 #include "star6e_recorder.h"
 #include "intra_refresh.h"
@@ -185,6 +186,11 @@ void venc_config_defaults(VencConfig *cfg)
 	/* framing mode (video0) — off by default; expands zoom_pct + stab */
 	safe_strcpy(cfg->video0.framing, sizeof(cfg->video0.framing), "off");
 	(void)venc_config_apply_framing_preset("off", &cfg->video0);
+
+	/* Shift_Detector accuracy — "auto" resolves per-backend (high on Star6E,
+	 * low on Maruko); an unset field thus preserves each backend's default. */
+	safe_strcpy(cfg->video0.stab_accuracy,
+		sizeof(cfg->video0.stab_accuracy), "auto");
 
 	/* Runtime-only "stab-fill" bypass — always boots false; not parsed or
 	 * serialized (a fresh stab-fill run always comes up composing). */
@@ -612,6 +618,18 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 				"stabKalmanQ", v->stab_kalman_q);
 			v->stab_kalman_r = json_get_double(obj,
 				"stabKalmanR", v->stab_kalman_r);
+			/* Detector accuracy level (shared table in
+			 * framing_stab_accuracy.h).  Lenient on load — an
+			 * unrecognised hand-edited value falls back to "auto"
+			 * (the resolver also treats unknown as auto). */
+			{
+				const char *acc = json_get_string(obj,
+					"stabAccuracy", v->stab_accuracy);
+				if (!framing_stab_accuracy_valid(acc))
+					acc = "auto";
+				safe_strcpy(v->stab_accuracy,
+					sizeof(v->stab_accuracy), acc);
+			}
 			/* Harden stab_crop_pct to [60, 100] for the active stab preset.
 			 * A stab preset must have a usable crop budget; clamping here
 			 * also self-heals a stale stabCropPct (e.g. a 0 saved while
@@ -1392,6 +1410,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->video0.stab_kalman_q);
 		cJSON_AddNumberToObject(vid, "stabKalmanR",
 			cfg->video0.stab_kalman_r);
+		cJSON_AddStringToObject(vid, "stabAccuracy",
+			cfg->video0.stab_accuracy);
 	}
 
 	/* outgoing */
