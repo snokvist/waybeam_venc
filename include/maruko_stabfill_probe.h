@@ -23,4 +23,22 @@
 void maruko_stabfill_probe_run(int venc_dev, const void *chn0_attr,
 	uint32_t enc_w, uint32_t enc_h);
 
+/* Phase F0a go/no-go bench for the module-bind stab-fill path.
+ *
+ * Phase 5a proved a direct manual push to the i6c H.265 VENC does NOT encode:
+ * the VENC is bind-fed by design (SDK-confirmed; UVC injects to SCL, then
+ * frame-base-binds SCL->VENC).  F0a stands up that exact topology on a SECOND
+ * SCL channel (dev 0, chn 1) with no upstream bind: create + start the SCL
+ * channel, frame-base-bind SCL(0,1,0)->VENC(new chn, NORMAL_FRMBASE), then
+ * inject hand-composed frames into the SCL input port
+ * (MI_SYS_ChnInputPortGetBuf/PutBuf, the SDK's PutStreamToSclInputPort path)
+ * and confirm VENC emits.  Also times the per-frame compose+push cost on the
+ * single A7 (the pivotal budget question at 50 fps).
+ *
+ * Env-gated: only runs when MARUKO_STABFILL_F0A is set.  Called once after
+ * channel-0 is up; tears its SCL+VENC bridge down cleanly (never SIGKILL).
+ * chn0_attr is the live i6c_venc_chn reused as the bridge channel's config. */
+void maruko_stabfill_f0a_run(int venc_dev, const void *chn0_attr,
+	uint32_t enc_w, uint32_t enc_h);
+
 #endif /* MARUKO_STABFILL_PROBE_H */

@@ -76,6 +76,11 @@ static int g_mi_scl_chn_created = 0;
  * snapshot backend.  Configured + enabled in configure_maruko_scl, bound
  * to MJPG VENC dev 8 by venc_jpeg_backend_init (src/maruko_jpeg.c). */
 static int g_mi_scl_port1_enabled = 0;
+/* Phase F0a stab-fill bench: chn-0 VENC attr stashed at CreateChn time so the
+ * post-bind F0a hook can reuse it as the bridge channel's encode config (the
+ * hook runs after the SCL device exists, unlike the mid-bringup 5a probe). */
+static i6c_venc_chn g_f0a_chn0_attr;
+static int g_f0a_chn0_attr_valid = 0;
 /* Mirrors MI_SYS_WindowRect_t.  Defined up here because both the SCL
  * configure path and the zoom helpers below use it. */
 typedef struct {
@@ -2041,6 +2046,12 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 
 	fill_maruko_rc_attr(&attr, cfg, gop, bit_rate_bits, framerate);
 
+	/* Stash for the Phase F0a stab-fill bench (env-gated hook, post-bind). */
+	if (getenv("MARUKO_STABFILL_F0A")) {
+		g_f0a_chn0_attr = attr;
+		g_f0a_chn0_attr_valid = 1;
+	}
+
 	*chn = 0;
 	ret = maruko_mi_venc_create_chn(venc_dev, *chn, &attr);
 	if (ret != 0) {
@@ -3409,6 +3420,14 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ctx->cfg.record.mode,
 			ctx->cfg.record.server);
 	}
+
+	/* Phase F0a stab-fill bench: stand up a 2nd SCL channel + frame-base-bound
+	 * VENC bridge and confirm SCL-inject → VENC encodes (the module-bind path
+	 * Phase 5a's finding requires).  Runs once after the full pipeline is up so
+	 * the SCL device exists; env-gated; cleans up its own bridge. */
+	if (getenv("MARUKO_STABFILL_F0A") && g_f0a_chn0_attr_valid)
+		maruko_stabfill_f0a_run(ctx->venc_device, &g_f0a_chn0_attr,
+			ctx->cfg.image_width, ctx->cfg.image_height);
 
 	/* Phase 6: open recorder for "mirror" (chn 0 → file) and "dual"
 	 * (chn 1 → file) modes.  Must run AFTER start_dual so that, in

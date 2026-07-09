@@ -38,6 +38,46 @@ compose cost acceptable at 50 fps?
   document stab-fill as i6c-infeasible and STOP — ship stab-only). Record
   numbers here, like the Phase 1 / 5a RESULTS blocks.
 
+### Phase F0a RESULTS (device `.233`, SSC378QE, 2026-07-09)
+
+Env-gated `MARUKO_STABFILL_F0A` bench (`maruko_stabfill_probe.c
+:maruko_stabfill_f0a_run`, hooked post-`bind_maruko_pipeline`). Three iterations:
+
+1. **SCL-inject topology stands up in our binary.** A 2nd SCL channel (dev 0,
+   chn 1, no upstream bind) created + started + output-port(IFC 1080×720)
+   configured + enabled — **all `ret=0`**. So SCL manual-input (the
+   `PutStreamToSclInputPort` primitive) is available to us.
+2. **VENC channel ceiling = 3.** `MI_VENC_MAX_CHN_NUM_PER_DC = 3` → valid H26x
+   channels are **0,1,2 only**; CreateChn(0,6) rejected (SDK returns raw `31`,
+   not an `MI_DEF_ERR`). Retest at chn 2 → `CreateChn=0`. *(Recontextualises 5a:
+   its chn 4/5 were also out-of-range, so 5a's device signal was weaker than a
+   clean "push doesn't encode" — the SDK-source conclusion still stands.)*
+3. **FRAME_BASE can't coexist with the live RING encode on the single H26x
+   device.** `BindChnPort2(SCL(0,1,0)→VENC(0,2) FRAME_BASE)` = `0xA0092012` =
+   **SYS / E_MI_ERR_BUSY**. The main encode (dev 0 chn 0) is RING-fed; a
+   frame-base bind on another channel of the *same* VENC device is refused.
+4. **The 2nd H26x device is not backed by hardware.** Moving the bridge to
+   `MI_VENC_DEV_ID_H264_H265_1` (dev 1): `MI_VENC_CreateDev(1)` **blocks
+   forever** (printf after the call never fires across 28 s while other threads
+   keep logging). SSC378QE has a single H26x core.
+
+**Net:** the SDK already proves the compose→SCL-inject→`SCL→VENC` FRAME_BASE
+topology encodes H.265 (UVC path; `ST_Sys_Bind` is byte-identical to our bind).
+Our binary reproduces the whole chain **up to** the frame-base bind; the only
+blocker is that a frame-base VENC can't run **alongside** the live RING encode on
+the one H26x device. **This is not a problem for the real design** — in
+`stab-fill` the composed frame *is* the main encode, so VENC dev 0 chn 0 is
+frame-base from the start and there is no competing RING leg. The sibling-probe
+simply can't demonstrate that without tearing the live RING down first.
+
+**Still unproven in-binary:** (a) the frame-base bind actually succeeds once dev
+0 is RING-free, and (b) the single-A7 compose+push CPU cost at 50 fps. Both fall
+out naturally from the F2 rewire (build VENC frame-base from the start) and can
+be measured at F5 — or via a **destructive** dev-0 ring-swap bench first
+(unbind the live RING → bind frame-base → inject → measure → daemon killed).
+Clean, non-disruptive probing is exhausted. **DECISION PENDING** (see
+requirements "Open decision").
+
 ## If F0 passes — the port
 
 ### F1 — compose helpers (port Star6E's fill/blit to i6c)
