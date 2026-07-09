@@ -29,6 +29,13 @@ on SSC338Q at 192.168.2.201 (IMX335).
   the 40fps probe sat within ~5% of both the ISP throughput wall and the
   analog HMAX floor; 33.3 keeps margin and still beats stock 4K@30 by ~11%.
   Retime not yet device-verified (no IMX415 on the bench).
+- **Exact-CBR compensation for >120fps modes** (closes the deferred
+  follow-up in the 2026-07-06 spec): the RC budgets at the 120 fpsNum cap
+  while the bind delivers the true rate, so the wire ran ~1.19× the set
+  bitrate at 144. The encoder budget is now scaled ×rc_fps/delivered at
+  the three sites (pipeline create `venc_max_rate`, live `apply_bitrate`,
+  re-applied on `apply_fps` when the factor changes). Device-verified:
+  19.6 Mbps wire against a 20 Mbps config at Fps_1s 143.99 (was 23.8).
 
 ## [0.37.0] - 2026-07-09
 

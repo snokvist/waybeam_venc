@@ -2435,11 +2435,22 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	{
 		uint32_t delivered = state->sensor.mode.maxFps ?
 			state->sensor.mode.maxFps : pconf.sensor_framerate;
+		uint32_t delivered_true = delivered;
 		if (delivered > STAR6E_VENC_INPUT_FPS_MAX)
 			delivered = STAR6E_VENC_INPUT_FPS_MAX;
 		venc_fps = vcfg->video0.fps;
 		if (venc_fps == 0 || venc_fps > delivered)
 			venc_fps = delivered;
+		/* Exact-CBR: the bind delivers delivered_true frames while the
+		 * RC budgets at venc_fps (capped 120) — scale the encoder budget
+		 * by venc_fps/delivered_true so the wire rate lands on the
+		 * configured bitrate (x120/144 for the 144 mode).  Mirrors
+		 * rc_compensate_kbps() in star6e_controls.c for the live paths. */
+		if (vcfg->video0.fps && vcfg->video0.fps < delivered_true)
+			delivered_true = vcfg->video0.fps;
+		if (delivered_true > venc_fps && venc_fps > 0)
+			pconf.venc_max_rate = (uint32_t)((uint64_t)
+				pconf.venc_max_rate * venc_fps / delivered_true);
 	}
 
 	/* GOP frame count must track the encoder's real fps (venc_fps), not
