@@ -1,5 +1,69 @@
 # History
 
+## [0.37.0] - 2026-07-09
+
+Stabilization: **Maruko `video0.framing = stab-fill`** — full-FOV
+stabilization (the whole frame floats on a moving black border, no crop-in) on
+the Infinity6C, completing stab parity with Star6E. Device-verified on
+SSC378QE at IMX415 1080×720@50 (visual + 5-cycle teardown soak, 0 MMU resets).
+
+- **The Phase 5a "i6c VENC cannot be manually pushed" device result is
+  OVERTURNED** — it was an ABI artifact. The i6c `MI_SYS_BufConf_t` differs
+  from Star6E's in three load-bearing ways: `E_MI_SYS_BUFDATA_FRAME` is **1**
+  (0 is `RAW`!), the struct carries `bDirectBuf`+`bCrcCheck` before the config
+  union (union at offset 24, not 16), and `BufFrameConfig` has no embedded
+  extra-conf. With the corrected layout, `MI_SYS_ChnInputPortGetBuf/PutBuf`
+  straight into a `NORMAL_FRMBASE` VENC input **encodes at the full sensor
+  rate** — so Maruko stab-fill uses the same manual-feed shape as Star6E; no
+  SCL bridge or FRAME_BASE bind needed.
+- Graph rewire (only when `framing == "stab-fill"`): SCL port0 → RAW +
+  unbound, drained by the fill thread; VENC created `NORMAL` (frame-base)
+  with `StartRecvPic` deferred to post-graph; no VENC ring pool. `off`/`zoom`/
+  `stab` keep the zero-copy RING leg untouched. Requires the unbound VENC
+  input port to be given `MI_SYS_SetChnInputPortFrc(USERINJECT, fps/fps)`.
+- Fill loop (in `maruko_framing_stab.c`, second registered module sharing the
+  detector/Kalman/`stab_accuracy` with `stab`): drain port0 → detect on the
+  centre patch → Kalman → compose (shift + Y=16/UV=128 borders) via
+  `MI_SYS_BufBlitPa`/`BufFillPa` (present on i6c, leading-SocId signatures) →
+  push. Measured: detect 5.2 ms + compose 3.0 ms ≈ **5.8 ms/frame thread CPU**
+  (~29% of the single A7 at 50 fps) at `stab_accuracy=low`.
+- `stab_crop_pct` is the float/border budget (max_off = enc·(100−pct)/200 per
+  side); `pause_stab` glide-home works unchanged.
+- WebUI: `stab-fill` un-gated on Maruko (reverses the #165 disable); tooltip
+  updated. `record.mode=dual` is refused under stab-fill (chn 1 is RING-fed —
+  can't mix with a frame-base chn 0 on the one H26x device).
+- The 5a probe's BufConf ABI is corrected in-tree so the archived bench now
+  reports the true answer.
+
+Reinit hardening (found by adversarial resolution/sensor-mode switch testing
+with the stab presets active — ~40 API-driven reinit switches on `.233`):
+
+- **Two-phase stab teardown (BOTH presets).** Joining the consumer thread of a
+  user-drained SCL port (fill: port0; stab: the port-2 tap) while the camera
+  still produces pins SCL/ISP working tasks, and the ISP→SCL REALTIME unbind's
+  UNBOUNDED kernel flush then wedges in uninterruptible D-state
+  (`MI_SYS_IMPL_FlushRealTimeOutputBuf`) — ending as a zombie process or a
+  hardware-watchdog reset.  Device-reproduced from stab-fill AND plain stab on
+  size/preset switches; retroactively explains the 2026-07-03 teardown hangs.
+  Now: `framing_stop` flips the thread to drain-only (no IVE/compose, pure
+  GetBuf/PutBuf) so consumption continues while the ports are disabled;
+  teardown joins + sweeps the residue afterwards (`finish_stop`).  Cut the
+  wedge incidence from ~1-in-2 (fill) to <1-in-20 across the switch barrage.
+- **Teardown watchdog (roadmap item, now shipped).** The residual SDK race is
+  GENERIC and pre-existing — control test: `framing=off` wedged on its first
+  size-change reinit, no stab code in the path (matches the 2026-07-03 hangs
+  and the factory binary wedging identically).  It cannot be closed from
+  userspace ordering, so a watchdog armed at teardown entry forces
+  `reboot(RB_AUTOBOOT)` after 12 s if teardown has not completed — a bounded,
+  logged, self-recovering ~45 s reboot instead of open-ended D-state limbo
+  (no sysrq on I6C; SIGKILL leaves an MI zombie).  Benefits every mode, not
+  just the stab presets.
+- **Live fps change under stab-fill fixed.** `maruko_apply_fps` re-bound
+  SCL→VENC RING as its fps divider — on the frame-base manual-fed VENC that
+  stalls the encoder dead (instant "no encoder data" abort, device-reproduced).
+  In fill mode the divider is now the VENC input port's USERINJECT FRC
+  (src:dst), applied live with no graph change.
+
 ## [0.36.0] - 2026-07-09
 
 Stabilization: **`video0.stab_accuracy` — a shared high/medium/low detector

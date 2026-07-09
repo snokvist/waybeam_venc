@@ -45,4 +45,27 @@ const MarukoFramingModule *maruko_framing_select(const VencConfig *vcfg);
 /* Register all compiled-in framing modules.  Called once at pipeline init. */
 void maruko_framing_register_builtins(void);
 
+/* Debug-OSD snapshot from the stab/stab-fill module: last detector measurement
+ * + Kalman correction (stab pixels), pause state, and whether the fill preset
+ * is active.  Returns 1 when a stab thread is running, else 0 (hide the row).
+ * Defined in maruko_framing_stab.c — only call under HAVE_FRAMING_STAB. */
+int maruko_framing_stab_osd_status(int *acc_x, int *acc_y,
+	int *meas_x, int *meas_y, int *paused, int *fill);
+
+/* Fill-mode live-fps divider (stab-fill): re-issues the VENC input port's
+ * USERINJECT FRC at src:dst — the frame-base equivalent of the RING bind's
+ * fps-divider rebind, which MUST NOT run in fill mode (a RING bind on the
+ * NORMAL_FRMBASE manual-fed VENC stalls it dead).  Returns 0 on success, -1
+ * when fill isn't active.  Only call under HAVE_FRAMING_STAB. */
+int maruko_framing_stab_fill_set_fps(uint32_t src_fps, uint32_t dst_fps);
+
+/* Stab/stab-fill teardown phase 2: disable the tap (stab), join the
+ * drain-only consumer thread (armed by the module's stop()), sweep the
+ * residual FIFO.  Must be called from the pipeline teardown AFTER
+ * DisablePort(0,0,0) — the drain thread is what lets SCL/ISP quiesce so the
+ * ISP→SCL REALTIME unbind flush cannot wedge (device-reproduced from BOTH
+ * presets).  Idempotent; no-op when no stab thread armed.  Only call under
+ * HAVE_FRAMING_STAB. */
+void maruko_framing_stab_finish_stop(void);
+
 #endif /* MARUKO_FRAMING_H */
