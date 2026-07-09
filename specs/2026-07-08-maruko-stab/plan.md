@@ -388,6 +388,31 @@ limitation: DIVP blits the shifted SCL frame into a black canvas surface,
 FRAMEBASE-**bind** that canvas to VENC. Its own spec (multi-day). Alternative:
 ship stab-only on Maruko and mark stab-fill i6c-deferred.
 
+### Phase 5a ADDENDUM — CONCLUSIVE via Maruko SDK source (`/home/snokvist/dev/Maruko`)
+
+The SDK verify samples settle it and **resolve the sibling-channel confounder —
+a deeper "main-channel direct-push" bench is unnecessary (it would also fail):**
+
+- **`.../maruko_impl/venc/mid_venc_impl.cpp` (H.264/H.265):** ALWAYS feeds VENC
+  via `MI_SYS_BindChnPort2` (`E_MI_SYS_BIND_TYPE_FRAME_BASE|REALTIME|HW_RING`);
+  never a direct `ChnInputPortPutBuf`. The H26x VENC input is a bind sink.
+- **`.../interface/uvc/module_uvc.cpp` (H.264/H.265, the canonical manual-feed
+  path):** injects frames into **SCL**, then binds `SCL → VENC` **frame-base**
+  with VENC in `E_MI_VENC_INPUT_MODE_NORMAL_FRMBASE`. So NORMAL_FRMBASE pairs
+  with a frame-base BIND, not a raw push to VENC.
+- **`.../venc/mid_jpeg_impl.cpp`:** direct `ChnInputPortGetBuf/PutBuf` push DOES
+  encode — but ONLY on the separate JPEG device (`MI_VENC_DEV_ID_JPEG_0`), not
+  the H26x encoder.
+- `MI_VENC_InputSourceConfig_t` is a single-field struct `{eInputSrcBufferMode}`
+  (repo's bare-enum pass was correct — not the bug).
+
+**Conclusion: the i6c H.265 VENC is bind-fed BY DESIGN; Star6E's push-to-VENC
+compose path cannot port.** The viable stab-fill mechanism is UVC-style:
+**compose the shifted+bordered frame, inject it into a processing module (SCL
+manual input, or DIVP HW compose), and FRAME_BASE-bind that module → VENC**
+(NORMAL_FRMBASE). This is proven to encode H.265 in the SDK (UVC). It is a
+distinct, larger implementation than Star6E's (own spec); OR ship stab-only.
+
 **If 5a passes — the port (mirror Star6E, reuse the stab module):**
 - 5b. Add a fill-mode branch to `maruko_framing_stab.c` (mirror `g_stab_fill_mode`),
   OR a sibling `maruko_framing_stab_fill.c` sharing the detector/Kalman. Prefer the
