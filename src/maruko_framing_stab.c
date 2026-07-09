@@ -555,13 +555,17 @@ static int fill_blit_i8_rect(StabFrame_t *dst, int dst_x, int dst_y,
 		return -1;
 	if (w <= 0 || h <= 0)
 		return 0;
-	dst_x &= ~1;
-	src_x &= ~1;
-	w &= ~1;
 	if (src_x < 0) { int d = -src_x; src_x = 0; dst_x += d; w -= d; }
 	if (src_y < 0) { int d = -src_y; src_y = 0; dst_y += d; h -= d; }
 	if (dst_x < 0) { int d = -dst_x; dst_x = 0; src_x += d; w -= d; }
 	if (dst_y < 0) { int d = -dst_y; dst_y = 0; src_y += d; h -= d; }
+	/* Even-align AFTER the negative clips — an odd clip delta must not leave
+	 * odd (SDK-rejected) coordinates.  The 1px content shift this can cost is
+	 * confined to the defensive out-of-bounds path (unreachable from the
+	 * clamped compose caller). */
+	dst_x &= ~1;
+	src_x &= ~1;
+	w &= ~1;
 	if (src_x + w > src->u16Width)
 		w = src->u16Width - src_x;
 	if (dst_x + w > dst->u16Width)
@@ -786,6 +790,11 @@ static int fill_compose_to_venc(const StabBufInfo_t *src_buf,
 			fprintf(stderr, "[maruko-stab] fill: VENC-input ChnInputPortPutBuf "
 				"ret=%d (0x%x)\n", (int)ret, (unsigned)ret);
 		}
+		/* Drop-release so a transient submit failure can't bleed the input
+		 * pool dry (a leaked handle per failure would wedge GetBuf at
+		 * NOBUF).  If the failed submit already consumed the handle, the
+		 * drop call fails harmlessly on the handle lookup. */
+		SysInPutBuf(handle, &dst_buf, 1);
 	}
 	return ret;
 
@@ -919,9 +928,17 @@ static int maruko_stab_fill_setup_ports(MarukoBackendContext *ctx,
 	}
 
 	/* Tell the scheduler the VENC input port's frame rate — an injected
-	 * (unbound) input port defaults to 0/0 FRC.  USERINJECT + BY_RATIO at
-	 * the sensor rate matches the SDK's user-inject discipline. */
-	if (SysInFrc) {
+	 * (unbound) input port defaults to 0/0 FRC, and without USERINJECT the
+	 * queued frames can park until NOBUF wedges the feed.  Hard setup error
+	 * if the symbol is missing or the call fails: a silently-wedging feed
+	 * is worse than a visible bring-up failure. */
+	if (!SysInFrc) {
+		fprintf(stderr, "[maruko-stab] fill: MI_SYS_SetChnInputPortFrc "
+			"missing — injected frames would never schedule\n");
+		g_ctx = NULL;
+		return -1;
+	}
+	{
 		StabFillFrc_t frc = {
 			.eType = STABFILL_FRC_USERINJECT,
 			.eStrategy = STABFILL_FRC_BY_RATIO,
@@ -932,6 +949,10 @@ static int maruko_stab_fill_setup_ports(MarukoBackendContext *ctx,
 		fprintf(stderr, "[maruko-stab] fill: VENC-input SetChnInputPortFrc"
 			"(USERINJECT %u/%u) ret=%d\n",
 			ctx->sensor.fps, ctx->sensor.fps, (int)ret);
+		if (ret != 0) {
+			g_ctx = NULL;
+			return -1;
+		}
 	}
 	framing_kalman_reset(&g_kalman, g_cfg_q, g_cfg_r);
 	fprintf(stderr, "[maruko-stab] fill: manual-drain mode (encode %ux%u, "
@@ -974,7 +995,8 @@ static void *maruko_stab_fill_thread_main(void *arg)
 		MI_S32 h = -1;
 		IveImage_t *prev = (cur & 1) ? &g_b : &g_a;
 		IveImage_t *curr = (cur & 1) ? &g_a : &g_b;
-		double t0, t1, t2, c0, c1;
+		double t0, t1, t2, c1;
+		int copied;
 
 		if (fd >= 0) {
 			fd_set rf; struct timeval tv = {0, 100000};
@@ -987,14 +1009,14 @@ static void *maruko_stab_fill_thread_main(void *arg)
 			continue;
 		}
 
-		c0 = now_ms();   /* wall; CPU tracked via thread clock below */
 		{
 			struct timespec cts;
 			clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts);
 			c1 = cts.tv_sec * 1000.0 + cts.tv_nsec / 1e6;
 		}
 		t0 = now_ms();
-		if (fill_copy_y_to_ive(curr, &buf) == 0 && have_prev) {
+		copied = fill_copy_y_to_ive(curr, &buf) == 0;
+		if (copied && have_prev) {
 			MI_S32 r = IveShift(g_ive_handle, prev, curr, &g_dx, &g_dy,
 				&ctrl, 1);
 			if (r == 0) {
@@ -1022,8 +1044,13 @@ static void *maruko_stab_fill_thread_main(void *arg)
 		t2 = now_ms();
 
 		SysPutBuf(h);
-		have_prev = 1;
-		cur++;
+		/* Only advance the ping-pong on a successful copy — else the next
+		 * detect would correlate against a stale/uninitialized prev image
+		 * and inject a bogus shift sample into the Kalman. */
+		if (copied) {
+			have_prev = 1;
+			cur++;
+		}
 
 		det_ms += (t1 - t0);
 		comp_ms += (t2 - t1);
@@ -1032,7 +1059,6 @@ static void *maruko_stab_fill_thread_main(void *arg)
 			clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts);
 			cpu_ms += (cts.tv_sec * 1000.0 + cts.tv_nsec / 1e6) - c1;
 		}
-		(void)c0;
 		if (++frames % 250 == 0) {
 			fprintf(stderr, "[maruko-stab] fill: %d frames | detect %.1f ms "
 				"| compose %.1f ms | thread CPU %.1f ms/frame | acc=(%d,%d) "

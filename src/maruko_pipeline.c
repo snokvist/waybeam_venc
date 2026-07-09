@@ -76,12 +76,6 @@ static int g_mi_scl_chn_created = 0;
  * snapshot backend.  Configured + enabled in configure_maruko_scl, bound
  * to MJPG VENC dev 8 by venc_jpeg_backend_init (src/maruko_jpeg.c). */
 static int g_mi_scl_port1_enabled = 0;
-/* Phase F0a stab-fill bench: chn-0 VENC attr stashed at CreateChn time so the
- * post-bind F0a hook can reuse it as the bridge channel's encode config (the
- * hook runs after the SCL device exists, unlike the mid-bringup 5a probe). */
-static i6c_venc_chn g_f0a_chn0_attr;
-static int g_f0a_chn0_attr_valid = 0;
-
 /* stab-fill graph mode (cfg.framing == "stab-fill", latched per bring-up in
  * maruko_pipeline_configure_graph).  stab-fill swaps the SCL→VENC leg: SCL(0,0)
  * port0 becomes RAW + UNBOUND (drained by the fill module), and the VENC is
@@ -1728,23 +1722,29 @@ int maruko_pipeline_framing_setup(MarukoBackendContext *ctx,
 	if (!ctx || !vcfg)
 		return 0;
 	m = maruko_framing_select(vcfg);
+	/* In stab-fill the framing module is the frame-base VENC's ONLY producer
+	 * — the graph was built with port0 unbound and no RING leg, so degrading
+	 * to "off" here would ship a healthy-looking daemon that streams nothing,
+	 * forever.  Any fill bring-up failure is therefore FATAL (the daemon
+	 * exits visibly; a config fix or respawn retries).  Other presets keep
+	 * the graceful degrade: the RING leg is intact without them. */
 	if (!m)
-		return 0;
+		return g_stab_fill_graph ? -1 : 0;
 	if (m->prepare)
 		(void)m->prepare(vcfg, ctx->scl_crop_w, ctx->scl_crop_h, &ew, &eh);
 	if (m->setup_ports &&
 	    m->setup_ports(ctx, ctx->sensor.fps, ctx->sensor.fps) != 0) {
 		fprintf(stderr,
-			"> [maruko] framing '%s' setup_ports failed — off\n",
-			m->preset_name);
-		return 0;
+			"> [maruko] framing '%s' setup_ports failed — %s\n",
+			m->preset_name, g_stab_fill_graph ? "FATAL" : "off");
+		return g_stab_fill_graph ? -1 : 0;
 	}
 	if (m->start && m->start() != 0) {
-		fprintf(stderr, "> [maruko] framing '%s' start failed — off\n",
-			m->preset_name);
+		fprintf(stderr, "> [maruko] framing '%s' start failed — %s\n",
+			m->preset_name, g_stab_fill_graph ? "FATAL" : "off");
 		if (m->stop)
 			m->stop();
-		return 0;
+		return g_stab_fill_graph ? -1 : 0;
 	}
 	g_maruko_framing = m;
 	printf("> [maruko] framing '%s' active\n", m->preset_name);
@@ -2034,8 +2034,8 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 
 	/* Ring pool MUST be configured before CreateChannel (matching
 	 * majestic i6c_hal.c order: pool → CreateChn → SetSource → Start).
-	 * stab-fill skips it: the ring is the RING-DMA input backing store and
-	 * the frame-base bind allocates its own handshake buffers. */
+	 * stab-fill skips it: the ring is the RING-DMA input backing store; the
+	 * NORMAL_FRMBASE input allocates its own ~3-buffer handshake pool. */
 	if (!g_stab_fill_graph) {
 		MI_U16 venc_ring = (MI_U16)height;
 		if (venc_ring == 0)
@@ -2069,12 +2069,6 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 
 	fill_maruko_rc_attr(&attr, cfg, gop, bit_rate_bits, framerate);
 
-	/* Stash for the Phase F0a stab-fill bench (env-gated hook, post-bind). */
-	if (getenv("MARUKO_STABFILL_F0A")) {
-		g_f0a_chn0_attr = attr;
-		g_f0a_chn0_attr_valid = 1;
-	}
-
 	*chn = 0;
 	ret = maruko_mi_venc_create_chn(venc_dev, *chn, &attr);
 	if (ret != 0) {
@@ -2087,9 +2081,10 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 		return ret;
 	}
 
-	/* stab-fill: NORMAL (frame-base) input — required for the FRAME_BASE
-	 * bind from the compose bridge (UVC-proven; NORMAL == NORMAL_FRMBASE=0).
-	 * Everything else: RING_DMA fed by the zero-copy SCL ring. */
+	/* stab-fill: NORMAL (frame-base) input — required for the manual
+	 * ChnInputPortGetBuf/PutBuf feed (NORMAL == E_MI_VENC_INPUT_MODE_
+	 * NORMAL_FRMBASE = 0).  Everything else: RING_DMA fed by the zero-copy
+	 * SCL ring. */
 	i6c_venc_src_conf input_mode = g_stab_fill_graph ?
 		I6C_VENC_SRC_CONF_NORMAL : I6C_VENC_SRC_CONF_RING_DMA;
 	ret = maruko_mi_venc_set_input_source(venc_dev, *chn, &input_mode);
@@ -2105,8 +2100,8 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	(void)maruko_apply_ref_pred(venc_dev, *chn, cfg);
 
 	/* stab-fill: StartRecvPic (+ IntraRefresh, which must follow it) is
-	 * deferred to bind_maruko_pipeline AFTER the FRAME_BASE bind — the UVC
-	 * reference orders Create → SetInputSourceConfig → Bind → StartRecvPic. */
+	 * deferred to maruko_setup_stabfill_venc — after the rest of the graph
+	 * is assembled, before the fill module's first push. */
 	if (g_stab_fill_graph)
 		return 0;
 
@@ -3513,14 +3508,6 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 			ctx->cfg.record.server);
 	}
 
-	/* Phase F0a stab-fill bench: stand up a 2nd SCL channel + frame-base-bound
-	 * VENC bridge and confirm SCL-inject → VENC encodes (the module-bind path
-	 * Phase 5a's finding requires).  Runs once after the full pipeline is up so
-	 * the SCL device exists; env-gated; cleans up its own bridge. */
-	if (getenv("MARUKO_STABFILL_F0A") && g_f0a_chn0_attr_valid)
-		maruko_stabfill_f0a_run(ctx->venc_device, &g_f0a_chn0_attr,
-			ctx->cfg.image_width, ctx->cfg.image_height);
-
 	/* Phase 6: open recorder for "mirror" (chn 0 → file) and "dual"
 	 * (chn 1 → file) modes.  Must run AFTER start_dual so that, in
 	 * dual mode, the drain thread sees the recorder fd >= 0 by the
@@ -3532,7 +3519,11 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	 * same disk-space / rotation / sync_file_range plumbing. */
 	if (ctx->cfg.record.enabled && ctx->cfg.record.dir[0] &&
 	    (strcmp(ctx->cfg.record.mode, "mirror") == 0 ||
-	     strcmp(ctx->cfg.record.mode, "dual") == 0)) {
+	     /* dual is refused under stab-fill (see the start_dual guard) —
+	      * don't open a file its absent chn-1 drain thread would never
+	      * feed.  mirror (chn 0 → file) works fine under stab-fill. */
+	     (strcmp(ctx->cfg.record.mode, "dual") == 0 &&
+	      !g_stab_fill_graph))) {
 		if (strcmp(ctx->cfg.record.format, "hevc") == 0) {
 			if (star6e_recorder_start(&ctx->recorder,
 			    ctx->cfg.record.dir) == 0) {
