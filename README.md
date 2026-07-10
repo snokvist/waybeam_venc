@@ -1254,8 +1254,21 @@ optionally — when Star6E adaptive encoder control is active — per-frame
 size, QP, complexity, scene-change flag, IDR decision, and
 frames-since-IDR.
 
-See `include/rtp_sidecar.h` and `tools/rtp_timing_probe.c` for the
-full wire protocol and reference probe.
+The sender supports up to 4 concurrent subscribers (keyed by
+addr:port, per-slot 5 s TTL) so a vehicle-local hub consumer, the wfb
+link_controller and a debug probe can coexist on one port.
+
+With `attitude.enabled=true` (requires `imu.enabled`, Star6E only) each
+FRAME also carries a 12-byte ATTITUDE trailer — roll/pitch/yaw from an
+on-device complementary filter, int16 0.1° units — consumed by the
+vehicle hub for the HUD artificial horizon. Mounting is corrected via
+`attitude.mountDeg` (0/90/180/270) and `attitude.invertRoll`/
+`attitude.invertPitch`.
+
+See `include/rtp_sidecar.h`, the canonical cross-repo spec
+`protocols/rtp-sidecar.md` (waybeam-coordination), and
+`tools/rtp_timing_probe.c` for the full wire protocol and reference
+probe.
 
 ## Sensor Driver Sources
 

@@ -1,5 +1,28 @@
 # History
 
+## [0.39.0] - 2026-07-10
+
+RTP sidecar: multi-subscriber sender + ATTITUDE trailer (cross-repo spec
+`protocols/rtp-sidecar.md`, multi-telemetry HUD group 6).
+
+- **Multi-subscriber sidecar.** The sender now keeps 4 subscriber slots
+  keyed by addr:port with per-slot 5 s TTLs; MSG_FRAME fans out to every
+  live slot and SYNC_RESP goes only to the requester. Removes the
+  single-slot hijack where any MSG_SUBSCRIBE stole the feed from the
+  wfb link_controller or ground pipeline-stats consumer.
+- **ATTITUDE trailer (flag 0x08, 12 B).** Optional roll/pitch/yaw
+  (int16 0.1°) + status + imu_age_ms appended last in flag order.
+  Fed by a new complementary-filter estimator (`src/attitude_est.c`,
+  unit-tested) running on the BMI270 ring in the Star6E frame loop;
+  computed only when `attitude.enabled` AND a subscriber is live.
+  Maruko builds carry the config but never emit the trailer (its IMU
+  push path is not wired yet).
+- **New `attitude` config section** (trailing struct, ABI append-only):
+  `enabled`, `mountDeg` (0/90/180/270), `invertRoll`, `invertPitch` —
+  all MUT_RESTART, full 7-touch (defaults/parse/pretty/JSON/fields/
+  aliases/docs).
+- `tools/rtp_timing_probe` decodes and prints the ATTITUDE trailer.
+
 ## [0.38.0] - 2026-07-09
 
 Star6E sensor-driver mode quality: **fixed-framerate exposure policy + exact

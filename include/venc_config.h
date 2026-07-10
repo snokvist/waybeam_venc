@@ -261,6 +261,18 @@ typedef struct {
 	bool show_osd;
 } VencConfigDebug;
 
+/* Attitude export over the rtp_sidecar ATTITUDE trailer
+ * (protocols/rtp-sidecar.md). Requires imu.enabled; Star6E only for
+ * now (Maruko's IMU push path is not wired). Lives in its own TRAILING
+ * VencConfig member — the config ABI is append-only and VencConfigImu
+ * is not the last member. */
+typedef struct {
+	bool enabled;        /* emit the sidecar attitude trailer          */
+	int  mount_deg;      /* sensor yaw vs camera: 0/90/180/270         */
+	bool invert_roll;    /* flip sign after mount rotation             */
+	bool invert_pitch;
+} VencConfigAttitude;
+
 typedef struct {
 	bool enabled;       /* false → snapshot subsystem skipped entirely */
 	uint32_t quality;   /* 1..100 MJPEG q-factor; clamped (0 → default 80) */
@@ -285,6 +297,7 @@ typedef struct {
 	VencConfigRecord record;
 	VencConfigSnapshot snapshot;
 	VencConfigDebug debug;
+	VencConfigAttitude attitude;  /* trailing — ABI append-only */
 } VencConfig;
 
 typedef enum {

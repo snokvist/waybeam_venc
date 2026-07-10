@@ -1,9 +1,12 @@
 #include "star6e_runtime.h"
 
+#include "attitude_est.h"
 #include "audio_codec.h"
 #include "debug_osd.h"
 #include "idr_rate_limit.h"
 #include "imu_bmi270.h"
+#include "imu_ring.h"
+#include "star6e_framing_host.h"
 #include "pipeline_common.h"
 #include "scene_detector.h"
 #include "sdk_quiet.h"
@@ -68,6 +71,92 @@ static void idle_wait(RtpSidecarSender *sc, int timeout_ms)
 static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_signal_count = 0;
 static struct timespec g_imu_verbose_last = {0};
+
+/* ── Attitude export (sidecar ATTITUDE trailer) ───────────────────────────
+ *
+ * The frame loop has just called imu_drain(), so the pipeline's IMU ring
+ * holds everything up to "now". Feed the new samples into the
+ * complementary filter and snapshot the attitude for this frame's sidecar
+ * trailer. File-scope state is fine here: the Star6E respawn path is a
+ * full re-exec (fresh process), and only the frame thread touches it. */
+static AttitudeEst g_att_est;
+static int g_att_inited;
+static struct timespec g_att_cursor;   /* last consumed sample timestamp */
+
+static int16_t att_clamp16(int v)
+{
+	if (v > 32767) return 32767;
+	if (v < -32768) return -32768;
+	return (int16_t)v;
+}
+
+static const RtpSidecarAttitudeInfo *attitude_frame_update(
+	const VencConfig *vcfg, RtpSidecarAttitudeInfo *out)
+{
+	ImuRing *ring = star6e_pipeline_imu_ring();
+	struct timespec now;
+
+	if (!ring)
+		return NULL;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (!g_att_inited) {
+		attitude_est_init(&g_att_est, 0.0f);
+		g_att_cursor = now;
+		g_att_inited = 1;
+	}
+
+	ImuRingSample s[256];
+	uint32_t n = imu_ring_read_range(ring, g_att_cursor, now, s, 256);
+	for (uint32_t i = 0; i < n; i++) {
+		uint64_t ts_us = (uint64_t)s[i].ts.tv_sec * 1000000ULL +
+		                 (uint64_t)s[i].ts.tv_nsec / 1000ULL;
+		attitude_est_update(&g_att_est,
+			s[i].gyro_x, s[i].gyro_y, s[i].gyro_z,
+			s[i].accel_x, s[i].accel_y, s[i].accel_z, ts_us);
+	}
+	if (n > 0) {
+		/* Advance past the newest consumed sample; read_range is
+		 * inclusive and attitude_est_update drops dt<=0 duplicates,
+		 * so a 1 ns bump avoids re-feeding the boundary sample. */
+		g_att_cursor = s[n - 1].ts;
+		g_att_cursor.tv_nsec++;
+		if (g_att_cursor.tv_nsec >= 1000000000L) {
+			g_att_cursor.tv_nsec = 0;
+			g_att_cursor.tv_sec++;
+		}
+	}
+
+	if (!g_att_est.have_init)
+		return NULL;   /* no gravity reference yet — no trailer */
+
+	int roll = attitude_est_roll_cdeg(&g_att_est);
+	int pitch = attitude_est_pitch_cdeg(&g_att_est);
+	int yaw = attitude_est_yaw_cdeg(&g_att_est);
+
+	/* Mount rotation about the camera axis, then sign trims. */
+	switch (vcfg->attitude.mount_deg) {
+	case 90:  { int t = roll; roll = pitch; pitch = -t; } break;
+	case 180: roll = -roll; pitch = -pitch; break;
+	case 270: { int t = roll; roll = -pitch; pitch = t; } break;
+	default: break;
+	}
+	if (vcfg->attitude.invert_roll)  roll = -roll;
+	if (vcfg->attitude.invert_pitch) pitch = -pitch;
+
+	long age_ms = (now.tv_sec - g_att_cursor.tv_sec) * 1000L +
+	              (now.tv_nsec - g_att_cursor.tv_nsec) / 1000000L;
+	if (age_ms < 0) age_ms = 0;
+	if (age_ms > 65535) age_ms = 65535;
+
+	out->roll_cdeg  = att_clamp16(roll);
+	out->pitch_cdeg = att_clamp16(pitch);
+	out->yaw_cdeg   = att_clamp16(yaw);
+	out->status     = RTP_SIDECAR_ATT_VALID |
+	                  (attitude_est_settled(&g_att_est)
+	                   ? RTP_SIDECAR_ATT_SETTLED : 0);
+	out->imu_age_ms = (uint16_t)age_ms;
+	return out;
+}
 
 /* ── Scene-detector stream decoders ───────────────────────────────────── */
 
@@ -505,7 +594,8 @@ static void *dual_rec_thread_fn(void *arg)
 					 * post-encode skip is the wrong adaptation
 					 * knob for inter-frame-coded video. */
 					(void)star6e_video_send_frame(&d->video,
-						&d->output, &stream, 1, 0, NULL);
+						&d->output, &stream, 1, 0, NULL,
+						NULL);
 				} else if (d->ts_recorder) {
 					star6e_ts_recorder_write_stream(
 						d->ts_recorder, &stream);
@@ -855,8 +945,20 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * break the H.265 reference chain (see HISTORY 0.9.2). */
 		if (rtp_sidecar_is_subscribed(&ps->video.sidecar))
 			star6e_output_observe_pressure(&ps->output);
+
+		/* Attitude trailer: only when configured AND someone is
+		 * listening — the filter costs a few µs/frame but the ring
+		 * read takes the IMU ring mutex, so skip it entirely when
+		 * disabled or unsubscribed. */
+		RtpSidecarAttitudeInfo att_info;
+		const RtpSidecarAttitudeInfo *att_ptr = NULL;
+		if (vcfg->attitude.enabled && ps->imu &&
+		    rtp_sidecar_is_subscribed(&ps->video.sidecar))
+			att_ptr = attitude_frame_update(vcfg, &att_info);
+
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,
-			ps->output_enabled, vcfg->system.verbose, &enc_info);
+			ps->output_enabled, vcfg->system.verbose, &enc_info,
+			att_ptr);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up

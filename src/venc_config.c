@@ -214,6 +214,12 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* debug */
 	cfg->debug.show_osd = false;
+
+	/* attitude (sidecar trailer export; requires imu.enabled) */
+	cfg->attitude.enabled      = false;
+	cfg->attitude.mount_deg    = 0;
+	cfg->attitude.invert_roll  = false;
+	cfg->attitude.invert_pitch = false;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -813,6 +819,20 @@ int venc_config_load(const char *path, VencConfig *cfg)
 			cfg->debug.show_osd = json_get_bool(obj, "showOsd",
 				cfg->debug.show_osd);
 	}
+	{
+		const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root,
+			"attitude");
+		if (obj) {
+			cfg->attitude.enabled = json_get_bool(obj, "enabled",
+				cfg->attitude.enabled);
+			cfg->attitude.mount_deg = json_get_int(obj, "mountDeg",
+				cfg->attitude.mount_deg);
+			cfg->attitude.invert_roll = json_get_bool(obj,
+				"invertRoll", cfg->attitude.invert_roll);
+			cfg->attitude.invert_pitch = json_get_bool(obj,
+				"invertPitch", cfg->attitude.invert_pitch);
+		}
+	}
 
 	cJSON_Delete(root);
 
@@ -1308,6 +1328,16 @@ static void render_debug(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_close(p, 1, is_last);
 }
 
+static void render_attitude(PrettyBuf *p, const VencConfig *cfg, int is_last)
+{
+	pp_section_open(p, 1, "attitude");
+	pp_field_bool(p, 2, "enabled",     cfg->attitude.enabled,      0);
+	pp_field_int(p,  2, "mountDeg",    cfg->attitude.mount_deg,    0);
+	pp_field_bool(p, 2, "invertRoll",  cfg->attitude.invert_roll,  0);
+	pp_field_bool(p, 2, "invertPitch", cfg->attitude.invert_pitch, 1);
+	pp_section_close(p, 1, is_last);
+}
+
 /* Top-level: build the canonical pretty layout into a malloc'd string.
  * Caller must free.  Returns NULL on allocation failure. */
 static char *config_render_pretty(const VencConfig *cfg)
@@ -1328,7 +1358,8 @@ static char *config_render_pretty(const VencConfig *cfg)
 	render_imu(&p,      cfg, 0);
 	render_record(&p,   cfg, 0);
 	render_snapshot(&p, cfg, 0);
-	render_debug(&p,    cfg, 1);
+	render_debug(&p,    cfg, 0);
+	render_attitude(&p, cfg, 1);
 	pp_str(&p, "}");
 
 	if (p.oom) {
@@ -1499,6 +1530,18 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *dbg = cJSON_AddObjectToObject(root, "debug");
 	if (dbg)
 		cJSON_AddBoolToObject(dbg, "showOsd", cfg->debug.show_osd);
+
+	/* attitude */
+	cJSON *att = cJSON_AddObjectToObject(root, "attitude");
+	if (att) {
+		cJSON_AddBoolToObject(att, "enabled", cfg->attitude.enabled);
+		cJSON_AddNumberToObject(att, "mountDeg",
+			cfg->attitude.mount_deg);
+		cJSON_AddBoolToObject(att, "invertRoll",
+			cfg->attitude.invert_roll);
+		cJSON_AddBoolToObject(att, "invertPitch",
+			cfg->attitude.invert_pitch);
+	}
 
 	return root;
 }

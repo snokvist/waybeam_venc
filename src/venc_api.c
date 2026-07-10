@@ -492,6 +492,13 @@ static const FieldDesc g_fields[] = {
 	 * row; it isn't in /api/v1/config). */
 	FIELD_UI(video0, pause_stab,       FT_BOOL,   MUT_LIVE, &ui_pause_stab),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
+	/* Attitude export over the rtp_sidecar trailer (requires imu.enabled;
+	 * Star6E only). MUT_RESTART: the estimator + trailer wiring is set up
+	 * at pipeline init. */
+	FIELD(attitude, enabled,      FT_BOOL, MUT_RESTART),
+	FIELD(attitude, mount_deg,    FT_INT,  MUT_RESTART),
+	FIELD(attitude, invert_roll,  FT_BOOL, MUT_RESTART),
+	FIELD(attitude, invert_pitch, FT_BOOL, MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -556,6 +563,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "discovery.serviceType", "discovery.service_type" },
 	{ "discovery.bareAlias", "discovery.bare_alias" },
 	{ "debug.showOsd", "debug.show_osd" },
+	{ "attitude.mountDeg", "attitude.mount_deg" },
+	{ "attitude.invertRoll", "attitude.invert_roll" },
+	{ "attitude.invertPitch", "attitude.invert_pitch" },
 };
 
 static const char *canonicalize_field_key(const char *key)
