@@ -665,6 +665,14 @@ const TOOLTIPS = {
 'imu.gyroRangeDps':'Gyroscope full-scale range in degrees/sec. Default: 1000. Requires restart',
 'imu.calFile':'Path to IMU calibration file. Default: /etc/imu.cal. Requires restart',
 'imu.calSamples':'Number of samples for gyro bias calibration at startup. Default: 400. Requires restart',
+'attitude.enabled':'Emit roll/pitch/yaw in the RTP sidecar ATTITUDE trailer (needs imu.enabled; Star6E only). Requires restart',
+'attitude.axisFwd':'Sensor axis pointing out of the lens: +x, -x, +y, -y, +z, -z. Calibrate: point the lens straight down — the axis gravity lands on is axisFwd. Default: +x. Requires restart',
+'attitude.axisDown':'Sensor axis pointing down when the camera is level. Calibrate: hold the camera level — the axis gravity lands on is axisDown. Must differ from axisFwd. Default: +z. Requires restart',
+'attitude.trimRollDeg':'Boresight trim: the ROLL the estimator reads while the camera is held level (after axisFwd/axisDown are set). Corrects a board tilted inside the housing. Default: 0. Requires restart',
+'attitude.trimPitchDeg':'Boresight trim: the PITCH the estimator reads while the camera is held level. E.g. reads +20.4 when level → set 20.4. Default: 0. Requires restart',
+'attitude.mountDeg':'Legacy output-side rotation about the camera axis (0/90/180/270). Prefer axisFwd/axisDown; leave 0 after axis calibration. Requires restart',
+'attitude.invertRoll':'Flip roll sign after mount rotation (use if the AHI tilts the wrong way). Requires restart',
+'attitude.invertPitch':'Flip pitch sign after mount rotation. Requires restart',
 'record.enabled':'Enable recording on startup. Requires restart',
 'record.dir':'Recording output directory. Default: /tmp. Requires restart',
 'record.format':'Recording container format: ts (MPEG-TS) or hevc (raw). Default: ts. Requires restart',
@@ -721,6 +729,7 @@ const SECTIONS = [
 {id:'audio',title:'Audio',keys:['audio.enabled','audio.codec','audio.sampleRate','audio.channels','audio.volume','audio.mute']},
 {id:'fpv',title:'FPV',keys:['fpv.roiEnabled','fpv.roiQp','fpv.roiSteps','fpv.roiCenter','fpv.noiseLevel']},
 {id:'imu',title:'IMU',keys:['imu.enabled','imu.i2cDevice','imu.i2cAddr','imu.sampleRateHz','imu.gyroRangeDps','imu.calFile','imu.calSamples']},
+{id:'attitude',title:'Attitude',keys:['attitude.enabled','attitude.axisFwd','attitude.axisDown','attitude.trimRollDeg','attitude.trimPitchDeg','attitude.mountDeg','attitude.invertRoll','attitude.invertPitch']},
 {id:'record',title:'Recording',keys:['record.enabled','record.mode','record.format','record.dir','record.maxSeconds','record.maxMB','record.bitrate','record.fps','record.gopSize','record.server']}
 ];
 
