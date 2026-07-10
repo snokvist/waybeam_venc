@@ -107,6 +107,8 @@
     "invertRoll": false,
     "invertPitch": false,
     "axisFwd": "+x",
-    "axisDown": "+z"
+    "axisDown": "+z",
+    "trimRollDeg": 0.0,
+    "trimPitchDeg": 0.0
   }
 }

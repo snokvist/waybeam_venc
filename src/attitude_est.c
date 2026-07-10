@@ -137,41 +137,64 @@ static void axis_cross(const float a[3], const float b[3], float out[3])
 	out[2] = a[0] * b[1] - a[1] * b[0];
 }
 
-static void axis_row(AttitudeAxisMap *m, int row, const float v[3])
+/* out = a · b (3x3) */
+static void mat_mul(const float a[3][3], const float b[3][3],
+	float out[3][3])
 {
-	for (int i = 0; i < 3; i++) {
-		if (v[i] != 0.0f) {
-			m->idx[row] = i;
-			m->sgn[row] = v[i];
-			return;
-		}
-	}
-	m->idx[row] = row;   /* unreachable for valid signed unit axes */
-	m->sgn[row] = 1.0f;
+	for (int i = 0; i < 3; i++)
+		for (int j = 0; j < 3; j++)
+			out[i][j] = a[i][0] * b[0][j] +
+			            a[i][1] * b[1][j] +
+			            a[i][2] * b[2][j];
 }
 
 int attitude_axis_map_init(AttitudeAxisMap *m,
-	const char *fwd, const char *down)
+	const char *fwd, const char *down,
+	float trim_roll_deg, float trim_pitch_deg)
 {
 	float f[3], d[3], r[3];
+	float perm[3][3];
+	int ret = 0;
 
-	/* Identity: camera fwd/right/down = sensor x/y/z. */
-	m->idx[0] = 0; m->idx[1] = 1; m->idx[2] = 2;
-	m->sgn[0] = m->sgn[1] = m->sgn[2] = 1.0f;
-
-	if (axis_parse(fwd, f) != 0 || axis_parse(down, d) != 0)
-		return -1;
-	{
+	/* Permutation: camera fwd/right/down rows = sensor-frame axes. */
+	if (axis_parse(fwd, f) != 0 || axis_parse(down, d) != 0) {
+		ret = -1;
+	} else {
 		int fi = f[0] != 0.0f ? 0 : (f[1] != 0.0f ? 1 : 2);
 		int di = d[0] != 0.0f ? 0 : (d[1] != 0.0f ? 1 : 2);
 		if (fi == di)
-			return -1;   /* parallel / anti-parallel */
+			ret = -1;   /* parallel / anti-parallel */
+	}
+	if (ret != 0) {
+		f[0] = 1.0f; f[1] = 0.0f; f[2] = 0.0f;   /* identity */
+		d[0] = 0.0f; d[1] = 0.0f; d[2] = 1.0f;
 	}
 	axis_cross(d, f, r);   /* right = down × fwd (right-handed) */
-	axis_row(m, 0, f);
-	axis_row(m, 1, r);
-	axis_row(m, 2, d);
-	return 0;
+	for (int j = 0; j < 3; j++) {
+		perm[0][j] = f[j];
+		perm[1][j] = r[j];
+		perm[2][j] = d[j];
+	}
+
+	/* Boresight trim: undo the level-pose reading (roll_r, pitch_r).
+	 * Gravity in a (roll,pitch)-tilted frame is R_x(-roll)·R_y(-pitch)
+	 * ·(0,0,1), so R_y(pitch)·R_x(roll) restores it to +down. */
+	{
+		float cr = cosf(trim_roll_deg  * (float)M_PI / 180.0f);
+		float sr = sinf(trim_roll_deg  * (float)M_PI / 180.0f);
+		float cp = cosf(trim_pitch_deg * (float)M_PI / 180.0f);
+		float sp = sinf(trim_pitch_deg * (float)M_PI / 180.0f);
+		float rx[3][3] = { { 1, 0,   0 },
+		                   { 0, cr, -sr },
+		                   { 0, sr,  cr } };
+		float ry[3][3] = { {  cp, 0, sp },
+		                   {   0, 1,  0 },
+		                   { -sp, 0, cp } };
+		float corr[3][3];
+		mat_mul(ry, rx, corr);
+		mat_mul(corr, perm, m->r);
+	}
+	return ret;
 }
 
 void attitude_axis_map_apply(const AttitudeAxisMap *m,
@@ -180,5 +203,7 @@ void attitude_axis_map_apply(const AttitudeAxisMap *m,
 	float in[3] = { in_x, in_y, in_z };
 
 	for (int i = 0; i < 3; i++)
-		out[i] = m->sgn[i] * in[m->idx[i]];
+		out[i] = m->r[i][0] * in[0] +
+		         m->r[i][1] * in[1] +
+		         m->r[i][2] * in[2];
 }

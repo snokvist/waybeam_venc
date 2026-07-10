@@ -104,7 +104,9 @@ static const RtpSidecarAttitudeInfo *attitude_frame_update(
 		attitude_est_init(&g_att_est, 0.0f);
 		if (attitude_axis_map_init(&g_att_map,
 		                           vcfg->attitude.axis_fwd,
-		                           vcfg->attitude.axis_down) != 0)
+		                           vcfg->attitude.axis_down,
+		                           vcfg->attitude.trim_roll_deg,
+		                           vcfg->attitude.trim_pitch_deg) != 0)
 			fprintf(stderr, "attitude: invalid axisFwd/axisDown "
 			        "(\"%s\"/\"%s\") — using identity\n",
 			        vcfg->attitude.axis_fwd,

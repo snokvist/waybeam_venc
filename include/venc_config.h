@@ -273,6 +273,8 @@ typedef struct {
 	bool invert_pitch;
 	char axis_fwd[4];    /* sensor axis out of the lens: "+x".."-z"    */
 	char axis_down[4];   /* sensor axis pointing down when level       */
+	float trim_roll_deg;  /* roll/pitch the estimator reads while the  */
+	float trim_pitch_deg; /* camera is held level — undone input-side  */
 } VencConfigAttitude;
 
 typedef struct {

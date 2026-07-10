@@ -148,7 +148,7 @@ int test_attitude_est(void)
 		AttitudeAxisMap m;
 		float out[3];
 		CHECK("axmap_identity_init",
-		      attitude_axis_map_init(&m, "+x", "+z") == 0);
+		      attitude_axis_map_init(&m, "+x", "+z", 0, 0) == 0);
 		attitude_axis_map_apply(&m, 1.0f, 2.0f, 3.0f, out);
 		CHECK("axmap_identity_apply",
 		      out[0] == 1.0f && out[1] == 2.0f && out[2] == 3.0f);
@@ -160,7 +160,7 @@ int test_attitude_est(void)
 		AttitudeAxisMap m;
 		float out[3];
 		CHECK("axmap_perm_init",
-		      attitude_axis_map_init(&m, "-y", "+x") == 0);
+		      attitude_axis_map_init(&m, "-y", "+x", 0, 0) == 0);
 		attitude_axis_map_apply(&m, 1.0f, 2.0f, 3.0f, out);
 		CHECK("axmap_perm_apply",
 		      out[0] == -2.0f && out[1] == -3.0f && out[2] == 1.0f);
@@ -172,7 +172,7 @@ int test_attitude_est(void)
 		AttitudeAxisMap m;
 		float out[3];
 		CHECK("axmap_xup_init",
-		      attitude_axis_map_init(&m, "+z", "-x") == 0);
+		      attitude_axis_map_init(&m, "+z", "-x", 0, 0) == 0);
 		attitude_axis_map_apply(&m, -G, 0.0f, 0.0f, out);
 		CHECK("axmap_xup_level",
 		      out[0] == 0.0f && out[1] == 0.0f && out[2] == G);
@@ -197,15 +197,45 @@ int test_attitude_est(void)
 		AttitudeAxisMap m;
 		float out[3];
 		CHECK("axmap_bad_parse",
-		      attitude_axis_map_init(&m, "x", "+z") == -1);
+		      attitude_axis_map_init(&m, "x", "+z", 0, 0) == -1);
 		CHECK("axmap_bad_axis",
-		      attitude_axis_map_init(&m, "+w", "+z") == -1);
-		CHECK("axmap_null", attitude_axis_map_init(&m, NULL, "+z") == -1);
+		      attitude_axis_map_init(&m, "+w", "+z", 0, 0) == -1);
+		CHECK("axmap_null", attitude_axis_map_init(&m, NULL, "+z", 0, 0) == -1);
 		CHECK("axmap_parallel",
-		      attitude_axis_map_init(&m, "+x", "-x") == -1);
+		      attitude_axis_map_init(&m, "+x", "-x", 0, 0) == -1);
 		attitude_axis_map_apply(&m, 4.0f, 5.0f, 6.0f, out);
 		CHECK("axmap_reject_keeps_identity",
 		      out[0] == 4.0f && out[1] == 5.0f && out[2] == 6.0f);
+	}
+
+	/* 12: boresight trim — a board tilted 20° nose-up inside an x-up
+	 * housing (the .201 case) reads level with axisDown=-x, axisFwd=+z,
+	 * trimPitchDeg=20 (the pitch it showed while held level). */
+	{
+		AttitudeAxisMap m;
+		float out[3];
+		float c20 = cosf(20.0f * (float)M_PI / 180.0f);
+		float s20 = sinf(20.0f * (float)M_PI / 180.0f);
+		CHECK("axmap_trim_init",
+		      attitude_axis_map_init(&m, "+z", "-x", 0, 20.0f) == 0);
+		attitude_axis_map_apply(&m, -G * c20, 0.0f, -G * s20, out);
+		CHECK("axmap_trim_pitch_level",
+		      fabsf(out[0]) < 1e-3f && fabsf(out[1]) < 1e-3f &&
+		      fabsf(out[2] - G) < 1e-3f);
+	}
+
+	/* 13: roll trim on an identity mount */
+	{
+		AttitudeAxisMap m;
+		float out[3];
+		float c10 = cosf(10.0f * (float)M_PI / 180.0f);
+		float s10 = sinf(10.0f * (float)M_PI / 180.0f);
+		CHECK("axmap_trim_roll_init",
+		      attitude_axis_map_init(&m, "+x", "+z", 10.0f, 0) == 0);
+		attitude_axis_map_apply(&m, 0.0f, G * s10, G * c10, out);
+		CHECK("axmap_trim_roll_level",
+		      fabsf(out[0]) < 1e-3f && fabsf(out[1]) < 1e-3f &&
+		      fabsf(out[2] - G) < 1e-3f);
 	}
 
 	return failures;

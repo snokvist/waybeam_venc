@@ -51,22 +51,31 @@ void attitude_est_update(AttitudeEst *e,
 int attitude_est_settled(const AttitudeEst *e);
 
 /*
- * Sensor→camera axis remap (signed permutation), applied to gyro and
- * accel vectors BEFORE attitude_est_update. Configured from two axis
- * names ("+x".."-z"): fwd = the sensor axis pointing out of the lens,
- * down = the sensor axis pointing down when the camera is level; the
- * right axis is derived (right = down × fwd). This corrects a board
- * mounted in any of the 24 axis-aligned orientations; the output-side
- * attitude.mount_deg / invert trims remain for fine sign fixes only.
+ * Sensor→camera axis remap, applied to gyro and accel vectors BEFORE
+ * attitude_est_update. Two parts, composed into one 3x3 matrix:
+ *
+ *  1. Signed permutation from two axis names ("+x".."-z"): fwd = the
+ *     sensor axis pointing out of the lens, down = the sensor axis
+ *     pointing down when the camera is level; right is derived
+ *     (right = down × fwd). Covers all 24 axis-aligned mountings.
+ *  2. Fine boresight trim for a board tilted inside the housing:
+ *     trim_roll/pitch_deg = the roll/pitch the estimator READS while
+ *     the camera is held level (the "lay it flat" calibration values).
+ *     Corrected input-side as R_y(pitch)·R_x(roll) — exact, unlike an
+ *     output-side Euler subtraction which cross-couples at large tilt.
+ *
+ * The output-side attitude.mount_deg / invert trims remain for sign
+ * fixes only.
  */
 typedef struct {
-	int   idx[3];   /* camera axis i (fwd/right/down) reads sensor idx */
-	float sgn[3];
+	float r[3][3];   /* v_cam = r · v_sensor */
 } AttitudeAxisMap;
 
-/* -1 on unparseable names or non-orthogonal fwd/down (identity kept). */
+/* -1 on unparseable names or non-orthogonal fwd/down (identity kept,
+ * trims still applied). Trim angles in degrees. */
 int attitude_axis_map_init(AttitudeAxisMap *m,
-	const char *fwd, const char *down);
+	const char *fwd, const char *down,
+	float trim_roll_deg, float trim_pitch_deg);
 
 void attitude_axis_map_apply(const AttitudeAxisMap *m,
 	float in_x, float in_y, float in_z, float out[3]);

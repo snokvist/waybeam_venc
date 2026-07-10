@@ -224,6 +224,8 @@ void venc_config_defaults(VencConfig *cfg)
 		sizeof(cfg->attitude.axis_fwd), "+x");
 	safe_strcpy(cfg->attitude.axis_down,
 		sizeof(cfg->attitude.axis_down), "+z");
+	cfg->attitude.trim_roll_deg  = 0.0f;
+	cfg->attitude.trim_pitch_deg = 0.0f;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -843,6 +845,12 @@ int venc_config_load(const char *path, VencConfig *cfg)
 				sizeof(cfg->attitude.axis_down),
 				json_get_string(obj, "axisDown",
 					cfg->attitude.axis_down));
+			cfg->attitude.trim_roll_deg = (float)json_get_double(
+				obj, "trimRollDeg",
+				cfg->attitude.trim_roll_deg);
+			cfg->attitude.trim_pitch_deg = (float)json_get_double(
+				obj, "trimPitchDeg",
+				cfg->attitude.trim_pitch_deg);
 		}
 	}
 
@@ -1348,7 +1356,11 @@ static void render_attitude(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_bool(p, 2, "invertRoll",  cfg->attitude.invert_roll,  0);
 	pp_field_bool(p, 2, "invertPitch", cfg->attitude.invert_pitch, 0);
 	pp_field_string(p, 2, "axisFwd",   cfg->attitude.axis_fwd,     0);
-	pp_field_string(p, 2, "axisDown",  cfg->attitude.axis_down,    1);
+	pp_field_string(p, 2, "axisDown",  cfg->attitude.axis_down,    0);
+	pp_field_double(p, 2, "trimRollDeg",
+		cfg->attitude.trim_roll_deg,  0);
+	pp_field_double(p, 2, "trimPitchDeg",
+		cfg->attitude.trim_pitch_deg, 1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1559,6 +1571,10 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->attitude.axis_fwd);
 		cJSON_AddStringToObject(att, "axisDown",
 			cfg->attitude.axis_down);
+		cJSON_AddNumberToObject(att, "trimRollDeg",
+			cfg->attitude.trim_roll_deg);
+		cJSON_AddNumberToObject(att, "trimPitchDeg",
+			cfg->attitude.trim_pitch_deg);
 	}
 
 	return root;
