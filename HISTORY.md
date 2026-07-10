@@ -1,5 +1,17 @@
 # History
 
+## [0.39.1] - 2026-07-10
+
+- **Sensor→camera axis remap** (`attitude.axisFwd` / `attitude.axisDown`,
+  MUT_RESTART, defaults `+x`/`+z` = identity). A signed permutation
+  applied to gyro+accel BEFORE the estimator, correcting boards mounted
+  in any of the 24 axis-aligned orientations (the output-side
+  `mountDeg`/invert trims only rotate about the camera axis and cannot
+  fix a vertical board). Set from a two-pose bench calibration: axisDown
+  = the sensor axis reading "down" with the camera level, axisFwd = the
+  one reading "down" with the camera nose pointed at the floor. Invalid
+  or parallel axes log once and fall back to identity.
+
 ## [0.39.0] - 2026-07-10
 
 RTP sidecar: multi-subscriber sender + ATTITUDE trailer (cross-repo spec

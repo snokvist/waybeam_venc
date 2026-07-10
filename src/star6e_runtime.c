@@ -82,6 +82,7 @@ static struct timespec g_imu_verbose_last = {0};
 static AttitudeEst g_att_est;
 static int g_att_inited;
 static struct timespec g_att_cursor;   /* last consumed sample timestamp */
+static AttitudeAxisMap g_att_map;      /* sensor→camera signed permutation */
 
 static int16_t att_clamp16(int v)
 {
@@ -101,6 +102,13 @@ static const RtpSidecarAttitudeInfo *attitude_frame_update(
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	if (!g_att_inited) {
 		attitude_est_init(&g_att_est, 0.0f);
+		if (attitude_axis_map_init(&g_att_map,
+		                           vcfg->attitude.axis_fwd,
+		                           vcfg->attitude.axis_down) != 0)
+			fprintf(stderr, "attitude: invalid axisFwd/axisDown "
+			        "(\"%s\"/\"%s\") — using identity\n",
+			        vcfg->attitude.axis_fwd,
+			        vcfg->attitude.axis_down);
 		g_att_cursor = now;
 		g_att_inited = 1;
 	}
@@ -110,9 +118,13 @@ static const RtpSidecarAttitudeInfo *attitude_frame_update(
 	for (uint32_t i = 0; i < n; i++) {
 		uint64_t ts_us = (uint64_t)s[i].ts.tv_sec * 1000000ULL +
 		                 (uint64_t)s[i].ts.tv_nsec / 1000ULL;
+		float g[3], a[3];
+		attitude_axis_map_apply(&g_att_map,
+			s[i].gyro_x, s[i].gyro_y, s[i].gyro_z, g);
+		attitude_axis_map_apply(&g_att_map,
+			s[i].accel_x, s[i].accel_y, s[i].accel_z, a);
 		attitude_est_update(&g_att_est,
-			s[i].gyro_x, s[i].gyro_y, s[i].gyro_z,
-			s[i].accel_x, s[i].accel_y, s[i].accel_z, ts_us);
+			g[0], g[1], g[2], a[0], a[1], a[2], ts_us);
 	}
 	if (n > 0) {
 		/* Advance past the newest consumed sample; read_range is

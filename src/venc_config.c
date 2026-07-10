@@ -220,6 +220,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->attitude.mount_deg    = 0;
 	cfg->attitude.invert_roll  = false;
 	cfg->attitude.invert_pitch = false;
+	safe_strcpy(cfg->attitude.axis_fwd,
+		sizeof(cfg->attitude.axis_fwd), "+x");
+	safe_strcpy(cfg->attitude.axis_down,
+		sizeof(cfg->attitude.axis_down), "+z");
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -831,6 +835,14 @@ int venc_config_load(const char *path, VencConfig *cfg)
 				"invertRoll", cfg->attitude.invert_roll);
 			cfg->attitude.invert_pitch = json_get_bool(obj,
 				"invertPitch", cfg->attitude.invert_pitch);
+			safe_strcpy(cfg->attitude.axis_fwd,
+				sizeof(cfg->attitude.axis_fwd),
+				json_get_string(obj, "axisFwd",
+					cfg->attitude.axis_fwd));
+			safe_strcpy(cfg->attitude.axis_down,
+				sizeof(cfg->attitude.axis_down),
+				json_get_string(obj, "axisDown",
+					cfg->attitude.axis_down));
 		}
 	}
 
@@ -1334,7 +1346,9 @@ static void render_attitude(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_bool(p, 2, "enabled",     cfg->attitude.enabled,      0);
 	pp_field_int(p,  2, "mountDeg",    cfg->attitude.mount_deg,    0);
 	pp_field_bool(p, 2, "invertRoll",  cfg->attitude.invert_roll,  0);
-	pp_field_bool(p, 2, "invertPitch", cfg->attitude.invert_pitch, 1);
+	pp_field_bool(p, 2, "invertPitch", cfg->attitude.invert_pitch, 0);
+	pp_field_string(p, 2, "axisFwd",   cfg->attitude.axis_fwd,     0);
+	pp_field_string(p, 2, "axisDown",  cfg->attitude.axis_down,    1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1541,6 +1555,10 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 			cfg->attitude.invert_roll);
 		cJSON_AddBoolToObject(att, "invertPitch",
 			cfg->attitude.invert_pitch);
+		cJSON_AddStringToObject(att, "axisFwd",
+			cfg->attitude.axis_fwd);
+		cJSON_AddStringToObject(att, "axisDown",
+			cfg->attitude.axis_down);
 	}
 
 	return root;

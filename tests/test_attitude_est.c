@@ -143,5 +143,70 @@ int test_attitude_est(void)
 		      abs(attitude_est_roll_cdeg(&e)) < 100);
 	}
 
+	/* 8: axis map — identity passes vectors through */
+	{
+		AttitudeAxisMap m;
+		float out[3];
+		CHECK("axmap_identity_init",
+		      attitude_axis_map_init(&m, "+x", "+z") == 0);
+		attitude_axis_map_apply(&m, 1.0f, 2.0f, 3.0f, out);
+		CHECK("axmap_identity_apply",
+		      out[0] == 1.0f && out[1] == 2.0f && out[2] == 3.0f);
+	}
+
+	/* 9: axis map — signed permutation (fwd=-y, down=+x →
+	 * right = down×fwd = -z) */
+	{
+		AttitudeAxisMap m;
+		float out[3];
+		CHECK("axmap_perm_init",
+		      attitude_axis_map_init(&m, "-y", "+x") == 0);
+		attitude_axis_map_apply(&m, 1.0f, 2.0f, 3.0f, out);
+		CHECK("axmap_perm_apply",
+		      out[0] == -2.0f && out[1] == -3.0f && out[2] == 1.0f);
+	}
+
+	/* 10: axis map — a sensor mounted x-up (gravity along -x) reads
+	 * level once remapped with axisDown=-x */
+	{
+		AttitudeAxisMap m;
+		float out[3];
+		CHECK("axmap_xup_init",
+		      attitude_axis_map_init(&m, "+z", "-x") == 0);
+		attitude_axis_map_apply(&m, -G, 0.0f, 0.0f, out);
+		CHECK("axmap_xup_level",
+		      out[0] == 0.0f && out[1] == 0.0f && out[2] == G);
+
+		AttitudeEst e;
+		uint64_t ts = 1000000;
+		attitude_est_init(&e, 0.0f);
+		for (int i = 0; i < 300; i++) {
+			float a[3];
+			ts += DT_US;
+			attitude_axis_map_apply(&m, -G, 0.0f, 0.0f, a);
+			attitude_est_update(&e, 0.0f, 0.0f, 0.0f,
+			                    a[0], a[1], a[2], ts);
+		}
+		CHECK("axmap_xup_est_level",
+		      abs(attitude_est_roll_cdeg(&e)) < 10 &&
+		      abs(attitude_est_pitch_cdeg(&e)) < 10);
+	}
+
+	/* 11: axis map — invalid or parallel axes reject, keep identity */
+	{
+		AttitudeAxisMap m;
+		float out[3];
+		CHECK("axmap_bad_parse",
+		      attitude_axis_map_init(&m, "x", "+z") == -1);
+		CHECK("axmap_bad_axis",
+		      attitude_axis_map_init(&m, "+w", "+z") == -1);
+		CHECK("axmap_null", attitude_axis_map_init(&m, NULL, "+z") == -1);
+		CHECK("axmap_parallel",
+		      attitude_axis_map_init(&m, "+x", "-x") == -1);
+		attitude_axis_map_apply(&m, 4.0f, 5.0f, 6.0f, out);
+		CHECK("axmap_reject_keeps_identity",
+		      out[0] == 4.0f && out[1] == 5.0f && out[2] == 6.0f);
+	}
+
 	return failures;
 }

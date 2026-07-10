@@ -499,6 +499,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(attitude, mount_deg,    FT_INT,  MUT_RESTART),
 	FIELD(attitude, invert_roll,  FT_BOOL, MUT_RESTART),
 	FIELD(attitude, invert_pitch, FT_BOOL, MUT_RESTART),
+	FIELD(attitude, axis_fwd,     FT_STRING, MUT_RESTART),
+	FIELD(attitude, axis_down,    FT_STRING, MUT_RESTART),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -566,6 +568,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "attitude.mountDeg", "attitude.mount_deg" },
 	{ "attitude.invertRoll", "attitude.invert_roll" },
 	{ "attitude.invertPitch", "attitude.invert_pitch" },
+	{ "attitude.axisFwd", "attitude.axis_fwd" },
+	{ "attitude.axisDown", "attitude.axis_down" },
 };
 
 static const char *canonicalize_field_key(const char *key)

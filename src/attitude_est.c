@@ -105,3 +105,80 @@ int16_t attitude_est_yaw_cdeg(const AttitudeEst *e)
 {
 	return rad_to_cdeg(e->yaw_rad);
 }
+
+/* ── Sensor→camera axis remap ────────────────────────────────────────── */
+
+/* "+x".."-z" → signed unit axis; -1 on parse failure. */
+static int axis_parse(const char *s, float v[3])
+{
+	float sign;
+	int i;
+
+	v[0] = v[1] = v[2] = 0.0f;
+	if (!s)
+		return -1;
+	if (s[0] == '+')      sign = 1.0f;
+	else if (s[0] == '-') sign = -1.0f;
+	else return -1;
+	if (s[1] == 'x')      i = 0;
+	else if (s[1] == 'y') i = 1;
+	else if (s[1] == 'z') i = 2;
+	else return -1;
+	if (s[2] != '\0')
+		return -1;
+	v[i] = sign;
+	return 0;
+}
+
+static void axis_cross(const float a[3], const float b[3], float out[3])
+{
+	out[0] = a[1] * b[2] - a[2] * b[1];
+	out[1] = a[2] * b[0] - a[0] * b[2];
+	out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static void axis_row(AttitudeAxisMap *m, int row, const float v[3])
+{
+	for (int i = 0; i < 3; i++) {
+		if (v[i] != 0.0f) {
+			m->idx[row] = i;
+			m->sgn[row] = v[i];
+			return;
+		}
+	}
+	m->idx[row] = row;   /* unreachable for valid signed unit axes */
+	m->sgn[row] = 1.0f;
+}
+
+int attitude_axis_map_init(AttitudeAxisMap *m,
+	const char *fwd, const char *down)
+{
+	float f[3], d[3], r[3];
+
+	/* Identity: camera fwd/right/down = sensor x/y/z. */
+	m->idx[0] = 0; m->idx[1] = 1; m->idx[2] = 2;
+	m->sgn[0] = m->sgn[1] = m->sgn[2] = 1.0f;
+
+	if (axis_parse(fwd, f) != 0 || axis_parse(down, d) != 0)
+		return -1;
+	{
+		int fi = f[0] != 0.0f ? 0 : (f[1] != 0.0f ? 1 : 2);
+		int di = d[0] != 0.0f ? 0 : (d[1] != 0.0f ? 1 : 2);
+		if (fi == di)
+			return -1;   /* parallel / anti-parallel */
+	}
+	axis_cross(d, f, r);   /* right = down × fwd (right-handed) */
+	axis_row(m, 0, f);
+	axis_row(m, 1, r);
+	axis_row(m, 2, d);
+	return 0;
+}
+
+void attitude_axis_map_apply(const AttitudeAxisMap *m,
+	float in_x, float in_y, float in_z, float out[3])
+{
+	float in[3] = { in_x, in_y, in_z };
+
+	for (int i = 0; i < 3; i++)
+		out[i] = m->sgn[i] * in[m->idx[i]];
+}

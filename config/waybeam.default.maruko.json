@@ -101,6 +101,8 @@
     "enabled": false,
     "mountDeg": 0,
     "invertRoll": false,
-    "invertPitch": false
+    "invertPitch": false,
+    "axisFwd": "+x",
+    "axisDown": "+z"
   }
 }

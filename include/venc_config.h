@@ -271,6 +271,8 @@ typedef struct {
 	int  mount_deg;      /* sensor yaw vs camera: 0/90/180/270         */
 	bool invert_roll;    /* flip sign after mount rotation             */
 	bool invert_pitch;
+	char axis_fwd[4];    /* sensor axis out of the lens: "+x".."-z"    */
+	char axis_down[4];   /* sensor axis pointing down when level       */
 } VencConfigAttitude;
 
 typedef struct {

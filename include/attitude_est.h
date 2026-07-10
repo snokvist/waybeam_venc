@@ -50,6 +50,27 @@ void attitude_est_update(AttitudeEst *e,
 /* 1 once the settle window has passed and roll/pitch are trustworthy. */
 int attitude_est_settled(const AttitudeEst *e);
 
+/*
+ * Sensor→camera axis remap (signed permutation), applied to gyro and
+ * accel vectors BEFORE attitude_est_update. Configured from two axis
+ * names ("+x".."-z"): fwd = the sensor axis pointing out of the lens,
+ * down = the sensor axis pointing down when the camera is level; the
+ * right axis is derived (right = down × fwd). This corrects a board
+ * mounted in any of the 24 axis-aligned orientations; the output-side
+ * attitude.mount_deg / invert trims remain for fine sign fixes only.
+ */
+typedef struct {
+	int   idx[3];   /* camera axis i (fwd/right/down) reads sensor idx */
+	float sgn[3];
+} AttitudeAxisMap;
+
+/* -1 on unparseable names or non-orthogonal fwd/down (identity kept). */
+int attitude_axis_map_init(AttitudeAxisMap *m,
+	const char *fwd, const char *down);
+
+void attitude_axis_map_apply(const AttitudeAxisMap *m,
+	float in_x, float in_y, float in_z, float out[3]);
+
 /* Angles in 0.1° units, clamped to int16 range. */
 int16_t attitude_est_roll_cdeg(const AttitudeEst *e);
 int16_t attitude_est_pitch_cdeg(const AttitudeEst *e);
