@@ -2182,7 +2182,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.11.0\","
+		"\"contract_version\":\"0.12.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
@@ -2580,6 +2580,78 @@ static int handle_restart(int fd, const HttpRequest *req, void *ctx)
 	 * /api/v1/set level (LIVE and RESTART both now save per set). */
 	venc_api_request_reinit();
 	return httpd_send_ok(fd, "{\"reinit\":true}");
+}
+
+/* ── Attitude endpoints ──────────────────────────────────────────────── */
+
+static int handle_attitude(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->query_attitude)
+		return httpd_send_error(fd, 501, "not_implemented",
+			"attitude not supported on this backend");
+	char *json = g_cb->query_attitude();
+	if (!json)
+		return httpd_send_error(fd, 500, "internal_error",
+			"out of memory");
+	size_t len = strlen(json) + 32;
+	char *buf = malloc(len);
+	if (!buf) {
+		free(json);
+		return httpd_send_error(fd, 500, "internal_error",
+			"out of memory");
+	}
+	snprintf(buf, len, "{\"ok\":true,\"data\":%s}", json);
+	int rc = httpd_send_json(fd, 200, buf);
+	free(buf);
+	free(json);
+	return rc;
+}
+
+/* GET /api/v1/attitude/calibrate_level — the "it's laying flat now"
+ * calibration: average ~1.3 s of accel, solve the boresight trims,
+ * persist them through the standard restart-set path (config file
+ * write; the running estimator picks them up on the next restart). */
+static int handle_attitude_calibrate(int fd, const HttpRequest *req,
+	void *ctx)
+{
+	float roll = 0.0f, pitch = 0.0f;
+	char q[64], buf[192];
+	int status = 0;
+	char *resp = NULL;
+
+	(void)req; (void)ctx;
+	if (!g_cb || !g_cb->attitude_calibrate_level)
+		return httpd_send_error(fd, 501, "not_implemented",
+			"attitude calibration not supported on this backend");
+	if (g_cb->attitude_calibrate_level(&roll, &pitch) != 0)
+		return httpd_send_error(fd, 409, "calibration_failed",
+			"no IMU samples (attitude.enabled + imu.enabled?) "
+			"or implausible gravity — hold the camera still");
+
+	snprintf(q, sizeof(q), "attitude.trim_roll_deg=%.2f",
+		(double)roll);
+	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+		free(resp);
+		return httpd_send_error(fd, 500, "internal_error",
+			"failed to persist trim_roll_deg");
+	}
+	free(resp);
+	resp = NULL;
+	snprintf(q, sizeof(q), "attitude.trim_pitch_deg=%.2f",
+		(double)pitch);
+	if (process_set_query(q, &status, &resp) != 0 || status != 200) {
+		free(resp);
+		return httpd_send_error(fd, 500, "internal_error",
+			"failed to persist trim_pitch_deg");
+	}
+	free(resp);
+
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"trimRollDeg\":%.2f,"
+		"\"trimPitchDeg\":%.2f,\"restartRequired\":true}}",
+		(double)roll, (double)pitch);
+	return httpd_send_json(fd, 200, buf);
 }
 
 static int handle_idr(int fd, const HttpRequest *req, void *ctx)
@@ -3206,6 +3278,11 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/fps/config",   handle_fps_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/fps/live",     handle_fps_live, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/restart",      handle_restart, NULL);
+	/* longer prefix first — routing is first-match prefix */
+	r |= venc_httpd_route("GET", "/api/v1/attitude/calibrate_level",
+		handle_attitude_calibrate, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/attitude",
+		handle_attitude, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/defaults",     handle_defaults, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/ae",           handle_ae, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/awb",          handle_awb, NULL);

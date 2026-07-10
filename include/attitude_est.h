@@ -80,6 +80,17 @@ int attitude_axis_map_init(AttitudeAxisMap *m,
 void attitude_axis_map_apply(const AttitudeAxisMap *m,
 	float in_x, float in_y, float in_z, float out[3]);
 
+/*
+ * Solve the level-pose boresight trims from a time-averaged raw accel
+ * vector (m/s², sensor frame) captured while the camera is held level:
+ * the returned trims are exactly what attitude_axis_map_init expects.
+ * -1 on invalid axes or implausible gravity magnitude (<0.5 g / >1.5 g
+ * — device moving or IMU misconfigured).
+ */
+int attitude_axis_map_solve_trims(const char *fwd, const char *down,
+	float ax, float ay, float az,
+	float *trim_roll_deg, float *trim_pitch_deg);
+
 /* Angles in 0.1° units, clamped to int16 range. */
 int16_t attitude_est_roll_cdeg(const AttitudeEst *e);
 int16_t attitude_est_pitch_cdeg(const AttitudeEst *e);

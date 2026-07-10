@@ -1,5 +1,22 @@
 # History
 
+## [0.40.0] - 2026-07-10
+
+One-click attitude calibration + live attitude API (contract 0.12.0).
+
+- **`GET /api/v1/attitude`** — live fused roll/pitch/yaw snapshot
+  (camera frame, post-remap/trims). The estimator now runs whenever
+  `attitude.enabled` + `imu.enabled` — no sidecar subscriber needed —
+  so the WebUI readout works standalone.
+- **`GET /api/v1/attitude/calibrate_level`** — hold the camera level:
+  averages ~1.3 s of accel in the frame loop, solves the boresight
+  trims exactly (`attitude_axis_map_solve_trims`, unit-tested), and
+  persists `attitude.trimRollDeg`/`trimPitchDeg` via the standard
+  restart-set path. 409 on no-IMU/moving, 501 on Maruko.
+- **WebUI Attitude section**: live roll/pitch/yaw readout (1 Hz poll)
+  and a "Capture level trims" button that calibrates, updates the
+  fields, and restarts the pipeline.
+
 ## [0.39.1] - 2026-07-10
 
 - **Sensor→camera axis remap** (`attitude.axisFwd` / `attitude.axisDown`,

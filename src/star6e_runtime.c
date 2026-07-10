@@ -84,6 +84,22 @@ static int g_att_inited;
 static struct timespec g_att_cursor;   /* last consumed sample timestamp */
 static AttitudeAxisMap g_att_map;      /* sensor→camera signed permutation */
 
+/* Live snapshot for /api/v1/attitude (HTTP thread reads, frame thread
+ * writes) and the level-trim calibration accumulator (HTTP thread arms,
+ * frame thread fills, HTTP thread consumes). */
+static pthread_mutex_t g_att_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+	int valid, settled;
+	float roll_deg, pitch_deg, yaw_deg;
+} g_att_snap;
+enum { ATT_CAL_IDLE = 0, ATT_CAL_PENDING, ATT_CAL_DONE };
+#define ATT_CAL_SAMPLES 256u   /* ~1.3 s at the 200 Hz default ODR */
+static struct {
+	int state;
+	float sx, sy, sz;   /* raw sensor-frame accel sums */
+	uint32_t n;
+} g_att_cal;
+
 static int16_t att_clamp16(int v)
 {
 	if (v > 32767) return 32767;
@@ -129,6 +145,21 @@ static const RtpSidecarAttitudeInfo *attitude_frame_update(
 			g[0], g[1], g[2], a[0], a[1], a[2], ts_us);
 	}
 	if (n > 0) {
+		pthread_mutex_lock(&g_att_lock);
+		if (g_att_cal.state == ATT_CAL_PENDING) {
+			for (uint32_t i = 0; i < n &&
+			     g_att_cal.n < ATT_CAL_SAMPLES; i++) {
+				g_att_cal.sx += s[i].accel_x;
+				g_att_cal.sy += s[i].accel_y;
+				g_att_cal.sz += s[i].accel_z;
+				g_att_cal.n++;
+			}
+			if (g_att_cal.n >= ATT_CAL_SAMPLES)
+				g_att_cal.state = ATT_CAL_DONE;
+		}
+		pthread_mutex_unlock(&g_att_lock);
+	}
+	if (n > 0) {
 		/* Advance past the newest consumed sample; read_range is
 		 * inclusive and attitude_est_update drops dt<=0 duplicates,
 		 * so a 1 ns bump avoids re-feeding the boundary sample. */
@@ -169,7 +200,75 @@ static const RtpSidecarAttitudeInfo *attitude_frame_update(
 	                  (attitude_est_settled(&g_att_est)
 	                   ? RTP_SIDECAR_ATT_SETTLED : 0);
 	out->imu_age_ms = (uint16_t)age_ms;
+
+	pthread_mutex_lock(&g_att_lock);
+	g_att_snap.valid = 1;
+	g_att_snap.settled = attitude_est_settled(&g_att_est);
+	g_att_snap.roll_deg  = (float)roll  * 0.1f;
+	g_att_snap.pitch_deg = (float)pitch * 0.1f;
+	g_att_snap.yaw_deg   = (float)yaw   * 0.1f;
+	pthread_mutex_unlock(&g_att_lock);
 	return out;
+}
+
+/* ── Attitude HTTP hooks (called from the httpd thread) ─────────────────── */
+
+/* Live attitude as malloc'd JSON for GET /api/v1/attitude. */
+char *star6e_attitude_query(void)
+{
+	char *buf = malloc(192);
+	if (!buf)
+		return NULL;
+	pthread_mutex_lock(&g_att_lock);
+	if (!g_att_snap.valid) {
+		snprintf(buf, 192, "{\"valid\":false}");
+	} else {
+		snprintf(buf, 192,
+			"{\"valid\":true,\"settled\":%s,"
+			"\"rollDeg\":%.1f,\"pitchDeg\":%.1f,\"yawDeg\":%.1f}",
+			g_att_snap.settled ? "true" : "false",
+			(double)g_att_snap.roll_deg,
+			(double)g_att_snap.pitch_deg,
+			(double)g_att_snap.yaw_deg);
+	}
+	pthread_mutex_unlock(&g_att_lock);
+	return buf;
+}
+
+/* Level-trim calibration: arm the accumulator, wait for the frame loop
+ * to fill it (~1.3 s of samples), solve the boresight trims. Blocking;
+ * returns 0 on success, -1 on timeout (attitude/IMU not running) or an
+ * implausible gravity magnitude (device moving / free-fall). */
+int star6e_attitude_calibrate_level(const VencConfig *vcfg,
+	float *roll_deg, float *pitch_deg)
+{
+	float ax, ay, az;
+	uint32_t cnt;
+	int done = 0;
+
+	pthread_mutex_lock(&g_att_lock);
+	memset(&g_att_cal, 0, sizeof(g_att_cal));
+	g_att_cal.state = ATT_CAL_PENDING;
+	pthread_mutex_unlock(&g_att_lock);
+
+	for (int i = 0; i < 60 && !done; i++) {   /* ≤3 s */
+		usleep(50 * 1000);
+		pthread_mutex_lock(&g_att_lock);
+		done = (g_att_cal.state == ATT_CAL_DONE);
+		pthread_mutex_unlock(&g_att_lock);
+	}
+
+	pthread_mutex_lock(&g_att_lock);
+	cnt = g_att_cal.n;
+	ax = g_att_cal.sx; ay = g_att_cal.sy; az = g_att_cal.sz;
+	g_att_cal.state = ATT_CAL_IDLE;
+	pthread_mutex_unlock(&g_att_lock);
+
+	if (!done || cnt == 0)
+		return -1;
+	return attitude_axis_map_solve_trims(vcfg->attitude.axis_fwd,
+		vcfg->attitude.axis_down, ax / (float)cnt, ay / (float)cnt,
+		az / (float)cnt, roll_deg, pitch_deg);
 }
 
 /* ── Scene-detector stream decoders ───────────────────────────────────── */
@@ -960,14 +1059,14 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		if (rtp_sidecar_is_subscribed(&ps->video.sidecar))
 			star6e_output_observe_pressure(&ps->output);
 
-		/* Attitude trailer: only when configured AND someone is
-		 * listening — the filter costs a few µs/frame but the ring
-		 * read takes the IMU ring mutex, so skip it entirely when
-		 * disabled or unsubscribed. */
+		/* Attitude: runs whenever configured (a few µs/frame + the
+		 * IMU ring mutex) — no subscription gate, so the WebUI live
+		 * readout and the level-trim calibration work standalone.
+		 * The trailer itself still only reaches the wire when a
+		 * sidecar subscriber is live (send fans out to live slots). */
 		RtpSidecarAttitudeInfo att_info;
 		const RtpSidecarAttitudeInfo *att_ptr = NULL;
-		if (vcfg->attitude.enabled && ps->imu &&
-		    rtp_sidecar_is_subscribed(&ps->video.sidecar))
+		if (vcfg->attitude.enabled && ps->imu)
 			att_ptr = attitude_frame_update(vcfg, &att_info);
 
 		(void)star6e_video_send_frame(&ps->video, &ps->output, &stream,

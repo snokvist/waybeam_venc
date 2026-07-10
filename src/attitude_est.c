@@ -207,3 +207,28 @@ void attitude_axis_map_apply(const AttitudeAxisMap *m,
 		         m->r[i][1] * in[1] +
 		         m->r[i][2] * in[2];
 }
+
+int attitude_axis_map_solve_trims(const char *fwd, const char *down,
+	float ax, float ay, float az,
+	float *trim_roll_deg, float *trim_pitch_deg)
+{
+	AttitudeAxisMap perm;
+	float g[3], mag, sx;
+
+	if (attitude_axis_map_init(&perm, fwd, down, 0.0f, 0.0f) != 0)
+		return -1;
+	attitude_axis_map_apply(&perm, ax, ay, az, g);
+	mag = sqrtf(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+	if (mag < 4.9f || mag > 14.8f)   /* 0.5–1.5 g */
+		return -1;
+	g[0] /= mag; g[1] /= mag; g[2] /= mag;
+
+	/* Gravity in a (roll,pitch)-tilted camera frame is
+	 * (−sinθ, cosθ·sinφ, cosθ·cosφ) — invert for the trims. */
+	sx = -g[0];
+	if (sx > 1.0f)  sx = 1.0f;
+	if (sx < -1.0f) sx = -1.0f;
+	*trim_pitch_deg = asinf(sx) * (180.0f / (float)M_PI);
+	*trim_roll_deg  = atan2f(g[1], g[2]) * (180.0f / (float)M_PI);
+	return 0;
+}

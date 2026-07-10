@@ -224,6 +224,33 @@ int test_attitude_est(void)
 		      fabsf(out[2] - G) < 1e-3f);
 	}
 
+	/* 12b: trim solver — inverse of test 12: the .201 level-pose mean
+	 * accel must solve to (0, +20) for the x-up housing */
+	{
+		float c20 = cosf(20.0f * (float)M_PI / 180.0f);
+		float s20 = sinf(20.0f * (float)M_PI / 180.0f);
+		float tr = 99.0f, tp = 99.0f;
+		CHECK("axsolve_ok",
+		      attitude_axis_map_solve_trims("+z", "-x",
+		          -G * c20, 0.0f, -G * s20, &tr, &tp) == 0);
+		CHECK("axsolve_pitch", fabsf(tp - 20.0f) < 0.1f);
+		CHECK("axsolve_roll", fabsf(tr) < 0.1f);
+		/* level identity mount solves to zero trims */
+		CHECK("axsolve_identity_ok",
+		      attitude_axis_map_solve_trims("+x", "+z",
+		          0.0f, 0.0f, G, &tr, &tp) == 0);
+		CHECK("axsolve_identity_zero",
+		      fabsf(tr) < 0.01f && fabsf(tp) < 0.01f);
+		/* implausible gravity (free-fall / moving) rejects */
+		CHECK("axsolve_lowg_reject",
+		      attitude_axis_map_solve_trims("+x", "+z",
+		          0.0f, 0.0f, 1.0f, &tr, &tp) == -1);
+		/* invalid axes reject */
+		CHECK("axsolve_bad_axes_reject",
+		      attitude_axis_map_solve_trims("+x", "-x",
+		          0.0f, 0.0f, G, &tr, &tp) == -1);
+	}
+
 	/* 13: roll trim on an identity mount */
 	{
 		AttitudeAxisMap m;

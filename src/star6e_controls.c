@@ -7,6 +7,7 @@
 #include "star6e_cus3a.h"
 #include "star6e_iq.h"
 #include "star6e_output.h"
+#include "star6e_runtime.h"
 #include "venc_api.h"
 #include "venc_jpeg.h"
 
@@ -1204,6 +1205,19 @@ static int apply_isp_bin(const char *path)
 		sensor_name, pad_id, g_star6e_control_ctx.sensor_fps);
 }
 
+static char *query_attitude(void)
+{
+	return star6e_attitude_query();
+}
+
+static int attitude_calibrate_level(float *roll_deg, float *pitch_deg)
+{
+	if (!g_star6e_control_ctx.vcfg)
+		return -1;
+	return star6e_attitude_calibrate_level(g_star6e_control_ctx.vcfg,
+		roll_deg, pitch_deg);
+}
+
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_fps = apply_fps,
@@ -1230,6 +1244,8 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_isp_bin = apply_isp_bin,
 	.apply_snapshot_quality = venc_jpeg_set_quality,
 	.apply_pause_stab = apply_pause_stab,
+	.query_attitude = query_attitude,
+	.attitude_calibrate_level = attitude_calibrate_level,
 };
 
 void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)

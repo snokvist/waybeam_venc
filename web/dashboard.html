@@ -396,6 +396,8 @@ select{cursor:pointer;-webkit-appearance:none;appearance:none;background-image:u
 <tr><td class="api-method">GET</td><td class="api-path">/api/v1/set?<i>key=value</i></td><td class="api-desc">Set config field. Live fields apply immediately; restart fields set reinit_pending</td><td class="api-example">{"ok":true,"data":{"field":"video0.bitrate","value":4000}}</td></tr>
 
 <tr><td class="api-method">GET</td><td class="api-path">/api/v1/restart</td><td class="api-desc">Reload config from disk and reinit the full encoder pipeline</td><td class="api-example">{"ok":true,"data":{"reinit":true}}</td></tr>
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/attitude</td><td class="api-desc">Live fused attitude (needs attitude.enabled + imu.enabled; Star6E only)</td><td class="api-example">{"ok":true,"data":{"valid":true,"settled":true,"rollDeg":0.5,"pitchDeg":-0.2,"yawDeg":1.9}}</td></tr>
+<tr><td class="api-method">GET</td><td class="api-path">/api/v1/attitude/calibrate_level</td><td class="api-desc">Hold the camera level: averages ~1.3s of accel, solves and persists attitude.trimRollDeg/trimPitchDeg (restart required)</td><td class="api-example">{"ok":true,"data":{"trimRollDeg":-2.60,"trimPitchDeg":20.43,"restartRequired":true}}</td></tr>
 
 </tbody></table>
 
@@ -1024,6 +1026,17 @@ function renderSettings(){
 
     const body = div.querySelector('.section-body');
 
+    if(sec.id === 'attitude'){
+      const live = document.createElement('div');
+      live.className = 'field';
+      live.innerHTML = `<div class="field-label">live attitude <span class="badge badge-live">LIVE</span></div>
+        <div style="display:flex;gap:.8rem;align-items:center">
+          <span id="att-live" style="font-family:monospace">&mdash;</span>
+          <button class="btn btn-apply" style="margin-left:auto" onclick="calibrateLevelTrims()" title="Hold the camera level, then click: venc averages ~1.3s of accel, solves trimRollDeg/trimPitchDeg exactly, persists them and restarts.">Capture level trims</button>
+        </div>`;
+      body.appendChild(live);
+    }
+
     for(const key of sec.keys){
 
       if(!(key in localConfig)) continue;
@@ -1265,6 +1278,35 @@ async function applyChanges(){
 
   updateButtons();
 
+}
+
+async function pollAttitude(){
+  const el = document.getElementById('att-live');
+  if(!el) return;
+  try{
+    const r = await api('/api/v1/attitude');
+    const d = r.data || {};
+    el.textContent = d.valid
+      ? `roll ${d.rollDeg>=0?'+':''}${d.rollDeg.toFixed(1)}°  pitch ${d.pitchDeg>=0?'+':''}${d.pitchDeg.toFixed(1)}°  yaw ${d.yawDeg>=0?'+':''}${d.yawDeg.toFixed(1)}°${d.settled?'':' (settling…)'}`
+      : 'no data — needs attitude.enabled + imu.enabled';
+  }catch(e){ el.textContent = 'unavailable'; }
+}
+
+async function calibrateLevelTrims(){
+  if(!confirm('Hold the camera LEVEL (lens at the horizon, image upright) and keep it still.\n\nvenc will average ~1.3s of accel, solve the boresight trims, persist them and restart the pipeline. Continue?')) return;
+  try{
+    const r = await api('/api/v1/attitude/calibrate_level');
+    const d = r.data || {};
+    toast(`Trims captured: roll ${d.trimRollDeg}°, pitch ${d.trimPitchDeg}° — restarting…`);
+    localConfig['attitude.trimRollDeg'] = d.trimRollDeg;
+    localConfig['attitude.trimPitchDeg'] = d.trimPitchDeg;
+    serverConfig['attitude.trimRollDeg'] = d.trimRollDeg;
+    serverConfig['attitude.trimPitchDeg'] = d.trimPitchDeg;
+    renderSettings();
+    await api('/api/v1/restart');
+  }catch(e){
+    toast('Calibration failed: '+e.message, false);
+  }
 }
 
 async function saveAndRestart(){
@@ -1727,6 +1769,8 @@ async function init(){
     pollTelemetry();
 
     setInterval(pollTelemetry, 2000);
+
+    setInterval(pollAttitude, 1000);
 
   }catch(e){
 
