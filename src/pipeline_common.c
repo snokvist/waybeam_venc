@@ -101,13 +101,15 @@ typedef int (*isp_set_exposure_limit_fn_t)(int channel,
 #define ISP_AE_CALL(fn, cfg) fn(0, cfg)
 #endif
 
-int pipeline_common_cap_exposure_for_fps(uint32_t fps)
+int pipeline_common_cap_exposure_for_fps(uint32_t fps,
+	bool shutter_rule_180)
 {
 	isp_get_exposure_limit_fn_t fn_get;
 	isp_set_exposure_limit_fn_t fn_set;
 	PipelineIspExposureLimit config;
 	void *handle;
 	uint32_t target_us;
+	uint32_t divisor;
 	int ret;
 
 	if (fps == 0)
@@ -165,13 +167,16 @@ int pipeline_common_cap_exposure_for_fps(uint32_t fps)
 		}
 	}
 
-	target_us = 1000000 / fps;
+	divisor = shutter_rule_180 ? fps * 2 : fps;
+	target_us = 1000000 / divisor;
 	if (config.maxShutterUs <= target_us) {
-		printf("> Exposure cap: maxShutter %uus (already <= %uus for %u fps), enforcing\n",
-			config.maxShutterUs, target_us, fps);
+		printf("> Exposure cap: maxShutter %uus (already <= %uus for %u fps%s), enforcing\n",
+			config.maxShutterUs, target_us, fps,
+			shutter_rule_180 ? ", 180° rule" : "");
 	} else {
-		printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps)\n",
-			config.maxShutterUs, target_us, fps);
+		printf("> Exposure cap: maxShutter %uus -> %uus (for %u fps%s)\n",
+			config.maxShutterUs, target_us, fps,
+			shutter_rule_180 ? ", 180° rule" : "");
 	}
 
 	config.maxShutterUs = target_us;
