@@ -1381,8 +1381,11 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 ## Change Log (Contract)
 - `0.12.1` (additive — new config field):
   - Added `isp.shutter_rule_180` (boolean, default `false`) to config
-    schema.  When `true`, caps max exposure to 1/(2×fps) instead of
-    1/fps (the 180° shutter rule).  `MUT_RESTART`.  Both backends.
+    schema.  When `true`, pins exposure to exactly 1/(2×fps) — sets
+    `minShutterUs == maxShutterUs` in the ISP exposure limit so the AE
+    shutter is locked while gain still auto-adjusts.  The supervisory
+    cus3a thread continuously enforces the pin.  `MUT_RESTART`.  Both
+    backends.
   - Added `isp.shutterRule180` camelCase alias (`isp.shutter_rule_180`).
 - `0.12.0` (additive — new endpoints):
   - `GET /api/v1/attitude` — live fused attitude snapshot (Star6E only;

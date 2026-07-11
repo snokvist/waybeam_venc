@@ -3,11 +3,13 @@
 ## [0.41.0] - 2026-07-11
 
 - **180° shutter rule toggle (`isp.shutterRule180`).** New boolean config
-  field (default `false`, restart-required) that caps max AE exposure to
-  1/(2×fps) instead of the default 1/fps frame-period cap.  At 60 fps
-  the ceiling drops from 16 666 µs to 8 333 µs, producing the natural
-  motion blur of a 180° cinema shutter.  Both Star6E and Maruko backends.
-  Contract `0.12.1`.
+  field (default `false`, restart-required) that pins AE exposure to
+  exactly 1/(2×fps) — `minShutterUs == maxShutterUs` in the ISP exposure
+  limit, so the AE shutter dimension is locked while gain still
+  auto-adjusts for brightness.  At 60 fps the shutter is fixed at
+  8 333 µs (1/120 s).  Both Star6E and Maruko backends; the supervisory
+  cus3a threads continuously enforce the pin so ISP bin reloads or
+  cold-boot AE init cannot override it.  Contract `0.12.1`.
 
 ## [0.40.1] - 2026-07-11
 
