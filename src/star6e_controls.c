@@ -1087,11 +1087,14 @@ static const char *output_transport_name(const Star6eOutput *o)
 		return "none";
 	if (o->ring)
 		return "shm";
+	if (o->frame_ring)
+		return "frame-shm";
 	switch (o->transport) {
-	case VENC_OUTPUT_URI_UDP:  return "udp";
-	case VENC_OUTPUT_URI_UNIX: return "unix";
-	case VENC_OUTPUT_URI_SHM:  return "shm";
-	default:                   return "none";
+	case VENC_OUTPUT_URI_UDP:       return "udp";
+	case VENC_OUTPUT_URI_UNIX:      return "unix";
+	case VENC_OUTPUT_URI_SHM:       return "shm";
+	case VENC_OUTPUT_URI_FRAME_SHM: return "frame-shm";
+	default:                        return "none";
 	}
 }
 
