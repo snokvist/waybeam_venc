@@ -41,7 +41,8 @@ venc_frame_ring_t *venc_frame_ring_create(const char *shm_name,
 	struct timespec ts;
 
 	if (!shm_name || !shm_name[0] || !is_power_of_2(slot_count) ||
-	    slot_data_size < VENC_FRAME_META_SIZE)
+	    slot_data_size < VENC_FRAME_META_SIZE ||
+	    slot_data_size > (UINT32_MAX - 8))
 		return NULL;
 
 	total = calc_total_size(slot_count, slot_data_size);

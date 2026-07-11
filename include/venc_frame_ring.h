@@ -289,6 +289,9 @@ static inline int venc_frame_ring_read(venc_frame_ring_t *r,
 	uint32_t idx, len;
 	venc_frame_ring_slot_t *slot;
 
+	if (!r || !r->hdr)
+		return -1;
+
 	rd = __atomic_load_n(&r->hdr->read_idx, __ATOMIC_RELAXED);
 	w = __atomic_load_n(&r->hdr->write_idx, __ATOMIC_ACQUIRE);
 
@@ -305,8 +308,11 @@ static inline int venc_frame_ring_read(venc_frame_ring_t *r,
 		return -1;
 	}
 
-	if (len > buf_size)
-		len = buf_size;
+	if (len > buf_size) {
+		r->stats.oversize_drops++;
+		__atomic_store_n(&r->hdr->read_idx, rd + 1, __ATOMIC_RELEASE);
+		return -1;
+	}
 
 	memcpy(buf, slot->data, len);
 	if (out_len) *out_len = len;
@@ -319,6 +325,9 @@ static inline int venc_frame_ring_read(venc_frame_ring_t *r,
 static inline int venc_frame_ring_read_wait(venc_frame_ring_t *r,
 	void *buf, uint32_t buf_size, uint32_t *out_len, int timeout_ms)
 {
+	if (!r || !r->hdr)
+		return -1;
+
 	for (;;) {
 		if (venc_frame_ring_read(r, buf, buf_size, out_len) == 0)
 			return 0;

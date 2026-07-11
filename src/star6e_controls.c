@@ -1151,6 +1151,33 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots);
+	} else if (ps->output.frame_ring) {
+		venc_frame_ring_fill_t fill;
+		int in_pressure;
+		if (venc_frame_ring_get_fill(ps->output.frame_ring, &fill) != 0)
+			return NULL;
+		in_pressure = fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+		pos = snprintf(buf, sizeof(buf),
+			"{\"ok\":true,\"data\":{"
+			"\"active\":true,"
+			"\"transport\":\"%s\","
+			"\"fillPct\":%u,"
+			"\"inPressure\":%s,"
+			"\"transportDrops\":%u,"
+			"\"pressureDrops\":%u,"
+			"\"framesSent\":%llu,"
+			"\"oversizeDrops\":%llu,"
+			"\"slotCount\":%u,"
+			"\"usedSlots\":%u}}",
+			transport,
+			(unsigned)fill.fill_pct,
+			in_pressure ? "true" : "false",
+			(unsigned)fill.full_drops,
+			(unsigned)pressure_drops,
+			(unsigned long long)fill.writes,
+			(unsigned long long)fill.oversize_drops,
+			(unsigned)fill.slot_count,
+			(unsigned)fill.used_slots);
 	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           ps->output.socket_handle >= 0) {

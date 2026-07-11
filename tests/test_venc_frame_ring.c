@@ -708,6 +708,79 @@ static int test_fr_get_fill(void)
 	return failures;
 }
 
+/* ── Read rejects oversize frame ───────────────────────────────────── */
+
+static int test_fr_read_oversize(void)
+{
+	int failures = 0;
+
+	venc_frame_ring_t *r = venc_frame_ring_create("test_fr_ro", 4, 256);
+	CHECK("fr_ro_create", r != NULL);
+
+	VencFrameMeta meta;
+	memset(&meta, 0, sizeof(meta));
+	meta.codec = VENC_FRAME_CODEC_H265;
+	uint8_t data[64];
+	memset(data, 0xBB, sizeof(data));
+
+	int ret = venc_frame_ring_write(r, &meta, data, sizeof(data));
+	CHECK("fr_ro_write", ret == 0);
+
+	/* Read with a buffer too small for the frame */
+	uint8_t small_buf[16];
+	uint32_t out_len = 0;
+	ret = venc_frame_ring_read(r, small_buf, sizeof(small_buf), &out_len);
+	CHECK("fr_ro_read_fail", ret == -1);
+	CHECK("fr_ro_oversize_stat", r->stats.oversize_drops == 1);
+
+	/* Slot was consumed (read_idx advanced) */
+	CHECK("fr_ro_idx_advanced",
+	      __atomic_load_n(&r->hdr->read_idx, __ATOMIC_RELAXED) == 1);
+
+	/* Ring should be empty now */
+	uint8_t buf[256];
+	ret = venc_frame_ring_read(r, buf, sizeof(buf), &out_len);
+	CHECK("fr_ro_empty", ret == -1);
+
+	venc_frame_ring_destroy(r);
+	return failures;
+}
+
+/* ── NULL guards on read/read_wait ────────────────────────────────── */
+
+static int test_fr_read_null_guard(void)
+{
+	int failures = 0;
+
+	CHECK("fr_rng_read_null", venc_frame_ring_read(NULL, NULL, 0, NULL) == -1);
+	CHECK("fr_rng_wait_null",
+	      venc_frame_ring_read_wait(NULL, NULL, 0, NULL, 100) == -1);
+
+	venc_frame_ring_t dummy;
+	memset(&dummy, 0, sizeof(dummy));
+	dummy.hdr = NULL;
+	CHECK("fr_rng_read_null_hdr",
+	      venc_frame_ring_read(&dummy, NULL, 0, NULL) == -1);
+	CHECK("fr_rng_wait_null_hdr",
+	      venc_frame_ring_read_wait(&dummy, NULL, 0, NULL, 100) == -1);
+
+	return failures;
+}
+
+/* ── slot_data_size upper bound ───────────────────────────────────── */
+
+static int test_fr_slot_data_size_limit(void)
+{
+	int failures = 0;
+
+	CHECK("fr_sdsl_max",
+	      venc_frame_ring_create("test_fr_sdsl", 4, UINT32_MAX) == NULL);
+	CHECK("fr_sdsl_near_max",
+	      venc_frame_ring_create("test_fr_sdsl2", 4, UINT32_MAX - 4) == NULL);
+
+	return failures;
+}
+
 /* ── Double begin_write rejected ───────────────────────────────────── */
 
 static int test_fr_double_begin(void)
@@ -757,6 +830,9 @@ int test_venc_frame_ring(void)
 	failures += test_fr_stats();
 	failures += test_fr_destroy_clears_init();
 	failures += test_fr_get_fill();
+	failures += test_fr_read_oversize();
+	failures += test_fr_read_null_guard();
+	failures += test_fr_slot_data_size_limit();
 	failures += test_fr_double_begin();
 
 	return failures;
