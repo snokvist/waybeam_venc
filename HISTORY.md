@@ -1,5 +1,13 @@
 # History
 
+## [0.42.1] - 2026-07-11
+
+- **Frame-SHM wait wakeup hardening.** `venc_frame_ring_read_wait()` now re-checks
+  the ring after publishing `consumer_waiting` and before entering the futex wait,
+  closing a lost-wake race where a consumer could sleep even though a frame had
+  already been committed. The standalone frame-SHM consumer now sizes its read
+  buffer from the attached ring header instead of assuming 512 KiB slots.
+
 ## [0.42.0] - 2026-07-11
 
 Full-frame SHM emissions — a new `frame-shm://` URI scheme that transfers
