@@ -73,6 +73,9 @@ typedef int (*maruko_isp_disable_userspace3a_fn_t)(MI_U32 dev_id, MI_U32 channel
   g_mi_venc.fnSetRcParam((dev), (chn), (param))
 #define maruko_mi_venc_request_idr(dev, chn, inst) \
   g_mi_venc.fnRequestIdr((dev), (chn), (inst))
+#define maruko_mi_venc_set_rc_priority(dev, chn, pri) \
+  (g_mi_venc.fnSetRcPriority ? \
+    g_mi_venc.fnSetRcPriority((dev), (chn), (int)(pri)) : -1)
 #define maruko_mi_venc_set_intra_refresh(dev, chn, cfg) \
   g_mi_venc.fnSetIntraRefresh((dev), (chn), (cfg))
 #define maruko_mi_venc_get_intra_refresh(dev, chn, cfg) \
