@@ -1,5 +1,24 @@
 # History
 
+## [0.43.0] - 2026-07-15
+
+Frame-SHM tagging for GDR and SVC-T enhance-layer frames.
+
+- **New `VencFrameMeta` flag bits** — `VENC_FRAME_FLAG_GDR` (0x02) and
+  `VENC_FRAME_FLAG_ENHANCE` (0x04) in `include/venc_frame_ring.h`. No
+  struct size change; uses bits 1–2 of the existing `flags` byte. Old
+  consumers ignore unknown bits — no ring version bump needed.
+- **GDR tagging** — when intra refresh is active (resilience preset is not
+  "off"), every non-IDR frame is tagged with `VENC_FRAME_FLAG_GDR` to
+  indicate a rolling intra stripe is present. Both Star6E and Maruko
+  backends track `gdr_active` on the output struct.
+- **SVC-T enhance tagging** — when temporal scalability is configured
+  (`ref_base > 0`), frames with `refType == 4` (enhance-P, not for
+  reference) are tagged with `VENC_FRAME_FLAG_ENHANCE`. Both backends
+  track `svct_active` on the output struct.
+- `frame_shm_consumer_test` reports GDR and ENHANCE frame counts in both
+  per-second interval output and the final summary.
+
 ## [0.42.1] - 2026-07-11
 
 - **Frame-SHM wait wakeup hardening.** `venc_frame_ring_read_wait()` now re-checks

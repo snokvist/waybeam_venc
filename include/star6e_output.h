@@ -107,6 +107,8 @@ typedef struct {
 	uint32_t last_full_drops;
 	uint32_t last_writes;
 	uint32_t last_oversize_drops;
+	int gdr_active;
+	int svct_active;
 } Star6eOutput;
 
 typedef struct {

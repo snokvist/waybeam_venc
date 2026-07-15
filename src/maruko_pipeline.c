@@ -2429,6 +2429,11 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		return -1;
 	ctx->venc_started = 1;
 
+	ctx->output.gdr_active =
+		(ctx->cfg.intra_refresh_mode[0] != '\0' &&
+		 strcmp(ctx->cfg.intra_refresh_mode, "off") != 0) ? 1 : 0;
+	ctx->output.svct_active = ctx->cfg.ref_base > 0 ? 1 : 0;
+
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
 	assign_maruko_ports(ctx, venc_device);
 

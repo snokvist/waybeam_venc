@@ -73,6 +73,8 @@ typedef struct {
 	uint32_t last_full_drops;
 	uint32_t last_writes;
 	uint32_t last_oversize_drops;
+	int gdr_active;
+	int svct_active;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */

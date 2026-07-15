@@ -2491,6 +2491,11 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * star6e_pipeline_start_venc() before StartRecvPic — the SDK
 	 * requires that ordering or the call silently no-ops. */
 
+	state->output.gdr_active =
+		(vcfg->video0.intra_refresh_mode[0] != '\0' &&
+		 strcmp(vcfg->video0.intra_refresh_mode, "off") != 0) ? 1 : 0;
+	state->output.svct_active = vcfg->video0.ref_base > 0 ? 1 : 0;
+
 	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
 	if (ret != 0)
 		goto fail_venc;

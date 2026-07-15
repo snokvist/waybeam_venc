@@ -37,11 +37,13 @@
 #define VENC_FRAME_META_SIZE    8
 #define VENC_FRAME_CODEC_H265   0x01
 #define VENC_FRAME_FLAG_IDR     0x01
+#define VENC_FRAME_FLAG_GDR     0x02  /* GDR rolling intra stripe active */
+#define VENC_FRAME_FLAG_ENHANCE 0x04  /* SVC-T enhance layer (droppable) */
 
 typedef struct {
 	uint32_t pts;        /* capture timestamp (µs, truncated to 32 bits) */
 	uint8_t  codec;      /* VENC_FRAME_CODEC_H265 */
-	uint8_t  flags;      /* VENC_FRAME_FLAG_IDR */
+	uint8_t  flags;      /* VENC_FRAME_FLAG_{IDR,GDR,ENHANCE} */
 	uint16_t reserved;   /* must be 0 */
 } VencFrameMeta;
 
