@@ -204,6 +204,7 @@ static int test_load_full_json(void)
 		"  \"video0\": { \"codec\": \"h264\", \"rcMode\": \"vbr\", \"fps\": 90,"
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
+		"    \"maxIBytes\": 10, \"maxPBytes\": 200000,"
 		"    \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
 		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
@@ -237,6 +238,10 @@ static int test_load_full_json(void)
 	CHECK("load_bitrate", cfg.video0.bitrate == 4096);
 	CHECK("load_gop", cfg.video0.gop_size == 1);
 	CHECK("load_qp_delta", cfg.video0.qp_delta == -7);
+	/* Tiny nonzero caps clamp to the floor; in-range values pass through. */
+	CHECK("load_max_i_clamped",
+		cfg.video0.max_i_bytes == VENC_FRAME_SIZE_CAP_MIN_BYTES);
+	CHECK("load_max_p_kept", cfg.video0.max_p_bytes == 200000);
 	CHECK("load_framing_zoom2x", strcmp(cfg.video0.framing, "zoom-2x") == 0);
 	CHECK("load_framing_zoom_pct", cfg.video0.zoom_pct == 0.5);
 	CHECK("load_zoom_x", cfg.video0.zoom_x == 0.25);

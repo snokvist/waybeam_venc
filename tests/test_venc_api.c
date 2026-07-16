@@ -44,6 +44,7 @@ typedef struct {
 	int apply_awb_mode_calls;
 	int apply_server_calls;
 	int apply_max_payload_calls;
+	int apply_max_frame_size_calls;
 	int apply_zoom_calls;
 	int apply_isp_bin_calls;
 
@@ -56,6 +57,8 @@ typedef struct {
 	uint32_t last_awb_ct;
 	char last_server[128];
 	uint16_t last_max_payload;
+	uint32_t last_max_i_bytes;
+	uint32_t last_max_p_bytes;
 	double last_zoom_pct;
 	double last_zoom_x;
 	double last_zoom_y;
@@ -294,6 +297,15 @@ static int test_apply_server(const char *uri)
 	snprintf(g_api_cb_state.last_server, sizeof(g_api_cb_state.last_server),
 		"%s", uri ? uri : "");
 	return g_api_cb_state.fail_server ? -1 : 0;
+}
+
+static int test_apply_max_frame_size(uint32_t max_i_bytes,
+				     uint32_t max_p_bytes)
+{
+	g_api_cb_state.apply_max_frame_size_calls++;
+	g_api_cb_state.last_max_i_bytes = max_i_bytes;
+	g_api_cb_state.last_max_p_bytes = max_p_bytes;
+	return 0;
 }
 
 static int test_apply_max_payload(uint16_t size)
@@ -817,6 +829,54 @@ static int test_set_rejects_malformed_percent_escape(void)
 	return failures;
 }
 
+static int test_live_set_max_frame_size_clamps(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_max_frame_size = test_apply_max_frame_size;
+
+	/* A typo'd tiny cap clamps up to the floor; 0 keeps "unlimited". */
+	CHECK("max_frame tiny rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.maxIBytes=10&video0.maxPBytes=0", &status,
+			response, sizeof(response)) == 0);
+	CHECK("max_frame tiny status", status == 200);
+	CHECK("max_frame tiny callback fired",
+		g_api_cb_state.apply_max_frame_size_calls == 1);
+	CHECK("max_frame tiny i clamped",
+		g_api_cb_state.last_max_i_bytes == VENC_FRAME_SIZE_CAP_MIN_BYTES);
+	CHECK("max_frame tiny p zero",
+		g_api_cb_state.last_max_p_bytes == 0);
+	CHECK("max_frame tiny cfg clamped",
+		cfg.video0.max_i_bytes == VENC_FRAME_SIZE_CAP_MIN_BYTES);
+	CHECK("max_frame tiny cfg p zero", cfg.video0.max_p_bytes == 0);
+
+	/* An in-range value passes through untouched (grouped apply carries
+	 * the previously clamped I cap along). */
+	CHECK("max_frame range rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.maxPBytes=200000", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max_frame range status", status == 200);
+	CHECK("max_frame range callback fired",
+		g_api_cb_state.apply_max_frame_size_calls == 2);
+	CHECK("max_frame range i carried",
+		g_api_cb_state.last_max_i_bytes == VENC_FRAME_SIZE_CAP_MIN_BYTES);
+	CHECK("max_frame range p kept",
+		g_api_cb_state.last_max_p_bytes == 200000);
+	CHECK("max_frame range cfg kept",
+		cfg.video0.max_p_bytes == 200000);
+
+	return failures;
+}
+
 static int test_live_set_max_payload_size_bounds(void)
 {
 	int failures = 0;
@@ -1242,6 +1302,7 @@ int test_venc_api(void)
 	failures += test_single_set_runtime_apply_failure();
 	failures += test_live_set_rejects_out_of_range_roi_values();
 	failures += test_live_set_max_payload_size_bounds();
+	failures += test_live_set_max_frame_size_clamps();
 	failures += test_live_set_max_payload_size_no_callback();
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();

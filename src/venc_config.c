@@ -564,8 +564,10 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->qp_delta = json_get_int(obj, "qpDelta", v->qp_delta);
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
-	v->max_i_bytes = (uint32_t)json_get_int(obj, "maxIBytes", (int)v->max_i_bytes);
-	v->max_p_bytes = (uint32_t)json_get_int(obj, "maxPBytes", (int)v->max_p_bytes);
+	v->max_i_bytes = venc_clamp_frame_size_cap(
+		(uint32_t)json_get_int(obj, "maxIBytes", (int)v->max_i_bytes));
+	v->max_p_bytes = venc_clamp_frame_size_cap(
+		(uint32_t)json_get_int(obj, "maxPBytes", (int)v->max_p_bytes));
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
 		(int)v->scene_threshold);
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",

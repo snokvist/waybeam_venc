@@ -1528,8 +1528,10 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		dst->video0.pause_stab = src->video0.pause_stab;
 		break;
 	case LIVE_GROUP_MAX_FRAME_SIZE:
-		dst->video0.max_i_bytes = src->video0.max_i_bytes;
-		dst->video0.max_p_bytes = src->video0.max_p_bytes;
+		dst->video0.max_i_bytes =
+			venc_clamp_frame_size_cap(src->video0.max_i_bytes);
+		dst->video0.max_p_bytes =
+			venc_clamp_frame_size_cap(src->video0.max_p_bytes);
 		break;
 	default:
 		break;

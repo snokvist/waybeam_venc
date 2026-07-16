@@ -36,6 +36,20 @@ extern "C" {
 #define VENC_BITRATE_MIN_KBPS 1000
 #define VENC_BITRATE_MAX_KBPS 200000
 
+/* Per-frame size-cap floor (bytes) for video0.maxIBytes/maxPBytes.  A tiny
+ * nonzero cap (a typo'd "10" instead of "10000") would starve the encoder
+ * into garbage output under FRAMEBITS_FIRST priority.  Enforced as a clamp
+ * (matching VENC_BITRATE_MIN_KBPS, not a /set reject) on both the JSON load
+ * and the live HTTP apply paths; 0 keeps its "unlimited" meaning. */
+#define VENC_FRAME_SIZE_CAP_MIN_BYTES 4096
+
+static inline uint32_t venc_clamp_frame_size_cap(uint32_t bytes)
+{
+	if (bytes > 0 && bytes < VENC_FRAME_SIZE_CAP_MIN_BYTES)
+		return VENC_FRAME_SIZE_CAP_MIN_BYTES;
+	return bytes;
+}
+
 /* ── Sub-structs mirroring JSON sections ─────────────────────────────── */
 
 typedef struct {
