@@ -52,6 +52,12 @@ param.lensAdj.configSize = 0;
   unchanged (identity) via the normal UDP path.
 - No `dmesg` NULL-deref / warp-engine faults (the i6e crash signature).
 - Latency vs. `lensAdjOn=0` baseline within noise.
+- **VPE mode:** confirm whether LDC-on is accepted with the existing
+  `I6_VPE_MODE_REALTIME` + `I6_SYS_LINK_REALTIME` VIF→VPE link, or whether
+  it forces an offline/framebase mode. If REALTIME is rejected with LDC,
+  retry with `I6_VPE_MODE_DVR`/`CAM` and record the added latency — this is
+  open question #1 and the feature's biggest risk. Record path is unaffected
+  either way (it taps VENC, downstream of VPE).
 
 **If it fails at SetChannelParam with a blob error:** the blob is mandatory
 even for identity → jump to the SDK hunt for a minimal/dummy blob before

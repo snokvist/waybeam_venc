@@ -99,6 +99,69 @@ turned on entirely through the already-bound `MI_VPE_CreateChannel` /
 re-warp (a later phase / the EIS use case), and would be a one-line addition
 to the `star6e_mi.c` binding table (signature to confirm from the SDK).
 
+## Pipeline placement, VPE mode, and record applicability
+
+### Placement: one VPE channel, upstream of every encoder
+
+The Star6E graph is a single funnel (verified from `src/star6e_pipeline.c`,
+`src/star6e_jpeg.c`, `src/star6e_recorder.c`, `src/star6e_ts_recorder.c`):
+
+```
+VIF ─REALTIME─> VPE (ONE channel — LDC lives here) ─> port0 ─FRAMEBASE─┬─> VENC ch0  (main stream → UDP)
+                                                                       ├─> VENC ch1  (dual / record)
+                                                                       └─> JPEG VENC (snapshots)
+```
+
+LDC is a **VPE-channel** feature (`lensInit` at CreateChannel / `lensAdj` at
+SetChannelParam), applied *before* the port split. Every downstream consumer
+taps VPE port0.
+
+### Record paths: covered automatically, and unavoidably
+
+The recorders do **not** capture frames — `star6e_recorder.c` /
+`star6e_ts_recorder.c` mux already-encoded `MI_VENC_Stream_t` NAL packets
+from a VENC channel that is itself fed by VPE port0 (`star6e_runtime.c:722`
+feeds `ts_recorder_write_stream`). JPEG snapshots likewise bind to the VPE
+output port (`star6e_jpeg.c:venc_jpeg_set_source`). Therefore:
+
+- **Correction reaches the record path for free** — recorded frames are the
+  corrected frames. No record-specific LDC config is needed, and **no record
+  path bypasses VPE**.
+- **All-or-nothing (architectural limit):** because V2 LDC corrects the
+  channel before the port split, it applies identically to the live stream,
+  the record/dual stream, and snapshots. You **cannot** have a corrected live
+  stream with an uncorrected recording, nor a different warp per output. Per-
+  output correction is not achievable with the embedded-LDC architecture (it
+  would require separate VPE channels or a post-VPE stage we don't have).
+
+### Does it need a special VPE mode?
+
+The channel runs `I6_VPE_MODE_REALTIME` with a `I6_SYS_LINK_REALTIME`
+VIF→VPE link today (`src/star6e_pipeline.c:518,1934`) — a low-latency
+**line-buffer** path with no full-frame DRAM roundtrip. A geometric warp is a
+random-access spatial remap (an output pixel may source from anywhere in the
+input), which is inherently incompatible with line-buffer streaming.
+
+**Hypothesis (to confirm — SDK hunt #5 / Phase 0):** enabling LDC forces the
+VPE channel out of pure REALTIME into an offline/framebase mode
+(`I6_VPE_MODE_DVR` / `CAM`, `include/sigmastar_types.h:322-330`), adding
+latency and DRAM bandwidth. Note 3DNR already runs under REALTIME, so *some*
+processing coexists with the realtime link — but a full-frame warp is a
+stronger requirement. This mode question is the **single biggest risk** for
+the feature: if LDC demands leaving REALTIME, the low-delay pipeline
+(`documentation/LOW_DELAY_PIPELINE.md`) takes a latency hit that must be
+measured before committing.
+
+### Which sensor/fps modes can use it?
+
+LDC has hardware resolution and DRAM-bandwidth ceilings, so the **highest
+modes are the ones most likely to lose LDC or drop fps** — for the current
+imx335 bench that means the 1080p120 high-fps mode
+(`documentation/STAR6E_IMX335_MODES.md`). Expect LDC to be viable at 1080p60
+and questionable at 1080p120 until Phase 1 measures it. Capture the actual
+max-resolution / max-fps-with-LDC envelope from the SDK (hunt #5) and on the
+bench (Phase 1).
+
 ## The calibration blob — what we know vs. what to find
 
 This is the central unknown for real (non-identity) lens correction.
@@ -175,16 +238,26 @@ Record findings in `plan.md` §"SDK findings" as they come in.
 
 ## Open questions
 
-1. Is `configAddr` required for `WORKMODE_LDC`, or is an identity
+1. **Does LDC force the VPE channel out of `I6_VPE_MODE_REALTIME`** into an
+   offline/framebase mode (the biggest risk — latency + bandwidth on the
+   low-delay path)? (Phase 0 / SDK hunt #5)
+2. Is `configAddr` required for `WORKMODE_LDC`, or is an identity
    3×3/NULL-blob channel accepted? (Phase 0)
-2. Fixed-point format + majorness of `proj3x3[9]`? (SDK hunt #1)
-3. Does the SDK ship a blob generator + any example calibration? (hunt #3)
-4. Does LDC compose with VPE port scaling and with `SetPortCrop`
+3. Fixed-point format + majorness of `proj3x3[9]`? (SDK hunt #1)
+4. Does the SDK ship a blob generator + any example calibration? (hunt #3)
+5. Does LDC compose with VPE port scaling and with `SetPortCrop`
    (`stab-fill`), or is it mutually exclusive? (hunt #5 / Phase 1)
-5. Latency / memory-bandwidth cost of LDC-on at 1080p120? (Phase 1)
-6. Must LDC be configured at `CreateChannel` (`lensInit`) or can it be
+6. Which sensor modes support LDC — specifically, is it viable at 1080p120
+   or capped at 1080p60? (SDK hunt #5 / Phase 1)
+7. Latency / memory-bandwidth cost of LDC-on at 1080p60 and 1080p120?
+   (Phase 1)
+8. Must LDC be configured at `CreateChannel` (`lensInit`) or can it be
    toggled live via `SetChannelParam` (`lensAdj`)? Teardown/reinit ordering
    implications (cf. `documentation/FULL_TEARDOWN_REINIT_PLAN.md`).
+
+Note: correction is **all-or-nothing across outputs** (one VPE channel feeds
+the live stream, record/dual stream, and snapshots) — this is settled by the
+architecture, not an open question. No record path bypasses VPE.
 
 ## Verified fact sources (this repo)
 
