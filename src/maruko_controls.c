@@ -328,7 +328,18 @@ static int maruko_apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_byte
 	pri = (max_i_bytes > 0 || max_p_bytes > 0)
 		? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
 		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
-	maruko_mi_venc_set_rc_priority(g_ctx.venc_dev, g_ctx.venc_chn, pri);
+	if (maruko_mi_venc_set_rc_priority(g_ctx.venc_dev,
+					   g_ctx.venc_chn, pri) != 0) {
+		/* Old libmi_venc.so without the symbol: the caps were applied
+		 * but stay soft hints under BITRATE_FIRST.  Warn once so a
+		 * device session isn't silently weaker than configured. */
+		static bool warned_soft;
+		if (!warned_soft) {
+			warned_soft = true;
+			printf("> maxFrameSize: MI_VENC_SetRcPriority unavailable"
+			       " — caps are soft hints (BITRATE_FIRST)\n");
+		}
+	}
 
 	if (idr_rate_limit_allow(g_ctx.venc_chn))
 		maruko_mi_venc_request_idr(g_ctx.venc_dev, g_ctx.venc_chn, 1);

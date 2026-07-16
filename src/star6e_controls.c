@@ -12,6 +12,7 @@
 #include "venc_jpeg.h"
 
 #include <dlfcn.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -366,10 +367,22 @@ static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
 	pri = (max_i_bytes > 0 || max_p_bytes > 0)
 		? E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
 		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
-	MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, pri);
-
+	if (MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, pri) != 0) {
+		/* Old libmi_venc.so without the symbol: the caps were applied
+		 * but stay soft hints under BITRATE_FIRST.  Warn once so a
+		 * device session isn't silently weaker than configured. */
+		static bool warned_soft;
+		if (!warned_soft) {
+			warned_soft = true;
+			printf("> maxFrameSize: MI_VENC_SetRcPriority unavailable"
+			       " — caps are soft hints (BITRATE_FIRST)\n");
+		}
+	}
+	/* IDR refresh is best-effort (matches Maruko): the cap is already
+	 * applied at this point, so a failed request must not report the
+	 * whole apply as failed. */
 	if (request_idr() != 0)
-		return -1;
+		printf("> maxFrameSize: IDR request failed (cap applied)\n");
 	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
 		max_i_bytes, max_p_bytes,
 		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
