@@ -279,6 +279,9 @@ static int maruko_apply_qp_delta(int delta)
 	return 0;
 }
 
+static int maruko_request_idr(void);
+static uint32_t maruko_query_live_fps(void);
+
 static int maruko_apply_fps(uint32_t fps)
 {
 	i6c_venc_chn attr = {0};
@@ -297,6 +300,8 @@ static int maruko_apply_fps(uint32_t fps)
 			sensor_fps);
 		fps = sensor_fps;
 	}
+	if (fps == maruko_query_live_fps())
+		return 0;
 
 	/* stab-fill: there is NO SCL→VENC bind — the VENC is NORMAL_FRMBASE and
 	 * manually fed.  The unbind/RING-rebind fps-divider below would force a
@@ -348,6 +353,7 @@ static int maruko_apply_fps(uint32_t fps)
 			g_ctx.venc_chn, &attr);
 	}
 
+	maruko_request_idr();
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
 	return 0;
 }

@@ -377,6 +377,8 @@ static int apply_fps(uint32_t fps)
 			sensor_fps);
 		fps = sensor_fps;
 	}
+	if (fps == g_star6e_control_ctx.delivered_fps)
+		return 0;
 	/* Decouple delivery from rate control: the VPE->VENC bind DELIVERS the
 	 * true fps (VENC encodes it fine — the block does ~143fps), but the RC
 	 * fpsNum is capped to STAR6E_VENC_INPUT_FPS_MAX because _MI_VENC_VerifyFps
@@ -431,6 +433,7 @@ static int apply_fps(uint32_t fps)
 			(void)apply_bitrate(cfg_kbps);
 	}
 
+	request_idr();
 	printf("> FPS delivered %u, RC fpsNum %u (bind %u:%u)\n", fps, rc_fps,
 		sensor_fps, fps);
 	return 0;
