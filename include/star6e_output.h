@@ -109,6 +109,8 @@ typedef struct {
 	uint32_t last_oversize_drops;
 	int gdr_active;
 	int svct_active;
+	uint8_t gdr_cycle_len;
+	uint8_t gdr_counter;
 } Star6eOutput;
 
 typedef struct {

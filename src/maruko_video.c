@@ -306,7 +306,7 @@ void maruko_video_init_rtp_state(MarukoRtpState *rtp,
 }
 
 static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
-	const MarukoOutput *output)
+	MarukoOutput *output)
 {
 	VencFrameMeta meta;
 	venc_frame_ring_t *frame_ring;
@@ -346,8 +346,16 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 		? (uint32_t)stream->packet[0].timestamp : 0;
 	meta.codec = VENC_FRAME_CODEC_H265;
 	meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
-	if (!is_idr && output->gdr_active)
+	if (!is_idr && output->gdr_active) {
 		meta.flags |= VENC_FRAME_FLAG_GDR;
+		meta.gdr_pos = output->gdr_counter;
+		meta.gdr_len = output->gdr_cycle_len;
+		output->gdr_counter++;
+		if (output->gdr_counter >= output->gdr_cycle_len)
+			output->gdr_counter = 0;
+	} else if (is_idr) {
+		output->gdr_counter = 0;
+	}
 	if (output->svct_active &&
 	    stream->h265Info.refType == REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;

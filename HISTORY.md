@@ -8,6 +8,12 @@ Frame-SHM tagging for GDR and SVC-T enhance-layer frames.
   `VENC_FRAME_FLAG_ENHANCE` (0x04) in `include/venc_frame_ring.h`. No
   struct size change; uses bits 1–2 of the existing `flags` byte. Old
   consumers ignore unknown bits — no ring version bump needed.
+- **GDR cycle position** — the former `reserved` field is replaced by
+  `gdr_pos` (0-based position in the refresh cycle) and `gdr_len` (cycle
+  length in frames). The transport layer can use these to apply stronger
+  FEC or ARQ near the end of the cycle where the refresh completes.
+  Cycle length is derived at pipeline init from `ceil(total_ctu_rows /
+  lines_per_frame)`. Counter resets on each IDR.
 - **GDR tagging** — when intra refresh is active (resilience preset is not
   "off"), every non-IDR frame is tagged with `VENC_FRAME_FLAG_GDR` to
   indicate a rolling intra stripe is present. Both Star6E and Maruko
@@ -16,8 +22,8 @@ Frame-SHM tagging for GDR and SVC-T enhance-layer frames.
   (`ref_base > 0`), frames with `refType == 4` (enhance-P, not for
   reference) are tagged with `VENC_FRAME_FLAG_ENHANCE`. Both backends
   track `svct_active` on the output struct.
-- `frame_shm_consumer_test` reports GDR and ENHANCE frame counts in both
-  per-second interval output and the final summary.
+- `frame_shm_consumer_test` reports GDR and ENHANCE frame counts plus
+  cycle length in both per-second interval output and the final summary.
 
 ## [0.42.1] - 2026-07-11
 

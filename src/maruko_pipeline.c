@@ -2433,6 +2433,17 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		(ctx->cfg.intra_refresh_mode[0] != '\0' &&
 		 strcmp(ctx->cfg.intra_refresh_mode, "off") != 0) ? 1 : 0;
 	ctx->output.svct_active = ctx->cfg.ref_base > 0 ? 1 : 0;
+	{
+		IntraRefreshDerived gdr_ir;
+		(void)maruko_intra_refresh_derive(&ctx->cfg,
+			ctx->cfg.image_height, ctx->sensor.fps,
+			ctx->cfg.rc_codec, &gdr_ir);
+		uint32_t clen = (gdr_ir.total_rows && gdr_ir.lines)
+			? (gdr_ir.total_rows + gdr_ir.lines - 1) / gdr_ir.lines
+			: 0;
+		ctx->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
+		ctx->output.gdr_counter = 0;
+	}
 
 	MI_U32 venc_device = (MI_U32)ctx->venc_device;
 	assign_maruko_ports(ctx, venc_device);
