@@ -1,9 +1,19 @@
 # Capped VBR RC mode (bounded bitrate + deterministic per-frame size)
 
-**Status: SPEC — design locked, not yet implemented.** Replaces the existing
-`vbr` mode with a link-matched rate-control mode. Design decisions below are
-settled (see "Locked decisions"); remaining work is SDK-struct recovery
-(needs full SDK headers), wiring, and bench validation.
+**Status: SPEC — reconciled to PR #181 (2026-07-17).** Replaces the existing
+`vbr` mode with a link-matched rate-control mode.
+
+> **Update — mechanism corrected by PR #181** ("Add live MaxISize/MaxPSize
+> frame-size caps with RC priority", branch
+> `claude/waybeam-full-frame-shm-fec-kuf9p8`). The per-frame ceiling is **not**
+> the SuperFrame/`REENCODE` path originally hypothesised below — it is
+> `u32MaxISize`/`u32MaxPSize` (bytes) in the RcParam per-mode union +
+> `MI_VENC_SetRcPriority(FRAMEBITS_FIRST)` (RC raises QP to fit the cap).
+> PR #181 already ships this across CBR/VBR/AVBR, both backends, live +
+> boot-applied. **Net: `VBR` + `maxIBytes`/`maxPBytes` already delivers the
+> two target bounds.** The remaining increment for capped VBR is exposing the
+> **QP window** (`minQual`/`maxQual`); see "Remaining work". Implementation is
+> tracked in PR #181, not a fresh branch.
 
 ## Motivation
 
@@ -27,12 +37,14 @@ we do not want to maintain two VBR variants.
 
 ## Locked decisions (from design review)
 
-1. **Enforce the per-frame ceiling in the encoder**, via the SigmaStar
-   SuperFrame RC mechanism — not on the link side. The encoder emits a frame
-   that already fits; waybeam-link can retire its own per-frame cap logic.
-2. **Overflow behaviour = re-encode at higher QP** (`REENCODE`), not drop.
-   Every frame is kept (preserves the P-reference chain and SVC-T layering);
-   an oversized frame just takes a one-frame quality dip.
+1. **Enforce the per-frame ceiling in the encoder** — not on the link side.
+   The encoder emits a frame that already fits; waybeam-link can retire its
+   own per-frame cap logic. *Realised in PR #181 via `u32MaxISize`/
+   `u32MaxPSize` + `SetRcPriority(FRAMEBITS_FIRST)`.*
+2. **Overflow behaviour = raise QP to fit, keep the frame** (not drop). Every
+   frame is kept (preserves the P-reference chain and SVC-T layering); an
+   oversized frame just takes a one-frame quality dip. *`FRAMEBITS_FIRST`
+   delivers exactly this — the RC bumps QP rather than dropping.*
 3. **Replace `vbr`** — `rc_mode = "vbr"` becomes capped VBR. No separate mode
    string. (Old configs keep parsing; new fields default per "Migration".)
 4. **Star6E first**, then Maruko (per `AGENTS.md` dual-backend policy). The
@@ -42,11 +54,24 @@ we do not want to maintain two VBR variants.
 
 Three bounds, one mode:
 
-| Bound | Mechanism | Where |
+| Bound | Mechanism | Where / status |
 |---|---|---|
-| Upper bitrate | VBR `maxBitrate` | ChnAttr rate struct (**already wired**) |
-| Quality window | QP floor/ceiling (`minQual`/`maxQual` or RcParam min/max Qp) | ChnAttr rate struct or RcParam (**confirm — SDK hunt #2**) |
-| Per-frame size | SuperFrame `u32SuperIFrmBitsThr` / `u32SuperPFrmBitsThr` + `REENCODE` | RcParam (**new — not modelled in this tree**) |
+| Upper bitrate | VBR `maxBitrate` | ChnAttr rate struct (**already wired**, live via `video0.bitrate`) |
+| Per-frame size | `u32MaxISize`/`u32MaxPSize` (bytes) + `SetRcPriority(FRAMEBITS_FIRST)` | RcParam per-mode union (**shipped in PR #181** — `maxIBytes`/`maxPBytes`) |
+| Quality window | QP floor/ceiling (`minQual`/`maxQual`, or RcParam min/max Qp) | ChnAttr rate struct or RcParam (**remaining work** — confirm home + polarity vs SDK) |
+
+## Remaining work (post PR #181)
+
+1. **Expose the VBR QP window** (`minQual`/`maxQual`). With `FRAMEBITS_FIRST`,
+   the RC bumps QP to hit the byte cap; without a floor/ceiling that means
+   quality craters on complex frames and wasted bits on easy ones. The window
+   is the natural partner to the size caps. Likely a `SetChnAttr` patch on
+   `i6_venc_rate_h26xvbr.maxQual`/`minQual` (same pattern as `apply_bitrate`),
+   distinct from PR #181's `SetRcParam` path — confirm the effective home
+   (ChnAttr vs RcParam `u32MinQp`/`u32MaxQp`) and polarity against the SDK.
+2. **Consolidate/document** the "VBR + QP window + size caps" profile as the
+   recommended capped-VBR config; decide whether to retire the little-used
+   plain modes.
 
 ## SDK inventory — verified from this repo (2026-07-17)
 

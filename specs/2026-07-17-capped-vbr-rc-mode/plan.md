@@ -1,86 +1,74 @@
 # Plan: capped VBR RC mode
 
-Companion to `requirements.md`. Order is gated on recovering the SuperFrame /
-RcParam struct layout from the full SDK (Phase 0) — everything downstream
-depends on it.
+Companion to `requirements.md`. **Reconciled to PR #181 (2026-07-17):** the
+per-frame ceiling mechanism is already implemented there
+(`u32MaxISize`/`u32MaxPSize` + `SetRcPriority(FRAMEBITS_FIRST)`, both
+backends, live + boot-applied). This plan now covers only the remaining
+increment (QP window) and the shared validation, tracked **inside PR #181**.
 
-## Design decisions (locked — do not re-litigate)
+## Design decisions (locked)
 
-1. Encoder-enforced per-frame ceiling via SigmaStar SuperFrame.
-2. Overflow = `REENCODE` at higher QP (keep every frame).
-3. Replace `vbr`; capped behaviour is opt-in via the threshold fields
-   (all-defaults reproduces plain VBR).
-4. Star6E first, then Maruko. Struct modelled + round-trip-validated per SoC.
+1. Encoder-enforced per-frame ceiling — **done in PR #181** via
+   `FRAMEBITS_FIRST` (RC raises QP to fit; keeps every frame).
+2. `VBR` (bounds `maxBitrate`) + the caps = capped VBR's two target bounds —
+   **already achievable today** with PR #181 merged.
+3. Star6E + Maruko parity — PR #181 already does both.
 
-## Phase 0 — struct recovery + round-trip validation (blocked on full SDK)
+## Phase 0 — (obsolete) struct recovery
 
-1. From the SDK headers, model the real `MI_VENC_RcParam_t` and
-   `MI_VENC_SuperFrmParam_t` (+ QP-window fields) for i6e and i6c. Add them
-   to the tree replacing the opaque `void *pRcParam` (or alongside, guarded
-   per backend).
-2. **Round-trip test on device**: `GetRcParam` → flip known fields →
-   `SetRcParam` → `GetRcParam`, assert the values survive. This catches a
-   struct-layout mismatch before it corrupts RC silently. Gate: values
-   round-trip on both `192.168.1.13` (Star6E) and `192.168.2.12` (Maruko).
+PR #181 modelled the needed RcParam fields (`u32MaxISize`/`u32MaxPSize`) and
+added `MI_VENC_RcPriority_e` + `MI_VENC_SetRcPriority` (optional dlsym,
+NULL-safe) for both SoCs. No separate struct-recovery phase is needed. The
+one struct question that remains is the QP-window home (Phase 1).
 
-Struct layout is the one hard blocker — do not proceed until Phase 0 passes.
+## Phase 1 — expose the VBR QP window (the remaining increment)
 
-## Phase 1 — wire capped VBR (Star6E)
+1. Add `vbr_min_qp` / `vbr_max_qp` config fields (`video0`), camelCase
+   aliases, load/save/render, defaults = full range (⇒ today's VBR).
+2. Apply path: patch the ChnAttr rate struct
+   (`i6_venc_rate_h26xvbr.maxQual`/`minQual`) via `SetChnAttr` — mirror
+   `apply_bitrate` (`venc_api.c` rate switch). **Confirm against the SDK**
+   whether the effective window is ChnAttr `maxQual`/`minQual` or RcParam
+   per-mode `u32MinQp`/`u32MaxQp`, and the **polarity** (Qual vs Qp invert on
+   some gens). If it is RcParam, fold it into PR #181's `apply_max_frame_size`
+   path instead.
+3. `MUT_LIVE` if the set path is live (bitrate already is). `make lint` after
+   the config change and after the apply change (incremental).
+4. `test_venc_config.c` cases (parse, defaults, serialize round-trip).
 
-1. Extend the VBR create/apply path (`venc_api.c` around the `SetChnAttr`
-   switch) to also program, via `SetRcParam`:
-   - QP window (`vbr_min_qp`/`vbr_max_qp`)
-   - SuperFrame (`frame_max_i_bits`/`frame_max_p_bits`, mode=`REENCODE`,
-     `frame_max_reencodes`)
-   Apply after CreateChn, before StartRecvPic (adjust if Phase 0 shows
-   SetRcParam is live — then also wire the live-update path).
-2. Config: add the `video0` fields (requirements §"Config surface") with
-   defaults that reproduce plain VBR when unset. `make lint` after the
-   struct change and after the config change (incremental, per AGENTS.md).
-3. Add `test_venc_config.c` cases (parse, defaults, round-trip serialize).
+## Phase 2 — bench-validate (Star6E `192.168.1.13`, then Maruko)
 
-## Phase 2 — bench-validate determinism (Star6E `192.168.1.13`)
+Prefer `scripts/star6e_direct_deploy.sh cycle`. These extend PR #181's own
+device test plan:
 
-Prefer `scripts/star6e_direct_deploy.sh cycle`.
+- **Ceiling holds:** scene with hard cuts; per-frame sizes via RTP sidecar
+  (`frame_size_bytes`). Gate: no frame exceeds its `maxIBytes`/`maxPBytes`,
+  across cuts and at IDR (IDR is an I-frame → QP-bumped to fit, not dropped).
+- **IDR composition:** force scene-detect + API IDR; confirm it fits the I
+  cap and the stream recovers; reconcile with `idr_rate_limit.h`.
+- **No fps loss:** run 1080p60 and 1080p120; the `FRAMEBITS_FIRST` QP-bump
+  must not blow the ~8.3 ms budget at 120fps. Document the envelope.
+- **No limit cycle:** frame sizes not pinned at the cap every frame (⇒ cap
+  below VBR's natural size at `maxBitrate`; raise it / widen `statTime`).
+- **QP window (Phase 1):** `FRAMEBITS_FIRST` + `maxQual` floor → no visible
+  quality craters on complex frames; easy scenes dip below `maxBitrate`.
 
-- **Ceiling holds:** stream a scene with hard cuts (or `--eis-test`-style
-  motion); capture per-frame sizes via the RTP sidecar
-  (`frame_size_bytes`). Gate: **no frame exceeds** its maxI/maxP threshold,
-  across cuts and at GOP boundaries (IDR ≤ maxIbits).
-- **No fps loss from re-encode:** run at 1080p60 and 1080p120; confirm fps
-  holds and latency stays within noise of plain VBR. If 120fps drops,
-  lower `frame_max_reencodes` / raise thresholds and document the envelope.
-- **No limit cycle:** confirm frame sizes aren't pinned at the cap every
-  frame (that means the threshold is below the VBR loop's natural size —
-  raise it). Watch for quality breathing.
-- **IDR composes:** force an IDR (scene-detect + `/api/v1/...`); confirm it
-  is QP-bumped to fit maxIbits, not dropped, and the stream recovers.
+## Phase 3 — waybeam-link retires its per-frame cap
 
-## Phase 3 — Maruko parity
-
-Repeat Phase 1-2 wiring/validation on Maruko (i6c struct variant). Watch the
-known Maruko output disable/re-enable stall (`KNOWN_ISSUES.md`) if toggling
-output during tests.
-
-## Phase 4 — waybeam-link retires its per-frame cap
-
-Once the encoder guarantees the ceiling, remove the link-side maxI/maxP
-enforcement (separate repo). Keep link's bitrate/QP setpoint control. Do this
-only after Phase 2/3 prove the encoder ceiling holds — do not run both caps
-in production (double-clamp masks encoder-side bugs).
+Once the encoder ceiling is proven in production, remove the link-side
+maxI/maxP enforcement (separate repo). Keep link's bitrate/QP setpoint
+control. Do NOT run both caps in production — double-clamp masks encoder-side
+bugs.
 
 ## Verify
 
-`make verify` (both backends) before declaring done; targeted deploy tests
-per `AGENTS.md` "Deployment Targets". `HISTORY.md` + `VERSION` bump land with
-Phase 1 (first shipping behaviour change).
+`make verify` (both backends) + targeted deploy tests per `AGENTS.md`.
+`VERSION` + `HISTORY.md` bump land with whatever PR ships the QP window (or
+with PR #181 if folded in).
 
 ## SDK findings (fill in when the full SDK is mounted)
 
-- [ ] `MI_VENC_RcParam_t` real layout (i6e): …
-- [ ] `MI_VENC_RcParam_t` real layout (i6c): …
-- [ ] QP-window fields + polarity (Qual vs Qp): …
-- [ ] `MI_VENC_SuperFrmParam_t` fields + mode enum (REENCODE value): …
-- [ ] SuperFrame threshold units (bits?) + `s32MaxReEncodeTimes`: …
-- [ ] SetRcParam live vs create-time; ordering: …
-- [ ] SDK demo reference (path): …
+- [ ] QP-window home: ChnAttr `maxQual`/`minQual` vs RcParam `u32MinQp`/
+      `u32MaxQp` — and polarity: …
+- [ ] `FRAMEBITS_FIRST` behaviour at 120fps (QP-bump cost / fps envelope): …
+- [ ] IDR vs `maxIBytes` composition on device: …
