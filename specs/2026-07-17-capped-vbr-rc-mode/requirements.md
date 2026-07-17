@@ -47,8 +47,9 @@ we do not want to maintain two VBR variants.
    delivers exactly this — the RC bumps QP rather than dropping.*
 3. **Replace `vbr`** — `rc_mode = "vbr"` becomes capped VBR. No separate mode
    string. (Old configs keep parsing; new fields default per "Migration".)
-4. **Star6E first**, then Maruko (per `AGENTS.md` dual-backend policy). The
-   SuperFrame struct must be modelled and validated per backend.
+4. **Star6E + Maruko parity** (per `AGENTS.md` dual-backend policy). PR #181
+   already implements the per-frame caps on both; the QP-window increment
+   follows the same dual-backend pattern.
 
 ## What the mode is
 
@@ -73,95 +74,81 @@ Three bounds, one mode:
    recommended capped-VBR config; decide whether to retire the little-used
    plain modes.
 
-## SDK inventory — verified from this repo (2026-07-17)
+## What PR #181 established (mechanism, both backends)
 
-- The encoder-side per-frame size cap is **absent from this tree.** Greps for
-  `SuperFrm`/`Iprop`/`ReEncode`/`FrmBitsThr` hit nothing in `src/` or
-  `include/`. The maxI/maxP control the team built lives in **waybeam-link**.
-- `MI_VENC_RcParam_t` is modelled as **opaque** here:
-  `struct { ...; void *pRcParam; }` (`include/star6e.h:451`). `GetRcParam` /
-  `SetRcParam` are bound both backends (`star6e_mi.c:286-289`,
-  `maruko_mi.h:127-128`) but no concrete SuperFrame/RcParam layout exists.
-- VBR is wired for **`maxBitrate` + `gop` only** (`venc_api.c:2895-2932`,
-  via `GetChnAttr` → patch → `SetChnAttr`, the live-reconfigure pattern).
-  The rate struct already carries `maxQual`/`minQual`
-  (`i6_venc_rate_h26xvbr`, `sigmastar_types.h:569-577`) — present but
-  **not exposed** as config.
-- `rc_mode` accepts `"cbr"|"vbr"|"avbr"|"qvbr"`
-  (`include/venc_config.h:103`); the apply switch handles CBR/VBR/AVBR only.
+- **Per-frame caps:** `u32MaxISize` / `u32MaxPSize` (bytes) set in the RcParam
+  per-mode union member matching the active rate mode
+  (`stParamH265{Cbr,Vbr,Avbr}` / `stParamH264{Cbr,VBR,Avbr}`) via
+  `GetRcParam` → patch → `SetRcParam`.
+- **Hard-ceiling switch:** `MI_VENC_SetRcPriority(FRAMEBITS_FIRST)` when either
+  cap > 0 (the RC then honours the byte cap over the bitrate target by raising
+  QP); `BITRATE_FIRST` when both return to 0. `MI_VENC_RcPriority_e` +
+  `fnSetRcPriority` added to both backends as an **optional dlsym** symbol
+  (NULL-safe), arity differing (Star6E 2-arg, Maruko 3-arg).
+- **Config / API:** `video0.maxIBytes` / `video0.maxPBytes` (default 0 =
+  unlimited), `MUT_LIVE`, applied atomically via `apply_max_frame_size` and
+  at boot. An IDR is requested (rate-limited) on change.
 
-### SDK reference hunt (do when full SDK is mounted)
+This resolves the struct-layout and mechanism unknowns the original draft
+listed as blockers — no SuperFrame modelling is needed.
 
-The one hard dependency is the exact **RcParam + SuperFrame** layout, which
-must byte-match `libmi_venc` for both SoCs (version-sensitive, like the IVE
-blob lesson).
+### Remaining SDK question (only one)
 
-1. **`MI_VENC_RcParam_t` real layout** — the concrete struct behind the
-   opaque `pRcParam`, for i6e (Star6E) and i6c (Maruko). Capture common
-   fields (min/max Qp, I-frame Qp bounds, `s32ChangePos`, reencode count)
-   and the union of per-mode params.
-2. **QP-window home** — is the quality window the VBR rate struct's
-   `minQual`/`maxQual`, or RcParam `u32MinQp`/`u32MaxQp` (+ `u32MinIQp`/
-   `u32MaxIQp`)? Confirm **polarity** (which bound is the QP floor vs
-   ceiling — Qual vs Qp conventions are inverted on some SigmaStar gens).
-3. **SuperFrame struct + enum** — `MI_VENC_SuperFrmParam_t` (or equivalent):
-   `eSuperFrmMode` values (`NONE` / `REENCODE` / `DROP`), the I/P bit
-   threshold field names/units (**bits**, confirm), and the
-   `s32MaxReEncodeTimes` cap.
-4. **Set path + ordering** — does SuperFrame/QP-window go through
-   `MI_VENC_SetRcParam` (vs ChnAttr)? Must it be set between CreateChn and
-   StartRecvPic, or is it live? (We already do live `SetChnAttr` for
-   bitrate; confirm `SetRcParam` is equally live.)
-5. **Demo/example** — grep SDK `ipc_demo`/`sample` for a SuperFrame +
-   REENCODE example and a min/max-Qp VBR example, for both chips.
+**QP-window home + polarity.** Is the effective quality window the ChnAttr
+VBR rate struct's `maxQual`/`minQual` (`i6_venc_rate_h26xvbr`,
+`sigmastar_types.h:569-577`), or RcParam per-mode `u32MinQp`/`u32MaxQp`? And
+which bound is the floor vs ceiling (Qual vs Qp conventions invert on some
+gens)? Confirm against the SDK before wiring Phase 1.
 
-## Config surface (proposed)
+## Config surface
 
-`rc_mode = "vbr"` (capped VBR). New `video0` fields:
+Already shipped (PR #181), `video0`:
 
-- `vbr_max_bitrate` — existing `video0.bitrate` semantics (ceiling). Live.
-- `vbr_min_qp` / `vbr_max_qp` — QP window. Live if RcParam set is live.
-- `frame_max_i_bits` / `frame_max_p_bits` — SuperFrame thresholds. Live.
-- `frame_max_reencodes` — `s32MaxReEncodeTimes` (default small, e.g. 2).
+- `maxIBytes` / `maxPBytes` — per-frame I/P byte caps. `MUT_LIVE`, 0 =
+  unlimited.
 
-(Exact names to match existing `venc_config` conventions; add
-`test_venc_config.c` cases.)
+To add (QP-window increment):
 
-## Migration (replacing `vbr`)
+- `vbr_min_qp` / `vbr_max_qp` (names TBD to match `venc_config` conventions) —
+  the quality window. Default = full range ⇒ today's VBR. Live via the same
+  reconfigure pattern. Add `test_venc_config.c` cases.
 
-- Old `rc_mode="vbr"` configs must keep loading. New fields default so the
-  mode reproduces sane behaviour when unset: `frame_max_*_bits = 0` ⇒
-  SuperFrame off (pure bounded VBR), QP window = full range ⇒ today's VBR.
-  The capped behaviour is opt-in by setting the thresholds.
-- Document in `HISTORY.md` under the version that ships it: `vbr` now means
-  capped VBR; the old plain-VBR behaviour is the all-defaults case.
+## Migration (`vbr` → capped VBR)
+
+- The "mode" is a *profile*, not a new `rc_mode` string: run `rc_mode="vbr"`
+  (bounds `maxBitrate`) with `maxIBytes`/`maxPBytes` set (deterministic
+  per-frame size) and, once added, the QP window.
+- All-defaults (`maxIBytes=maxPBytes=0`, full QP range) reproduces plain VBR,
+  so existing configs are unaffected.
+- Document the profile in `HISTORY.md` under the version that ships the QP
+  window / consolidation.
 
 ## Open questions / risks
 
-1. **Opaque struct layout** (SDK hunt #1/#3) — the sole hard blocker; a
-   mismatched RcParam struct silently corrupts RC or returns errors. Validate
-   with a known-value round-trip (`Set` then `Get`) on device.
-2. **Re-encode cost at high fps** — `REENCODE` re-runs the encoder for an
-   overflow frame within the same frame budget. At imx335 **120fps** (~8.3ms
-   budget) a re-encode could blow the deadline / drop fps. Measure; cap
-   `frame_max_reencodes` low and set thresholds so overflow is rare.
+1. **QP-window home + polarity** (see above) — the only remaining SDK
+   confirm; blocks the Phase 1 wiring, not the shipped caps.
+2. **`FRAMEBITS_FIRST` QP-bump cost at high fps** — hitting a hard byte cap by
+   steering QP within a single encode should be cheaper than an explicit
+   re-encode pass, but the internal cost is an SDK detail. Measure at imx335
+   **120fps** (~8.3 ms budget); characterise the fps/latency envelope.
 3. **IDR interaction** — an IDR is an I-frame, so it is subject to
-   `maxIbits` REENCODE. Confirm scene-detect IDR and resilience-preset IDRs
-   compose with the cap (a forced IDR that can't fit the I-threshold gets
-   QP-bumped, not dropped). Reconcile with `idr_rate_limit.h`.
-4. **Resilience-preset / intra-refresh ownership** — presets currently drive
-   intra-refresh + SVC-T + GOP under a CBR assumption. Decide whether capped
-   VBR composes with the presets or is selected independently of them.
-5. **maxP-cap ↔ VBR-loop interaction** — a threshold set well below what the
-   VBR loop wants can produce a cap-clipping limit cycle (quality breathing).
-   Set thresholds ≥ the VBR loop's natural per-frame size at `maxBitrate`;
-   widen `statTime` to soften.
+   `maxIBytes`. Confirm scene-detect and resilience-preset IDRs get QP-bumped
+   to fit (not dropped); reconcile with `idr_rate_limit.h`.
+4. **Resilience-preset ownership** — presets drive intra-refresh + SVC-T + GOP
+   under a CBR assumption. Decide whether the capped-VBR profile composes with
+   the presets or is selected independently.
+5. **Cap ↔ VBR-loop limit cycle** — a cap set well below the VBR loop's
+   natural per-frame size at `maxBitrate` pins every frame at the cap (quality
+   breathing). Keep caps ≥ that natural size; widen `statTime` to soften.
+6. **QP-window necessity** — without a `maxQual` floor, `FRAMEBITS_FIRST` can
+   crater quality on complex frames; without a `minQual` ceiling it wastes
+   bits on easy ones. This is the motivation for the Phase 1 increment.
 
-## Verified fact sources (this repo)
+## Verified fact sources
 
+- PR #181 diff (`u32MaxISize`/`u32MaxPSize`, `MI_VENC_RcPriority_e`,
+  `apply_max_frame_size`, dual-backend `fnSetRcPriority`)
 - `include/sigmastar_types.h:527-616` (VBR/QP/CBR rate structs, `maxQual`/
   `minQual`), `514-525` / `895-908` (rate-mode enums, i6e + i6c)
-- `include/star6e.h:451-452` (opaque `MI_VENC_RcParam_t`)
 - `src/venc_api.c:2891-2932` (VBR wired for maxBitrate+gop; live SetChnAttr)
-- `src/venc_config.c:110,543` + `include/venc_config.h:103` (`rc_mode`)
-- `src/star6e_mi.c:286-289` (`GetRcParam`/`SetRcParam` bound)
+- `src/venc_config.c` + `include/venc_config.h:103` (`rc_mode`, `max_*_bytes`)
