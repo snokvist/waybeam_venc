@@ -1,187 +1,176 @@
 # Star6E NPU detection sidecar — implementation plan
 
-Read `requirements.md` first. This plan is staged so each phase is independently
-verifiable (`AGENTS.md` "Scope Control"). Phase 1 is a **go/no-go hardware gate**:
-do not build the wire format or OSD path until the IPU actually invokes on device.
+Read `requirements.md` first. Staged so each phase is independently verifiable
+(`AGENTS.md` "Scope Control"). Phase 1 is a **go/no-go hardware gate**: do not
+build the wire trailer or OSD path until the IPU actually invokes on device.
 
 ## Module layout
 
 ```
-Makefile                         DETECT ?= 0  → src/star6e_npu.c, src/detect_*.c
+Makefile                         DETECT ?= 0  → adds detect sources,
                                  -DHAVE_NPU_DETECT=1 when set
 sdk/ssc338q/lib/chacha20poly1305.c   vendored single-file AEAD (D4)
 src/star6e_npu.c                 IPU device/chn lifecycle, VPE tap, infer thread
 include/star6e_npu.h             public hooks called from star6e_pipeline.c
-src/detect_model_yolov8.c        YOLOv8 decode + NMS + distance (the only
-include/detect_model.h           model-specific file; dispatch by model_id)
-src/detect_sidecar.c             DETECT UDP: subscribe/fanout + envelope+TLV pack
-include/detect_sidecar.h         wire ABI (frozen)
+src/detect_model.c               model_id → decoder dispatch + per-model config load
+include/detect_model.h           DetectModel vtable; DetectFrame result struct
+src/detect_model_yolov8.c        the one v1 decoder: NV12 tensors → boxes (+ any
+                                 model-defined extras); produces TLV + OverlayList
 src/detect_overlay.c             OverlayList → debug_osd_* renderer (model-agnostic)
 include/detect_overlay.h
-tests/test_detect_wire.c         host test: envelope+TLV pack/skip-unknown
-tests/test_detect_decode.c       host test: YOLOv8 decode + distance math (no SDK)
+include/rtp_sidecar.h  (edit)    add RTP_SIDECAR_FLAG_DETECT + variable trailer +
+src/rtp_sidecar.c      (edit)    a send-frame variant that appends an opaque blob
+tests/test_detect_wire.c         host: DETECT trailer pack/parse + skip-unknown + trunc
+tests/test_detect_decode.c       host: YOLOv8 decode/NMS (no SDK)
 ```
 
-Rationale for **not** reusing the `FramingModule` registry: detection is a
-read-only frame *consumer*, not an owner of the port0→VENC path, and must run
-concurrently with a framing preset (stab). A framing slot is mutually exclusive
-(`star6e_framing_select()` first-`enabled()`-wins, `FRAMING_MAX=4`), which is the
-wrong semantics. Detection gets its own small subsystem.
+**Not** a `FramingModule` (mutually exclusive slot, wrong semantics) and **not** a
+separate sidecar socket (D5 — one subscription). The sidecar stays a dumb carrier;
+detection semantics live only in the decoder and in waybeam-hub.
 
 ## Phase 1 — IPU bring-up (HARDWARE GATE)
 
-Prove the silicon path before anything else.
+1. Confirm `libmi_ipu.so` in `/usr/lib` on the Star6E bench
+   (`root@192.168.1.13`). Absent → feature blocked; stop and report.
+2. Dev-only probe (`tools/ipu_probe.c`, not shipped): `i6_ipu_load()` →
+   `MI_IPU_CreateDevice(fw)` → `MI_IPU_CreateCHN(net)` with a known YOLOv8n
+   `.img` → `GetInOutTensorDesc` → feed a static NV12 buffer → `Invoke` → dump
+   output tensor shapes/`scalar`/`zeroPnt`.
+3. Confirm the layout matches the YOLOv8n export (grid, INT8 dequant).
 
-1. Confirm `libmi_ipu.so` is present in `/usr/lib` on the Star6E bench
-   (`root@192.168.1.13`). If absent, the whole feature is blocked — stop and
-   report.
-2. Minimal standalone probe (`tools/ipu_probe.c`, dev-only, not shipped): call
-   `i6_ipu_load()`, `MI_IPU_CreateDevice(fw)`, `MI_IPU_CreateCHN(net)` with a
-   known YOLOv8n `.img`, `MI_IPU_GetInOutTensorDesc`, feed a static NV12 buffer,
-   `MI_IPU_Invoke`, dump raw output tensor shapes/scales.
-3. Verify the output tensor layout matches expected YOLOv8n export
-   (grid/anchors, INT8 + `scalar`/`zeroPnt`).
+**Gate:** plausible tensors on device. If the SGS-toolchain output doesn't match
+the `i6_ipu_tend` contract, fix the conversion recipe (private repo) first. No
+further phases until green. (Risk R1/R2 measured here.)
 
-**Gate:** invoke returns plausible tensors on device. If the SGS toolchain
-output doesn't match the `i6_ipu_tend` contract, resolve the model-conversion
-recipe (private repo) before proceeding. No further phases until green.
+## Phase 2 — VPE tap + inference thread + decoder dispatch
 
-## Phase 2 — VPE tap + inference thread
-
-1. Add a dedicated VPE scaler output port at model input res (config
-   `detect.input_w/h`, default 640×640, NV12). Follow the depth/getbuf pattern
-   in `star6e_framing_stab.c` (`MI_SYS_SetChnOutputPortDepth`,
-   `MI_SYS_ChnOutputPortGetBuf` → `phyAddr[0]`). Feed the phys addr straight to
-   the IPU input tensor (zero-copy).
+1. Dedicated VPE scaler output port at the active model's input size (from the
+   model's config, default 640×640 NV12). Follow the depth/getbuf pattern in
+   `star6e_framing_stab.c` (`MI_SYS_SetChnOutputPortDepth`,
+   `MI_SYS_ChnOutputPortGetBuf` → `phyAddr[0]`) and feed the phys addr straight
+   into the IPU input tensor (zero-copy).
 2. Low-priority inference thread: GetBuf → Invoke → PutBuf, decimated by
-   `detect.infer_interval` (default: aim ~10 Hz regardless of encode fps).
-3. Post-processor (`detect_model_yolov8.c`): dequant, decode anchor-free boxes,
-   sigmoid scores, NMS, distance-from-size (D8). Output a host-order
-   `DetectFrame { model_id, count, Det[] }` where
-   `Det { class_id, score, cx, cy, w, h, distance_cm }`.
-4. Publish into a **double-buffered latest-snapshot** (ping-pong pointer +
-   seq counter). Mirrors how the inline scene detector hands per-frame telemetry
-   to the sidecar without locking the encode hot path.
+   `detect.infer_interval` (target ~10 Hz regardless of encode fps).
+3. **Decoder dispatch** (`detect_model.c`): a `DetectModel` vtable keyed by
+   `model_id` — `decode(tensors) → DetectFrame`, `to_overlay(DetectFrame) →
+   OverlayList`, `to_tlv(DetectFrame) → bytes`. v1 registers one entry
+   (`detect_model_yolov8.c`). Per-model params (thresholds, class table, input
+   dims, any distance constants, tag schema id) are hardcoded in the decoder or
+   loaded from a separate per-model config file — never from `waybeam.json`.
+4. Publish `DetectFrame` into a **double-buffered latest-snapshot** (ping-pong
+   pointer + `detect_seq`), mirroring how the scene detector hands telemetry to
+   the sidecar without locking the encode hot path.
 
-**Verify:** log decoded boxes for a known test scene; encode FPS/bitrate
-unchanged vs `DETECT=0`.
+**Verify:** decoded boxes logged for a known scene; encode FPS/bitrate unchanged
+vs `DETECT=0`.
 
-## Phase 3 — Wire ABI (frozen) + sidecar
+## Phase 3 — RTP sidecar DETECT trailer (frozen transport)
 
-Envelope (`include/detect_sidecar.h`, network byte order, `pack(1)`):
+Extend `rtp_sidecar.h/.c`, modelled on the attitude trailer. New flag and a
+variable-length trailer appended **after** attitude (last, because it is the only
+variable-length trailer — the fixed ones keep computable offsets):
 
 ```c
-#define DETECT_MAGIC   0x44544354u   /* "DTCT" */
-#define DETECT_VERSION 1
-#define DETECT_MSG_SUBSCRIBE 1
-#define DETECT_MSG_FRAME     2
-/* 3 = DESCRIPTOR — RESERVED, future; do not implement in v1 */
+#define RTP_SIDECAR_FLAG_DETECT 0x10   /* detect trailer follows (last) */
+#define DETECT_TLR_TRUNCATED    0x01   /* objects dropped to fit MTU */
 
-#define DETECT_FLAG_TRUNCATED 0x01   /* objects dropped to fit one datagram */
-
+/* Fixed trailer header (network byte order, pack(1)); TLV body follows. */
 typedef struct {
-    uint32_t magic;            /* DETECT_MAGIC */
-    uint8_t  version;          /* DETECT_VERSION */
-    uint8_t  msg_type;         /* DETECT_MSG_FRAME */
-    uint16_t model_id;         /* public id→name registry */
-    uint16_t schema_ver;       /* payload TLV schema version for this model */
-    uint16_t object_count;     /* objects actually included */
-    uint32_t flags;            /* DETECT_FLAG_* (reserved bits = 0) */
-    uint64_t frame_id;         /* == RtpSidecarFrame.frame_id for correlation */
-    uint64_t capture_us;       /* same clock domain as RTP sidecar */
-    uint16_t payload_len;      /* bytes of TLV that follow */
-    uint16_t _reserved;        /* 0; future use */
-    /* ── TLV payload: payload_len bytes ── */
-} DetectEnvelope;              /* 32 bytes */
+    uint16_t model_id;      /* public id→name registry */
+    uint16_t schema_ver;    /* TLV schema version for this model */
+    uint16_t object_count;  /* objects actually included */
+    uint16_t flags;         /* DETECT_TLR_* */
+    uint32_t detect_seq;    /* monotonic inference id (fresh vs unchanged) */
+    uint16_t payload_len;   /* bytes of TLV that follow */
+    uint16_t _reserved;     /* 0 */
+} RtpSidecarDetectHdr;      /* 16 bytes + payload_len */
 ```
 
-TLV record (per field): `[tag u8][len u8][value len bytes]`, values network
-byte order, objects separated by a `TAG_OBJ` boundary tag. Reserve the v1 tag
-set once (`TAG_OBJ`, `TAG_BBOX`, `TAG_CLASS`, `TAG_SCORE`, `TAG_TRACK_ID`,
-`TAG_DISTANCE_CM`); leave the tag space open. **Consumers skip unknown tags by
-`len`** — the same forward-compat rule the RTP sidecar already uses for its
-flag-gated trailers.
+TLV body: `[tag u8][len u8][value…]`, network byte order, each object opened by
+an object-boundary tag. The venc side copies the blob the decoder produced —
+**it never parses tags**. Consumers skip unknown tags by `len`.
 
-Sidecar (`src/detect_sidecar.c`): copy the subscribe/fanout/TTL machinery from
-`rtp_sidecar.c` (bind own `detect.sidecar_port`, learn subscriber from packet
-source, ≤4 subs, 5 s TTL). Reserve two `_pad` bytes in the subscribe struct for
-a future `max_schema_ver` capability field.
+Wiring: add a `rtp_sidecar_send_frame_full2(... , const void *detect_blob,
+uint16_t detect_len)` (or extend the existing `_full`) that sets
+`RTP_SIDECAR_FLAG_DETECT` and appends `detect_blob` when non-NULL. The blob is
+opaque bytes → the generic append keeps the sidecar model-agnostic even in the
+default build. **Attach-on-fresh:** the backend passes the blob only when
+`detect_seq` advanced since the last send; otherwise NULL (no trailer).
 
-**One-datagram rule:** the packer fills objects (highest score first) until the
-next TLV object would exceed the MTU budget; remaining objects are dropped and
-`DETECT_FLAG_TRUNCATED` is set. Exactly one `sendto` per encoded frame per
-subscriber.
+**One-datagram rule:** the decoder's `to_tlv` fills objects highest-score-first
+until the next object would exceed the remaining MTU budget (packet minus the
+frame/enc/transport/attitude trailers already present); the rest are dropped and
+`DETECT_TLR_TRUNCATED` set. Still exactly one `sendto` per frame per subscriber.
 
 **Verify:** `tests/test_detect_wire.c` on host — pack N objects, parse back,
-confirm skip-unknown-tag and truncation-flag behaviour byte-for-byte.
+confirm skip-unknown-tag, truncation, and that an unchanged `detect_seq` omits
+the trailer.
 
 ## Phase 4 — Generic OSD path
 
-`detect_overlay.c`: translate the latest `DetectFrame` snapshot into an
-`OverlayList` (boxes as `RECT`, labels as `TEXT`, centroids as `POINT`), then a
-model-agnostic renderer walks it calling `debug_osd_rect/text/point`. The
-renderer never learns class semantics.
+`detect_overlay.c`: the decoder's `to_overlay` emits an `OverlayList` (boxes →
+`RECT`, labels → `TEXT`, centroids → `POINT`); a model-agnostic renderer walks it
+calling `debug_osd_rect/text/point`. The renderer learns no class semantics.
 
 Coordinate mapping: boxes are in inference-frame (scaler port) space; map into
-the encoded frame. When a framing crop is active, apply the same crop-origin
-transform the OSD already uses for its stats panel
-(`debug_osd_set_panel_offset`). Read the snapshot on the encode thread between
-`debug_osd_begin_frame`/`end_frame`; detections are the most recent (a few
-frames stale by design).
+the encoded frame. With a framing crop active, apply the same crop-origin
+transform the OSD already uses (`debug_osd_set_panel_offset`). Read the snapshot
+on the encode thread inside `debug_osd_begin_frame`/`end_frame`; detections are
+the most recent (a few frames stale by design).
 
 **Verify:** boxes land on-target with and without an active stab crop.
 
 ## Phase 5 — Config, crypto, docs, ship
 
-1. `detect.*` config section through the full sync contract for persisted
-   fields (`VencConfig` sub-struct + defaults, `load_detect()`/serialize,
+1. Minimal `detect.*` in `waybeam.json` through the full sync contract for
+   persisted fields (`VencConfig` + defaults, `load_detect()`/serialize,
    `render_detect()` printer, `g_fields[]`/`g_aliases[]`,
-   `config/waybeam.default.json`) — **but no `SECTIONS[]` and no `FIELD_UI`**
-   (posture per requirements). Fields: `enabled`, `model_path`, `key_path`,
-   `sidecar_port`, `osd` (bool), `infer_interval`, `input_w`, `input_h`.
-   - **Risk check:** confirm adding a sub-struct to `VencConfig` does not shift
-     layout the ISP-bin loader depends on (`star6e_pipeline.h:78-79` heap-
-     allocates `Star6eDualVenc` specifically to *avoid* growing `VencConfig`).
-     If growth is unsafe, heap-allocate the detect config the same way.
-2. Vendored `chacha20poly1305.c` (D4). Load path: if `model_path` bytes carry
-   the AEAD header + tag, require a key (`key_path`/env); decrypt into a private
-   buffer fed to the IPU via the `i6_ipu_rdfn` callback. Missing/wrong key →
-   log once, leave detection dormant, pipeline runs normally.
-3. Terse `HTTP_API_CONTRACT.md` entry for any `detect.*` set/get; no examples
-   (examples live private).
-4. `VERSION` bump + one `HISTORY.md` line. `make verify` (both backends;
-   `DETECT=0` for Maruko, both `DETECT=0/1` for Star6E).
+   `config/waybeam.default.json`) — **no `SECTIONS[]`, no `FIELD_UI`**. Fields:
+   `enabled`, `model_id`, `model_path`, `key_path`, `osd`, `infer_interval`.
+   Per-model tuning does **not** live here (D9).
+   - **Risk check R3:** confirm adding a sub-struct to `VencConfig` doesn't
+     shift layout the ISP-bin loader depends on (`star6e_pipeline.h:78-79`
+     heap-allocates `Star6eDualVenc` specifically to avoid growing `VencConfig`).
+     If unsafe, heap-allocate the detect config the same way.
+2. Vendored `chacha20poly1305.c`. Load: if `model_path` bytes carry the AEAD
+   header+tag, require a key (`key_path`/env), decrypt into a private buffer fed
+   to the IPU via `i6_ipu_rdfn`. Missing/wrong key → log once, stay dormant.
+3. Terse `HTTP_API_CONTRACT.md` entry for `detect.*` set/get; no examples.
+4. `VERSION` bump + one `HISTORY.md` line. `make verify` (Maruko `DETECT=0`;
+   Star6E `DETECT=0` and `DETECT=1`).
 
 ## Risks
 
-- **R1 — model conversion (highest).** The IPU eats an `SGS_IPU_SDK`-compiled
-  `.img`, not ONNX. If the toolchain recipe (quantization/calibration) is not
-  reproducible, Phase 1 stalls. Owned by the private repo; must be settled
-  before Phase 2.
-- **R2 — IPU memory footprint.** 64–128 MB board already runs sensor+ISP+VENC.
-  Measure IPU device/model residency in Phase 1; if it starves VB pools, cap
-  input res / model size.
-- **R3 — `VencConfig` growth vs ISP bin load** (see Phase 5 risk check).
-- **R4 — one-datagram truncation** under crowded scenes. Accepted per hard
-  constraint; `TRUNCATED` flag makes loss observable rather than silent.
-- **R5 — coordinate drift** between scaler-port space and encoded crop. De-risked
-  by reusing the panel-offset transform; verify on device with stab active.
+- **R1 — model conversion (highest).** IPU eats an `SGS_IPU_SDK` `.img`, not
+  ONNX. Non-reproducible quantization stalls Phase 1. Private repo; settle before
+  Phase 2.
+- **R2 — IPU memory footprint** on a 64–128 MB board. Measure residency in
+  Phase 1; cap input res / model size if VB pools starve.
+- **R3 — `VencConfig` growth vs ISP bin load** (see Phase 5).
+- **R4 — trailer truncation** under crowded scenes. Accepted; `TRUNCATED` makes
+  loss observable, not silent.
+- **R5 — coordinate drift** scaler-port vs encoded crop. De-risked by reusing the
+  panel-offset transform; verify on device with stab active.
+- **R6 — sidecar edit touches a core/shared file.** The DETECT append is generic
+  (opaque blob) so it compiles in both backends without pulling in detection;
+  keep the model-specific code entirely behind `HAVE_NPU_DETECT`.
 
 ## Simplicity review (fit-for-purpose)
 
-What this plan deliberately **does not** build, to stay minimal:
+Deliberately **not** built, to stay minimal:
 
-- No in-band `DESCRIPTOR` negotiation — `model_id` + private schema covers v1;
-  TLV skip-unknown already gives forward-compat. (Reserved msg_type only.)
-- No fragmentation / multi-packet frames — the one-datagram rule removes an
-  entire reassembly subsystem; truncation is a flag, not a protocol.
-- No device-side model *registry* — one YOLOv8 decoder behind a `model_id`
-  dispatch; adding a decoder later is additive, no framework.
-- No per-device key binding in v1 — single shared key is enough to gate blob
-  redistribution.
-- No `FramingModule` reuse — avoided the mutual-exclusion mismatch.
+- **No second socket / second subscription** — detection rides the ATTITUDE
+  packet as one more flag-gated trailer. One read for hub; auto-correlated by
+  `frame_id`. (Removed the separate-port design entirely.)
+- **No fragmentation** — one datagram per frame; truncation is a flag.
+- **No privileged fields in transport or OSD** — distance/keypoints/stats are all
+  model-defined TLV tags + model-produced OSD primitives. Transport carries
+  opaque bytes; the OSD renderer draws opaque primitives.
+- **No in-band DESCRIPTOR, no per-device key** — reserved.
+- **No plugin framework** — a small `model_id` vtable dispatch; a second model is
+  additive.
 
-The generality that matters (new models without touching OSD/transport) lives
-entirely in **two frozen contracts** — the `OverlayList` draw vocabulary and the
-`DetectEnvelope`+TLV wire — not in device-side plugin machinery. That is the
-minimum surface that satisfies the future-proofing requirement.
+The generality that matters — new models without touching OSD or transport —
+lives in exactly two frozen contracts (the `OverlayList` draw vocabulary and the
+opaque DETECT trailer) plus one dispatch point (`model_id` → decoder). That is the
+minimum surface that satisfies both "one read" and "any future model."
