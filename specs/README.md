@@ -14,3 +14,4 @@ warranted, `plan.md` and `validation.md`.
 | `2026-07-08-ive-hw-accel/` | IVE HW proven + benchmarked; no consumer built yet |
 | `2026-07-09-maruko-ldc-gyro-dis/` | Investigation only; standalone MI_LDC unproven, lib not vendored |
 | `2026-07-16-star6e-ldc-geometric-correction/` | Investigation; VPE-embedded LDC, Phase 0 liveness probe pending SDK blob hunt |
+| `2026-07-17-capped-vbr-rc-mode/` | Spec; design locked (encoder SuperFrame + REENCODE, replaces vbr), pending SDK RcParam struct recovery |
