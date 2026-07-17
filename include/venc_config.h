@@ -110,6 +110,15 @@ typedef struct {
 	uint32_t max_p_bytes;      /* per-frame P-frame size cap (bytes); 0=unlimited */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
+	/* Pure-realtime encode chain (Star6E only; Maruko already streams
+	 * SCL→VENC in RING mode).  true = bind VPE→VENC ch0 as a streaming
+	 * link (RING, REALTIME fallback) with the VENC in ring-input mode so
+	 * encode overlaps sensor readout.  Trade-off while active: dual-VENC
+	 * recording and the JPEG snapshot are refused (a streaming producer
+	 * port is 1:1 — no FRAMEBASE fan-out from the same VPE port).
+	 * false = classic FRAMEBASE delivery.  See
+	 * documentation/REALTIME_PIPELINE_INVESTIGATION.md. */
+	bool low_delay;
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

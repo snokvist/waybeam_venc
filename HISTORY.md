@@ -1,5 +1,42 @@
 # History
 
+## [0.48.0] - 2026-07-18
+
+Star6E pure-REALTIME encode chain behind a new `video0.lowDelay` flag
+(default off, MUT_RESTART) — the last FRAMEBASE leg (VPE→VENC ch0) becomes a
+streaming link so encode overlaps sensor readout.  Design + device plan in
+`documentation/REALTIME_PIPELINE_INVESTIGATION.md`; MVP target Star6E/IMX335
+mode 4 (1920×1080@120).
+
+- **VENC ring input** (`src/star6e_mi.c`, `include/star6e_mi.h`,
+  `include/star6e.h`): `MI_VENC_SetInputSourceConfig` loaded as an optional
+  symbol (mirrors the OpenIPC i6 HAL); under lowDelay, ch0 is switched to
+  `I6_VENC_SRC_CONF_RING_ONE` between CreateChn and StartRecvPic.  A
+  rejection is non-fatal — the bind stays FRAMEBASE.
+- **Link-type probe** (`src/star6e_pipeline.c::star6e_pipeline_bind_venc0`):
+  first ch0 bind under lowDelay probes `LINK_RING` then `LINK_REALTIME`
+  (no i6e vendor reference exists for this leg — the i6c HAL uses RING, the
+  OpenIPC i6 HAL stays FRAMEBASE).  If both are rejected the VENC input is
+  restored to frame-base (Stop → NORMAL → Start; ring input over a
+  FRAMEBASE bind is the device-proven stall combo) before falling back.
+  The negotiated type is exposed via `star6e_pipeline_venc_link_type()` and
+  reused by the live-fps rebinds (`src/star6e_controls.c`) and the stab
+  framing port0 bind (`src/star6e_framing_stab.c`) — mixing link types on
+  one port stalls the pipeline.
+- **VIF `frameLineCnt = h/4`** under lowDelay so downstream is notified
+  every quarter frame (harmless alone; the win needs the full chain).
+- **1:1 fan-out policy**: a streaming producer port refuses second binds
+  (mi_sys busy, `0xA0092012` on i6c), so under a negotiated streaming link
+  dual-VENC recording downgrades to single-channel (same pattern as the
+  stab downgrade) and the JPEG snapshot is skipped (endpoint serves 503).
+  Both restore with `lowDelay=false`.  Follow-up: second VPE-port tap.
+- **framing=stab-fill is exempt** — its compose loop manually feeds the
+  VENC input port, which requires frame-base input (same exception as
+  Maruko's NORMAL_FRMBASE stab-fill path); lowDelay is inert there.
+- Config plumbing: `video0.lowDelay` in defaults/parse/pretty-print
+  (`src/venc_config.c`, both `config/waybeam.default*.json`), `g_fields[]`
+  + camelCase alias (`src/venc_api.c`), contract doc updated.
+
 ## [0.47.0] - 2026-07-18
 
 Retire the Star6E `aeEngine=custom` userspace AE and remove the `custom` value

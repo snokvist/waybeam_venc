@@ -1,8 +1,19 @@
 # Pure REALTIME Pipeline — Investigation & Star6E/IMX335 MVP Plan
 
-Date: 2026-07-17 | Status: **Investigation complete — implementation plan
-ready, pending approval** | Supersedes the plan section of
-`LOW_DELAY_PIPELINE.md`.
+Date: 2026-07-17 | Status: **Implemented in v0.48.0 (`video0.lowDelay`,
+default off) — pending bench verification (§6)** | Supersedes the plan
+section of `LOW_DELAY_PIPELINE.md`.
+
+Implementation deltas from the plan below: the RING→REALTIME probe and the
+FRAMEBASE fallback (with frame-base input restore) live in
+`star6e_pipeline_bind_venc0()`; the negotiated link is exposed through
+`star6e_pipeline_venc_link_type()` for the live-fps rebinds; dual-record
+under lowDelay *downgrades to single-channel* (same pattern as the stab
+downgrade) rather than hard-refusing; and `framing=stab-fill` exempts
+itself from ring input because its compose loop manually feeds the VENC
+input port (frame-base required, as on Maruko).  No i6e private ring pool
+is configured — the i6c pool struct has no verified i6e counterpart and
+the reference i6 HAL never calls it (§4.5 resolved: skip).
 
 ## Goal
 

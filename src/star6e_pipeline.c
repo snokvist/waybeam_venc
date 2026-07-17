@@ -427,6 +427,85 @@ static Star6ePrecropRect star6e_pipeline_compute_precrop(uint32_t sensor_w,
 	return rect;
 }
 
+/* video0.lowDelay pipeline state.  Reset by star6e_pipeline_start() so a
+ * single-PID reinit re-negotiates from the fresh config.
+ *
+ * g_low_delay: the config intent (gates ring input, frameLineCnt, and the
+ * dual/snapshot fan-out refusals).  g_venc_ring_input: the VENC ch0 input
+ * actually entered ring mode (SetInputSourceConfig accepted RING_ONE) — a
+ * streaming bind is only attempted when this holds, because ring input
+ * over a FRAMEBASE bind is the device-proven stall combo and the reverse
+ * (streaming bind over frame-base input) is untested.  g_venc_link_type:
+ * the negotiated ch0 link, recorded at first bind and reused by every
+ * later rebind (live fps changes). */
+static int g_low_delay;
+static int g_venc_ring_input;
+static uint32_t g_venc_link_type = I6_SYS_LINK_FRAMEBASE;
+
+uint32_t star6e_pipeline_venc_link_type(void)
+{
+	return g_venc_link_type;
+}
+
+MI_S32 star6e_pipeline_bind_venc0(MI_SYS_ChnPort_t *vpe_port,
+	MI_SYS_ChnPort_t *venc_port, uint32_t src_fps, uint32_t dst_fps)
+{
+	static const struct { uint32_t link; const char *name; } probes[] = {
+		{ I6_SYS_LINK_RING,     "RING" },
+		{ I6_SYS_LINK_REALTIME, "REALTIME" },
+	};
+	MI_S32 ret;
+	size_t i;
+
+	if (g_venc_link_type != I6_SYS_LINK_FRAMEBASE || !g_venc_ring_input)
+		return MI_SYS_BindChnPort2(vpe_port, venc_port,
+			src_fps, dst_fps, g_venc_link_type, 0);
+
+	/* First lowDelay bind: probe the streaming links.  There is no i6e
+	 * vendor reference for this leg (the i6c HAL uses RING; the OpenIPC
+	 * i6 HAL stays FRAMEBASE), so accept whichever the firmware takes. */
+	for (i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+		ret = MI_SYS_BindChnPort2(vpe_port, venc_port,
+			src_fps, dst_fps, probes[i].link, 0);
+		if (ret == 0) {
+			g_venc_link_type = probes[i].link;
+			printf("> lowDelay: VPE->VENC bound %s (%u:%u)\n",
+				probes[i].name, src_fps, dst_fps);
+			return 0;
+		}
+		fprintf(stderr, "WARNING: lowDelay %s bind rejected %d\n",
+			probes[i].name, (int)ret);
+	}
+
+	/* Both streaming links rejected.  The VENC input is still in ring
+	 * mode — restore frame-base input before the FRAMEBASE bind (ring
+	 * input + FRAMEBASE bind is the known stall combo).  If the restore
+	 * fails, abort rather than bind an invalid combination. */
+	{
+		i6_venc_src_conf conf = I6_VENC_SRC_CONF_NORMAL;
+		int chn = (int)venc_port->channel;
+
+		MI_VENC_StopRecvPic(chn);
+		ret = MI_VENC_SetInputSourceConfig(chn, &conf);
+		if (ret != 0) {
+			fprintf(stderr, "ERROR: lowDelay fallback could not "
+				"restore frame-base VENC input (%d) — set "
+				"video0.lowDelay=false\n", (int)ret);
+			return ret;
+		}
+		if (MI_VENC_StartRecvPic(chn) != 0) {
+			fprintf(stderr, "ERROR: lowDelay fallback "
+				"StartRecvPic failed\n");
+			return -1;
+		}
+	}
+	g_venc_ring_input = 0;
+	fprintf(stderr, "WARNING: lowDelay unsupported by this firmware — "
+		"falling back to FRAMEBASE delivery\n");
+	return MI_SYS_BindChnPort2(vpe_port, venc_port,
+		src_fps, dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
+}
+
 static int star6e_pipeline_start_vif(const SensorSelectResult *sensor,
 	const Star6ePrecropRect *precrop)
 {
@@ -475,7 +554,11 @@ static int star6e_pipeline_start_vif(const SensorSelectResult *sensor,
 			sensor->plane.precision * I6_BAYER_END + sensor->plane.bayer);
 	}
 	port.frate = I6_VIF_FRATE_FULL;
-	port.frameLineCnt = 0;
+	/* lowDelay: notify downstream every quarter frame so the realtime
+	 * chain can start before the full frame lands.  Harmless if the
+	 * VPE→VENC leg later falls back to FRAMEBASE (measured +108 µs only,
+	 * no functional change — LOW_DELAY_PIPELINE.md). */
+	port.frameLineCnt = g_low_delay ? precrop->h / 4 : 0;
 
 	ret = MI_VIF_SetChnPortAttr(0, 0, &port);
 	if (ret != 0) {
@@ -1322,6 +1405,35 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		return ret;
 	}
 
+	/* lowDelay: switch the input to ring mode — must land between
+	 * CreateChn and StartRecvPic (SDK ordering).  Ch0 only: the dual ch1
+	 * caller passes vcfg=NULL and the JPEG channel is never created under
+	 * lowDelay.  A rejection (old libmi_venc.so, missing symbol) is not
+	 * fatal — the bind stage then stays FRAMEBASE.
+	 *
+	 * framing=stab-fill is exempt: its compose loop manually feeds the
+	 * VENC input port (ChnInputPortGetBuf/PutBuf), which requires
+	 * frame-base input — same exception as Maruko's NORMAL_FRMBASE
+	 * stab-fill path.  lowDelay is inert there. */
+	if (vcfg && vcfg->video0.low_delay &&
+	    strcmp(vcfg->video0.framing, "stab-fill") == 0) {
+		printf("> lowDelay: inert under framing=stab-fill "
+			"(manual frame-base VENC feed)\n");
+	} else if (vcfg && vcfg->video0.low_delay) {
+		i6_venc_src_conf conf = I6_VENC_SRC_CONF_RING_ONE;
+		MI_S32 src_ret = MI_VENC_SetInputSourceConfig(*chn, &conf);
+		if (src_ret == 0) {
+			g_venc_ring_input = 1;
+			printf("> lowDelay: VENC ch%d ring input (RING_ONE)\n",
+				*chn);
+		} else {
+			g_venc_ring_input = 0;
+			fprintf(stderr, "WARNING: lowDelay ring input rejected "
+				"(%d) — keeping FRAMEBASE delivery\n",
+				(int)src_ret);
+		}
+	}
+
 	/* SDK convention: SetRefParam must be called between CreateChn and
 	 * StartRecvPic.  Star6E silently no-ops the call if invoked after
 	 * StartRecvPic, producing a flat single-layer stream. */
@@ -2001,8 +2113,8 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 		 * the encoder actually outputs it.  The RC fpsNum is separately capped
 		 * to STAR6E_VENC_INPUT_FPS_MAX below — see venc_fps. */
 
-		ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
-			bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
+		ret = star6e_pipeline_bind_venc0(&state->vpe_port,
+			&state->venc_port, bind_src_fps, bind_dst_fps);
 		if (ret != 0) {
 			fprintf(stderr, "ERROR: MI_SYS_Bind VPE->VENC failed %d\n", ret);
 			MI_SYS_UnBindChnPort(&state->vif_port, &state->vpe_port);
@@ -2016,8 +2128,18 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
 	 * just serves 503 if init fails.  Config from venc.json snapshot.*
-	 * section; width=0/height=0 inherits main stream dimensions. */
-	{
+	 * section; width=0/height=0 inherits main stream dimensions.
+	 *
+	 * lowDelay: skipped when a streaming link was negotiated — the 1:1
+	 * producer port cannot take the snapshot's second FRAMEBASE bind
+	 * (mi_sys busy).  No source registered → snapshot endpoint serves
+	 * 503 until lowDelay is turned off.  Moving the snapshot to a second
+	 * VPE output port is the planned follow-up
+	 * (REALTIME_PIPELINE_INVESTIGATION.md §4.6). */
+	if (g_venc_link_type != I6_SYS_LINK_FRAMEBASE) {
+		printf("> lowDelay: JPEG snapshot disabled (1:1 streaming "
+			"port, no fan-out)\n");
+	} else {
 		venc_jpeg_set_source(&state->vpe_port);
 		const VencConfigSnapshot *snap = &vcfg->snapshot;
 		VencJpegConfig jcfg = {
@@ -2368,6 +2490,16 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	star6e_pipeline_clear_zoom_status();
 	star6e_framing_register_builtins();
 
+	/* Re-negotiate the lowDelay chain from the fresh config: single-PID
+	 * reinit reuses this process, so the probe state must not leak from
+	 * the previous run. */
+	g_low_delay = vcfg->video0.low_delay ? 1 : 0;
+	g_venc_ring_input = 0;
+	g_venc_link_type = I6_SYS_LINK_FRAMEBASE;
+	if (g_low_delay)
+		printf("> lowDelay: pure-realtime encode chain requested "
+			"(dual record + snapshot disabled while active)\n");
+
 	if (prepare_pipeline_config(state, vcfg, &pconf) != 0)
 		return -1;
 
@@ -2555,6 +2687,19 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 			"single-channel while image stabilization is active "
 			"(video0.framing): no separate ch1 — recording the "
 			"stabilized main stream (ch0) at its bitrate, not "
+			"record.bitrate\n");
+		return 0;
+	}
+
+	/* lowDelay: a streaming (RING/REALTIME) producer port is 1:1 — a
+	 * second FRAMEBASE bind on VPE port0 is rejected by mi_sys (busy).
+	 * Same downgrade as the stab case: no ch1, the caller records the
+	 * main stream instead. */
+	if (g_venc_link_type != I6_SYS_LINK_FRAMEBASE) {
+		fprintf(stderr, "[waybeam] WARNING: dual recording downgraded to "
+			"single-channel while video0.lowDelay is active: the "
+			"streaming VPE->VENC link is 1:1, no ch1 fan-out — "
+			"recording the main stream (ch0) at its bitrate, not "
 			"record.bitrate\n");
 		return 0;
 	}

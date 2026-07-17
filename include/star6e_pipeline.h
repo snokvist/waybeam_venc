@@ -116,6 +116,20 @@ int star6e_pipeline_start_dual(Star6ePipelineState *state,
 /** Tear down secondary VENC channel if active. */
 void star6e_pipeline_stop_dual(Star6ePipelineState *state);
 
+/** VPE→VENC ch0 link type currently in effect (I6_SYS_LINK_*).  FRAMEBASE
+ *  unless video0.lowDelay negotiated a streaming link at first bind.  Live
+ *  fps rebinds must reuse this value — mixing link types on one port, or
+ *  a FRAMEBASE bind over a ring-mode VENC input, stalls the pipeline. */
+uint32_t star6e_pipeline_venc_link_type(void);
+
+/** Bind VPE port0 → VENC ch0 with the negotiated link type.  Under
+ *  video0.lowDelay the first call probes RING then REALTIME and records
+ *  the accepted type; if both are rejected it restores the VENC to
+ *  frame-base input and falls back to FRAMEBASE.  Plain FRAMEBASE bind
+ *  otherwise.  Returns the MI_SYS_BindChnPort2 result. */
+MI_S32 star6e_pipeline_bind_venc0(MI_SYS_ChnPort_t *vpe_port,
+	MI_SYS_ChnPort_t *venc_port, uint32_t src_fps, uint32_t dst_fps);
+
 /** Initialize and start the full encoder pipeline (sensor → VENC). */
 int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	SdkQuietState *sdk_quiet);

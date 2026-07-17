@@ -161,6 +161,7 @@ void venc_config_defaults(VencConfig *cfg)
 	/* scene detection (video0) */
 	cfg->video0.scene_threshold = 0;   /* 0 = off */
 	cfg->video0.scene_holdoff = 2;
+	cfg->video0.low_delay = false;
 
 	/* intra refresh (video0) — disabled by default; mode-driven */
 	safe_strcpy(cfg->video0.intra_refresh_mode,
@@ -558,6 +559,7 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
 		(int)v->scene_holdoff);
 	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
+	v->low_delay = json_get_bool(obj, "lowDelay", v->low_delay);
 
 	/* Resilience preset is the sole driver of intra-refresh + SVC-T
 	 * (refPred).  For named presets it also overrides gop_size; only
@@ -1250,6 +1252,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "maxPBytes",      cfg->video0.max_p_bytes,     0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
+	pp_field_bool(p,   2, "lowDelay",       cfg->video0.low_delay,       0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);

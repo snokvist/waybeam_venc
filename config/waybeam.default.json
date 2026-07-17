@@ -37,6 +37,7 @@
     "maxPBytes": 0,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
+    "lowDelay": false,
     "resilience": "off",
     "zoomX": 0.5,
     "zoomY": 0.5,

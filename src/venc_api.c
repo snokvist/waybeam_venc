@@ -472,6 +472,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(snapshot, height,    FT_UINT,   MUT_RESTART),
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
+	FIELD(video0, low_delay,       FT_BOOL,   MUT_RESTART),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
 	 * magnitude is part of the framing preset (derived zoom_pct), not a
@@ -566,6 +567,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "record.gopSize", "record.gop_size" },
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
+	{ "video0.lowDelay", "video0.low_delay" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
 	{ "video0.stabCropPct", "video0.stab_crop_pct" },

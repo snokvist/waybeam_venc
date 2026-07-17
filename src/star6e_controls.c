@@ -421,6 +421,7 @@ static int apply_fps(uint32_t fps)
 	MI_S32 bind_ret;
 	uint32_t sensor_fps;
 	uint32_t rc_fps;
+	uint32_t venc_link;
 
 	if (fps == 0 || fps > PIPELINE_LIVE_FPS_MAX)
 		return -1;
@@ -443,17 +444,21 @@ static int apply_fps(uint32_t fps)
 	 * delivered rate leaves only ~19% CBR overshoot instead of ~4.7x. */
 	rc_fps = fps > STAR6E_VENC_INPUT_FPS_MAX ? STAR6E_VENC_INPUT_FPS_MAX : fps;
 
+	/* Live fps changes reuse the link type the pipeline negotiated at
+	 * first bind (FRAMEBASE, or RING/REALTIME under video0.lowDelay) —
+	 * mixing link types on the same port stalls the pipeline. */
+	venc_link = star6e_pipeline_venc_link_type();
 	MI_SYS_UnBindChnPort(&g_star6e_control_ctx.vpe_port,
 		&g_star6e_control_ctx.venc_port);
 	bind_ret = MI_SYS_BindChnPort2(&g_star6e_control_ctx.vpe_port,
 		&g_star6e_control_ctx.venc_port, sensor_fps, fps,
-		I6_SYS_LINK_FRAMEBASE, 0);
+		venc_link, 0);
 	if (bind_ret != 0) {
 		printf("> Rebind VPE->VENC at %u:%u fps failed %d, restoring\n",
 			sensor_fps, fps, bind_ret);
 		MI_SYS_BindChnPort2(&g_star6e_control_ctx.vpe_port,
 			&g_star6e_control_ctx.venc_port, sensor_fps, sensor_fps,
-			I6_SYS_LINK_FRAMEBASE, 0);
+			venc_link, 0);
 		g_star6e_control_ctx.delivered_fps = sensor_fps;
 		return -1;
 	}
@@ -469,7 +474,7 @@ static int apply_fps(uint32_t fps)
 			&g_star6e_control_ctx.venc_port);
 		MI_SYS_BindChnPort2(&g_star6e_control_ctx.vpe_port,
 			&g_star6e_control_ctx.venc_port, sensor_fps, sensor_fps,
-			I6_SYS_LINK_FRAMEBASE, 0);
+			venc_link, 0);
 		g_star6e_control_ctx.delivered_fps = sensor_fps;
 		return -1;
 	}

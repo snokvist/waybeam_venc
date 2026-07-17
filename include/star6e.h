@@ -536,6 +536,9 @@ _Static_assert(sizeof(MI_VENC_ParamRef_t) == 12,
 #define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg((chn), (cfg))
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg((chn), (idx), (cfg))
 #define MI_VENC_GetChnDevid(chn, dev) g_mi_venc.fnGetChnDevid((chn), (dev))
+#define MI_VENC_SetInputSourceConfig(chn, conf) \
+	(g_mi_venc.fnSetInputSourceConfig ? \
+		g_mi_venc.fnSetInputSourceConfig((chn), (conf)) : -1)
 #define MI_VENC_SetIntraRefresh(chn, cfg) \
 	(g_mi_venc.fnSetIntraRefresh ? \
 		g_mi_venc.fnSetIntraRefresh((chn), (cfg)) : -1)
