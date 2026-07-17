@@ -1546,9 +1546,11 @@ static int star6e_stab_setup_ports(Star6ePipelineState *state,
 	tap_ok = (ret == 0 && port1_enabled);
 
 	/* Bind port0 -> VENC zero-copy regardless of the tap: the stabilized (or,
-	 * if the tap is unavailable, static centre) crop is fed by this bind. */
-	ret = MI_SYS_BindChnPort2(&state->vpe_port, &state->venc_port,
-		bind_src_fps, bind_dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
+	 * if the tap is unavailable, static centre) crop is fed by this bind.
+	 * Link type is negotiated by the pipeline (FRAMEBASE, or streaming
+	 * under video0.lowDelay). */
+	ret = star6e_pipeline_bind_venc0(&state->vpe_port, &state->venc_port,
+		bind_src_fps, bind_dst_fps);
 	if (ret != 0) {
 		fprintf(stderr, "[waybeam] ERROR: stab port0->VENC bind failed "
 			"%d\n", (int)ret);

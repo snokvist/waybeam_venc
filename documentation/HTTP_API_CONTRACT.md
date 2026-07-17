@@ -145,6 +145,7 @@ Response `200`:
       "video0.size": { "mutability": "restart_required", "supported": true },
       "video0.scene_threshold": { "mutability": "restart_required", "supported": true },
       "video0.scene_holdoff": { "mutability": "restart_required", "supported": true },
+      "video0.low_delay": { "mutability": "restart_required", "supported": true },
       "video0.resilience": { "mutability": "restart_required", "supported": true },
       "video0.zoom_x": { "mutability": "live", "supported": true },
       "video0.zoom_y": { "mutability": "live", "supported": true },

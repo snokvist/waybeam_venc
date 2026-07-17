@@ -290,6 +290,8 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 	LOAD_SYM(venc, "libmi_venc.so", fnGetChnDevid,
 		int (*)(int, uint32_t *), "MI_VENC_GetChnDevid");
 	/* Optional — older libmi_venc.so may not export these. */
+	LOAD_SYM(venc, "libmi_venc.so", fnSetInputSourceConfig,
+		int (*)(int, void *), "MI_VENC_SetInputSourceConfig");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetIntraRefresh,
 		int (*)(int, void *), "MI_VENC_SetIntraRefresh");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetIntraRefresh,
