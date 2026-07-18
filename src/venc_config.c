@@ -1479,6 +1479,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);
 		cJSON_AddStringToObject(vid, "framing", cfg->video0.framing);
+		cJSON_AddBoolToObject(vid, "lowDelay", cfg->video0.low_delay);
 		cJSON_AddNumberToObject(vid, "stabCropPct", cfg->video0.stab_crop_pct);
 		cJSON_AddNumberToObject(vid, "stabRecenterSpeed",
 			cfg->video0.stab_recenter_speed);

@@ -1,8 +1,9 @@
 # Pure REALTIME Pipeline — Investigation & Star6E/IMX335 MVP Plan
 
 Date: 2026-07-17 | Status: **Implemented in v0.48.0 (`video0.lowDelay`,
-default off) — pending bench verification (§6)** | Supersedes the plan
-section of `LOW_DELAY_PIPELINE.md`.
+default off) — bench-verified on `.201` (§6a): safe FRAMEBASE fallback, but
+this i6e firmware rejects a streaming VPE→VENC bind, so no latency gain
+here.** | Supersedes the plan section of `LOW_DELAY_PIPELINE.md`.
 
 Implementation deltas from the plan below: the RING→REALTIME probe and the
 FRAMEBASE fallback (with frame-base input restore) live in
@@ -233,12 +234,59 @@ already used for the IMX415 100 fps timing wall (HISTORY 0.26.0/0.27.0).
 7. Then repeat step 2–4 on mode 5 (144) and mode 3 (100) to map the I6E
    realtime ceiling, and update `STAR6E_IMX335_MODES.md`.
 
+## 6a. Bench result (2026-07-18, `.201` Star6E / IMX335, mode 4 = 1080p120)
+
+Verified on `192.168.2.201` (`.13` was unreachable). **Verdict: this i6e
+firmware rejects a streaming VPE→VENC bind — the feature is a safe, correct
+no-op here and always falls back to FRAMEBASE.**
+
+1. **Link accept probe — NEGATIVE, as feared in §7.** Both `LINK_RING` and
+   `LINK_REALTIME` binds on VPE→VENC are rejected by mi_sys with
+   `0xA0092008` (`-1610014712`). `star6e_pipeline_bind_venc0()` then restores
+   the VENC input to `NORMAL` (Stop → `SetInputSourceConfig(NORMAL)` → Start)
+   and binds FRAMEBASE — confirmed live: `bind_Type=1` (FRAMEBASE) in
+   `/proc/mi_modules/mi_venc/mi_venc0`. So pure-realtime is **not available
+   on this i6e leg/firmware**; there is no in-repo vendor reference that it
+   ever was (the OpenIPC i6 HAL binds VENC FRAMEBASE — only the *i6c* HAL
+   uses RING). REALTIME is accepted for VIF→VPE but not VPE→VENC.
+2. **Rate / stability:** sustained **120.0 fps** at mode 4; VENC ISR
+   counters `IsrBufFullCnt / IsrRingFullCnt / IsrTimeoutCnt` all **0**; no
+   `sync err` / `FIFO-FULL` / `FrmLost` in dmesg. `RewindCnt` 0.
+3. **Latency A/B — N/A:** both `lowDelay=off` and `lowDelay=on` resolve to a
+   FRAMEBASE bind on this firmware, so there is no latency delta to measure
+   and **no regression** (input-task pipeline-delay averages unchanged).
+4. **Controls:** live fps `120→60→120` rebind clean (shared link-type
+   helper, FRAMEBASE); **SIGHUP reinit ×3** all return healthy (0.48.0,
+   FRAMEBASE, ~120 fps, zero ISR errors).
+5. **Degradations:** the dual-record / snapshot refusal is gated on the
+   *actual* negotiated `g_venc_link_type` (not the config intent), so under
+   the FRAMEBASE fallback `snapshot.jpg` returns **200** and dual stays
+   available — correct. The streaming-only degradation path therefore cannot
+   be exercised on this firmware.
+6. **Bug found + fixed on-device:** `video0.lowDelay` was wired into the file
+   pretty-printer and the FIELD/alias table but **missing from
+   `venc_config_to_json_string`**, so `/api/v1/config` (and the WebUI) never
+   showed it. Added to the cJSON export + a regression round-trip test;
+   `/api/v1/config` now reports `lowDelay:true`. (No WebUI toggle yet —
+   settable via `set`/config; a UI control is a follow-up.)
+7. **Cosmetic:** stdout is block-buffered to the log file while stderr is
+   unbuffered, so the fallback trace prints out of causal order (the
+   `ring input (RING_ONE)` stdout line lands after the stderr fallback
+   warnings). Harmless; an `fflush(stdout)` before the probe would tidy it.
+
+**Bottom line:** the change is safe, flag-gated, default-off, and correct,
+but delivers **no latency benefit on the `.201` i6e firmware** — it is
+infrastructure + a documented negative result. It would engage on any i6e
+BSP whose mi_sys accepts a streaming VPE→VENC bind. Mode-5/mode-3 sweeps
+(step 7) were skipped: pointless while every mode falls back to FRAMEBASE.
+
 ## 7. Risks
 
-- **RING vs REALTIME on i6e VPE→VENC is unproven** — no in-repo vendor
-  reference (OpenIPC i6 HAL binds VENC FRAMEBASE; only the i6c HAL uses
-  RING+RING_DMA). Mitigation: probe both, flag-gated fallback to
-  FRAMEBASE.
+- **RING vs REALTIME on i6e VPE→VENC — RESOLVED NEGATIVE (§6a).** On the
+  `.201` firmware both are rejected (`0xA0092008`); the probe-and-fallback
+  design makes this harmless (clean FRAMEBASE fallback), but there is
+  currently no i6e firmware in hand that accepts the streaming bind, so the
+  feature yields no latency gain today. Left in as flag-gated infrastructure.
 - **GetStream timing changes** under streaming input; the main loop's
   poll cadence may need adjustment.
 - **Snapshot/dual loss under lowDelay** is a real feature trade until the

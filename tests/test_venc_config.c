@@ -1064,6 +1064,45 @@ static int test_save_layout_populated_round_trip(void)
 	return failures;
 }
 
+/* video0.lowDelay must survive the cJSON export path used by /api/v1/config
+ * — regression: the flag was wired into the file pretty-printer and the FIELD
+ * table but was missing from venc_config_to_json_string, so the API and WebUI
+ * never saw it (caught on-device on the .201 Star6E/IMX335 bench). */
+static int test_low_delay_export_roundtrip(void)
+{
+	int failures = 0;
+
+	const char *json = "{ \"video0\": { \"lowDelay\": true } }";
+	char *path = write_temp_json(json);
+	VencConfig cfg;
+	venc_config_defaults(&cfg);
+	int ret = venc_config_load(path, &cfg);
+	unlink(path);
+	free(path);
+	CHECK("low_delay_load_ok", ret == 0);
+	CHECK("low_delay_parsed", cfg.video0.low_delay == true);
+
+	char *rendered = venc_config_to_json_string(&cfg);
+	CHECK("low_delay_render_ok", rendered != NULL);
+	if (rendered) {
+		CHECK("low_delay_in_export",
+			strstr(rendered, "lowDelay") != NULL);
+		char *path2 = write_temp_json(rendered);
+		free(rendered);
+		if (path2) {
+			VencConfig cfg2;
+			venc_config_defaults(&cfg2);
+			ret = venc_config_load(path2, &cfg2);
+			unlink(path2);
+			free(path2);
+			CHECK("low_delay_reload_ok", ret == 0);
+			CHECK("low_delay_roundtrip", cfg2.video0.low_delay == true);
+		}
+	}
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_config(void)
@@ -1090,5 +1129,6 @@ int test_venc_config(void)
 	failures += test_save_layout_byte_equal();
 	failures += test_save_layout_populated_round_trip();
 	failures += test_resilience_preset_expansion();
+	failures += test_low_delay_export_roundtrip();
 	return failures;
 }

@@ -35,7 +35,20 @@ mode 4 (1920×1080@120).
   Maruko's NORMAL_FRMBASE stab-fill path); lowDelay is inert there.
 - Config plumbing: `video0.lowDelay` in defaults/parse/pretty-print
   (`src/venc_config.c`, both `config/waybeam.default*.json`), `g_fields[]`
-  + camelCase alias (`src/venc_api.c`), contract doc updated.
+  + camelCase alias (`src/venc_api.c`), contract doc updated.  Also added to
+  the cJSON export (`venc_config_to_json_string`) so `/api/v1/config` and the
+  WebUI see it — this was missing on first cut and caught on-device; a
+  round-trip regression test now guards it.
+- **Bench-verified on `.201` (Star6E / IMX335, mode 4 = 1080p120).** This
+  i6e firmware **rejects** both RING and REALTIME on the VPE→VENC leg
+  (`0xA0092008`); the feature restores frame-base VENC input and falls back
+  to FRAMEBASE cleanly — `bind_Type=1`, 120.0 fps, zero VENC BufFull/RingFull/
+  Timeout, no dmesg sync-err/FIFO-FULL/FrmLost.  Live fps `120→60→120` and
+  SIGHUP reinit ×3 stay healthy; snapshot/dual remain available under the
+  fallback (refusal keys off the *actual* link type).  Net: safe, flag-gated,
+  default-off infrastructure that yields **no latency gain on this firmware**
+  and would engage only on an i6e BSP that accepts the streaming bind.  See
+  `documentation/REALTIME_PIPELINE_INVESTIGATION.md` §6a.
 
 ## [0.47.0] - 2026-07-18
 
