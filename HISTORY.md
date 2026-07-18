@@ -13,7 +13,12 @@ Manual minimum exposure / gain floors for the supervisory AE.
   `minShutterUs` of the ISP exposure limit on startup and re-enforces them
   each tick.  Each floor is clamped so it can never exceed its ceiling, and
   `isp.shutterRule180` (which pins `min==max`) takes precedence over a manual
-  `shutterMin`.  `MUT_LIVE`, both Star6E and Maruko backends.
+  `shutterMin`.  Setting a floor back to `0` restores the ISP bin's calibrated
+  floor (the thread captures `minSensorGain`/`minShutterUs` from the bin at
+  startup and falls back to it, mirroring the ceiling's `bin_max_*` fallback).
+  `MUT_LIVE`, both Star6E and Maruko backends.  Device-verified on `.201`
+  (IMX335, custom AE) and `.233` (IMX415): floors apply, clamp to ceiling,
+  pin overrides shutter floor, and `0` restores the bin default.
 - camelCase aliases `isp.gainMin` / `isp.shutterMinUs`; added to the config
   schema, pretty-printer, JSON export, default configs, and HTTP API contract.
 

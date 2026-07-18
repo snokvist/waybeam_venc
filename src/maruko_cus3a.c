@@ -88,6 +88,8 @@ typedef struct {
 	/* baseline limits read from ISP bin */
 	uint32_t bin_max_shutter_us;
 	uint32_t bin_max_sensor_gain;
+	uint32_t bin_min_shutter_us;   /* bin's calibrated floors — restored */
+	uint32_t bin_min_sensor_gain;  /* when the user sets the min back to 0 */
 
 	pthread_t thread;
 	volatile int running;
@@ -336,21 +338,25 @@ static void *cus3a_thread(void *arg)
 			}
 			/* Manual floors (compared against the fresh read, like
 			 * the ceilings above).  Pin overrides the shutter floor;
-			 * clamp each floor to not exceed its ceiling. */
-			if (!s->shutter_pin && s->shutter_min_us > 0) {
-				uint32_t v = s->shutter_min_us >
-					cur_limit.maxShutterUs ?
-					cur_limit.maxShutterUs : s->shutter_min_us;
-				if (cur_limit.minShutterUs != v) {
+			 * a 0 config falls back to the bin's calibrated floor so
+			 * clearing the override restores it; clamp to the ceiling. */
+			{
+				uint32_t eff = s->shutter_min_us > 0 ?
+					s->shutter_min_us : s->bin_min_shutter_us;
+				uint32_t v = eff > cur_limit.maxShutterUs ?
+					cur_limit.maxShutterUs : eff;
+				if (!s->shutter_pin && eff > 0 &&
+				    cur_limit.minShutterUs != v) {
 					cur_limit.minShutterUs = v;
 					changed = 1;
 				}
 			}
-			if (s->gain_min > 0) {
-				uint32_t v = s->gain_min >
-					cur_limit.maxSensorGain ?
-					cur_limit.maxSensorGain : s->gain_min;
-				if (cur_limit.minSensorGain != v) {
+			{
+				uint32_t eff = s->gain_min > 0 ?
+					s->gain_min : s->bin_min_sensor_gain;
+				uint32_t v = eff > cur_limit.maxSensorGain ?
+					cur_limit.maxSensorGain : eff;
+				if (eff > 0 && cur_limit.minSensorGain != v) {
 					cur_limit.minSensorGain = v;
 					changed = 1;
 				}
@@ -440,6 +446,8 @@ int maruko_cus3a_start(const MarukoCus3aConfig *cfg)
 		    lim.maxSensorGain > 0) {
 			g_cus3a.bin_max_shutter_us = lim.maxShutterUs;
 			g_cus3a.bin_max_sensor_gain = lim.maxSensorGain;
+			g_cus3a.bin_min_shutter_us = lim.minShutterUs;
+			g_cus3a.bin_min_sensor_gain = lim.minSensorGain;
 			if (cfg->verbose)
 				printf("[maruko-cus3a] ISP bin limits: "
 					"gain %u-%u, isp_gain max %u, "

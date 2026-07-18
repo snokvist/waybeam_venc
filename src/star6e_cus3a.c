@@ -91,6 +91,8 @@ typedef struct {
 	/* ISP bin baseline limits (read at startup) */
 	uint32_t bin_max_shutter_us;
 	uint32_t bin_max_sensor_gain;
+	uint32_t bin_min_shutter_us;   /* bin's calibrated floors — restored */
+	uint32_t bin_min_sensor_gain;  /* when the user sets the min back to 0 */
 
 	/* thread */
 	pthread_t thread;
@@ -298,8 +300,8 @@ static void *cus3a_thread(void *arg)
 
 		applied_shutter_max = cur_limit.maxShutterUs;
 		applied_gain_max = cur_limit.maxSensorGain;
-		applied_shutter_min = s->shutter_min_us;
-		applied_gain_min = s->gain_min;
+		applied_shutter_min = cur_limit.minShutterUs;
+		applied_gain_min = cur_limit.minSensorGain;
 	}
 
 	sleep_ms = s->cfg.ae_fps > 0 ? 1000 / s->cfg.ae_fps : 66;
@@ -364,21 +366,31 @@ static void *cus3a_thread(void *arg)
 				applied_gain_max = effective_gain;
 				changed = 1;
 			}
-			if (!s->shutter_pin && s->shutter_min_us > 0 &&
-			    s->shutter_min_us != applied_shutter_min) {
-				cur_limit.minShutterUs =
-					s->shutter_min_us > cur_limit.maxShutterUs ?
-					cur_limit.maxShutterUs : s->shutter_min_us;
-				applied_shutter_min = s->shutter_min_us;
-				changed = 1;
+			/* Manual floors, with a bin-baseline fallback so that
+			 * setting the config back to 0 restores the ISP bin's
+			 * calibrated floor (mirrors effective_gain above). */
+			{
+				uint32_t eff_shutter_min = s->shutter_min_us > 0 ?
+					s->shutter_min_us : s->bin_min_shutter_us;
+				uint32_t v = eff_shutter_min > cur_limit.maxShutterUs ?
+					cur_limit.maxShutterUs : eff_shutter_min;
+				if (!s->shutter_pin && eff_shutter_min > 0 &&
+				    v != applied_shutter_min) {
+					cur_limit.minShutterUs = v;
+					applied_shutter_min = v;
+					changed = 1;
+				}
 			}
-			if (s->gain_min > 0 &&
-			    s->gain_min != applied_gain_min) {
-				cur_limit.minSensorGain =
-					s->gain_min > cur_limit.maxSensorGain ?
-					cur_limit.maxSensorGain : s->gain_min;
-				applied_gain_min = s->gain_min;
-				changed = 1;
+			{
+				uint32_t eff_gain_min = s->gain_min > 0 ?
+					s->gain_min : s->bin_min_sensor_gain;
+				uint32_t v = eff_gain_min > cur_limit.maxSensorGain ?
+					cur_limit.maxSensorGain : eff_gain_min;
+				if (eff_gain_min > 0 && v != applied_gain_min) {
+					cur_limit.minSensorGain = v;
+					applied_gain_min = v;
+					changed = 1;
+				}
 			}
 
 			/* Cold-boot fps kick (CUS3A path).  On cold boot the ISP
@@ -546,6 +558,8 @@ int star6e_cus3a_start(const Star6eCus3aConfig *cfg)
 		    lim.maxSensorGain > 0) {
 			g_cus3a.bin_max_shutter_us = lim.maxShutterUs;
 			g_cus3a.bin_max_sensor_gain = lim.maxSensorGain;
+			g_cus3a.bin_min_shutter_us = lim.minShutterUs;
+			g_cus3a.bin_min_sensor_gain = lim.minSensorGain;
 			if (cfg->verbose)
 				printf("[cus3a] ISP bin limits: "
 					"gain %u-%u, isp_gain max %u, "
