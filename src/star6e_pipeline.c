@@ -2491,6 +2491,14 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * star6e_pipeline_start_venc() before StartRecvPic — the SDK
 	 * requires that ordering or the call silently no-ops. */
 
+	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
+	if (ret != 0)
+		goto fail_venc;
+
+	/* Must run AFTER bind_and_finalize_pipeline(): it calls
+	 * star6e_output_init() -> star6e_output_reset(), which memsets the
+	 * whole output struct and would otherwise zero these GDR/SVC-T
+	 * tagging fields. */
 	state->output.gdr_active =
 		(vcfg->video0.intra_refresh_mode[0] != '\0' &&
 		 strcmp(vcfg->video0.intra_refresh_mode, "off") != 0) ? 1 : 0;
@@ -2506,10 +2514,6 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 		state->output.gdr_cycle_len = clen > 255 ? 255 : (uint8_t)clen;
 		state->output.gdr_counter = 0;
 	}
-
-	ret = bind_and_finalize_pipeline(state, vcfg, &pconf, sdk_quiet);
-	if (ret != 0)
-		goto fail_venc;
 
 	return 0;
 

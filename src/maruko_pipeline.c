@@ -3832,7 +3832,8 @@ static void maruko_pipeline_log_verbose_frame(MarukoBackendContext *ctx,
  * (type 0) to know which frames are non-reference. */
 #define HEVC_NAL_TRAIL_N 0
 #define HEVC_NAL_TRAIL_R 1
-#define MARUKO_REFTYPE_ENHANCE_P_NOTFORREF 4
+/* MARUKO_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in maruko_video.h. Was
+ * locally 4 (HiSilicon value) — wrong for the SigmaStar enum. */
 
 static size_t maruko_nal_header_idx(const uint8_t *buf, size_t len)
 {

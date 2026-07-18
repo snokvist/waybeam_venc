@@ -19,11 +19,29 @@ Frame-SHM tagging for GDR and SVC-T enhance-layer frames.
   indicate a rolling intra stripe is present. Both Star6E and Maruko
   backends track `gdr_active` on the output struct.
 - **SVC-T enhance tagging** — when temporal scalability is configured
-  (`ref_base > 0`), frames with `refType == 4` (enhance-P, not for
-  reference) are tagged with `VENC_FRAME_FLAG_ENHANCE`. Both backends
-  track `svct_active` on the output struct.
+  (`ref_base > 0`), frames with `refType == ENHANCE_P_NOTFORREF` (the
+  droppable top enhance layer) are tagged with `VENC_FRAME_FLAG_ENHANCE`.
+  Both backends track `svct_active` on the output struct.
 - `frame_shm_consumer_test` reports GDR and ENHANCE frame counts plus
   cycle length in both per-second interval output and the final summary.
+
+Device-verification fixes (Star6E IMX335 .201):
+- **Fixed: Star6E GDR/SVC-T fields zeroed by output reset.** The pipeline
+  set `gdr_active`/`svct_active`/`gdr_cycle_len` before
+  `bind_and_finalize_pipeline()`, which calls `star6e_output_init()` →
+  `star6e_output_reset()` (a full `memset`), wiping them — so Star6E emitted
+  zero GDR/ENHANCE tags. The assignment now runs after finalize.
+- **Fixed: wrong `ENHANCE_P_NOTFORREF` refType constant (both backends).**
+  It was `4` (the HiSilicon enum value); the SigmaStar i6e/i6c enum inserts
+  `BASE_P_REFTOIDR` at index 1, making `ENHANCE_P_NOTFORREF` = `5` (value 4
+  is `ENHANCE_P_REFBYENHANCE`, a referenced, non-droppable frame).
+  Consolidated into one shared define per backend
+  (`STAR6E_REFTYPE_ENHANCE_P_NOTFORREF` in `star6e.h`,
+  `MARUKO_REFTYPE_ENHANCE_P_NOTFORREF` in `maruko_video.h`), which also
+  corrects the pre-existing TRAIL_R→TRAIL_N error-resilience rewrite in
+  `star6e_runtime.c` / `maruko_pipeline.c` that shared the same wrong value.
+  Verified on i6e: 1:1 SVC-T → 50% frames tagged ENHANCE and rewritten to
+  TRAIL_N; reference frames stay TRAIL_R.
 
 ## [0.42.1] - 2026-07-11
 

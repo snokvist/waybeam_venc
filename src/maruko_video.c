@@ -10,7 +10,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 
-#define REFTYPE_ENHANCE_P_NOTFORREF 4
+/* MARUKO_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in maruko_video.h. */
 
 typedef struct {
 	MarukoOutput *output;
@@ -357,7 +357,7 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 		output->gdr_counter = 0;
 	}
 	if (output->svct_active &&
-	    stream->h265Info.refType == REFTYPE_ENHANCE_P_NOTFORREF)
+	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
 	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0)
