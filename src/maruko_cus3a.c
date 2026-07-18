@@ -82,6 +82,8 @@ typedef struct {
 	volatile uint32_t shutter_max_us;
 	int shutter_pin;                    /* pin minShutter==maxShutter */
 	volatile uint32_t gain_max;
+	volatile uint32_t shutter_min_us;   /* 0 = bin default; ignored if pinned */
+	volatile uint32_t gain_min;         /* 0 = use ISP bin default */
 
 	/* baseline limits read from ISP bin */
 	uint32_t bin_max_shutter_us;
@@ -228,12 +230,27 @@ static void *cus3a_thread(void *arg)
 		if (want_gain > 0 && want_gain <= cur_limit.maxSensorGain)
 			cur_limit.maxSensorGain = want_gain;
 
+		/* Manual floors (0 = leave the ISP-bin default).  The 180° pin
+		 * already forces minShutter==maxShutter, so honour a manual
+		 * shutter floor only when not pinned; never let a floor exceed
+		 * the ceiling we just wrote. */
+		if (!s->shutter_pin && s->shutter_min_us > 0)
+			cur_limit.minShutterUs =
+				s->shutter_min_us > cur_limit.maxShutterUs ?
+				cur_limit.maxShutterUs : s->shutter_min_us;
+		if (s->gain_min > 0)
+			cur_limit.minSensorGain =
+				s->gain_min > cur_limit.maxSensorGain ?
+				cur_limit.maxSensorGain : s->gain_min;
+
 		s->fn_set_exposure_limit(0, 0, &cur_limit);
 		limit_writes++;
 		if (s->cfg.verbose)
-			printf("[maruko-cus3a] init limits: maxShutter=%uus "
-				"maxGain=%u\n",
+			printf("[maruko-cus3a] init limits: shutter=[%u,%u]us "
+				"gain=[%u,%u]\n",
+				cur_limit.minShutterUs,
 				cur_limit.maxShutterUs,
+				cur_limit.minSensorGain,
 				cur_limit.maxSensorGain);
 	}
 
@@ -317,6 +334,27 @@ static void *cus3a_thread(void *arg)
 				gain_max_eff = effective_gain;
 				changed = 1;
 			}
+			/* Manual floors (compared against the fresh read, like
+			 * the ceilings above).  Pin overrides the shutter floor;
+			 * clamp each floor to not exceed its ceiling. */
+			if (!s->shutter_pin && s->shutter_min_us > 0) {
+				uint32_t v = s->shutter_min_us >
+					cur_limit.maxShutterUs ?
+					cur_limit.maxShutterUs : s->shutter_min_us;
+				if (cur_limit.minShutterUs != v) {
+					cur_limit.minShutterUs = v;
+					changed = 1;
+				}
+			}
+			if (s->gain_min > 0) {
+				uint32_t v = s->gain_min >
+					cur_limit.maxSensorGain ?
+					cur_limit.maxSensorGain : s->gain_min;
+				if (cur_limit.minSensorGain != v) {
+					cur_limit.minSensorGain = v;
+					changed = 1;
+				}
+			}
 
 			if (changed) {
 				int lret = s->fn_set_exposure_limit(
@@ -387,6 +425,8 @@ int maruko_cus3a_start(const MarukoCus3aConfig *cfg)
 	g_cus3a.shutter_max_us = cfg->shutter_max_us;
 	g_cus3a.shutter_pin = cfg->shutter_pin;
 	g_cus3a.gain_max = cfg->gain_max;
+	g_cus3a.shutter_min_us = cfg->shutter_min_us;
+	g_cus3a.gain_min = cfg->gain_min;
 
 	if (resolve_symbols(&g_cus3a) != 0) {
 		release_symbols(&g_cus3a);
@@ -460,4 +500,14 @@ void maruko_cus3a_set_gain_max(uint32_t gain)
 void maruko_cus3a_set_shutter_max(uint32_t us)
 {
 	g_cus3a.shutter_max_us = us;
+}
+
+void maruko_cus3a_set_gain_min(uint32_t gain)
+{
+	g_cus3a.gain_min = gain;
+}
+
+void maruko_cus3a_set_shutter_min(uint32_t us)
+{
+	g_cus3a.shutter_min_us = us;
 }

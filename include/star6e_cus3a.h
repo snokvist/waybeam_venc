@@ -12,6 +12,9 @@ typedef struct {
 	uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
 	int      shutter_pin;      /* pin minShutter==maxShutter (180° rule) */
 	uint32_t gain_max;         /* 0 = use ISP bin default */
+	uint32_t shutter_min_us;   /* min exposure floor µs (0 = bin default;
+	                            * ignored while shutter_pin is set) */
+	uint32_t gain_min;         /* min sensor gain floor (0 = bin default) */
 	int      verbose;          /* enable periodic status logging */
 } Star6eCus3aConfig;
 
@@ -51,5 +54,13 @@ void star6e_cus3a_set_gain_max(uint32_t gain);
 /** Update the max shutter (exposure) at runtime.
  *  Called when the user changes isp.shutterMaxUs via API. */
 void star6e_cus3a_set_shutter_max(uint32_t us);
+
+/** Update the min sensor gain floor at runtime.
+ *  Called when the user changes isp.gainMin via API. */
+void star6e_cus3a_set_gain_min(uint32_t gain);
+
+/** Update the min shutter (exposure) floor at runtime.
+ *  Called when the user changes isp.shutterMinUs via API. */
+void star6e_cus3a_set_shutter_min(uint32_t us);
 
 #endif /* STAR6E_CUS3A_H */

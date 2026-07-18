@@ -85,6 +85,8 @@ typedef struct {
 	volatile uint32_t shutter_max_us;   /* 0 = auto from sensor_fps */
 	int shutter_pin;                    /* pin minShutter==maxShutter */
 	volatile uint32_t gain_max;         /* 0 = use ISP bin default */
+	volatile uint32_t shutter_min_us;   /* 0 = bin default; ignored if pinned */
+	volatile uint32_t gain_min;         /* 0 = use ISP bin default */
 
 	/* ISP bin baseline limits (read at startup) */
 	uint32_t bin_max_shutter_us;
@@ -215,6 +217,8 @@ static void *cus3a_thread(void *arg)
 	unsigned long last_log_ms = 0;
 	uint32_t applied_shutter_max = 0;
 	uint32_t applied_gain_max = 0;
+	uint32_t applied_shutter_min = 0;
+	uint32_t applied_gain_min = 0;
 	int fps_kick_done = 0;
 
 	ae_hw = malloc(sizeof(Cus3aAeHwStats));
@@ -265,18 +269,37 @@ static void *cus3a_thread(void *arg)
 		    want_gain <= cur_limit.maxSensorGain)
 			cur_limit.maxSensorGain = want_gain;
 
+		/* Manual floors (0 = leave the ISP-bin default).  The 180° pin
+		 * already forces minShutter==maxShutter, so honour a manual
+		 * shutter floor only when not pinned; never let a floor exceed
+		 * the ceiling we just wrote. */
+		if (!s->shutter_pin && s->shutter_min_us > 0) {
+			cur_limit.minShutterUs =
+				s->shutter_min_us > cur_limit.maxShutterUs ?
+				cur_limit.maxShutterUs : s->shutter_min_us;
+		}
+		if (s->gain_min > 0) {
+			cur_limit.minSensorGain =
+				s->gain_min > cur_limit.maxSensorGain ?
+				cur_limit.maxSensorGain : s->gain_min;
+		}
+
 		/* Always write — even if the limit value matches, the sensor
 		 * register may not comply after a cold boot ISP bin load. */
 		s->fn_set_exposure_limit(0, &cur_limit);
 		limit_writes++;
 		if (s->cfg.verbose)
 			printf("[cus3a] initial limits enforced: "
-				"maxShutter=%uus maxGain=%u\n",
+				"shutter=[%u,%u]us gain=[%u,%u]\n",
+				cur_limit.minShutterUs,
 				cur_limit.maxShutterUs,
+				cur_limit.minSensorGain,
 				cur_limit.maxSensorGain);
 
 		applied_shutter_max = cur_limit.maxShutterUs;
 		applied_gain_max = cur_limit.maxSensorGain;
+		applied_shutter_min = s->shutter_min_us;
+		applied_gain_min = s->gain_min;
 	}
 
 	sleep_ms = s->cfg.ae_fps > 0 ? 1000 / s->cfg.ae_fps : 66;
@@ -339,6 +362,22 @@ static void *cus3a_thread(void *arg)
 			    effective_gain != applied_gain_max) {
 				cur_limit.maxSensorGain = effective_gain;
 				applied_gain_max = effective_gain;
+				changed = 1;
+			}
+			if (!s->shutter_pin && s->shutter_min_us > 0 &&
+			    s->shutter_min_us != applied_shutter_min) {
+				cur_limit.minShutterUs =
+					s->shutter_min_us > cur_limit.maxShutterUs ?
+					cur_limit.maxShutterUs : s->shutter_min_us;
+				applied_shutter_min = s->shutter_min_us;
+				changed = 1;
+			}
+			if (s->gain_min > 0 &&
+			    s->gain_min != applied_gain_min) {
+				cur_limit.minSensorGain =
+					s->gain_min > cur_limit.maxSensorGain ?
+					cur_limit.maxSensorGain : s->gain_min;
+				applied_gain_min = s->gain_min;
 				changed = 1;
 			}
 
@@ -491,6 +530,8 @@ int star6e_cus3a_start(const Star6eCus3aConfig *cfg)
 	g_cus3a.shutter_max_us = cfg->shutter_max_us;
 	g_cus3a.shutter_pin = cfg->shutter_pin;
 	g_cus3a.gain_max = cfg->gain_max;
+	g_cus3a.shutter_min_us = cfg->shutter_min_us;
+	g_cus3a.gain_min = cfg->gain_min;
 
 	if (resolve_symbols(&g_cus3a) != 0) {
 		release_symbols(&g_cus3a);
@@ -569,4 +610,14 @@ void star6e_cus3a_set_gain_max(uint32_t gain)
 void star6e_cus3a_set_shutter_max(uint32_t us)
 {
 	g_cus3a.shutter_max_us = us;
+}
+
+void star6e_cus3a_set_gain_min(uint32_t gain)
+{
+	g_cus3a.gain_min = gain;
+}
+
+void star6e_cus3a_set_shutter_min(uint32_t us)
+{
+	g_cus3a.shutter_min_us = us;
 }

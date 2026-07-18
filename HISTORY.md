@@ -1,5 +1,22 @@
 # History
 
+## [0.46.0] - 2026-07-18
+
+Manual minimum exposure / gain floors for the supervisory AE.
+
+- **New `isp.gainMin` / `isp.shutterMinUs` live controls** — set an explicit
+  minimum sensor gain and minimum exposure (µs) floor for the 3A, completing
+  the manual min/max envelope alongside the existing `isp.gainMax` /
+  `isp.shutterMaxUs` ceilings.  Both default `0` = "use the ISP bin's
+  calibrated floor" (no override).
+- The supervisory cus3a thread writes the floors into `minSensorGain` /
+  `minShutterUs` of the ISP exposure limit on startup and re-enforces them
+  each tick.  Each floor is clamped so it can never exceed its ceiling, and
+  `isp.shutterRule180` (which pins `min==max`) takes precedence over a manual
+  `shutterMin`.  `MUT_LIVE`, both Star6E and Maruko backends.
+- camelCase aliases `isp.gainMin` / `isp.shutterMinUs`; added to the config
+  schema, pretty-printer, JSON export, default configs, and HTTP API contract.
+
 ## [0.45.0] - 2026-07-18
 
 Live per-frame I/P frame-size caps (MaxISize/MaxPSize) with RC priority.
