@@ -527,9 +527,11 @@ _Static_assert(sizeof(MI_VENC_ParamRef_t) == 12,
 #define MI_VENC_SetChnAttr(chn, attr) g_mi_venc.fnSetChnAttr((chn), (attr))
 #define MI_VENC_GetRcParam(chn, p)    g_mi_venc.fnGetRcParam((chn), (p))
 #define MI_VENC_SetRcParam(chn, p)    g_mi_venc.fnSetRcParam((chn), (p))
+/* SDK: MI_VENC_SetRcPriority(VeChn, MI_VENC_RcPriority_e *) — pass the address
+ * of a temporary holding the enum value, not the value itself. */
 #define MI_VENC_SetRcPriority(chn, pri) \
 	(g_mi_venc.fnSetRcPriority ? \
-		g_mi_venc.fnSetRcPriority((chn), (int)(pri)) : -1)
+		g_mi_venc.fnSetRcPriority((chn), &(MI_VENC_RcPriority_e){ (pri) }) : -1)
 #define MI_VENC_RequestIdr(chn, inst) g_mi_venc.fnRequestIdr((chn), (inst))
 #define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg((chn), (cfg))
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg((chn), (idx), (cfg))

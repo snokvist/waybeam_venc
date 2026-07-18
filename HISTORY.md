@@ -16,6 +16,14 @@ Live per-frame I/P frame-size caps (MaxISize/MaxPSize) with RC priority.
   Maruko (3-arg with VeDev), both loaded as optional dlsym symbols
   (NULL-safe). Mode-aware `GetRcParam` → set the correct RC union member
   (H265/H264 × CBR/VBR/AVBR) → `SetRcParam` → `SetRcPriority`.
+- **`SetRcPriority` takes a POINTER to the enum** — `MI_VENC_SetRcPriority`'s
+  last arg is `MI_VENC_RcPriority_e *peRcPriority`, not the value (verified
+  against the i6e/i6c SDK headers). The initial implementation passed the
+  enum value, so the SDK dereferenced `0x2` as a pointer and faulted the
+  encoder pipeline (SCL teardown + "Sensor abnormal"). Both backends now
+  pass the address of a temporary. Device-verified: Star6E .201 (P-cap 5619→
+  1868 kbps at maxPBytes=2000, no crash) and Maruko .233 (priority=framebits,
+  no crash).
 - Config JSON: `maxIBytes` / `maxPBytes` camelCase load/save/render.
 - Adds `specs/2026-07-17-capped-vbr-rc-mode/` (requirements + plan) for a
   follow-on capped-VBR profile.
