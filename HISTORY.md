@@ -1,5 +1,25 @@
 # History
 
+## [0.45.0] - 2026-07-18
+
+Live per-frame I/P frame-size caps (MaxISize/MaxPSize) with RC priority.
+
+- **New `video0.maxIBytes` / `video0.maxPBytes` live controls** — cap the
+  per-frame encoded I-frame and P-frame size via the MI_VENC RC params
+  `u32MaxISize` / `u32MaxPSize`. `MUT_LIVE`, applied atomically as a group;
+  0 = unlimited (default).
+- **RC priority switch** — when either cap is > 0, RC priority is set to
+  `FRAMEBITS_FIRST` so the encoder treats the size cap as a hard ceiling;
+  when both return to 0, `BITRATE_FIRST` is restored. An IDR is requested
+  after each apply.
+- **Dual-backend parity** — Star6E (2-arg `MI_VENC_SetRcPriority`) and
+  Maruko (3-arg with VeDev), both loaded as optional dlsym symbols
+  (NULL-safe). Mode-aware `GetRcParam` → set the correct RC union member
+  (H265/H264 × CBR/VBR/AVBR) → `SetRcParam` → `SetRcPriority`.
+- Config JSON: `maxIBytes` / `maxPBytes` camelCase load/save/render.
+- Adds `specs/2026-07-17-capped-vbr-rc-mode/` (requirements + plan) for a
+  follow-on capped-VBR profile.
+
 ## [0.44.0] - 2026-07-18
 
 Live FPS change improvements and exposure-based FPS override.
