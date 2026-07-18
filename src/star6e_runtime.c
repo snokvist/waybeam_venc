@@ -291,7 +291,9 @@ static uint32_t star6e_scene_frame_size(const MI_VENC_Stream_t *s)
 /* HEVC NAL types relevant for non-reference rewriting */
 #define HEVC_NAL_TRAIL_N 0
 #define HEVC_NAL_TRAIL_R 1
-#define SS_REFTYPE_ENHANCE_P_NOTFORREF 4
+/* STAR6E_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in star6e.h. Was locally
+ * 4 (HiSilicon value) — wrong for the SigmaStar enum, so the TRAIL_N rewrite
+ * marked referenced-enhance frames (or nothing under shallow SVC-T). */
 
 /* Locate the NAL header byte 0 inside a payload buffer that may or may not
  * begin with a start-code prefix (00 00 01 / 00 00 00 01).  Returns the
@@ -533,13 +535,17 @@ static int runtime_request_idr(void)
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
-static void start_custom_ae(const Star6ePipelineState *ps,
+/* Start the supervisory AE limit enforcer.  This is the sole AE path on
+ * Star6E: the ISP firmware/bin AE does convergence and this thread re-asserts
+ * the user's gain/shutter min/max on the exposure limit each tick.  The
+ * historical aeEngine=custom userspace governor was retired — both engine
+ * values now run this same enforcer (see start_ae_enforcer's caller). */
+static void start_ae_enforcer(const Star6ePipelineState *ps,
 	const VencConfig *vcfg)
 {
 	Star6eCus3aConfig ae_cfg;
 
 	star6e_cus3a_config_defaults(&ae_cfg);
-	ae_cfg.sensor_fps = ps->sensor.fps;
 	if (vcfg->isp.ae_fps > 0)
 		ae_cfg.ae_fps = vcfg->isp.ae_fps;
 	if (vcfg->isp.gain_max > 0)
@@ -547,7 +553,13 @@ static void start_custom_ae(const Star6ePipelineState *ps,
 	if (vcfg->isp.shutter_rule_180 && ps->sensor.fps > 0) {
 		ae_cfg.shutter_max_us = 1000000 / (ps->sensor.fps * 2);
 		ae_cfg.shutter_pin = 1;
+	} else if (vcfg->isp.shutter_max_us > 0) {
+		ae_cfg.shutter_max_us = vcfg->isp.shutter_max_us;
 	}
+	if (vcfg->isp.gain_min > 0)
+		ae_cfg.gain_min = vcfg->isp.gain_min;
+	if (vcfg->isp.shutter_min_us > 0)
+		ae_cfg.shutter_min_us = vcfg->isp.shutter_min_us;
 	ae_cfg.verbose = vcfg->system.verbose;
 	star6e_cus3a_start(&ae_cfg);
 }
@@ -805,14 +817,23 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	scene_init(&ctx->scene, ctx->vcfg.video0.scene_threshold,
 		ctx->vcfg.video0.scene_holdoff);
 
-	if (!vcfg->isp.legacy_ae)
-		start_custom_ae(ps, vcfg);
+	/* AE runs in ONE mode on Star6E: the SDK firmware/bin AE converges and
+	 * the supervisory thread enforces the gain/shutter limits beside it.  The
+	 * thread needs aeFps>0 for a tick rate. */
+	if (vcfg->isp.ae_fps > 0)
+		start_ae_enforcer(ps, vcfg);
 
 	if (vcfg->fpv.roi_enabled) {
 		star6e_controls_apply_roi_qp(vcfg->fpv.roi_qp);
 	}
 	if (vcfg->video0.qp_delta != 0) {
 		star6e_controls_apply_qp_delta(vcfg->video0.qp_delta);
+	}
+	if (vcfg->video0.max_i_bytes > 0 || vcfg->video0.max_p_bytes > 0) {
+		const VencApplyCallbacks *cb = star6e_controls_callbacks();
+		if (cb->apply_max_frame_size)
+			cb->apply_max_frame_size(vcfg->video0.max_i_bytes,
+				vcfg->video0.max_p_bytes);
 	}
 
 	if (!ps->output_enabled) {
@@ -1047,7 +1068,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * Only active when refPred is enabled (ref_base > 0) — otherwise the
 	 * encoder produces a flat single-ref stream and every frame matters. */
 	if (vcfg->video0.ref_base > 0 &&
-	    stream.h265Info.refType == SS_REFTYPE_ENHANCE_P_NOTFORREF) {
+	    stream.h265Info.refType == STAR6E_REFTYPE_ENHANCE_P_NOTFORREF) {
 		star6e_patch_stream_to_trail_n(&stream);
 	}
 
@@ -1341,7 +1362,7 @@ static int star6e_runner_run(void *opaque)
 	Star6eRunnerContext *ctx = opaque;
 	struct timespec cus3a_ts_last = {0};
 	struct timespec run_start;
-	int legacy_fps_kick_done = 0;
+	int cold_boot_fps_kick_done = 0;
 	unsigned int idle_counter = 0;
 	int handled;
 	int ret;
@@ -1403,18 +1424,17 @@ static int star6e_runner_run(void *opaque)
 			return ret;
 		}
 
-		/* One-shot legacy-AE cold-boot fps re-kick ~1.5s after start,
-		 * once the ISP bin load + AE have settled (the init-time kick
-		 * fires too early and doesn't stick on a cold boot).  No-op in
-		 * CUS3A mode (its thread does the frame-15 kick). */
-		if (!legacy_fps_kick_done) {
+		/* One-shot cold-boot fps re-kick ~1.5s after start, once the ISP
+		 * bin load + AE have settled (the init-time kick fires too early
+		 * and doesn't stick on a cold boot). */
+		if (!cold_boot_fps_kick_done) {
 			struct timespec now;
 			clock_gettime(CLOCK_MONOTONIC, &now);
 			if ((now.tv_sec - run_start.tv_sec) +
 			    (now.tv_nsec - run_start.tv_nsec) / 1e9 >= 1.5) {
-				star6e_pipeline_legacy_fps_rekick(&ctx->ps,
+				star6e_pipeline_cold_boot_fps_rekick(&ctx->ps,
 					&ctx->vcfg);
-				legacy_fps_kick_done = 1;
+				cold_boot_fps_kick_done = 1;
 			}
 		}
 	}

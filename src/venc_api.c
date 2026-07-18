@@ -393,6 +393,9 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, sensor_bin,         FT_STRING, MUT_LIVE),
 	FIELD(isp, gain_max,           FT_UINT,   MUT_LIVE),
+	FIELD(isp, shutter_max_us,     FT_UINT,   MUT_LIVE),
+	FIELD(isp, gain_min,           FT_UINT,   MUT_LIVE),
+	FIELD(isp, shutter_min_us,     FT_UINT,   MUT_LIVE),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
 
@@ -408,6 +411,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, bitrate,         FT_UINT,   MUT_LIVE),
 	FIELD(video0, gop_size,        FT_DOUBLE, MUT_LIVE),
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
+	FIELD(video0, max_i_bytes,     FT_UINT,   MUT_LIVE),
+	FIELD(video0, max_p_bytes,     FT_UINT,   MUT_LIVE),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
@@ -528,11 +533,16 @@ static const FieldAlias g_field_aliases[] = {
 	{ "system.overclockLevel", "system.overclock_level" },
 	{ "isp.sensorBin", "isp.sensor_bin" },
 	{ "isp.gainMax", "isp.gain_max" },
+	{ "isp.shutterMaxUs", "isp.shutter_max_us" },
+	{ "isp.gainMin", "isp.gain_min" },
+	{ "isp.shutterMinUs", "isp.shutter_min_us" },
 	{ "isp.awbMode", "isp.awb_mode" },
 	{ "isp.awbCt", "isp.awb_ct" },
 	{ "video0.rcMode", "video0.rc_mode" },
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
+	{ "video0.maxIBytes", "video0.max_i_bytes" },
+	{ "video0.maxPBytes", "video0.max_p_bytes" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -774,9 +784,8 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 			return "awb_mode must be 'auto' or 'ct_manual'";
 	}
 	if (strcmp(key, "isp.ae_engine") == 0) {
-		if (strcmp(cfg->isp.ae_engine, "sdk") != 0 &&
-		    strcmp(cfg->isp.ae_engine, "custom") != 0)
-			return "ae_engine must be 'sdk' or 'custom'";
+		if (strcmp(cfg->isp.ae_engine, "sdk") != 0)
+			return "ae_engine must be 'sdk'";
 	}
 	if (strcmp(key, "isp.sensor_bin") == 0) {
 		/* Empty string opts into the /etc/sensors/<sensor>.bin fallback;
@@ -1071,6 +1080,9 @@ typedef enum {
 	LIVE_GROUP_QP_DELTA,
 	LIVE_GROUP_ROI,
 	LIVE_GROUP_GAIN_MAX,
+	LIVE_GROUP_SHUTTER_MAX,
+	LIVE_GROUP_GAIN_MIN,
+	LIVE_GROUP_SHUTTER_MIN,
 	LIVE_GROUP_AWB,
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
@@ -1080,6 +1092,7 @@ typedef enum {
 	LIVE_GROUP_ISP_BIN,
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
+	LIVE_GROUP_MAX_FRAME_SIZE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1228,6 +1241,12 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_ROI;
 	if (strcmp(canonical_key, "isp.gain_max") == 0)
 		return LIVE_GROUP_GAIN_MAX;
+	if (strcmp(canonical_key, "isp.shutter_max_us") == 0)
+		return LIVE_GROUP_SHUTTER_MAX;
+	if (strcmp(canonical_key, "isp.gain_min") == 0)
+		return LIVE_GROUP_GAIN_MIN;
+	if (strcmp(canonical_key, "isp.shutter_min_us") == 0)
+		return LIVE_GROUP_SHUTTER_MIN;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
 	    strcmp(canonical_key, "isp.awb_ct") == 0)
 		return LIVE_GROUP_AWB;
@@ -1249,6 +1268,9 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_SNAPSHOT_QUALITY;
 	if (strcmp(canonical_key, "video0.pause_stab") == 0)
 		return LIVE_GROUP_PAUSE_STAB;
+	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
+	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
+		return LIVE_GROUP_MAX_FRAME_SIZE;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1266,6 +1288,12 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "fpv.roi_*";
 	case LIVE_GROUP_GAIN_MAX:
 		return "isp.gain_max";
+	case LIVE_GROUP_SHUTTER_MAX:
+		return "isp.shutter_max_us";
+	case LIVE_GROUP_GAIN_MIN:
+		return "isp.gain_min";
+	case LIVE_GROUP_SHUTTER_MIN:
+		return "isp.shutter_min_us";
 	case LIVE_GROUP_AWB:
 		return "isp.awb_*";
 	case LIVE_GROUP_VERBOSE:
@@ -1284,6 +1312,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "snapshot.quality";
 	case LIVE_GROUP_PAUSE_STAB:
 		return "video0.pauseStab";
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return "video0.maxIBytes/maxPBytes";
 	default:
 		return "unknown";
 	}
@@ -1417,6 +1447,12 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_roi_qp != NULL;
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max != NULL;
+	case LIVE_GROUP_SHUTTER_MAX:
+		return g_cb->apply_shutter_max != NULL;
+	case LIVE_GROUP_GAIN_MIN:
+		return g_cb->apply_gain_min != NULL;
+	case LIVE_GROUP_SHUTTER_MIN:
+		return g_cb->apply_shutter_min != NULL;
 	case LIVE_GROUP_AWB:
 		return g_cb->apply_awb_mode != NULL;
 	case LIVE_GROUP_VERBOSE:
@@ -1440,6 +1476,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality != NULL;
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab != NULL;
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return g_cb->apply_max_frame_size != NULL;
 	default:
 		return 0;
 	}
@@ -1472,6 +1510,15 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_GAIN_MAX:
 		dst->isp.gain_max = src->isp.gain_max;
+		break;
+	case LIVE_GROUP_SHUTTER_MAX:
+		dst->isp.shutter_max_us = src->isp.shutter_max_us;
+		break;
+	case LIVE_GROUP_GAIN_MIN:
+		dst->isp.gain_min = src->isp.gain_min;
+		break;
+	case LIVE_GROUP_SHUTTER_MIN:
+		dst->isp.shutter_min_us = src->isp.shutter_min_us;
 		break;
 	case LIVE_GROUP_AWB:
 		if (touched && touched->awb_mode) {
@@ -1514,6 +1561,10 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_PAUSE_STAB:
 		dst->video0.pause_stab = src->video0.pause_stab;
+		break;
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		dst->video0.max_i_bytes = src->video0.max_i_bytes;
+		dst->video0.max_p_bytes = src->video0.max_p_bytes;
 		break;
 	default:
 		break;
@@ -1589,6 +1640,12 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_roi_qp(cfg->fpv.roi_qp);
 	case LIVE_GROUP_GAIN_MAX:
 		return g_cb->apply_gain_max(cfg->isp.gain_max);
+	case LIVE_GROUP_SHUTTER_MAX:
+		return g_cb->apply_shutter_max(cfg->isp.shutter_max_us);
+	case LIVE_GROUP_GAIN_MIN:
+		return g_cb->apply_gain_min(cfg->isp.gain_min);
+	case LIVE_GROUP_SHUTTER_MIN:
+		return g_cb->apply_shutter_min(cfg->isp.shutter_min_us);
 	case LIVE_GROUP_AWB:
 		mode = strcmp(cfg->isp.awb_mode, "ct_manual") == 0 ? 1 : 0;
 		return g_cb->apply_awb_mode(mode, cfg->isp.awb_ct);
@@ -1632,6 +1689,9 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_snapshot_quality(cfg->snapshot.quality);
 	case LIVE_GROUP_PAUSE_STAB:
 		return g_cb->apply_pause_stab(cfg->video0.pause_stab);
+	case LIVE_GROUP_MAX_FRAME_SIZE:
+		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
+			cfg->video0.max_p_bytes);
 	default:
 		return -2;
 	}

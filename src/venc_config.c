@@ -89,12 +89,10 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->sensor.unlock_value = 0x80;
 	cfg->sensor.unlock_dir = 0;
 
-	/* isp.  ae_engine drives both per-backend struct fields; defaults
-	 * to "sdk" (Star6E legacy_ae=true / Maruko ae_mode="native"). */
+	/* isp.  ae_engine is "sdk"-only (the SDK firmware/bin AE drives
+	 * convergence; a supervisory thread enforces limits beside it). */
 	cfg->isp.sensor_bin[0] = '\0';
 	safe_strcpy(cfg->isp.ae_engine, sizeof(cfg->isp.ae_engine), "sdk");
-	cfg->isp.legacy_ae = true;
-	safe_strcpy(cfg->isp.ae_mode, sizeof(cfg->isp.ae_mode), "native");
 	cfg->isp.ae_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
@@ -280,33 +278,19 @@ static void load_sensor(const cJSON *root, VencConfigSensor *s)
 	 * silently ignored on read so existing configs migrate cleanly. */
 }
 
-/* ae_engine → per-backend struct field expansion.
+/* ae_engine validation.  "sdk" is the only supported value: the SDK
+ * firmware/bin AE drives convergence, with a supervisory limit enforcer beside
+ * it (Star6E) or the paced-native 3A (Maruko).  The historical "custom"
+ * userspace governor was retired (Maruko 0.22.0, Star6E 0.47.0) and the
+ * "custom" value removed entirely.
  *
- * Star6E:
- *   "sdk"    → legacy_ae=true   (ISP firmware AE; skip start_custom_ae)
- *   "custom" → legacy_ae=false  (start_custom_ae spins cus3a)
- *
- * Maruko: IGNORED since 0.22.0 — paced native 3A is the only AE mode
- *   (vendor AE+AWB, RunOnce pacer at sensor_fps/3, floor 30 Hz; beats
- *   both historical modes on CPU and image quality).  The field is still
- *   parsed so existing configs load cleanly; "custom" logs a retirement
- *   notice at pipeline init.
- *
- * Unknown values fall back to "sdk".  Returns 0 on recognised value,
- * -1 if `name` is unrecognised (caller warns and falls back). */
+ * Returns 0 for "sdk" (or empty → "sdk"), -1 otherwise (caller warns and
+ * falls back to "sdk", so old configs carrying "custom" still load). */
 static int apply_ae_engine(const char *name, VencConfigIsp *s)
 {
 	const char *want = (!name || !*name) ? "sdk" : name;
 	if (strcmp(want, "sdk") == 0) {
 		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "sdk");
-		s->legacy_ae = true;
-		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "native");
-		return 0;
-	}
-	if (strcmp(want, "custom") == 0) {
-		safe_strcpy(s->ae_engine, sizeof(s->ae_engine), "custom");
-		s->legacy_ae = false;
-		safe_strcpy(s->ae_mode, sizeof(s->ae_mode), "throttle");
 		return 0;
 	}
 	return -1;
@@ -318,22 +302,25 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	if (!obj) return;
 	safe_strcpy(s->sensor_bin, sizeof(s->sensor_bin),
 		json_get_string(obj, "sensorBin", s->sensor_bin));
-	/* ae_engine is the sole AE selector.  Legacy `legacyAe` /
-	 * `aeMode` keys are silently dropped on load — existing configs
-	 * migrate to the ae_engine default ("sdk") which matches the
-	 * historical legacyAe=true / aeMode="native" defaults. */
+	/* ae_engine is "sdk"-only.  Retired `legacyAe` / `aeMode` / the "custom"
+	 * value are dropped on load — existing configs migrate to "sdk". */
 	{
 		const char *engine = json_get_string(obj, "aeEngine",
 			s->ae_engine);
 		if (apply_ae_engine(engine, s) != 0) {
-			fprintf(stderr, "[config] WARNING: unknown isp.aeEngine "
-				"'%s' (use sdk|custom) — falling back to sdk\n",
+			fprintf(stderr, "[config] WARNING: unsupported isp.aeEngine "
+				"'%s' (only 'sdk' is supported) — using sdk\n",
 				engine);
 			(void)apply_ae_engine("sdk", s);
 		}
 	}
 	s->ae_fps = (uint32_t)json_get_int(obj, "aeFps", (int)s->ae_fps);
 	s->gain_max = (uint32_t)json_get_int(obj, "gainMax", (int)s->gain_max);
+	s->shutter_max_us = (uint32_t)json_get_int(obj, "shutterMaxUs",
+		(int)s->shutter_max_us);
+	s->gain_min = (uint32_t)json_get_int(obj, "gainMin", (int)s->gain_min);
+	s->shutter_min_us = (uint32_t)json_get_int(obj, "shutterMinUs",
+		(int)s->shutter_min_us);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
 		json_get_string(obj, "awbMode", s->awb_mode));
 	s->awb_ct = (uint32_t)json_get_int(obj, "awbCt", (int)s->awb_ct);
@@ -564,6 +551,8 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->qp_delta = json_get_int(obj, "qpDelta", v->qp_delta);
 	if (v->qp_delta < -12) v->qp_delta = -12;
 	if (v->qp_delta > 12) v->qp_delta = 12;
+	v->max_i_bytes = (uint32_t)json_get_int(obj, "maxIBytes", (int)v->max_i_bytes);
+	v->max_p_bytes = (uint32_t)json_get_int(obj, "maxPBytes", (int)v->max_p_bytes);
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
 		(int)v->scene_threshold);
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
@@ -1222,6 +1211,9 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "aeEngine",   cfg->isp.ae_engine,   0);
 	pp_field_uint(p,   2, "aeFps",      cfg->isp.ae_fps,      0);
 	pp_field_uint(p,   2, "gainMax",    cfg->isp.gain_max,    0);
+	pp_field_uint(p,   2, "shutterMaxUs", cfg->isp.shutter_max_us, 0);
+	pp_field_uint(p,   2, "gainMin",    cfg->isp.gain_min,    0);
+	pp_field_uint(p,   2, "shutterMinUs", cfg->isp.shutter_min_us, 0);
 	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
 	pp_field_uint(p,   2, "awbCt",      cfg->isp.awb_ct,      0);
 	pp_field_bool(p,   2, "keepAspect",      cfg->isp.keep_aspect,      0);
@@ -1254,6 +1246,8 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "bitrate",        cfg->video0.bitrate,         0);
 	pp_field_double(p, 2, "gopSize",        cfg->video0.gop_size,        0);
 	pp_field_int(p,    2, "qpDelta",        cfg->video0.qp_delta,        0);
+	pp_field_uint(p,   2, "maxIBytes",      cfg->video0.max_i_bytes,     0);
+	pp_field_uint(p,   2, "maxPBytes",      cfg->video0.max_p_bytes,     0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
@@ -1440,6 +1434,9 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(isp, "aeEngine", cfg->isp.ae_engine);
 		cJSON_AddNumberToObject(isp, "aeFps", cfg->isp.ae_fps);
 		cJSON_AddNumberToObject(isp, "gainMax", cfg->isp.gain_max);
+		cJSON_AddNumberToObject(isp, "shutterMaxUs", cfg->isp.shutter_max_us);
+		cJSON_AddNumberToObject(isp, "gainMin", cfg->isp.gain_min);
+		cJSON_AddNumberToObject(isp, "shutterMinUs", cfg->isp.shutter_min_us);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
 		cJSON_AddNumberToObject(isp, "awbCt", cfg->isp.awb_ct);
 		cJSON_AddBoolToObject(isp, "keepAspect", cfg->isp.keep_aspect);
@@ -1471,6 +1468,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "bitrate", cfg->video0.bitrate);
 		cJSON_AddNumberToObject(vid, "gopSize", cfg->video0.gop_size);
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
+		cJSON_AddNumberToObject(vid, "maxIBytes", cfg->video0.max_i_bytes);
+		cJSON_AddNumberToObject(vid, "maxPBytes", cfg->video0.max_p_bytes);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
