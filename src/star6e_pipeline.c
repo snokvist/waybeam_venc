@@ -441,6 +441,11 @@ static Star6ePrecropRect star6e_pipeline_compute_precrop(uint32_t sensor_w,
 static int g_low_delay;
 static int g_venc_ring_input;
 static uint32_t g_venc_link_type = I6_SYS_LINK_FRAMEBASE;
+/* HW_RING bind param = ring line count = ALIGN_UP(encode height, 32).
+ * The vendor samples (stitch/amigos) pass this for every HW_RING bind;
+ * 0 is only valid for FRAMEBASE/REALTIME.  Set when RING_ONE input is
+ * accepted, reused by every later rebind. */
+static uint32_t g_venc_ring_lines;
 
 uint32_t star6e_pipeline_venc_link_type(void)
 {
@@ -459,14 +464,18 @@ MI_S32 star6e_pipeline_bind_venc0(MI_SYS_ChnPort_t *vpe_port,
 
 	if (g_venc_link_type != I6_SYS_LINK_FRAMEBASE || !g_venc_ring_input)
 		return MI_SYS_BindChnPort2(vpe_port, venc_port,
-			src_fps, dst_fps, g_venc_link_type, 0);
+			src_fps, dst_fps, g_venc_link_type,
+			g_venc_link_type == I6_SYS_LINK_RING ?
+				g_venc_ring_lines : 0);
 
-	/* First lowDelay bind: probe the streaming links.  There is no i6e
-	 * vendor reference for this leg (the i6c HAL uses RING; the OpenIPC
-	 * i6 HAL stays FRAMEBASE), so accept whichever the firmware takes. */
+	/* First lowDelay bind: probe the streaming links.  Vendor recipe
+	 * (SDK stitch/amigos samples): HW_RING requires u32BindParam =
+	 * ALIGN_UP(height, 32) ring lines; REALTIME/FRAMEBASE pass 0. */
 	for (i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
 		ret = MI_SYS_BindChnPort2(vpe_port, venc_port,
-			src_fps, dst_fps, probes[i].link, 0);
+			src_fps, dst_fps, probes[i].link,
+			probes[i].link == I6_SYS_LINK_RING ?
+				g_venc_ring_lines : 0);
 		if (ret == 0) {
 			g_venc_link_type = probes[i].link;
 			printf("> lowDelay: VPE->VENC bound %s (%u:%u)\n",
@@ -500,8 +509,10 @@ MI_S32 star6e_pipeline_bind_venc0(MI_SYS_ChnPort_t *vpe_port,
 		}
 	}
 	g_venc_ring_input = 0;
-	fprintf(stderr, "WARNING: lowDelay unsupported by this firmware — "
-		"falling back to FRAMEBASE delivery\n");
+	fprintf(stderr, "WARNING: lowDelay streaming bind rejected — i6e MHE "
+		"core lacks ring/realtime input (SupportRing=0, see "
+		"REALTIME_PIPELINE_INVESTIGATION.md §6b) — falling back to "
+		"FRAMEBASE delivery\n");
 	return MI_SYS_BindChnPort2(vpe_port, venc_port,
 		src_fps, dst_fps, I6_SYS_LINK_FRAMEBASE, 0);
 }
@@ -1424,8 +1435,9 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		MI_S32 src_ret = MI_VENC_SetInputSourceConfig(*chn, &conf);
 		if (src_ret == 0) {
 			g_venc_ring_input = 1;
-			printf("> lowDelay: VENC ch%d ring input (RING_ONE)\n",
-				*chn);
+			g_venc_ring_lines = (height + 31u) & ~31u;
+			printf("> lowDelay: VENC ch%d ring input (RING_ONE, "
+				"%u ring lines)\n", *chn, g_venc_ring_lines);
 		} else {
 			g_venc_ring_input = 0;
 			fprintf(stderr, "WARNING: lowDelay ring input rejected "
@@ -2495,6 +2507,7 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	 * the previous run. */
 	g_low_delay = vcfg->video0.low_delay ? 1 : 0;
 	g_venc_ring_input = 0;
+	g_venc_ring_lines = 0;
 	g_venc_link_type = I6_SYS_LINK_FRAMEBASE;
 	if (g_low_delay)
 		printf("> lowDelay: pure-realtime encode chain requested "

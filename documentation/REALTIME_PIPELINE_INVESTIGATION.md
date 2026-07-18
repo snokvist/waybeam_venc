@@ -1,9 +1,11 @@
 # Pure REALTIME Pipeline — Investigation & Star6E/IMX335 MVP Plan
 
 Date: 2026-07-17 | Status: **Implemented in v0.48.0 (`video0.lowDelay`,
-default off) — bench-verified on `.201` (§6a): safe FRAMEBASE fallback, but
-this i6e firmware rejects a streaming VPE→VENC bind, so no latency gain
-here.** | Supersedes the plan section of `LOW_DELAY_PIPELINE.md`.
+default off) — bench-verified on `.201` (§6a) and root-caused against the
+vendor SDK (§6b): the i6e MHE H26x core does not advertise ring/realtime
+input (`SupportRing=0`; the JPEG engine and i6c's H26x core do), so the
+feature always falls back to FRAMEBASE on i6e.** | Supersedes the plan
+section of `LOW_DELAY_PIPELINE.md`.
 
 Implementation deltas from the plan below: the RING→REALTIME probe and the
 FRAMEBASE fallback (with frame-base input restore) live in
@@ -276,17 +278,106 @@ no-op here and always falls back to FRAMEBASE.**
 
 **Bottom line:** the change is safe, flag-gated, default-off, and correct,
 but delivers **no latency benefit on the `.201` i6e firmware** — it is
-infrastructure + a documented negative result. It would engage on any i6e
-BSP whose mi_sys accepts a streaming VPE→VENC bind. Mode-5/mode-3 sweeps
+infrastructure + a documented negative result. Mode-5/mode-3 sweeps
 (step 7) were skipped: pointless while every mode falls back to FRAMEBASE.
+
+## 6b. Adversarial root-cause (2026-07-18, vendor SDK cross-validated)
+
+Why does the bind *really* fail?  Full adversarial pass against the vendor
+Pudding SDK (`~/dev/star6e_SDK`) + live kernel traces.  Verdict: **the i6e
+H26x encoder core does not advertise ring/realtime input capability — a
+per-SoC hardware/driver-table fact, not a fixable userland precondition.**
+
+The kernel says exactly why (dmesg on `.201` at bind time):
+
+```
+_MI_SYS_IMPL_BindChannelPort: Output port MOD7(VPE) DEV0 CHN0 PORT0
+  supported bindmask0 [org output 0000001d, org input 00000001],
+  Proposed BindType 00000010(HW_RING) → Filtered 00000010
+```
+
+- VPE **output** mask `0x1d` = FRAME_BASE|REALTIME|HW_AUTOSYNC|HW_RING — the
+  VPE side supports every streaming type.
+- VENC **input** mask `0x01` = FRAME_BASE only — the VENC input port is the
+  veto.  Intersection = 0 → `MI_ERR_SYS_NOT_SUPPORT` (0xA0092008).
+
+Hypotheses eliminated, in order:
+
+1. **Enum/ABI mismatch — NO.**  This SDK's `MI_SYS_BindType_e` matches our
+   `sigmastar_types.h` exactly (FRAME_BASE 0x1, REALTIME 0x4, HW_RING 0x10);
+   `MI_VENC_InputSrcBufferMode_e` NORMAL=0/RING_ONE=1/RING_HALF=2 and the
+   one-enum `MI_VENC_InputSourceConfig_t` match our call.
+2. **Call ordering — NO.**  Vendor recipe (stitch `st_main_stitch.cpp:1844+`,
+   amigos `venc.cpp:106-133`): CreateChn → SetInputSourceConfig(RING_ONE) →
+   StartRecvPic → BindChnPort2(HW_RING).  Ours is identical.
+3. **`u32BindParam` — REAL BUG, but not the cause here.**  Vendor convention:
+   HW_RING requires `u32BindParam = ALIGN_UP(height,32)` ring lines
+   (REALTIME/FRAME_BASE pass 0).  Our probe passed 0.  Fixed (the probe now
+   passes `ALIGN_UP(h,32)`, stored in `g_venc_ring_lines` and reused by every
+   rebind) and re-tested on-device: **still rejected, mask unchanged** — the
+   capability veto sits above param validation.  The fix stays because the
+   probe was vendor-incorrect and would have false-negatived on capable
+   silicon.
+4. **Missing VPE→VENC private ring pool — RED HERRING.**  The header defines
+   `E_MI_SYS_VPE_TO_VENC_PRIVATE_RING_POOL`/`MI_SYS_ConfigPrivateMMAPool`,
+   but no vendor sample in the entire SDK ever configures it; the pool is
+   driver-managed (`_MI_VENC_CreateRingPool` in mi_venc.ko).
+5. **Wrong VENC device / codec — STRUCTURAL, unfixable.**  i6e has two
+   mi_venc devices: **dev0 = MHE**, the single unified H.264+H.265 core
+   (`infinity6e.dtsi:157`, one `mhe-irq`), and **dev1 = JPE**, the JPEG
+   engine (`dtsi:327`).  `/proc/mi_modules/mi_venc/mi_venc0` capability rows:
+   dev0 `SupportRing=0 SupportImi=0`, dev1 `SupportRing=1 SupportImi=1`.
+   The device is chosen internally by codec (`_MI_VENC_GetDevIdByCodecType`,
+   no devid in `MI_VENC_CreateChn`) — both H.264 and H.265 land on dev0.
+   **Ring input on i6e is effectively a JPEG-only capability.**
+6. **Cross-check that the flag is real (the clincher):** on Maruko/i6c
+   (`.233`), where our production `LINK_RING` SCL→VENC bind works, the same
+   proc shows the H26x **dev0 `SupportRing=1`**.  Same driver architecture,
+   same flag; i6c H26x has ring input, i6e MHE does not.
+7. **Driver generations:** the SDK carries two mi_venc.ko vintages.  The
+   2019 builds expose a `VENC_support_HWRING:bool` module param; the 2022
+   firmware-based MHE driver ("chagall.bin" — what `.201` runs, build
+   2022-06-07, param list matches exactly) removed it.  The vendor also
+   ships **no** ring→VENC amigos config for the i6e demo family while other
+   chip families get them — consistent with MHE lacking the input.
+
+**Mechanism (disassembly-confirmed, unstripped SDK .ko with DWARF):**
+`_MI_SYS_IMPL_BindChannelPort` computes `allowed = proposed & VPE-output-caps
+& VENC-input-caps` and returns `0xA0092008` on an empty result.  The VPE
+side (`_MI_SclRes_OnGetOutputPortBindCapability`) unconditionally advertises
+`0x1d` toward VENC — never the blocker.  The VENC side
+(`_MI_VENC_OnGetInputPortBindCapability`, mi_venc_impl.c) builds its mask
+as: FRAME_BASE, `|= HW_RING` only if the device's
+`MHAL_VENC_EXTRA_CAPABILITY_t.bExternalRingSupport` is set (the proc
+`SupportRing` column) and the peer is VPE, `|= REALTIME` only if
+`bImiSupport` (proc `SupportImi`; REALTIME into VENC is IMI/SRAM-backed).
+The flags are queried from the mhal device table at `MI_VENC_IMPL_InitDev`.
+On `.201` the MHE device reports 0/0 → input mask `0x01` → veto.  The
+device-identity is double-confirmed by proc `MaxTaskCnt` 1/2 matching module
+params `max_h26x_task=1` / `max_jpe_task=2` (dev0=H26x, dev1=JPE).  Further
+bind-time preconditions (SetInputSourceConfig ring-mode coherence vs
+`picHeight/ringLineCount`, one ring channel per device) sit *behind* the
+capability gate and are all satisfied by our sequence.
+
+**What would change the verdict:** a vendor mhal/chagall firmware release
+that sets `bExternalRingSupport=1` for the MHE device (or a validated 2019
+legacy-driver stack) — outside our control.  Until then `video0.lowDelay` on
+Star6E always falls back to FRAMEBASE, by design.  REALTIME into VENC is
+additionally IMI-gated and unsupported *everywhere* in the SDK samples
+(REALTIME is used only for VIF→VPE), so HW_RING was always the only
+realistic vehicle.
 
 ## 7. Risks
 
-- **RING vs REALTIME on i6e VPE→VENC — RESOLVED NEGATIVE (§6a).** On the
-  `.201` firmware both are rejected (`0xA0092008`); the probe-and-fallback
-  design makes this harmless (clean FRAMEBASE fallback), but there is
-  currently no i6e firmware in hand that accepts the streaming bind, so the
-  feature yields no latency gain today. Left in as flag-gated infrastructure.
+- **RING vs REALTIME on i6e VPE→VENC — RESOLVED NEGATIVE, root-caused
+  (§6a/§6b).** Both rejected (`0xA0092008`) because the MHE H26x core's
+  input port only advertises FRAME_BASE (`SupportRing=0` in the mhal device
+  table; kernel mask trace `org input 0x01` vs VPE `org output 0x1d`).
+  Cross-validated: i6c's H26x dev0 has `SupportRing=1` and our RING bind
+  works there.  Ring on i6e exists only on the JPEG engine (dev1), which
+  H26x channels can never land on.  Probe-and-fallback keeps this harmless;
+  left in as flag-gated infrastructure pending a vendor driver/firmware that
+  enables MHE ring input.
 - **GetStream timing changes** under streaming input; the main loop's
   poll cadence may need adjustment.
 - **Snapshot/dual loss under lowDelay** is a real feature trade until the

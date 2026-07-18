@@ -46,9 +46,21 @@ mode 4 (1920×1080@120).
   Timeout, no dmesg sync-err/FIFO-FULL/FrmLost.  Live fps `120→60→120` and
   SIGHUP reinit ×3 stay healthy; snapshot/dual remain available under the
   fallback (refusal keys off the *actual* link type).  Net: safe, flag-gated,
-  default-off infrastructure that yields **no latency gain on this firmware**
-  and would engage only on an i6e BSP that accepts the streaming bind.  See
-  `documentation/REALTIME_PIPELINE_INVESTIGATION.md` §6a.
+  default-off infrastructure that yields **no latency gain on this firmware**.
+  See `documentation/REALTIME_PIPELINE_INVESTIGATION.md` §6a.
+- **Adversarial root-cause vs the vendor SDK (doc §6b):** the rejection is
+  the i6e MHE H26x core's mhal capability table — its VENC input port only
+  advertises FRAME_BASE (`SupportRing=0`/`SupportImi=0`; kernel bind trace
+  `org input 0x01` vs VPE `org output 0x1d`).  Cross-validated on i6c
+  (Maruko), whose H26x dev0 reports `SupportRing=1` and where our RING bind
+  works.  Ring input on i6e exists only on the JPEG engine (dev1); the
+  device is picked by codec and cannot be steered.  Not a userland
+  precondition: enum values, call ordering, input-source config, and the
+  (driver-managed) VPE→VENC ring pool were all verified against SDK headers,
+  samples, and disassembly.  **Probe fix from the review:** HW_RING binds now
+  pass the vendor-required `u32BindParam = ALIGN_UP(height,32)` ring-line
+  count (was 0 — would have false-negatived on ring-capable silicon);
+  device-retested, capability veto unchanged as expected.
 
 ## [0.47.0] - 2026-07-18
 
