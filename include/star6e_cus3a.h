@@ -15,6 +15,12 @@ typedef struct {
 	uint32_t shutter_min_us;   /* min exposure floor µs (0 = bin default;
 	                            * ignored while shutter_pin is set) */
 	uint32_t gain_min;         /* min sensor gain floor (0 = bin default) */
+	int      limits_only;      /* 1 = run alongside the SDK firmware AE as a
+	                            * pure exposure-limit enforcer (sdk/legacy AE
+	                            * mode): enforce only explicit user gain/shutter
+	                            * min/max, skip the fps-derived shutter cap and
+	                            * the cold-boot fps kick (the pipeline owns those
+	                            * when legacy_ae is set). */
 	int      verbose;          /* enable periodic status logging */
 } Star6eCus3aConfig;
 

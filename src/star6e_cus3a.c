@@ -129,6 +129,12 @@ static uint32_t compute_max_shutter(const Cus3aState *s)
 {
 	if (s->shutter_max_us > 0)
 		return s->shutter_max_us;
+	/* In limits-only mode (running beside the SDK firmware AE) do NOT
+	 * impose the fps-derived shutter cap — the pipeline's legacy exposure
+	 * cap owns that.  0 = "no user shutter ceiling" so the enforcement
+	 * loop leaves maxShutterUs untouched. */
+	if (s->cfg.limits_only)
+		return 0;
 	if (s->cfg.sensor_fps > 0)
 		return 1000000 / s->cfg.sensor_fps;
 	return 8333;  /* fallback ~120fps */
@@ -343,16 +349,23 @@ static void *cus3a_thread(void *arg)
 			uint32_t want_gain = s->gain_max;
 			uint32_t effective_gain = want_gain > 0 ?
 				want_gain : s->bin_max_sensor_gain;
+			/* Bin-baseline fallback so clearing a user shutter
+			 * ceiling (limits-only mode → compute_max_shutter==0)
+			 * restores the startup/bin max instead of leaving the
+			 * last cap stuck.  In custom mode want_shutter is always
+			 * >0 so this is a no-op there. */
+			uint32_t effective_shutter = want_shutter > 0 ?
+				want_shutter : s->bin_max_shutter_us;
 			int changed = 0;
 
 			/* Re-read current limits from ISP (they may have
 			 * been changed externally by cap_exposure_for_fps) */
 			s->fn_get_exposure_limit(0, &cur_limit);
 
-			if (want_shutter > 0 &&
-			    want_shutter != applied_shutter_max) {
-				cur_limit.maxShutterUs = want_shutter;
-				applied_shutter_max = want_shutter;
+			if (effective_shutter > 0 &&
+			    effective_shutter != applied_shutter_max) {
+				cur_limit.maxShutterUs = effective_shutter;
+				applied_shutter_max = effective_shutter;
 				changed = 1;
 			}
 			if (s->shutter_pin && want_shutter > 0 &&
@@ -410,7 +423,7 @@ static void *cus3a_thread(void *arg)
 			 * this is the sole deterministic kick.  Cus3a_thread
 			 * restarts on reinit, so fps_kick_done re-arms each
 			 * pipeline cycle. */
-			if (frames == 15 && !fps_kick_done &&
+			if (frames == 15 && !fps_kick_done && !s->cfg.limits_only &&
 			    s->fn_set_fps && s->cfg.sensor_fps > 0) {
 				printf("[cus3a] cold-boot fps kick: "
 				    "SetFps(%u)\n", s->cfg.sensor_fps);
