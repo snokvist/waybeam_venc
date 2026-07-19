@@ -116,5 +116,14 @@
     "axisDown": "+z",
     "trimRollDeg": 0.0,
     "trimPitchDeg": 0.0
+  },
+  "detect": {
+    "enabled": false,
+    "backend": "worker",
+    "modelPath": "",
+    "firmwarePath": "",
+    "workerLib": "",
+    "inferInterval": 1,
+    "osd": true
   }
 }

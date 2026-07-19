@@ -291,6 +291,20 @@ typedef struct {
 	uint32_t height;    /* 0 → inherit from main stream */
 } VencConfigSnapshot;
 
+/* IPU NPU object detection (Star6E only). Feeds a VPE port1 NV12 tap to a
+ * detector backend (see detect_plugin.h). Mutually exclusive with
+ * video0.framing=stab (both claim the single VPE port1). Lives in its own
+ * TRAILING VencConfig member — the config ABI is append-only. */
+typedef struct {
+	bool enabled;          /* run the IPU detector                        */
+	char backend[16];      /* "worker" (dlopen .so) | "yolov8" (in-tree)  */
+	char model_path[VENC_CONFIG_STRING_MAX];    /* offline .img; "" = default */
+	char firmware_path[VENC_CONFIG_STRING_MAX]; /* IPU fw; "" = backend default */
+	char worker_lib[VENC_CONFIG_STRING_MAX];    /* "worker": .so path; "" = default */
+	int  infer_interval;   /* run 1 of every N captured frames (>=1)       */
+	bool osd;              /* draw detection overlay (backend-dependent)   */
+} VencConfigDetect;
+
 /* ── Top-level config ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -308,6 +322,7 @@ typedef struct {
 	VencConfigSnapshot snapshot;
 	VencConfigDebug debug;
 	VencConfigAttitude attitude;  /* trailing — ABI append-only */
+	VencConfigDetect detect;      /* trailing — ABI append-only */
 } VencConfig;
 
 typedef enum {
