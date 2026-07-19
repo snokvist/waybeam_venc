@@ -2,14 +2,15 @@
 
 ## [0.48.0] - 2026-07-19
 
-Star6E NPU object detection (#183): YOLOv8 on the idle IPU, results streamed
-as sidecar metadata and drawn on the debug OSD.
+Star6E NPU object detection (#183): pluggable object detection on the idle
+IPU, results streamed as sidecar metadata and drawn on the debug OSD.
 
 - **Detector plugin boundary** (`include/detect_plugin.h`): the host owns the
-  VPE port1 tap (640x352 NV12, drop-not-block), the reader thread, config, and
-  the carriers; a dlopen'd plugin `.so` (`detect.plugin`) owns the IPU device
-  and the decode and returns `DetectBox[]`.  New model = config change, no
-  venc rebuild; all model-specific code stays out of this repo.
+  VPE port1 tap (model-input-size NV12, drop-not-block), the reader thread,
+  config, and the carriers; a dlopen'd plugin `.so` (`detect.plugin`) owns the
+  IPU device and the decode and returns `DetectBox[]`.  New model = config
+  change, no venc rebuild; all model-specific code (models, decode, class
+  tables, usage docs) lives with the plugin, out of this repo.
 - **RTP sidecar DETECT trailer** (flag 0x10, appended last): per-frame
   detection metadata — 16 B header (model_id, schema_ver, count, detect_seq,
   payload_len, age_ms) + TLV body with normalized-u16 BOX records.  Attached
@@ -25,6 +26,8 @@ as sidecar metadata and drawn on the debug OSD.
   IPU invoke.  Detection is best-effort — any bring-up failure logs and the
   stream continues without it.  `detect` config block is trailing/append-only;
   detect and `framing=stab` are mutually exclusive (both claim VPE port1).
+- WebUI: new **Detection** dashboard section exposing the `detect.*` config
+  fields (enabled, plugin, modelPath, firmwarePath, inferInterval, osd).
 - New host tests: `tests/test_detect_wire.c` (39 cases) for the trailer
   builder; sidecar send-path call sites updated.
 
