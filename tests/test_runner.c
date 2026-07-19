@@ -42,6 +42,7 @@ extern int test_attitude_est(void);
 extern int test_framing_stab_accuracy(void);
 extern int test_venc_frame_ring(void);
 extern int test_detect_dequant(void);
+extern int test_detect_wire(void);
 
 int main(void)
 {
@@ -156,6 +157,9 @@ int main(void)
 
 	printf("\n--- test_detect_dequant ---\n");
 	failures += test_detect_dequant();
+
+	printf("\n--- test_detect_wire ---\n");
+	failures += test_detect_wire();
 
 	printf("\n=== Results: %d passed, %d failed ===\n",
 		g_test_pass_count, g_test_fail_count);

@@ -19,6 +19,7 @@
 #include "star6e_ipu_yolo.h"
 #include "star6e_pipeline.h"
 #include "detect_plugin.h"
+#include "timing.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -106,6 +107,16 @@ typedef struct Star6eIpuDetect {
 	iy_put_buf_fn  put_buf;
 
 	DetectBox boxes[64];
+
+	/* Latest-detection snapshot published by the reader for the encode
+	 * thread (sidecar DETECT trailer).  The lock is held only for the
+	 * ≤64-box memcpy on each side — never across the IPU invoke. */
+	pthread_mutex_t pub_lock;
+	DetectBox       pub_boxes[STAR6E_DETECT_SNAP_MAX];
+	int             pub_count;
+	uint32_t        pub_seq;
+	uint64_t        pub_produced_us;
+	int             pub_valid;
 } Star6eIpuDetect;
 
 #define IY_MAX_DETS ((int)(sizeof(((Star6eIpuDetect *)0)->boxes) / \
@@ -201,10 +212,25 @@ static void *iy_reader_main(void *arg)
 		frame.phy_y = phy_y;
 		frame.phy_uv = phy_uv;
 
-		(void)d->backend->process(&frame, d->boxes, IY_MAX_DETS, &ndet);
-		/* The worker backend renders its own overlay; results are
-		 * available in d->boxes for a future host-side consumer
-		 * (OSD / sidecar).  Nothing else to do here. */
+		if (d->backend->process(&frame, d->boxes, IY_MAX_DETS,
+		                        &ndet) == 0) {
+			/* Publish the snapshot for the encode thread's sidecar
+			 * DETECT trailer.  The worker backend also renders its
+			 * own overlay; this just exposes the same boxes to the
+			 * host without a second inference. */
+			if (ndet < 0)
+				ndet = 0;
+			if (ndet > IY_MAX_DETS)
+				ndet = IY_MAX_DETS;
+			pthread_mutex_lock(&d->pub_lock);
+			memcpy(d->pub_boxes, d->boxes,
+			       (size_t)ndet * sizeof(DetectBox));
+			d->pub_count = ndet;
+			d->pub_seq++;
+			d->pub_produced_us = wb_monotonic_us();
+			d->pub_valid = 1;
+			pthread_mutex_unlock(&d->pub_lock);
+		}
 
 		d->put_buf(handle);
 	}
@@ -317,10 +343,13 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 		}
 	}
 
+	pthread_mutex_init(&d->pub_lock, NULL);
+
 	d->running = 1;
 	if (pthread_create(&d->reader, NULL, iy_reader_main, d) != 0) {
 		fprintf(stderr, "[ipu-yolo] reader thread create failed\n");
 		d->running = 0;
+		pthread_mutex_destroy(&d->pub_lock);
 		d->backend->deinit();
 		MI_VPE_DisablePort(0, 1);
 		dlclose(d->plugin_handle);
@@ -365,5 +394,40 @@ void star6e_ipu_yolo_stop(Star6ePipelineState *state)
 	if (d->plugin_handle)
 		dlclose(d->plugin_handle);
 
+	/* Reader is joined; no other user of pub_lock (state->detect is already
+	 * NULL, so the encode-thread accessor bails before touching it). */
+	pthread_mutex_destroy(&d->pub_lock);
+
 	free(d);
+}
+
+int star6e_ipu_yolo_snapshot(Star6ePipelineState *state,
+	Star6eDetectSnapshot *out)
+{
+	Star6eIpuDetect *d;
+	int have = 0;
+
+	if (!state || !out)
+		return 0;
+	d = (Star6eIpuDetect *)state->detect;
+	if (!d)
+		return 0;
+
+	pthread_mutex_lock(&d->pub_lock);
+	if (d->pub_valid) {
+		int c = d->pub_count;
+		if (c < 0)
+			c = 0;
+		if (c > STAR6E_DETECT_SNAP_MAX)
+			c = STAR6E_DETECT_SNAP_MAX;
+		memcpy(out->boxes, d->pub_boxes, (size_t)c * sizeof(DetectBox));
+		out->count = c;
+		out->seq = d->pub_seq;
+		out->produced_us = d->pub_produced_us;
+		out->net_w = (uint16_t)d->net_w;
+		out->net_h = (uint16_t)d->net_h;
+		have = 1;
+	}
+	pthread_mutex_unlock(&d->pub_lock);
+	return have;
 }

@@ -66,6 +66,18 @@ vs `DETECT=0`.
 
 ## Phase 3 — RTP sidecar DETECT trailer (frozen transport)
 
+> **Reconciliation (2026-07-19).** This section predates the **plugin-split**
+> (public host dlopens a private `DetectBackend` plugin; the public ABI
+> `detect_plugin.h` hands the host only `DetectBox[]` — pure geometry, net-px
+> corner form, `score`, `cls`). The original text below assumed the *decoder*
+> builds the wire blob (`to_tlv`), but the decoder is now **private** and the
+> public host has boxes and nothing else. The design is therefore refactored to
+> **host-built boxes over a still-opaque envelope**, keeping model-agnostic
+> transport while matching what the host actually holds. Decisions folded in:
+> canonical sidecar header re-homed to `waybeam_venc/include/rtp_sidecar.h`
+> (waybeam_wfb_ng was deregistered 2026-07-18), and radeon-vrx is the first
+> confirming consumer.
+
 Extend `rtp_sidecar.h/.c`, modelled on the attitude trailer. New flag and a
 variable-length trailer appended **after** attitude (last, because it is the only
 variable-length trailer — the fixed ones keep computable offsets):
@@ -76,35 +88,90 @@ variable-length trailer — the fixed ones keep computable offsets):
 
 /* Fixed trailer header (network byte order, pack(1)); TLV body follows. */
 typedef struct {
-    uint16_t model_id;      /* public id→name registry */
-    uint16_t schema_ver;    /* TLV schema version for this model */
-    uint16_t object_count;  /* objects actually included */
-    uint16_t flags;         /* DETECT_TLR_* */
-    uint32_t detect_seq;    /* monotonic inference id (fresh vs unchanged) */
-    uint16_t payload_len;   /* bytes of TLV that follow */
-    uint16_t _reserved;     /* 0 */
+    uint16_t model_id;      /* public id→label-table registry (0 = VisDrone-10) */
+    uint16_t schema_ver;    /* wire schema version (v1 = standard BOX tag)       */
+    uint16_t object_count;  /* objects actually included                         */
+    uint16_t flags;         /* DETECT_TLR_*                                       */
+    uint32_t detect_seq;    /* monotonic inference id (dedup / freshness)         */
+    uint16_t payload_len;   /* bytes of TLV that follow                           */
+    uint16_t age_ms;        /* staleness of this snapshot at frame encode, sat.   */
 } RtpSidecarDetectHdr;      /* 16 bytes + payload_len */
 ```
 
-TLV body: `[tag u8][len u8][value…]`, network byte order, each object opened by
-an object-boundary tag. The venc side copies the blob the decoder produced —
-**it never parses tags**. Consumers skip unknown tags by `len`.
+**TLV body:** `[tag u8][len u8][value…]`, network byte order. Consumers skip
+unknown tags by `len`. One **public standard tag** is defined; the host emits it
+directly from `DetectBox[]` (no plugin involvement needed for v1):
 
-Wiring: add a `rtp_sidecar_send_frame_full2(... , const void *detect_blob,
-uint16_t detect_len)` (or extend the existing `_full`) that sets
-`RTP_SIDECAR_FLAG_DETECT` and appends `detect_blob` when non-NULL. The blob is
-opaque bytes → the generic append keeps the sidecar model-agnostic even in the
-default build. **Attach-on-fresh:** the backend passes the blob only when
-`detect_seq` advanced since the last send; otherwise NULL (no trailer).
+```c
+#define DETECT_TAG_BOX   0x01   /* value = 10 B, one detection */
+/* value: x1,y1,x2,y2  u16 each, NORMALIZED 0..65535 of frame W/H, corner form;
+ *        score u8 (prob*255);  cls u8 (mapped to a label via model_id).       */
+```
 
-**One-datagram rule:** the decoder's `to_tlv` fills objects highest-score-first
-until the next object would exceed the remaining MTU budget (packet minus the
-frame/enc/transport/attitude trailers already present); the rest are dropped and
-`DETECT_TLR_TRUNCATED` set. Still exactly one `sendto` per frame per subscriber.
+**Normalized coords, not net-px:** the VPE port1 tap squashes the full frame into
+the model input (640×352) *linearly per-axis* (`star6e_ipu_yolo.c:284`), so a
+net-normalized coordinate equals the display-normalized coordinate. The consumer
+multiplies by its own decoded W/H — no net dims, no aspect math on the wire,
+model-geometry-agnostic. Host converts `x_norm = x_net / net_w * 65535` etc.
 
-**Verify:** `tests/test_detect_wire.c` on host — pack N objects, parse back,
-confirm skip-unknown-tag, truncation, and that an unchanged `detect_seq` omits
-the trailer.
+Tags `0x80–0xFF` are **reserved for private, plugin-defined records** (keypoints,
+distance, classifier vectors). A future plugin ABI addition can hand the host an
+opaque extra-blob to append after the standard boxes — deferred, not built. This
+keeps the public spec stable while private models evolve their payload.
+
+**Who builds it:** the **host** serializes the published `DetectBox[]` snapshot
+into standard BOX tags. The sidecar stays a dumb carrier (it copies the assembled
+trailer, understands only the byte layout); the host understands only "boxes"
+(universal geometry, `cls` is an opaque int). Model *semantics* (label strings,
+distance formulas) stay private / in the consumer's `model_id` table.
+
+**Wiring (also fixes the fixed-92 B-buffer trap):** the sender assembles trailers
+by running offset into a fixed `RtpSidecarFrameExtFull` struct
+(`rtp_sidecar.c:265`) — too small for a variable trailer. Replace that local with
+`uint8_t buf[RTP_SIDECAR_DGRAM_MAX]` (512) and add a superset
+`rtp_sidecar_send_frame_detect(... , const void *detect_blob, uint16_t
+detect_len)` that sets `RTP_SIDECAR_FLAG_DETECT` and appends the blob after
+ATTITUDE; `rtp_sidecar_send_frame_full` becomes a `detect=NULL` wrapper. Max
+datagram = 52 + 12 + 16 + 12 + (16 + 24×10) = **360 B** ≪ MTU; bump the spec's
+receive-buffer floor 128 → 512 B.
+
+**Snapshot handoff:** the port1 reader (`iy_reader_main`) today fills
+`d->boxes[64]` and drops them (`star6e_ipu_yolo.c:204`). Add a mutex-guarded
+double-buffered snapshot `{boxes_pub, ndet_pub, detect_seq, produced_us}` to
+`Star6eIpuDetect`; the reader publishes after `process()`, the encode thread
+reads it via a new `star6e_ipu_yolo_snapshot()` inside `star6e_video_send_frame`
+(new `detect_info` param threaded alongside `enc_info`/`att_info`,
+`star6e_video.c:157`). The lock is held only for a ≤24-box memcpy (µs) — **never
+across the ~96 ms invoke** — so the encoder hot path is untouched.
+
+**Attach policy — every frame, not on-fresh.** Emit the latest snapshot on every
+FRAME while subscribed (the original "attach only when `detect_seq` advanced" is
+reversed): on a lossy RF video link, repeating the current boxes every frame is
+cheap (~20 KB/s at 60 fps) and loss-resilient, and `detect_seq` still lets the
+consumer dedup / detect freshness. The trailer is omitted only when no valid
+snapshot exists yet (mirrors ATTITUDE dropping when invalid). `age_ms` lets the
+consumer fade stale boxes. *(Reversible: restore on-fresh to minimize bytes.)*
+
+**One-datagram rule:** the host fills BOX tags highest-score-first until the next
+would exceed the remaining MTU budget (packet minus the frame/enc/transport/
+attitude trailers already present, cap `RTP_SIDECAR_DETECT_MAX = 24`); the rest
+are dropped and `DETECT_TLR_TRUNCATED` set. Exactly one `sendto` per frame per
+subscriber.
+
+**Canonical-header + wire guard.** Update `protocols/rtp-sidecar.md` FIRST, then
+re-home its "canonical header" pointer to `waybeam_venc/include/rtp_sidecar.h`
+(the vendored `waybeam_wfb_ng/shared/…` original is deregistered). The venc-side
+`tests/test_detect_wire.c` host round-trip (pack N boxes → parse back →
+skip-unknown-tag → truncation → normalized-coord round-trip) **replaces the
+deregistered wfb_ng frozen Python parser** as the wire-conformance guard; keep
+the hub's `rtp_sidecar_wire.h` in sync when the ground consumer lands.
+
+**Verify:** `tests/test_detect_wire.c` green on host; on `.201`, emit while
+subscribed and confirm the trailer decodes; **radeon-vrx** (x86 RTP viewer that
+already decodes the matching stream) subscribes, draws the normalized boxes, and
+they overlay the worker's own burned-in boxes 1:1 — end-to-end wire confirmation
+with zero hub risk. The ground waybeam-hub OSD consumer (parse DETECT → unified
+LVGL OSD data layer) is a separate follow-on PR.
 
 ## Phase 4 — Generic OSD path
 
