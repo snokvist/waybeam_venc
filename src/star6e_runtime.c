@@ -1323,6 +1323,61 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					zoom.crop_w, zoom.crop_h,
 					zoom.crop_x, zoom.crop_y);
 			}
+
+			/* Detection boxes (detect.osd): scale net-space boxes
+			 * onto the canvas — the port1 tap squashes the full
+			 * FOV linearly per axis, so net->canvas is a straight
+			 * ratio (the same mapping the sidecar normalizes by).
+			 * A stale snapshot (reader stalled) is not drawn. */
+			if (vcfg->detect.enabled && vcfg->detect.osd) {
+				Star6eDetectSnapshot snap;
+				static const uint16_t det_col[] = {
+					DEBUG_OSD_RED, DEBUG_OSD_GREEN,
+					DEBUG_OSD_YELLOW, DEBUG_OSD_CYAN,
+					DEBUG_OSD_BLUE, DEBUG_OSD_WHITE,
+				};
+				const unsigned ncol =
+					sizeof(det_col) / sizeof(det_col[0]);
+
+				if (star6e_ipu_yolo_snapshot(ps, &snap) &&
+				    snap.count > 0 &&
+				    snap.net_w && snap.net_h &&
+				    wb_monotonic_us() - snap.produced_us <
+					700000) {
+					uint32_t cw = ps->image_width;
+					uint32_t chh = ps->image_height;
+					int di;
+
+					for (di = 0; di < snap.count; di++) {
+						const DetectBox *b =
+							&snap.boxes[di];
+						uint32_t x1 = (uint32_t)(b->x1
+							* cw / snap.net_w);
+						uint32_t y1 = (uint32_t)(b->y1
+							* chh / snap.net_h);
+						uint32_t x2 = (uint32_t)(b->x2
+							* cw / snap.net_w);
+						uint32_t y2 = (uint32_t)(b->y2
+							* chh / snap.net_h);
+
+						if (x2 >= cw)  x2 = cw - 1;
+						if (y2 >= chh) y2 = chh - 1;
+						if (x1 >= x2 || y1 >= y2)
+							continue;
+						debug_osd_rect(ps->debug_osd,
+							(uint16_t)x1,
+							(uint16_t)y1,
+							(uint16_t)(x2 - x1),
+							(uint16_t)(y2 - y1),
+							det_col[(unsigned)
+								b->cls % ncol],
+							0);
+					}
+					debug_osd_text(ps->debug_osd,
+						osd_row++, "det", "%d",
+						snap.count);
+				}
+			}
 		}
 
 		debug_osd_end_frame(ps->debug_osd);

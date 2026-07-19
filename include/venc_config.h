@@ -301,7 +301,9 @@ typedef struct {
 	char model_path[VENC_CONFIG_STRING_MAX];    /* offline .img; "" = default */
 	char firmware_path[VENC_CONFIG_STRING_MAX]; /* IPU fw; "" = plugin default */
 	int  infer_interval;   /* run 1 of every N captured frames (>=1)       */
-	bool osd;              /* draw detection overlay (plugin-dependent)    */
+	bool osd;              /* draw boxes on the debug OSD (needs
+	                          debug.showOsd; native backends have no
+	                          vehicle overlay of their own)              */
 } VencConfigDetect;
 
 /* ── Top-level config ────────────────────────────────────────────────── */
