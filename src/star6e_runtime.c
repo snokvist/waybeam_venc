@@ -1351,13 +1351,26 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 					for (di = 0; di < snap.count; di++) {
 						const DetectBox *b =
 							&snap.boxes[di];
-						uint32_t x1 = (uint32_t)(b->x1
+						/* Plugin coords cross an ABI
+						 * boundary — clamp the low
+						 * side before the float ->
+						 * unsigned conversion (UB on
+						 * negatives). */
+						float fx1 = b->x1 < 0.0f ?
+							0.0f : b->x1;
+						float fy1 = b->y1 < 0.0f ?
+							0.0f : b->y1;
+						float fx2 = b->x2 < 0.0f ?
+							0.0f : b->x2;
+						float fy2 = b->y2 < 0.0f ?
+							0.0f : b->y2;
+						uint32_t x1 = (uint32_t)(fx1
 							* cw / snap.net_w);
-						uint32_t y1 = (uint32_t)(b->y1
+						uint32_t y1 = (uint32_t)(fy1
 							* chh / snap.net_h);
-						uint32_t x2 = (uint32_t)(b->x2
+						uint32_t x2 = (uint32_t)(fx2
 							* cw / snap.net_w);
-						uint32_t y2 = (uint32_t)(b->y2
+						uint32_t y2 = (uint32_t)(fy2
 							* chh / snap.net_h);
 
 						if (x2 >= cw)  x2 = cw - 1;

@@ -301,6 +301,7 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 
 	if (iy_load_sys_symbols(d) != 0) {
 		fprintf(stderr, "[ipu-yolo] MI_SYS symbols unavailable\n");
+		dlclose(d->plugin_handle);
 		free(d);
 		return 0;
 	}
