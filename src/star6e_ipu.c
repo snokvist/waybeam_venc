@@ -19,6 +19,24 @@ int star6e_ipu_load(void)
 {
 	memset(&g_mi_ipu, 0, sizeof(g_mi_ipu));
 
+	/* libmi_ipu.so calls CamOs* from libcam_os_wrapper.so but is not
+	 * linked against it (vendor apps link both).  Pull the wrapper in
+	 * first with GLOBAL visibility; ignore failure — the host process
+	 * (e.g. waybeam) may already have it loaded via the MI libs. */
+	g_mi_ipu.cam_os_handle = dlopen("libcam_os_wrapper.so",
+		RTLD_LAZY | RTLD_GLOBAL);
+	g_mi_ipu.cam_fs_handle = dlopen("libcam_fs_wrapper.so",
+		RTLD_LAZY | RTLD_GLOBAL);
+	g_mi_ipu.mi_sys_handle = dlopen("libmi_sys.so",
+		RTLD_LAZY | RTLD_GLOBAL);
+	if (g_mi_ipu.mi_sys_handle) {
+		g_mi_ipu.fnSysInit = (int (*)(unsigned short))
+			dlsym(g_mi_ipu.mi_sys_handle, "MI_SYS_Init");
+		g_mi_ipu.fnSysConfigPool = (int (*)(void *))
+			dlsym(g_mi_ipu.mi_sys_handle,
+			      "MI_SYS_ConfigPrivateMMAPool");
+	}
+
 	g_mi_ipu.handle = dlopen("libmi_ipu.so", RTLD_LAZY | RTLD_GLOBAL);
 	if (!g_mi_ipu.handle) {
 		fprintf(stderr, "[ipu] dlopen libmi_ipu.so failed: %s\n", dlerror());
@@ -47,12 +65,16 @@ int star6e_ipu_load(void)
 		ipu_symbol(g_mi_ipu.handle, "MI_IPU_PutOutputTensors");
 	g_mi_ipu.fnInvoke = (int (*)(unsigned int, IpuTensorVector *,
 		IpuTensorVector *))ipu_symbol(g_mi_ipu.handle, "MI_IPU_Invoke");
+	g_mi_ipu.fnGetOfflineInfo = (int (*)(IpuReadFn, char *,
+		IpuOfflineInfo *))ipu_symbol(g_mi_ipu.handle,
+		"MI_IPU_GetOfflineModeStaticInfo");
 
 	if (!g_mi_ipu.fnCreateDevice || !g_mi_ipu.fnDestroyDevice ||
 	    !g_mi_ipu.fnCreateChannel || !g_mi_ipu.fnDestroyChannel ||
 	    !g_mi_ipu.fnGetIODesc || !g_mi_ipu.fnGetInputTensors ||
 	    !g_mi_ipu.fnGetOutputTensors || !g_mi_ipu.fnPutInputTensors ||
-	    !g_mi_ipu.fnPutOutputTensors || !g_mi_ipu.fnInvoke) {
+	    !g_mi_ipu.fnPutOutputTensors || !g_mi_ipu.fnInvoke ||
+	    !g_mi_ipu.fnGetOfflineInfo) {
 		star6e_ipu_unload();
 		return -1;
 	}
@@ -64,6 +86,12 @@ void star6e_ipu_unload(void)
 {
 	if (g_mi_ipu.handle)
 		dlclose(g_mi_ipu.handle);
+	if (g_mi_ipu.cam_os_handle)
+		dlclose(g_mi_ipu.cam_os_handle);
+	if (g_mi_ipu.cam_fs_handle)
+		dlclose(g_mi_ipu.cam_fs_handle);
+	if (g_mi_ipu.mi_sys_handle)
+		dlclose(g_mi_ipu.mi_sys_handle);
 	memset(&g_mi_ipu, 0, sizeof(g_mi_ipu));
 }
 

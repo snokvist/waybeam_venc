@@ -78,7 +78,17 @@ typedef struct {
 } IpuTensorVector;
 
 typedef struct {
+	unsigned int var_buf_size;   /* u32VariableBufferSize */
+	unsigned int model_size;     /* u32OfflineModelSize */
+} IpuOfflineInfo;
+
+typedef struct {
 	void *handle;
+	void *cam_os_handle;         /* libcam_os_wrapper.so (libmi_ipu dep) */
+	void *cam_fs_handle;         /* libcam_fs_wrapper.so (libmi_ipu dep) */
+	void *mi_sys_handle;         /* libmi_sys.so (libmi_ipu dep) */
+	int (*fnSysInit)(unsigned short dev);
+	int (*fnSysConfigPool)(void *conf);  /* MI_SYS_ConfigPrivateMMAPool */
 	int (*fnCreateDevice)(IpuDevAttr *cfg, IpuReadFn rd, char *fw_path,
 		unsigned int fw_size);
 	int (*fnDestroyDevice)(void);
@@ -92,6 +102,10 @@ typedef struct {
 	int (*fnPutOutputTensors)(unsigned int chn, IpuTensorVector *outs);
 	int (*fnInvoke)(unsigned int chn, IpuTensorVector *ins,
 		IpuTensorVector *outs);
+	/* Parses a compiled-network blob header; fills the variable-buffer
+	 * size CreateDevice requires (a zero size is rejected). */
+	int (*fnGetOfflineInfo)(IpuReadFn rd, char *net_path,
+		IpuOfflineInfo *info);
 } Star6eIpuImpl;
 
 /* Global instance — defined in star6e_ipu.c. */

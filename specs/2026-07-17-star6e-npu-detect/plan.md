@@ -174,3 +174,79 @@ The generality that matters — new models without touching OSD or transport —
 lives in exactly two frozen contracts (the `OverlayList` draw vocabulary and the
 opaque DETECT trailer) plus one dispatch point (`model_id` → decoder). That is the
 minimum surface that satisfies both "one read" and "any future model."
+
+## Phase 1 — RESULT (2026-07-19, bench .201 Star6E/IMX335, OpenIPC)
+
+**Gate verdict: NO-GO on the current stock OpenIPC image — blocked by two
+firmware-image gaps, NOT by silicon.** The IPU userspace/kernel stack was
+brought up far enough to prove the software path is sound and to localize both
+blockers to the builder (kernel + memory layout), where the fix belongs. This
+is a *deferred* gate, not a dead one (contrast the pure-REALTIME investigation,
+which was a true silicon capability wall — see
+`documentation/REALTIME_PIPELINE_INVESTIGATION.md`).
+
+### What was proven to work
+- `libmi_ipu.so` ships in OpenIPC; all 22 low-level `MDRV_IPU_*` symbols are
+  already exported by the on-device `mhal` — the hard part of the driver stack
+  is present.
+- OpenIPC ships **no `mi_ipu.ko`**. The SigmaStar SDK's build (Pudding
+  ILC02V009, kernel 4.9.84, vermagic-identical) loads after two shims:
+  1. **`__memzero` export shim** — OpenIPC's 4.9.84 dropped the legacy ARM
+     `__memzero`; a 6-line module (`memset(p,0,n)` + `EXPORT_SYMBOL`) built
+     against the builder kernel tree restores it.
+  2. **mi_common device-mutex ABI bridge** — the OpenIPC-shipped
+     `mi_common`/`mi_sys` (build `dc99390`, 2022-06-07) added a per-device
+     `struct mutex *` at device-struct offset **+0x30**, locked in
+     `MI_DEVICE_Open`; the SDK's `mi_ipu.ko` (build `eed835e`, 2022-06-01)
+     predates that field and leaves it NULL → first `/dev/mi_ipu` open oopsed
+     (NULL deref at +4 in `__mutex_lock_slowpath`). A tiny fixup module owns a
+     real mutex and writes its address into `mi_ipu`'s dev struct `.data+0x90`
+     after load. (Confirmed by a two-build disassembly diff.)
+- With both shims: `MI_SYS_Init` OK; `MI_IPU_GetOfflineModeStaticInfo` parses
+  the model (ssd_mobilenet stand-in: var_buf 2.88 MB, model 7.54 MB);
+  `MI_IPU_CreateDevice` reaches **firmware init** (i.e. device open, attr, and
+  the vendor path-mode `CreateDevice(&attr, NULL, fw_path, 0)` all succeed).
+
+### Where it stops
+`CreateDevice` fails at **firmware init, error 14 = the RISC-V CCIF handshake
+timeout**, for two independent infrastructure reasons:
+
+1. **DLA interrupt not mappable.** `mi_ipu` init does
+   `irq_of_parse_and_map(dla_node, 0)` → returns **virq 0** → `request_irq`
+   fails ("request_irq failed"). The DLA handshake semaphore is posted *only*
+   by that ISR, so init always times out (error 14). The board DT `/soc/dla`
+   is byte-identical to the vendor's (`interrupts=<GIC_SPI 85 LEVEL_HIGH>`,
+   `status="ok"`), yet the OpenIPC GIC domain does not map SPI 85 — a
+   kernel/GIC-config gap, not a DT-authoring gap.
+2. **No named IPU MMA heap.** Kernel prints "fail to get ipu mma heap name when
+   {enable,disable} miu protection". The vendor carves a dedicated IPU/DLA heap
+   in specific `MMAP_I6E_*` profiles; OpenIPC's memory layout exposes only
+   `mma_heap_name0` (bootarg `mma_heap=mma_heap_name0,...`). `MMU`-enabled
+   `mi_sys` also makes `MI_SYS_ConfigPrivateMMAPool` a no-op ("private pool is
+   disabled by default"), so a userspace carve-out cannot substitute.
+
+### Builder work required before Phase 2 is worth attempting
+- Ship a **version-matched `mi_ipu.ko`** (rebuilt against the `dc99390`
+  mi_common/mi_sys ABI, or on a matched kernel) — removes the need for the
+  memzero + mutex shims. Long-term home = the builder's
+  `sigmastar-osdrv-infinity6e` package.
+- **Wire the DLA IRQ**: ensure the OpenIPC GIC/interrupt-controller maps SPI 85
+  (verify `nr_irqs`/SPI range vs the vendor kernel config; confirm the `dla`
+  node's `interrupt-parent` resolves).
+- **Carve a named IPU MMA heap** in the i6e memory-map / bootargs (port the
+  vendor `MMAP_I6E_*` IPU region), sized ≥ ~16–24 MB for firmware + model +
+  IO buffers.
+
+### Repo artifacts from this phase
+- `tools/ipu_probe.c` reworked to the **vendor CreateDevice sequence**:
+  pulls `libcam_os_wrapper` / `libcam_fs_wrapper` / `libmi_sys` (libmi_ipu's
+  unlinked deps) with `RTLD_GLOBAL`, calls `MI_SYS_Init`, sizes the device from
+  `GetOfflineModeStaticInfo`, and uses vendor path-mode
+  `CreateDevice(&attr, NULL, fw, 0)` / `CreateCHN(&attr, NULL, model)`.
+- `include/star6e_ipu.h` / `src/star6e_ipu.c`: added the `cam_os`/`cam_fs`/
+  `mi_sys` dependency handles, `MI_SYS_Init` + `GetOfflineModeStaticInfo`
+  bindings, and `IpuOfflineInfo`.
+- The two shim modules (`memzero_shim.c`, `ipu_fixup.c`) are **dev-bench
+  scaffolding**, not part of this repo — the real fix is the matched `.ko` in
+  the builder. They live in the session scratchpad and are documented here for
+  reproducibility.

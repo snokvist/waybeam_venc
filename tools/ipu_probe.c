@@ -27,15 +27,49 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ── IPU private MMA pool ───────────────────────────────────────────────
+ * libmi_ipu allocates its firmware/model/IO buffers from a per-device
+ * private pool of the IPU device (module 29).  Nothing configures that
+ * pool on an OpenIPC system ("fail to get IPU MMA heap name"), so carve
+ * one out of the default bootarg heap before CreateDevice.  Struct layout
+ * mirrors MI_SYS_GlobalPrivPoolConfig_t (mi_sys_datatype.h). */
+#define IPU_MODULE_ID           29u
+#define PER_DEV_PRIVATE_POOL    2u
+#define IPU_POOL_HEAP           "mma_heap_name0"
+#define IPU_POOL_SIZE           (24u * 1024u * 1024u)
+
+struct probe_dev_pool_conf {
+	unsigned int  module_id;
+	unsigned int  dev_id;
+	unsigned int  reserve;
+	unsigned char heap_name[32];
+	unsigned int  heap_size;
+};
+
+struct probe_pool_config {
+	unsigned int config_type;
+	unsigned char create;         /* MI_BOOL */
+	union {
+		struct probe_dev_pool_conf dev;
+		unsigned char pad[56];
+	} u;
+};
+
 /* ── model-blob reader ──────────────────────────────────────────────────
  * The SDK forwards the path (fw_path / net_path) as the readFunc `ctx`.
  * We open it lazily and cache one FILE* keyed by the path pointer so a
  * multi-chunk load doesn't reopen per call.  A real integration would feed
- * decrypted bytes from memory here instead. */
+ * decrypted bytes from memory here instead.
+ *
+ * Retained but currently unused: the MI_IPU calls below mirror the vendor
+ * samples, which pass a NULL read-callback and let libmi_ipu open the blob
+ * path itself.  This callback is the seam the Phase-5 decrypt path will use
+ * (pass it in place of NULL to stream plaintext from memory). */
 static FILE *g_blob_fp;
 static char *g_blob_path;
 
-static int blob_read(void *data, int offset, int size, char *ctx)
+static int __attribute__((unused)) blob_read(void *data, int offset, int size,
+	char *ctx)
 {
 	if (ctx != g_blob_path) {
 		if (g_blob_fp)
@@ -129,6 +163,7 @@ int main(int argc, char **argv)
 	const char *nv12_path = NULL;
 	long fw_size;
 	IpuDevAttr dev;
+	IpuOfflineInfo offline;
 	IpuChnAttr chn_cfg;
 	IpuTensorIODesc io;
 	unsigned int channel = 0;
@@ -158,19 +193,36 @@ int main(int argc, char **argv)
 	}
 	printf("[probe] libmi_ipu.so loaded\n");
 
+	if (g_mi_ipu.fnSysInit && g_mi_ipu.fnSysInit(0) != 0) {
+		fprintf(stderr, "[probe] MI_SYS_Init failed\n");
+		goto out_unload;
+	}
+	printf("[probe] MI_SYS initialized\n");
+
+
+	memset(&offline, 0, sizeof(offline));
+	if (g_mi_ipu.fnGetOfflineInfo(NULL, (char *)net_path, &offline) != 0) {
+		fprintf(stderr, "[probe] GetOfflineModeStaticInfo failed\n");
+		goto out_unload;
+	}
+	printf("[probe] model %s: var_buf=%u model_size=%u\n",
+		net_path, offline.var_buf_size, offline.model_size);
+
 	memset(&dev, 0, sizeof(dev));
+	dev.max_dyn_buf_size = offline.var_buf_size;
 	dev.yuv420_walign = 16;
 	dev.yuv420_halign = 2;
 	dev.rgb_walign = 16;
-	if (g_mi_ipu.fnCreateDevice(&dev, blob_read, (char *)fw_path,
-		(unsigned int)fw_size) != 0) {
+	if (g_mi_ipu.fnCreateDevice(&dev, NULL, (char *)fw_path, 0) != 0) {
 		fprintf(stderr, "[probe] CreateDevice failed\n");
 		goto out_unload;
 	}
 	printf("[probe] device created (fw=%s, %ld bytes)\n", fw_path, fw_size);
 
 	memset(&chn_cfg, 0, sizeof(chn_cfg));
-	if (g_mi_ipu.fnCreateChannel(&channel, &chn_cfg, blob_read,
+	chn_cfg.usr_depth = 2;
+	chn_cfg.buf_depth = 2;
+	if (g_mi_ipu.fnCreateChannel(&channel, &chn_cfg, NULL,
 		(char *)net_path) != 0) {
 		fprintf(stderr, "[probe] CreateChannel failed\n");
 		goto out_dev;
