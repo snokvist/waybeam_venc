@@ -177,13 +177,39 @@ minimum surface that satisfies both "one read" and "any future model."
 
 ## Phase 1 — RESULT (2026-07-19, bench .201 Star6E/IMX335, OpenIPC)
 
-**Gate verdict: NO-GO on the current stock OpenIPC image — blocked by two
-firmware-image gaps, NOT by silicon.** The IPU userspace/kernel stack was
-brought up far enough to prove the software path is sound and to localize both
-blockers to the builder (kernel + memory layout), where the fix belongs. This
-is a *deferred* gate, not a dead one (contrast the pure-REALTIME investigation,
-which was a true silicon capability wall — see
-`documentation/REALTIME_PIPELINE_INVESTIGATION.md`).
+**Gate verdict: GO — the IPU runs YOLOv8n on real silicon, end to end.** On
+.201 the full path works: sensor → VPE port1 (640×352 NV12) → IPU YOLOv8n
+inference → detection→OSD (`[RGN-Y8]` bounding boxes) → RTP H.265 out. Verified
+live: RTP feed to a ground viewer (radeon-vrx) shows video **with bounding
+boxes overlaid**. IPU invoke ~51 ms (≈19.6 fps), model
+`yolov8n352drone.img` (352-input, 10-class), IPU/model SDK `1.2.2`.
+
+The enabling piece was a **correctly-built `mi_ipu.ko`** (provided by a
+collaborator, Apr-2026 build): vermagic-matched, **no `__memzero` dependency**,
+and built against the current `mi_common` ABI — so it loads with **no shims and
+no oops, and `request_irq` succeeds** on the same stock OpenIPC image. Both
+"blockers" recorded in the superseded NO-GO below were artifacts of testing
+with the *wrong* module (the 2022 SDK `eed835e` build), not real board limits:
+
+- The **DLA IRQ maps fine** with the right module. `request_irq` failed only
+  with the mismatched `.ko`; the corrected module requests the DLA interrupt
+  and the CCIF/RISC-V handshake completes. No DT/GIC change was needed.
+- The **`fail to get ipu mma heap name` messages are non-fatal** — they still
+  print with the working stack; the IPU falls back to the MMU-backed MMA heap
+  and inference runs. Not a blocker.
+
+The two shims (`memzero_shim`, `ipu_fixup`) are therefore **not needed** with a
+proper `mi_ipu.ko`; they were scaffolding to get the SDK module far enough to
+localize the failure. The only real dependency is the matched `mi_ipu.ko` (plus
+`ipu_firmware.bin`), which belongs in the builder's
+`sigmastar-osdrv-infinity6e` package.
+
+### Superseded NO-GO analysis (kept for context — was the wrong-module artifact)
+
+The following described the failure seen with the **2022 SDK `mi_ipu.ko`
+(`eed835e`)** only. It is retained because the ABI/mutex-drift and mhal
+capability findings are accurate and reusable, but its *gate conclusion* is
+overturned by the GO above.
 
 ### What was proven to work
 - `libmi_ipu.so` ships in OpenIPC; all 22 low-level `MDRV_IPU_*` symbols are
@@ -225,17 +251,19 @@ timeout**, for two independent infrastructure reasons:
    `mi_sys` also makes `MI_SYS_ConfigPrivateMMAPool` a no-op ("private pool is
    disabled by default"), so a userspace carve-out cannot substitute.
 
-### Builder work required before Phase 2 is worth attempting
-- Ship a **version-matched `mi_ipu.ko`** (rebuilt against the `dc99390`
-  mi_common/mi_sys ABI, or on a matched kernel) — removes the need for the
-  memzero + mutex shims. Long-term home = the builder's
-  `sigmastar-osdrv-infinity6e` package.
-- **Wire the DLA IRQ**: ensure the OpenIPC GIC/interrupt-controller maps SPI 85
-  (verify `nr_irqs`/SPI range vs the vendor kernel config; confirm the `dla`
-  node's `interrupt-parent` resolves).
-- **Carve a named IPU MMA heap** in the i6e memory-map / bootargs (port the
-  vendor `MMAP_I6E_*` IPU region), sized ≥ ~16–24 MB for firmware + model +
-  IO buffers.
+### Builder work required to ship (Phase 2 is UNBLOCKED)
+The gate is GO, so Phase 2 (the in-tree venc integration) can proceed now on
+the bench. For a shippable image the builder needs only:
+- **Ship the matched `mi_ipu.ko` + `ipu_firmware.bin`** in the
+  `sigmastar-osdrv-infinity6e` package, and load `mi_ipu` from the module init
+  (it is not auto-loaded today). No shims required with the correct module.
+- Provide the model + firmware at their runtime paths
+  (`/config/dla/ipu_firmware.bin`, model under a persisted path — on the bench
+  the 4.4 MB model lives on SD, symlinked into `/root/models/`, because the
+  NOR overlay is too small).
+
+*Not needed* (proven non-issues with the correct module): DLA-IRQ/GIC changes
+and a named IPU MMA-heap carveout — see the GO note above.
 
 ### Repo artifacts from this phase
 - `tools/ipu_probe.c` reworked to the **vendor CreateDevice sequence**:
