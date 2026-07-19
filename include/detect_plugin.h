@@ -7,20 +7,21 @@
  * The venc host owns the model-independent half of the NPU detection path
  * (the VPE tap, the reader thread, the OSD overlay, config, and the RTP
  * sidecar carrier).  A *backend* owns the model-specific half: the IPU
- * device lifecycle and the tensor decode.  A backend is selected at runtime
- * by config (`detect.backend`), so a new model or a new detector family is a
- * config change, not a rebuild.
+ * device lifecycle and the tensor decode.  A backend lives in an external,
+ * dlopen()'d plugin `.so` named by config (`detect.plugin`), so a new model or
+ * detector family is a config change, not a rebuild — and, crucially, all
+ * model-specific code (decode, class tables, schemas) stays OUT of this
+ * (public) repo.  The public host knows only this ABI; the plugins live in a
+ * separate private repo and ship as prebuilt `.so`s.
  *
- * Two backends implement this interface:
- *   - "worker": dlopen()s a prebuilt libipu_yolo_worker.so (frozen ABI).
- *   - "yolov8": an in-tree decoder (MI_IPU_* + YOLOv8 DFL decode).
- * Both are interchangeable behind DetectBackend, so the external .so can be
- * swapped for the in-tree decoder without touching the host.
+ * A plugin exports one symbol, WAYBEAM_DETECT_ENTRY (below), returning a
+ * DetectBackend.  The host dlopens the plugin, resolves that symbol, checks
+ * `abi`, and drives the returned vtable.
  *
- * ABI stability: DetectBox and DetectFrame are laid out to match the
- * libipu_yolo_worker.so structs byte-for-byte (det = 24 B, frame = 32 B) so
- * the worker backend can pass the host's arrays straight through with no
- * per-element translation.  Do not reorder these fields.
+ * ABI stability: DetectBox and DetectFrame are laid out so a plugin wrapping a
+ * prebuilt worker (whose structs are det = 24 B, frame = 32 B) can pass arrays
+ * straight through with no per-element translation.  Do not reorder these
+ * fields without bumping DETECT_PLUGIN_ABI.
  */
 
 #include <stdint.h>
@@ -28,8 +29,7 @@
 #define DETECT_PLUGIN_ABI 1u
 
 /* One detection.  Box coords are FP32 PIXELS in the model's NETWORK space
- * (e.g. 640x352), corner form.  Matches libipu_yolo_worker.so ipu_yolo_det_t
- * (sizeof 24). */
+ * (e.g. 640x352), corner form.  24-byte layout (see ABI note above). */
 typedef struct {
 	float   x1;      /* left   (net px) */
 	float   y1;      /* top    (net px) */
@@ -53,15 +53,14 @@ typedef struct {
 } DetectFrame;
 
 /* Backend configuration passed to init().  Empty/NULL string or a
- * non-positive number means "use the backend's built-in default". */
+ * non-positive number means "use the plugin's built-in default". */
 typedef struct {
 	const char *model_path;      /* SigmaStar offline .img */
 	const char *firmware_path;   /* IPU firmware (may be NULL) */
-	const char *worker_lib;      /* "worker" backend: path to the .so */
 	int         display_w;       /* for any internal overlay scaling */
 	int         display_h;
-	float       conf_thresh;     /* <=0 -> backend default */
-	float       nms_iou;         /* <=0 -> backend default */
+	float       conf_thresh;     /* <=0 -> plugin default */
+	float       nms_iou;         /* <=0 -> plugin default */
 } DetectBackendConfig;
 
 /*
@@ -90,11 +89,16 @@ typedef struct DetectBackend {
 	int  (*describe)(const char *const **class_names);
 } DetectBackend;
 
-/* Backend factories.  Return a static, non-owning pointer, or NULL if the
- * backend is not compiled in.  Selected by name from config. */
-const DetectBackend *detect_backend_worker(void);   /* dlopen the prebuilt .so */
-
-/* Resolve a backend by config name ("worker", ...).  NULL if unknown. */
-const DetectBackend *detect_backend_find(const char *name);
+/*
+ * Plugin entry point.  Every detector plugin `.so` exports one function with
+ * this name and signature; it returns a static, non-owning DetectBackend
+ * (or NULL if the plugin cannot provide one).  The host dlopens the plugin,
+ * resolves this symbol, verifies backend->abi == DETECT_PLUGIN_ABI, then
+ * drives the vtable.
+ *
+ *   const DetectBackend *waybeam_detect_entry(void);
+ */
+#define WAYBEAM_DETECT_ENTRY "waybeam_detect_entry"
+typedef const DetectBackend *(*WaybeamDetectEntryFn)(void);
 
 #endif /* DETECT_PLUGIN_H */

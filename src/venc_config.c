@@ -228,10 +228,10 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* detect (IPU NPU object detection; Star6E only) */
 	cfg->detect.enabled = false;
-	safe_strcpy(cfg->detect.backend, sizeof(cfg->detect.backend), "worker");
+	safe_strcpy(cfg->detect.plugin, sizeof(cfg->detect.plugin),
+		"/root/libwaybeam_detect.so");
 	cfg->detect.model_path[0]    = '\0';
 	cfg->detect.firmware_path[0] = '\0';
-	cfg->detect.worker_lib[0]    = '\0';
 	cfg->detect.infer_interval   = 1;
 	cfg->detect.osd              = true;
 }
@@ -860,10 +860,10 @@ int venc_config_load(const char *path, VencConfig *cfg)
 		if (obj) {
 			cfg->detect.enabled = json_get_bool(obj, "enabled",
 				cfg->detect.enabled);
-			safe_strcpy(cfg->detect.backend,
-				sizeof(cfg->detect.backend),
-				json_get_string(obj, "backend",
-					cfg->detect.backend));
+			safe_strcpy(cfg->detect.plugin,
+				sizeof(cfg->detect.plugin),
+				json_get_string(obj, "plugin",
+					cfg->detect.plugin));
 			safe_strcpy(cfg->detect.model_path,
 				sizeof(cfg->detect.model_path),
 				json_get_string(obj, "modelPath",
@@ -872,10 +872,6 @@ int venc_config_load(const char *path, VencConfig *cfg)
 				sizeof(cfg->detect.firmware_path),
 				json_get_string(obj, "firmwarePath",
 					cfg->detect.firmware_path));
-			safe_strcpy(cfg->detect.worker_lib,
-				sizeof(cfg->detect.worker_lib),
-				json_get_string(obj, "workerLib",
-					cfg->detect.worker_lib));
 			cfg->detect.infer_interval = json_get_int(obj,
 				"inferInterval", cfg->detect.infer_interval);
 			cfg->detect.osd = json_get_bool(obj, "osd",
@@ -1414,10 +1410,9 @@ static void render_detect(PrettyBuf *p, const VencConfig *cfg, int is_last)
 {
 	pp_section_open(p, 1, "detect");
 	pp_field_bool(p,   2, "enabled",      cfg->detect.enabled,       0);
-	pp_field_string(p, 2, "backend",      cfg->detect.backend,       0);
+	pp_field_string(p, 2, "plugin",       cfg->detect.plugin,        0);
 	pp_field_string(p, 2, "modelPath",    cfg->detect.model_path,    0);
 	pp_field_string(p, 2, "firmwarePath", cfg->detect.firmware_path, 0);
-	pp_field_string(p, 2, "workerLib",    cfg->detect.worker_lib,    0);
 	pp_field_int(p,    2, "inferInterval", cfg->detect.infer_interval, 0);
 	pp_field_bool(p,   2, "osd",          cfg->detect.osd,           1);
 	pp_section_close(p, 1, is_last);
@@ -1647,13 +1642,11 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 	cJSON *det = cJSON_AddObjectToObject(root, "detect");
 	if (det) {
 		cJSON_AddBoolToObject(det, "enabled", cfg->detect.enabled);
-		cJSON_AddStringToObject(det, "backend", cfg->detect.backend);
+		cJSON_AddStringToObject(det, "plugin", cfg->detect.plugin);
 		cJSON_AddStringToObject(det, "modelPath",
 			cfg->detect.model_path);
 		cJSON_AddStringToObject(det, "firmwarePath",
 			cfg->detect.firmware_path);
-		cJSON_AddStringToObject(det, "workerLib",
-			cfg->detect.worker_lib);
 		cJSON_AddNumberToObject(det, "inferInterval",
 			cfg->detect.infer_interval);
 		cJSON_AddBoolToObject(det, "osd", cfg->detect.osd);

@@ -87,6 +87,7 @@ typedef MI_S32 (*iy_put_buf_fn)(IyBufHandle_t handle);
  * does not grow VencConfig). */
 typedef struct Star6eIpuDetect {
 	const DetectBackend *backend;
+	void            *plugin_handle;  /* dlopen'd detector plugin .so */
 	MI_SYS_ChnPort_t vpe1_port;      /* {VPE,0,0,1} */
 	int              port1_enabled;
 	uint32_t         net_w;
@@ -238,12 +239,38 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 	d->infer_interval = vcfg->detect.infer_interval > 0
 		? vcfg->detect.infer_interval : 1;
 
-	d->backend = detect_backend_find(vcfg->detect.backend);
-	if (!d->backend || d->backend->abi != DETECT_PLUGIN_ABI) {
-		fprintf(stderr, "[ipu-yolo] backend '%s' unavailable/ABI "
-			"mismatch\n", vcfg->detect.backend);
-		free(d);
-		return 0;
+	{
+		const char *plugin = vcfg->detect.plugin[0]
+			? vcfg->detect.plugin : "/root/libwaybeam_detect.so";
+		WaybeamDetectEntryFn entry;
+
+		d->plugin_handle = dlopen(plugin, RTLD_NOW | RTLD_GLOBAL);
+		if (!d->plugin_handle) {
+			fprintf(stderr, "[ipu-yolo] dlopen plugin '%s' failed: "
+				"%s; detection disabled\n", plugin, dlerror());
+			free(d);
+			return 0;
+		}
+		entry = (WaybeamDetectEntryFn)dlsym(d->plugin_handle,
+			WAYBEAM_DETECT_ENTRY);
+		if (!entry) {
+			fprintf(stderr, "[ipu-yolo] plugin '%s' missing entry "
+				"'%s'; detection disabled\n", plugin,
+				WAYBEAM_DETECT_ENTRY);
+			dlclose(d->plugin_handle);
+			free(d);
+			return 0;
+		}
+		d->backend = entry();
+		if (!d->backend || d->backend->abi != DETECT_PLUGIN_ABI) {
+			fprintf(stderr, "[ipu-yolo] plugin '%s' ABI mismatch "
+				"(got %u, want %u); detection disabled\n", plugin,
+				d->backend ? d->backend->abi : 0u,
+				DETECT_PLUGIN_ABI);
+			dlclose(d->plugin_handle);
+			free(d);
+			return 0;
+		}
 	}
 
 	if (iy_load_sys_symbols(d) != 0) {
@@ -267,6 +294,7 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 	if (!d->port1_enabled) {
 		fprintf(stderr, "[ipu-yolo] VPE port1 %ux%u tap unavailable "
 			"(%d); detection disabled\n", net_w, net_h, (int)ret);
+		dlclose(d->plugin_handle);
 		free(d);
 		return 0;
 	}
@@ -277,13 +305,13 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 		memset(&cfg, 0, sizeof(cfg));
 		cfg.model_path = vcfg->detect.model_path;
 		cfg.firmware_path = vcfg->detect.firmware_path;
-		cfg.worker_lib = vcfg->detect.worker_lib;
 		cfg.display_w = (int)state->image_width;
 		cfg.display_h = (int)state->image_height;
 		if (d->backend->init(&cfg) != 0) {
 			fprintf(stderr, "[ipu-yolo] backend '%s' init failed; "
 				"detection disabled\n", d->backend->name);
 			MI_VPE_DisablePort(0, 1);
+			dlclose(d->plugin_handle);
 			free(d);
 			return 0;
 		}
@@ -295,6 +323,7 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 		d->running = 0;
 		d->backend->deinit();
 		MI_VPE_DisablePort(0, 1);
+		dlclose(d->plugin_handle);
 		free(d);
 		return 0;
 	}
@@ -332,6 +361,9 @@ void star6e_ipu_yolo_stop(Star6ePipelineState *state)
 
 	if (d->port1_enabled)
 		MI_VPE_DisablePort(0, 1);
+
+	if (d->plugin_handle)
+		dlclose(d->plugin_handle);
 
 	free(d);
 }

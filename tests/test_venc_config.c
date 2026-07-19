@@ -1072,7 +1072,8 @@ static int test_detect_export_roundtrip(void)
 {
 	int failures = 0;
 	const char *json =
-		"{ \"detect\": { \"enabled\": true, \"backend\": \"worker\", "
+		"{ \"detect\": { \"enabled\": true, "
+		"\"plugin\": \"/root/libwaybeam_detect.so\", "
 		"\"modelPath\": \"/root/models/m.img\", "
 		"\"inferInterval\": 3, \"osd\": false } }";
 
@@ -1093,8 +1094,8 @@ static int test_detect_export_roundtrip(void)
 	CHECK("detect_render_ok", rendered != NULL);
 	if (rendered) {
 		/* step-5 export must include the camelCase keys */
-		CHECK("detect_export_has_enabled",
-			strstr(rendered, "\"enabled\"") != NULL);
+		CHECK("detect_export_has_plugin",
+			strstr(rendered, "\"plugin\"") != NULL);
 		CHECK("detect_export_has_modelPath",
 			strstr(rendered, "\"modelPath\"") != NULL);
 		CHECK("detect_export_has_inferInterval",

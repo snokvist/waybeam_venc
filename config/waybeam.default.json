@@ -119,10 +119,9 @@
   },
   "detect": {
     "enabled": false,
-    "backend": "worker",
+    "plugin": "/root/libwaybeam_detect.so",
     "modelPath": "",
     "firmwarePath": "",
-    "workerLib": "",
     "inferInterval": 1,
     "osd": true
   }

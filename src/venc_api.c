@@ -512,10 +512,9 @@ static const FieldDesc g_fields[] = {
 	FIELD(attitude, trim_pitch_deg, FT_FLOAT, MUT_RESTART),
 
 	FIELD(detect, enabled,        FT_BOOL,   MUT_RESTART),
-	FIELD(detect, backend,        FT_STRING, MUT_RESTART),
+	FIELD(detect, plugin,         FT_STRING, MUT_RESTART),
 	FIELD(detect, model_path,     FT_STRING, MUT_RESTART),
 	FIELD(detect, firmware_path,  FT_STRING, MUT_RESTART),
-	FIELD(detect, worker_lib,     FT_STRING, MUT_RESTART),
 	FIELD(detect, infer_interval, FT_INT,    MUT_RESTART),
 	FIELD(detect, osd,            FT_BOOL,   MUT_RESTART),
 };
@@ -597,7 +596,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "attitude.trimPitchDeg", "attitude.trim_pitch_deg" },
 	{ "detect.modelPath", "detect.model_path" },
 	{ "detect.firmwarePath", "detect.firmware_path" },
-	{ "detect.workerLib", "detect.worker_lib" },
 	{ "detect.inferInterval", "detect.infer_interval" },
 };
 

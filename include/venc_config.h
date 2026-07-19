@@ -297,12 +297,11 @@ typedef struct {
  * TRAILING VencConfig member — the config ABI is append-only. */
 typedef struct {
 	bool enabled;          /* run the IPU detector                        */
-	char backend[16];      /* "worker" (dlopen .so) | "yolov8" (in-tree)  */
+	char plugin[VENC_CONFIG_STRING_MAX];        /* detector plugin .so path  */
 	char model_path[VENC_CONFIG_STRING_MAX];    /* offline .img; "" = default */
-	char firmware_path[VENC_CONFIG_STRING_MAX]; /* IPU fw; "" = backend default */
-	char worker_lib[VENC_CONFIG_STRING_MAX];    /* "worker": .so path; "" = default */
+	char firmware_path[VENC_CONFIG_STRING_MAX]; /* IPU fw; "" = plugin default */
 	int  infer_interval;   /* run 1 of every N captured frames (>=1)       */
-	bool osd;              /* draw detection overlay (backend-dependent)   */
+	bool osd;              /* draw detection overlay (plugin-dependent)    */
 } VencConfigDetect;
 
 /* ── Top-level config ────────────────────────────────────────────────── */
