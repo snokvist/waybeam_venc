@@ -234,6 +234,11 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->detect.firmware_path[0] = '\0';
 	cfg->detect.infer_interval   = 1;
 	cfg->detect.osd              = true;
+	cfg->detect.conf_thresh      = 0.0f;   /* 0 -> plugin default */
+	cfg->detect.nms_iou          = 0.0f;
+	cfg->detect.net_width        = 640;
+	cfg->detect.net_height       = 352;
+	cfg->detect.model_id         = 0;      /* VisDrone-10 */
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -876,6 +881,16 @@ int venc_config_load(const char *path, VencConfig *cfg)
 				"inferInterval", cfg->detect.infer_interval);
 			cfg->detect.osd = json_get_bool(obj, "osd",
 				cfg->detect.osd);
+			cfg->detect.conf_thresh = (float)json_get_double(obj,
+				"confThresh", cfg->detect.conf_thresh);
+			cfg->detect.nms_iou = (float)json_get_double(obj,
+				"nmsIou", cfg->detect.nms_iou);
+			cfg->detect.net_width = (uint32_t)json_get_int(obj,
+				"netWidth", (int)cfg->detect.net_width);
+			cfg->detect.net_height = (uint32_t)json_get_int(obj,
+				"netHeight", (int)cfg->detect.net_height);
+			cfg->detect.model_id = (uint32_t)json_get_int(obj,
+				"modelId", (int)cfg->detect.model_id);
 		}
 	}
 
@@ -1414,6 +1429,11 @@ static void render_detect(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "modelPath",    cfg->detect.model_path,    0);
 	pp_field_string(p, 2, "firmwarePath", cfg->detect.firmware_path, 0);
 	pp_field_int(p,    2, "inferInterval", cfg->detect.infer_interval, 0);
+	pp_field_double(p, 2, "confThresh",   cfg->detect.conf_thresh,   0);
+	pp_field_double(p, 2, "nmsIou",       cfg->detect.nms_iou,       0);
+	pp_field_int(p,    2, "netWidth",     (int)cfg->detect.net_width,  0);
+	pp_field_int(p,    2, "netHeight",    (int)cfg->detect.net_height, 0);
+	pp_field_int(p,    2, "modelId",      (int)cfg->detect.model_id,   0);
 	pp_field_bool(p,   2, "osd",          cfg->detect.osd,           1);
 	pp_section_close(p, 1, is_last);
 }
@@ -1650,6 +1670,13 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(det, "inferInterval",
 			cfg->detect.infer_interval);
 		cJSON_AddBoolToObject(det, "osd", cfg->detect.osd);
+		cJSON_AddNumberToObject(det, "confThresh",
+			cfg->detect.conf_thresh);
+		cJSON_AddNumberToObject(det, "nmsIou", cfg->detect.nms_iou);
+		cJSON_AddNumberToObject(det, "netWidth", cfg->detect.net_width);
+		cJSON_AddNumberToObject(det, "netHeight",
+			cfg->detect.net_height);
+		cJSON_AddNumberToObject(det, "modelId", cfg->detect.model_id);
 	}
 
 	return root;
