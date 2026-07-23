@@ -2319,7 +2319,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.12.1\","
+		"\"contract_version\":\"0.13.0\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);
