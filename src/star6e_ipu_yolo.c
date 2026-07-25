@@ -101,6 +101,11 @@ typedef struct Star6eIpuDetect {
 	volatile sig_atomic_t  running;
 	volatile int           pause;
 	volatile int           parked;
+	/* Consumer quiesce: set across a live model swap (star6e_ipu_yolo_reload)
+	 * so a snapshot() query never sees a half-loaded graph.  The swap itself
+	 * runs on the pipeline (encode) thread — the same thread that queries the
+	 * snapshot — so this also covers any future off-thread consumer. */
+	volatile int           paused;
 
 	iy_get_fd_fn   get_fd;
 	iy_close_fd_fn close_fd;
@@ -258,83 +263,91 @@ static int iy_model_id_classes(uint32_t model_id)
 	}
 }
 
-int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
+/* Warn (once per load) when the configured model_id's class count disagrees
+ * with what the loaded model reports.  model_id is configured, not derived —
+ * the plugin loads whatever .img it is pointed at — so swapping the model
+ * without updating the config silently relabels every box against the wrong
+ * class table.  The plugin knows its class count, so cross-check that much: it
+ * catches the realistic mistake (a 1-class person model still announcing
+ * itself as VisDrone-10) without pretending to validate the identity we cannot
+ * actually verify. */
+static void iy_check_model_id(const Star6eIpuDetect *d, uint32_t model_id)
 {
-	Star6eIpuDetect *d;
+	const char *const *names = NULL;
+	int have, want;
+
+	if (!d->backend || !d->backend->describe)
+		return;
+	have = d->backend->describe(&names);
+	want = iy_model_id_classes(model_id);
+	if (have > 0 && want > 0 && have != want)
+		fprintf(stderr, "[ipu-yolo] WARNING: model_id=%u expects %d classes "
+			"but the model has %d — consumers will mislabel every box; "
+			"fix detect.modelId\n", model_id, want, have);
+}
+
+/* Resolve + validate the tap/model dims from config.  Tap geometry follows the
+ * compiled model, so a higher-resolution .img needs no code change.  Both dims
+ * must be a multiple of 32 (>=64): the YOLO head strides 8/16/32, and a ragged
+ * grid would not match the anchor count the decode derives.  Returns 0 and
+ * writes the resolved dims on success, -1 (with a diag) when the geometry is
+ * rejected. */
+static int iy_resolve_net_dims(const VencConfig *vcfg, uint32_t *net_w,
+	uint32_t *net_h)
+{
+	uint32_t w = vcfg->detect.net_width  ? vcfg->detect.net_width  : 640;
+	uint32_t h = vcfg->detect.net_height ? vcfg->detect.net_height : 352;
+
+	if (w % 32 || h % 32 || w < 64 || h < 64) {
+		fprintf(stderr, "[ipu-yolo] detect.netWidth/netHeight %ux%u must be "
+			"multiples of 32 (>=64); detection disabled\n", w, h);
+		return -1;
+	}
+	*net_w = w;
+	*net_h = h;
+	return 0;
+}
+
+/* Load the model-specific half of the detector: dlopen the plugin, resolve +
+ * ABI-check the backend, create the VPE port1 tap, and init the backend on the
+ * configured model.  On any failure everything this call opened is torn back
+ * down (so the context is left with backend/plugin_handle/port1_enabled clear)
+ * and -1 is returned.  net_w/net_h are the already-validated tap dims. */
+static int iy_load_graph(Star6eIpuDetect *d, const VencConfig *vcfg,
+	uint32_t net_w, uint32_t net_h, uint32_t disp_w, uint32_t disp_h)
+{
+	const char *plugin = vcfg->detect.plugin[0]
+		? vcfg->detect.plugin : "/root/libwaybeam_detect.so";
+	WaybeamDetectEntryFn entry;
 	MI_VPE_PortAttr_t port;
-	MI_SYS_ChnPort_t vpe1 = {
-		.module = I6_SYS_MOD_VPE, .device = 0, .channel = 0, .port = 1 };
-	uint32_t net_w, net_h;
 	MI_S32 ret;
 
-	if (!state || !vcfg || !vcfg->detect.enabled)
-		return 0;
-
-	/* Tap geometry follows the compiled model, so a higher-resolution
-	 * .img needs no code change.  Both dims must be a multiple of 32:
-	 * the YOLO head strides 8/16/32, and a ragged grid would not match
-	 * the anchor count the decode derives. */
-	net_w = vcfg->detect.net_width  ? vcfg->detect.net_width  : 640;
-	net_h = vcfg->detect.net_height ? vcfg->detect.net_height : 352;
-	if (net_w % 32 || net_h % 32 || net_w < 64 || net_h < 64) {
-		fprintf(stderr, "[ipu-yolo] detect.netWidth/netHeight %ux%u "
-			"must be multiples of 32 (>=64); detection disabled\n",
-			net_w, net_h);
-		return 0;
+	d->plugin_handle = dlopen(plugin, RTLD_NOW | RTLD_GLOBAL);
+	if (!d->plugin_handle) {
+		fprintf(stderr, "[ipu-yolo] dlopen plugin '%s' failed: %s\n",
+			plugin, dlerror());
+		return -1;
 	}
-	if (state->detect)
-		return 0;   /* already running */
-
-	d = (Star6eIpuDetect *)calloc(1, sizeof(*d));
-	if (!d) {
-		fprintf(stderr, "[ipu-yolo] alloc failed\n");
-		return 0;   /* best-effort: never fatal to the stream */
+	entry = (WaybeamDetectEntryFn)dlsym(d->plugin_handle,
+		WAYBEAM_DETECT_ENTRY);
+	if (!entry) {
+		fprintf(stderr, "[ipu-yolo] plugin '%s' missing entry '%s'\n",
+			plugin, WAYBEAM_DETECT_ENTRY);
+		goto fail_plugin;
 	}
-	d->vpe1_port = vpe1;
-	d->net_w = net_w;
-	d->net_h = net_h;
-	d->infer_interval = vcfg->detect.infer_interval > 0
-		? vcfg->detect.infer_interval : 1;
-
-	{
-		const char *plugin = vcfg->detect.plugin[0]
-			? vcfg->detect.plugin : "/root/libwaybeam_detect.so";
-		WaybeamDetectEntryFn entry;
-
-		d->plugin_handle = dlopen(plugin, RTLD_NOW | RTLD_GLOBAL);
-		if (!d->plugin_handle) {
-			fprintf(stderr, "[ipu-yolo] dlopen plugin '%s' failed: "
-				"%s; detection disabled\n", plugin, dlerror());
-			free(d);
-			return 0;
-		}
-		entry = (WaybeamDetectEntryFn)dlsym(d->plugin_handle,
-			WAYBEAM_DETECT_ENTRY);
-		if (!entry) {
-			fprintf(stderr, "[ipu-yolo] plugin '%s' missing entry "
-				"'%s'; detection disabled\n", plugin,
-				WAYBEAM_DETECT_ENTRY);
-			dlclose(d->plugin_handle);
-			free(d);
-			return 0;
-		}
-		d->backend = entry();
-		if (!d->backend || d->backend->abi != DETECT_PLUGIN_ABI) {
-			fprintf(stderr, "[ipu-yolo] plugin '%s' ABI mismatch "
-				"(got %u, want %u); detection disabled\n", plugin,
-				d->backend ? d->backend->abi : 0u,
-				DETECT_PLUGIN_ABI);
-			dlclose(d->plugin_handle);
-			free(d);
-			return 0;
-		}
+	d->backend = entry();
+	if (!d->backend || d->backend->abi != DETECT_PLUGIN_ABI) {
+		fprintf(stderr, "[ipu-yolo] plugin '%s' ABI mismatch (got %u, "
+			"want %u)\n", plugin, d->backend ? d->backend->abi : 0u,
+			DETECT_PLUGIN_ABI);
+		d->backend = NULL;
+		goto fail_plugin;
 	}
 
 	if (iy_load_sys_symbols(d) != 0) {
 		fprintf(stderr, "[ipu-yolo] MI_SYS symbols unavailable\n");
-		dlclose(d->plugin_handle);
-		free(d);
-		return 0;
+		d->backend = NULL;
+		goto fail_plugin;
 	}
 
 	/* port1: full-frame scaled to the model input, NV12. */
@@ -350,32 +363,105 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 			d->port1_enabled = 1;
 	}
 	if (!d->port1_enabled) {
-		fprintf(stderr, "[ipu-yolo] VPE port1 %ux%u tap unavailable "
-			"(%d); detection disabled\n", net_w, net_h, (int)ret);
-		dlclose(d->plugin_handle);
-		free(d);
-		return 0;
+		fprintf(stderr, "[ipu-yolo] VPE port1 %ux%u tap unavailable (%d)\n",
+			net_w, net_h, (int)ret);
+		d->backend = NULL;
+		goto fail_plugin;
 	}
-	MI_SYS_SetChnOutputPortDepth(&vpe1, 2, 4);
+	MI_SYS_SetChnOutputPortDepth(&d->vpe1_port, 2, 4);
 
 	{
 		DetectBackendConfig cfg;
 		memset(&cfg, 0, sizeof(cfg));
 		cfg.model_path = vcfg->detect.model_path;
 		cfg.firmware_path = vcfg->detect.firmware_path;
-		cfg.display_w = (int)state->image_width;
-		cfg.display_h = (int)state->image_height;
+		cfg.display_w = (int)disp_w;
+		cfg.display_h = (int)disp_h;
 		/* 0 leaves the plugin on its own defaults (0.40 / 0.45). */
 		cfg.conf_thresh = vcfg->detect.conf_thresh;
 		cfg.nms_iou = vcfg->detect.nms_iou;
 		if (d->backend->init(&cfg) != 0) {
-			fprintf(stderr, "[ipu-yolo] backend '%s' init failed; "
-				"detection disabled\n", d->backend->name);
+			fprintf(stderr, "[ipu-yolo] backend '%s' init failed\n",
+				d->backend->name);
 			MI_VPE_DisablePort(0, 1);
-			dlclose(d->plugin_handle);
-			free(d);
-			return 0;
+			d->port1_enabled = 0;
+			d->backend = NULL;
+			goto fail_plugin;
 		}
+	}
+	return 0;
+
+fail_plugin:
+	dlclose(d->plugin_handle);
+	d->plugin_handle = NULL;
+	return -1;
+}
+
+/* Tear down the model-specific half loaded by iy_load_graph.  The reader
+ * thread MUST already be stopped/joined (no in-flight port1 DMA) before this
+ * runs, or DisablePort races the IPU read -> MMU fault. */
+static void iy_unload_graph(Star6eIpuDetect *d)
+{
+	if (d->backend) {
+		d->backend->deinit();
+		d->backend = NULL;
+	}
+	if (d->port1_enabled) {
+		MI_VPE_DisablePort(0, 1);
+		d->port1_enabled = 0;
+	}
+	if (d->plugin_handle) {
+		dlclose(d->plugin_handle);
+		d->plugin_handle = NULL;
+	}
+}
+
+/* Park the reader out of any GetBuf/PutBuf, then join it — MMU-safe ordering:
+ * the reader is guaranteed out of the port1 GetBuf/PutBuf window before the
+ * caller unloads the graph (DisablePort). */
+static void iy_stop_reader(Star6eIpuDetect *d)
+{
+	int i;
+
+	if (!d->reader_started)
+		return;
+	d->pause = 1;
+	for (i = 0; i < 100 && !d->parked; i++)
+		usleep(2000);
+	d->running = 0;
+	pthread_join(d->reader, NULL);
+	d->reader_started = 0;
+}
+
+int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
+{
+	Star6eIpuDetect *d;
+	uint32_t net_w, net_h;
+
+	if (!state || !vcfg || !vcfg->detect.enabled)
+		return 0;
+	if (iy_resolve_net_dims(vcfg, &net_w, &net_h) != 0)
+		return 0;
+	if (state->detect)
+		return 0;   /* already running */
+
+	d = (Star6eIpuDetect *)calloc(1, sizeof(*d));
+	if (!d) {
+		fprintf(stderr, "[ipu-yolo] alloc failed\n");
+		return 0;   /* best-effort: never fatal to the stream */
+	}
+	d->vpe1_port = (MI_SYS_ChnPort_t){
+		.module = I6_SYS_MOD_VPE, .device = 0, .channel = 0, .port = 1 };
+	d->net_w = net_w;
+	d->net_h = net_h;
+	d->infer_interval = vcfg->detect.infer_interval > 0
+		? vcfg->detect.infer_interval : 1;
+
+	if (iy_load_graph(d, vcfg, net_w, net_h, state->image_width,
+	    state->image_height) != 0) {
+		fprintf(stderr, "[ipu-yolo] detection disabled\n");
+		free(d);
+		return 0;
 	}
 
 	pthread_mutex_init(&d->pub_lock, NULL);
@@ -385,9 +471,7 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 		fprintf(stderr, "[ipu-yolo] reader thread create failed\n");
 		d->running = 0;
 		pthread_mutex_destroy(&d->pub_lock);
-		d->backend->deinit();
-		MI_VPE_DisablePort(0, 1);
-		dlclose(d->plugin_handle);
+		iy_unload_graph(d);
 		free(d);
 		return 0;
 	}
@@ -399,55 +483,97 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 		d->backend->name, net_w, net_h, d->infer_interval,
 		(double)vcfg->detect.conf_thresh,
 		(double)vcfg->detect.nms_iou, vcfg->detect.model_id);
+	iy_check_model_id(d, vcfg->detect.model_id);
+	return 0;
+}
 
-	/* model_id is configured, not derived — the plugin loads whatever .img
-	 * it is pointed at — so swapping the model without updating the config
-	 * silently relabels every box against the wrong class table.  The
-	 * plugin does know its class count, so cross-check that much: it
-	 * catches the realistic mistake (a 1-class person model still
-	 * announcing itself as VisDrone-10) without pretending to validate the
-	 * identity we cannot actually verify. */
-	if (d->backend->describe) {
-		const char *const *names = NULL;
-		int have = d->backend->describe(&names);
-		int want = iy_model_id_classes(vcfg->detect.model_id);
-		if (have > 0 && want > 0 && have != want)
-			fprintf(stderr, "[ipu-yolo] WARNING: model_id=%u expects "
-				"%d classes but the model has %d — consumers "
-				"will mislabel every box; fix detect.modelId\n",
-				vcfg->detect.model_id, want, have);
+int star6e_ipu_yolo_reload(Star6ePipelineState *state, const VencConfig *vcfg)
+{
+	Star6eIpuDetect *d;
+	uint32_t net_w, net_h;
+
+	if (!state || !vcfg)
+		return -1;
+	d = (Star6eIpuDetect *)state->detect;
+	if (!d)
+		return -1;   /* nothing running to swap — caller keeps config */
+
+	if (iy_resolve_net_dims(vcfg, &net_w, &net_h) != 0)
+		return -1;
+	/* Geometry guard: the port output w/h is fixed at create, so a dims
+	 * change needs the port recreated under a full MUT_RESTART, not this
+	 * live path.  (netWidth/netHeight are MUT_RESTART fields, so this is
+	 * defence-in-depth — a live model swap never carries a dims change.) */
+	if (net_w != d->net_w || net_h != d->net_h) {
+		fprintf(stderr, "[ipu-yolo] live reload skipped: net geometry "
+			"%ux%u -> %ux%u needs restart\n",
+			d->net_w, d->net_h, net_w, net_h);
+		return -1;
 	}
+
+	/* Quiesce the consumer and drop the stale snapshot so no old-model boxes
+	 * (or a half-loaded graph) are ever queried during the swap.  The DETECT
+	 * sidecar trailer is simply absent for the swap window — consumers
+	 * already tolerate "no DETECT". */
+	d->paused = 1;
+	pthread_mutex_lock(&d->pub_lock);
+	d->pub_valid = 0;
+	pthread_mutex_unlock(&d->pub_lock);
+
+	iy_stop_reader(d);
+	iy_unload_graph(d);
+
+	d->infer_interval = vcfg->detect.infer_interval > 0
+		? vcfg->detect.infer_interval : 1;
+
+	if (iy_load_graph(d, vcfg, net_w, net_h, state->image_width,
+	    state->image_height) != 0) {
+		/* New model would not load — leave detection cleanly OFF (the
+		 * encode path stops emitting DETECT) rather than half-up.  This
+		 * runs on the pipeline thread, so clearing state->detect + freeing
+		 * here cannot race the same thread's next snapshot() read. */
+		fprintf(stderr, "[ipu-yolo] live reload failed; detection disabled\n");
+		state->detect = NULL;
+		pthread_mutex_destroy(&d->pub_lock);
+		free(d);
+		return -1;
+	}
+
+	d->running = 1;
+	d->pause = 0;
+	d->parked = 0;
+	if (pthread_create(&d->reader, NULL, iy_reader_main, d) != 0) {
+		fprintf(stderr, "[ipu-yolo] reload: reader thread create failed; "
+			"detection disabled\n");
+		d->running = 0;
+		iy_unload_graph(d);
+		state->detect = NULL;
+		pthread_mutex_destroy(&d->pub_lock);
+		free(d);
+		return -1;
+	}
+	d->reader_started = 1;
+	d->paused = 0;
+
+	fprintf(stderr, "[ipu-yolo] model reloaded live: backend=%s %ux%u "
+		"conf=%.2f iou=%.2f model_id=%u\n", d->backend->name, net_w, net_h,
+		(double)vcfg->detect.conf_thresh, (double)vcfg->detect.nms_iou,
+		vcfg->detect.model_id);
+	iy_check_model_id(d, vcfg->detect.model_id);
 	return 0;
 }
 
 void star6e_ipu_yolo_stop(Star6ePipelineState *state)
 {
 	Star6eIpuDetect *d;
-	int i;
 
 	if (!state || !state->detect)
 		return;
 	d = (Star6eIpuDetect *)state->detect;
 	state->detect = NULL;
 
-	if (d->reader_started) {
-		/* Park the reader out of any GetBuf/PutBuf, then join before
-		 * touching the port (MMU-safe ordering). */
-		d->pause = 1;
-		for (i = 0; i < 100 && !d->parked; i++)
-			usleep(2000);
-		d->running = 0;
-		pthread_join(d->reader, NULL);
-	}
-
-	if (d->backend)
-		d->backend->deinit();
-
-	if (d->port1_enabled)
-		MI_VPE_DisablePort(0, 1);
-
-	if (d->plugin_handle)
-		dlclose(d->plugin_handle);
+	iy_stop_reader(d);
+	iy_unload_graph(d);
 
 	/* Reader is joined; no other user of pub_lock (state->detect is already
 	 * NULL, so the encode-thread accessor bails before touching it). */
@@ -465,8 +591,8 @@ int star6e_ipu_yolo_snapshot(Star6ePipelineState *state,
 	if (!state || !out)
 		return 0;
 	d = (Star6eIpuDetect *)state->detect;
-	if (!d)
-		return 0;
+	if (!d || d->paused)
+		return 0;   /* mid model swap: no half-loaded graph is queried */
 
 	pthread_mutex_lock(&d->pub_lock);
 	if (d->pub_valid) {

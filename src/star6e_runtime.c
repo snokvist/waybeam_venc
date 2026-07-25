@@ -1518,6 +1518,11 @@ static int star6e_runner_run(void *opaque)
 			continue;
 		}
 
+		/* Service any pending detector live model-swap on this (pipeline)
+		 * thread, between frames, so the VPE port1 recreate is atomic w.r.t.
+		 * the per-frame detect snapshot query below. */
+		star6e_controls_service_detect_reload();
+
 		ret = star6e_runtime_process_stream(ctx, &cus3a_ts_last,
 			&idle_counter);
 		if (ret != 0) {

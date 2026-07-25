@@ -97,6 +97,16 @@ typedef struct {
 	 * timeout (attitude/IMU not running) or implausible gravity.
 	 * NULL when unsupported. */
 	int (*attitude_calibrate_level)(float *roll_deg, float *pitch_deg);
+	/* Live-swap the offline NPU detector .img without respawning the
+	 * pipeline.  Fired when detect.model_path/model_id/conf_thresh/nms_iou
+	 * change with the net geometry unchanged; the backend re-creates only the
+	 * detector plugin + VPE tap while the encoder keeps running, so the
+	 * video0 RTP stream is uninterrupted.  Reads the freshly-committed
+	 * detect.* fields from the config.  Returns 0 once applied (detection is
+	 * best-effort, so a failed swap that leaves detection off is not surfaced
+	 * as an error — the requested config is kept).  NULL when the backend has
+	 * no live detector path (e.g. Maruko). */
+	int (*apply_detect_reload)(void);
 } VencApplyCallbacks;
 
 /* Register all API routes with the httpd.

@@ -44,6 +44,20 @@ typedef struct {
  * never fatal to the stream).  state->detect is set when active. */
 int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg);
 
+/* Live-swap the detector model without respawning the pipeline: tear down and
+ * re-create only the detector plugin + VPE port1 tap channel while the encoder
+ * keeps running, so the video0 RTP stream is uninterrupted.  Reads the new
+ * model_path / model_id / conf_thresh / nms_iou from vcfg.  MUST run on the
+ * pipeline (encode) thread — the same thread that queries the snapshot — so the
+ * swap is atomic w.r.t. the DETECT consumer and the failure path (which frees
+ * the context) can never race a snapshot() read.
+ *
+ * Returns 0 when the new model is live; -1 when the swap could not be done live
+ * (net geometry changed — caller must take the MUT_RESTART path — or no
+ * detector was running) or the new model failed to load (detection is left
+ * cleanly OFF; best-effort, never fatal to the stream). */
+int star6e_ipu_yolo_reload(Star6ePipelineState *state, const VencConfig *vcfg);
+
 /* Stop the detector: join the reader (before DisablePort — MMU-safe), deinit
  * the backend, disable port1, free the context.  Safe when inactive. */
 void star6e_ipu_yolo_stop(Star6ePipelineState *state);

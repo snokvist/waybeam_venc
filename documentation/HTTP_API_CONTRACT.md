@@ -1412,9 +1412,25 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
+| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **501** | Star6E hot-swaps the NPU detector `.img` in place (VPE port1 + plugin re-created on the pipeline thread) with the video0 RTP stream uninterrupted, provided `net_width`/`net_height` are unchanged. Maruko has no detector path (`apply_detect_reload` unset → 501). |
+| `detect.net_width` / `net_height` | restart | **501** | Tap geometry: the VPE port output is fixed at create, so a dims change takes the full respawn path. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.14.0` (additive — detector live model swap):
+  - `detect.model_path` changed from `MUT_RESTART` to `MUT_LIVE`, and
+    `detect.model_id` / `detect.conf_thresh` / `detect.nms_iou` are now
+    settable (`MUT_LIVE`).  Changing any of them re-creates only the NPU
+    detector plugin + VPE port1 tap on the pipeline thread — the video0
+    encode/RTP path keeps running, so there is no gap, keyframe reset, or
+    reconnect.  The sidecar `model_id` flips to the new value in lockstep
+    with the first new-model `DETECT` trailer.  Star6E only; Maruko returns
+    `501` (no `apply_detect_reload`).
+  - `detect.net_width` / `detect.net_height` are now settable as
+    `MUT_RESTART` (a tap-geometry change needs the VPE port recreated).
+    Both must be `0` (default) or a multiple of 32 (`>=64`).
+  - `detect.confThresh` / `nmsIou` accept `[0, 1)` (0 = plugin default);
+    `netWidth` / `netHeight` accept `0` or a `>=64` multiple of 32.
 - `0.46.0` (additive — new config fields):
   - Added `isp.gain_min` (min sensor gain floor) and `isp.shutter_min_us`
     (min exposure floor, µs) to the config schema.  Both default `0` =

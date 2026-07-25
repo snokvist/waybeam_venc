@@ -1,5 +1,41 @@
 # History
 
+## [0.52.0] - 2026-07-25
+
+Hot-swap the offline NPU detector `.img` without respawning the pipeline, so
+the main video0 RTP stream is uninterrupted (no gap, no keyframe reset, no
+reconnect) when only the model changes. Detection runs off the VPE0 port1 tap,
+independent of the video0 encode path, so a detector-only reload is clean.
+
+- **Detector-only reload entrypoint** (`star6e_ipu_yolo.c`) — the init is
+  factored into `iy_load_graph()` / `iy_unload_graph()` halves (plugin dlopen,
+  VPE port1 tap create, backend init) plus an `iy_stop_reader()` reader-join
+  helper. New `star6e_ipu_yolo_reload(state, vcfg)` tears down and re-creates
+  only the detector plugin + tap channel while the encoder keeps running.
+- **Geometry guard** — the live path is taken only when `net_width`/`net_height`
+  are unchanged; a dims change needs the VPE port recreated, so it falls back to
+  the full `MUT_RESTART` respawn. The multiple-of-32 / min-64 checks are shared
+  by start and reload via `iy_resolve_net_dims()`.
+- **Mutability wiring** (`venc_api.c`) — `detect.model_path` is now `MUT_LIVE`,
+  and `detect.model_id` / `conf_thresh` / `nms_iou` are newly settable
+  (`MUT_LIVE`); a new `LIVE_GROUP_DETECT` applies them via `apply_detect_reload`
+  instead of setting `g_reinit`. `detect.net_width` / `net_height` are settable
+  as `MUT_RESTART`. Added range validators for the four new fields.
+- **Atomicity + concurrency** — the swap runs on the pipeline (encode) thread
+  via a request posted by the HTTP apply hook and serviced between frames
+  (`star6e_controls_service_detect_reload`), so it is atomic w.r.t. the
+  per-frame `DETECT` snapshot query and the failure path (which frees the
+  detector context) can never race a `snapshot()` read. A `paused` flag quiesces
+  the consumer across the swap; the `DETECT` sidecar trailer is simply absent
+  for the ~tens of ms of the swap (consumers already tolerate "no DETECT"). The
+  wire `model_id` flips in lockstep with the first new-model `DETECT`, and the
+  `describe()` class-count cross-check re-runs after each reload.
+- Both `.img` files can be pre-staged (e.g. on SD); switching needs no
+  `/api/v1/restart`. Changing `netWidth`/`netHeight` still takes the full
+  respawn path (unchanged). No change to the RTP-sidecar wire ABI.
+- Contract `0.14.0`; `test_venc_api` gains four detect live/restart/validation
+  cases (2089/0); both backends build clean.
+
 ## [0.51.1] - 2026-07-24
 
 Detector hardening follow-ups from the v0.51.0 upstream review — four
