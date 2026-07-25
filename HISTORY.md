@@ -28,13 +28,30 @@ independent of the video0 encode path, so a detector-only reload is clean.
   `netHeight` to set, leaves detection off, releases the port1 claim, and does
   not disturb the stream. ABI is an exact match (no compatibility window during
   beta), so an ABI-1 plugin is rejected at load with a clear diagnostic.
-- **Swap cost, measured** — the swap does not respawn the pipeline, drop frames
-  at the transport, force a keyframe, or reconnect, but it is not free: the NPU
-  graph load runs on the pipeline thread (which is what makes it atomic against
-  the per-frame snapshot), so frame output stalls for its duration. On Star6E
-  .232 at 100 fps: **~200-450 ms** freshly booted, rising to **~2.2-2.5 s** once
-  the pipeline has respawned at least once; a process restart does not reset
-  that, only a reboot does. Budget for ~2.3 s in normal operation.
+- **Swap cost, measured** — a model change does not respawn the pipeline, drop
+  frames at the transport, force a keyframe, or reconnect, but it is not free:
+  the NPU graph load runs on the pipeline thread (which is what makes it atomic
+  against the per-frame snapshot), so frame output stalls for its duration. On
+  Star6E .232 at 100 fps the stall was **~100-450 ms** on some runs and
+  **~2.2-2.5 s** on others, with no in-between. The fast runs correlate with a
+  freshly booted or freshly restarted process and the slow ones with a pipeline
+  respawn having happened, but that did not hold in every trial (one
+  init-script restart stayed slow, another came back fast), so the trigger is
+  **not isolated** — it is not memory pressure, not file I/O (a pre-warmed
+  `.img` reads in 0.01 s with the stall unchanged), and not accumulation across
+  reloads (flat within a process). Treat **~2.5 s** as the planning number.
+  Only a `model_path` change pays this; see the in-place path below.
+- **Only a model change reloads the graph** — `model_id` is a label stamped into
+  the snapshot and `conf_thresh` / `nms_iou` are decode-time knobs, yet all
+  three shared `LIVE_GROUP_DETECT` and so rebuilt the NPU graph, paying the full
+  stall to change a number. `star6e_ipu_yolo_reload()` now compares the
+  requested `model_path` against what is loaded and, when it is unchanged,
+  applies the label and thresholds in place — the graph and the tap are never
+  torn down. Thresholds go through the new optional ABI-3 `set_thresholds()`
+  with the reader briefly parked (it parks between frames) so the decode is not
+  reading them as they are written; a backend without it falls back to the full
+  reload. Measured on .232 in the slow regime: threshold-only **50 ms** and
+  `model_id`-only **0 ms**, against ~2300 ms before.
 - **Mutability wiring** (`venc_api.c`) — `detect.model_path` is now `MUT_LIVE`,
   and `detect.model_id` / `conf_thresh` / `nms_iou` are newly settable
   (`MUT_LIVE`); a new `LIVE_GROUP_DETECT` applies them via `apply_detect_reload`

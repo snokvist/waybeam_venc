@@ -1423,7 +1423,7 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
-| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **501** | Star6E hot-swaps the NPU detector `.img` in place (VPE port1 + plugin re-created on the pipeline thread) without respawning the pipeline, provided `net_width`/`net_height` are unchanged. The stream keeps running (no reconnect, no drops), but the graph load runs on the pipeline thread, so frame output stalls for the duration — see the `0.14.0` note. A model whose real input geometry disagrees with the tap is refused and leaves detection off. Maruko has no detector path (`apply_detect_reload` unset → 501). |
+| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **501** | Star6E hot-swaps the NPU detector `.img` in place (VPE port1 + plugin re-created on the pipeline thread) without respawning the pipeline, provided `net_width`/`net_height` are unchanged. The stream keeps running (no reconnect, no drops), but a `model_path` change stalls frame output while the graph loads — budget ~2.5 s, see the `0.14.0` note. `model_id`/`conf_thresh`/`nms_iou` are applied in place without a graph reload (~0-50 ms). A model whose real input geometry disagrees with the tap is refused and leaves detection off. Maruko has no detector path (`apply_detect_reload` unset → 501). |
 | `detect.net_width` / `net_height` | restart | **501** | Tap geometry: the VPE port output is fixed at create, so a dims change takes the full respawn path. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
@@ -1434,13 +1434,19 @@ divergence is listed.  As of `contract_version: 0.12.1`:
     settable (`MUT_LIVE`).  Changing any of them re-creates only the NPU
     detector plugin + VPE port1 tap on the pipeline thread — the video0
     encode/RTP path keeps running, so there is no pipeline respawn, keyframe
-    reset, reconnect, or transport drop.  It is **not** free, though: the NPU
-    graph load runs on the pipeline thread (that is what makes the swap atomic
-    against the per-frame `DETECT` snapshot), so frame output stalls while it
-    runs.  Measured on Star6E .232 at 100 fps: **~200-450 ms** on a freshly
-    booted system, rising to **~2.2-2.5 s** once the pipeline has respawned at
-    least once (any `MUT_RESTART` change); a process restart does not reset it,
-    only a reboot does.  Budget for the ~2.3 s figure in normal operation.
+    reset, reconnect, or transport drop.  A **`model_path` change is not free**,
+    though: the NPU graph load runs on the pipeline thread (that is what makes
+    the swap atomic against the per-frame `DETECT` snapshot), so frame output
+    stalls while it runs.  Measured on Star6E .232 at 100 fps: **~100-450 ms**
+    on some runs, **~2.2-2.5 s** on others, with nothing in between and the
+    trigger not isolated (not memory pressure, not file I/O, not accumulation
+    across reloads).  Budget for **~2.5 s**.
+  - `model_id` / `conf_thresh` / `nms_iou` do **not** reload the graph: when the
+    requested `model_path` matches what is loaded, the label and thresholds are
+    applied in place (thresholds via the plugin's optional `set_thresholds()`,
+    falling back to a full reload if the backend lacks it).  Measured cost:
+    ~50 ms for a threshold change, ~0 ms for `model_id`, versus ~2300 ms before.
+    So live threshold tuning is cheap; only swapping the `.img` is expensive.
     The sidecar `model_id` flips to the new value in lockstep with the first
     new-model `DETECT` trailer.  Star6E only; Maruko returns `501` (no
     `apply_detect_reload`).

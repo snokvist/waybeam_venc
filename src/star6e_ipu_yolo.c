@@ -98,6 +98,11 @@ typedef struct Star6eIpuDetect {
 	                                    set at load, stamped into the snapshot
 	                                    so boxes + model_id stay latched */
 	int              infer_interval; /* process 1 of every N captured frames */
+	/* What is actually loaded, so a reload request can tell an .img change
+	 * (needs the NPU graph rebuilt) from a label/threshold change (does not). */
+	char             model_path[VENC_CONFIG_STRING_MAX];
+	float            conf_thresh;
+	float            nms_iou;
 
 	pthread_t              reader;
 	int                    reader_started;
@@ -428,8 +433,7 @@ static int iy_load_graph(Star6eIpuDetect *d, const VencConfig *vcfg,
 		cfg.conf_thresh = vcfg->detect.conf_thresh;
 		cfg.nms_iou = vcfg->detect.nms_iou;
 		/* ABI 2: the tap geometry, so a backend can refuse a model it
-		 * cannot be fed.  Harmless to fill for an ABI-1 plugin — the
-		 * host owns this struct, so the tail is simply never read. */
+		 * cannot be fed (the host checks independently below anyway). */
 		cfg.net_width = net_w;
 		cfg.net_height = net_h;
 		if (d->backend->init(&cfg) != 0) {
@@ -447,6 +451,12 @@ static int iy_load_graph(Star6eIpuDetect *d, const VencConfig *vcfg,
 			d->backend = NULL;
 			goto fail_plugin;
 		}
+		/* Record what is now loaded so a later reload request can tell an
+		 * .img change from a label/threshold change. */
+		snprintf(d->model_path, sizeof(d->model_path), "%s",
+			vcfg->detect.model_path);
+		d->conf_thresh = vcfg->detect.conf_thresh;
+		d->nms_iou = vcfg->detect.nms_iou;
 	}
 	return 0;
 
@@ -569,6 +579,52 @@ int star6e_ipu_yolo_reload(Star6ePipelineState *state, const VencConfig *vcfg)
 			"%ux%u -> %ux%u needs restart\n",
 			d->net_w, d->net_h, net_w, net_h);
 		return -1;
+	}
+
+	/* Only a different .img actually needs the NPU graph rebuilt.  model_id is
+	 * just a label stamped into the snapshot, and conf/iou are decode-time
+	 * knobs, so rebuilding the graph for those would cost hundreds of ms to
+	 * seconds of frame output (the load runs on this, the pipeline, thread) for
+	 * no reason — and threshold tuning is inherently interactive.  Apply them
+	 * in place instead, leaving the graph and the tap untouched. */
+	if (strcmp(vcfg->detect.model_path, d->model_path) == 0) {
+		int th_changed = (vcfg->detect.conf_thresh != d->conf_thresh) ||
+			(vcfg->detect.nms_iou != d->nms_iou);
+
+		if (!th_changed || d->backend->set_thresholds) {
+			if (th_changed) {
+				/* Park the reader so the decode is not reading the
+				 * thresholds while they are written.  It parks between
+				 * frames, so this costs at most one inference — and the
+				 * graph is never torn down, so there is no half-loaded
+				 * state for snapshot() to guard against (hence no
+				 * d->paused / pub_valid reset here). */
+				int i;
+				if (d->reader_started) {
+					d->pause = 1;
+					for (i = 0; i < 100 && !d->parked; i++)
+						usleep(2000);
+				}
+				d->backend->set_thresholds(vcfg->detect.conf_thresh,
+					vcfg->detect.nms_iou);
+				d->conf_thresh = vcfg->detect.conf_thresh;
+				d->nms_iou = vcfg->detect.nms_iou;
+				if (d->reader_started)
+					d->pause = 0;
+			}
+			/* Same model, so the boxes in flight are already this model's:
+			 * stamping the new id needs no latch window.  Written from the
+			 * pipeline thread, which is also the only snapshot() caller. */
+			d->model_id = vcfg->detect.model_id;
+			fprintf(stderr, "[ipu-yolo] applied in place (no model reload): "
+				"conf=%.2f iou=%.2f model_id=%u\n",
+				(double)vcfg->detect.conf_thresh,
+				(double)vcfg->detect.nms_iou, vcfg->detect.model_id);
+			iy_check_model_id(d, vcfg->detect.model_id);
+			return 0;
+		}
+		/* Thresholds changed but the backend cannot set them live — fall
+		 * through to the full reload, which picks them up via init(). */
 	}
 
 	/* Quiesce the consumer and drop the stale snapshot so no old-model boxes
