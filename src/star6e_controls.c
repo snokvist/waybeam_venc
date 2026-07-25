@@ -1110,6 +1110,29 @@ static int apply_awb_mode(int mode, uint32_t ct)
 	if (!handle)
 		return -1;
 
+	/* Push the colour temperature on EVERY apply, not just under ct_manual.
+	 * Both isp.awbCt and isp.awbMode route here, so writing it only in the
+	 * manual branch meant setting awbCt while in auto was recorded in config
+	 * but never reached the hardware register: /api/v1/awb reported one CT
+	 * while config claimed another, silently, until the next restart.  The
+	 * write does not itself change who drives AWB — the mode attr set below
+	 * does that — so priming it here simply keeps config and ISP in step. */
+	if (ct > 0) {
+		fn_ctmwb_t fn_ctmwb = (fn_ctmwb_t)dlsym(handle,
+			"MI_ISP_AWB_SetCTMwbAttr");
+
+		if (fn_ctmwb) {
+			AwbCtMwb_t mwb = { .u32CT = ct };
+			MI_S32 ct_ret = fn_ctmwb(0, &mwb);
+
+			if (ct_ret != 0) {
+				fprintf(stderr, "WARNING: MI_ISP_AWB_SetCTMwbAttr(%u) "
+					"failed: 0x%08x\n", ct, (unsigned)ct_ret);
+				ret = -1;
+			}
+		}
+	}
+
 	if (mode == 0) {
 		fn_get_t fn_get = (fn_get_t)dlsym(handle,
 			"MI_ISP_AWB_GetAttr");
@@ -1145,20 +1168,13 @@ static int apply_awb_mode(int mode, uint32_t ct)
 			ret = -1;
 		}
 	} else {
-		fn_ctmwb_t fn_ctmwb = (fn_ctmwb_t)dlsym(handle,
-			"MI_ISP_AWB_SetCTMwbAttr");
 		fn_get_t fn_get = (fn_get_t)dlsym(handle, "MI_ISP_AWB_GetAttr");
 		fn_set_t fn_set = (fn_set_t)dlsym(handle, "MI_ISP_AWB_SetAttr");
 
-		if (fn_ctmwb && fn_get && fn_set) {
-			AwbCtMwb_t mwb = { .u32CT = ct };
-			MI_S32 awb_ret = fn_ctmwb(0, &mwb);
-
-			if (awb_ret != 0) {
-				fprintf(stderr, "WARNING: MI_ISP_AWB_SetCTMwbAttr(%u) failed: 0x%08x\n",
-					ct, (unsigned)awb_ret);
-				ret = -1;
-			} else {
+		if (fn_get && fn_set) {
+			/* CT was written above — for both modes. */
+			{
+				MI_S32 awb_ret;
 				AwbAttr_t attr;
 
 				memset(&attr, 0, sizeof(attr));
