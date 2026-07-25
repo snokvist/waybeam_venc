@@ -139,6 +139,34 @@ process cannot influence how the kernel buckets time into these global fields.
 The burst pattern is consistent with accumulated time being flushed in batches
 rather than per tick, but that mechanism is unconfirmed in the kernel source.
 
+### Proof by constant synthetic load
+
+Killing `waybeam` does make `top` settle at a stable 90–100% idle — but that
+alone proves nothing, because it removes the real work *and* anything to
+mis-account. The discriminating test is a **provably constant** load. Running a
+shell `while : ; do : ; done` loop (pure userspace, essentially zero syscalls)
+alongside `waybeam`:
+
+| quantity | range over 2 s windows | |
+|---|---|---|
+| spinner own jiffies | **173–177** | constant by construction |
+| `waybeam` own jiffies | **44–47** | constant |
+| `idle` delta | 95–111 | stable |
+| **busy derived from `idle`** | **300–315** | **stable, 5%** |
+| **busy derived from the fields** | **224–412** | **1.8x swing** |
+| `user` field | 72 → 298 | incoherent |
+| `system` field | **10 → 319** | **incoherent** |
+
+A shell busy-loop cannot generate system time, yet `system` swings 10 → 319
+while the loop's own counter never moves. **The kernel re-buckets a constant
+workload at random between `user` and `system`.** Since a `while` loop is
+self-evidently not `waybeam`, the defect is kernel-side, confirmed.
+
+Corollary: the defect **needs load to manifest** — it mis-buckets work that
+exists, so an idle box looks fine. And because the absolute field error is
+roughly fixed, the *relative* swing grows as real load shrinks, which is how a
+steady 23% renders as 2–25% in `top`.
+
 Busybox `top` divides each process's jiffie delta by a `/proc/stat`-derived
 total, so it inherits that noise:
 
