@@ -1,5 +1,34 @@
 # History
 
+## [0.54.0] - 2026-07-25
+
+Startup NPU scrub: every Star6E start runs a bare `MI_IPU_CreateDevice` +
+`MI_IPU_DestroyDevice` cycle before pipeline bring-up (`star6e_ipu_scrub`,
+~110 ms, no-op when `/dev/mi_ipu` is absent). This closes the residual ISP-CMDQ
+wedge left open by 0.53.0, and fresh bench work on a healthy box narrowed that
+wedge considerably:
+
+- **The actual wedge condition** (reproduced 2/2, all other paths clean): the
+  detector was started **at pipeline bring-up** (from config at init), later
+  stopped **live**, and then a fork+exec respawn fired — the successor, which
+  never touches the IPU, wedges at ISP init. A detector started *live* on a
+  running pipeline does not poison the same sequence (1/2 sessions' worth of
+  contrary lore came from a degraded box).
+- **Not actually broken on a healthy box**: external stop/start with *any* gap
+  (the "wait ~20 s" rule measured earlier was an artifact of accumulated wedge
+  damage — kernel-side MMA chunks and the per-device proc entries drain within
+  ~1-2 s of teardown); and a `MUT_RESTART` respawn while detection is *running*
+  (the successor re-creates the IPU device from the carried config and
+  reconciles the state).
+- **Why the scrub works**: whatever state a predecessor's IPU teardown leaves
+  behind is reset by the next IPU device create — from any process. Running the
+  cycle before VIF/VPE/ISP bring-up makes every successor a reconciler
+  regardless of its detect config. Verified 2/2 on the previously-wedging
+  sequence, plus clean cold starts and live toggles. A scrub *after* the ISP
+  has wedged does not recover it, hence startup placement, and unconditional —
+  the poison survives process exit, so no flag from the previous instance can
+  know whether it is needed.
+
 ## [0.53.0] - 2026-07-25
 
 `detect.enabled` is applied live instead of by a `MUT_RESTART` respawn. The
