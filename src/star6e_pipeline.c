@@ -2567,6 +2567,10 @@ int star6e_pipeline_start(Star6ePipelineState *state, const VencConfig *vcfg,
 	return 0;
 
 fail_venc:
+	/* bind_and_finalize_pipeline() called star6e_vpe_ports_begin(); release it
+	 * so a failed bring-up does not leave a stale runtime.vpe_taps / port1
+	 * owner behind (no-op when begin() had not run). */
+	star6e_vpe_ports_end();
 	star6e_pipeline_stop_venc(state->venc_channel);
 fail_vpe:
 	star6e_pipeline_stop_vpe();

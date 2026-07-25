@@ -9,6 +9,7 @@
 #include "star6e_iq.h"
 #include "star6e_output.h"
 #include "star6e_runtime.h"
+#include "star6e_vpe_ports.h"
 #include "venc_api.h"
 #include "venc_jpeg.h"
 
@@ -1331,24 +1332,35 @@ static char *query_attitude(void)
  * consumer and the failure path (which frees the detector context) can never
  * race a snapshot() read.  The HTTP apply callback therefore only posts the
  * request here and waits (bounded) for the pipeline thread to service it via
- * star6e_controls_service_detect_reload(); a single slot coalesces bursts. */
+ * star6e_controls_service_detect_reload(); a single slot coalesces bursts.
+ *
+ * The request carries a full VencConfig SNAPSHOT taken while the caller holds
+ * g_cfg_mutex, and the pipeline thread reloads from a private copy of it — it
+ * never reads the live g_cfg during the (potentially >3s) NPU graph load.  So
+ * the bounded wait is purely a courtesy timeout: even if it expires and the
+ * HTTP path re-commits g_cfg (or a second /set arrives), the in-flight reload
+ * keeps using its stable snapshot — no torn model_path read. */
 static struct {
 	pthread_mutex_t lock;
 	pthread_cond_t  cond;
 	int             pending;   /* request posted, not yet serviced */
 	int             done;      /* pipeline thread finished the swap  */
+	VencConfig      cfg;       /* config snapshot for the pending swap */
 } g_detect_reload = {
-	PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0
+	.lock = PTHREAD_MUTEX_INITIALIZER,
+	.cond = PTHREAD_COND_INITIALIZER,
 };
 
 static int apply_detect_reload(void)
 {
 	struct timespec deadline;
 
-	if (!g_star6e_control_ctx.pipeline)
+	if (!g_star6e_control_ctx.pipeline || !g_star6e_control_ctx.vcfg)
 		return 0;   /* no pipeline bound — best-effort no-op */
 
 	pthread_mutex_lock(&g_detect_reload.lock);
+	/* Caller holds g_cfg_mutex, so *vcfg (== g_cfg) is a coherent read. */
+	g_detect_reload.cfg = *g_star6e_control_ctx.vcfg;
 	g_detect_reload.pending = 1;
 	g_detect_reload.done = 0;
 	clock_gettime(CLOCK_REALTIME, &deadline);
@@ -1368,18 +1380,26 @@ static int apply_detect_reload(void)
 
 void star6e_controls_service_detect_reload(void)
 {
+	VencConfig cfg;
 	int do_it;
 
 	pthread_mutex_lock(&g_detect_reload.lock);
 	do_it = g_detect_reload.pending;
 	g_detect_reload.pending = 0;
+	if (do_it)
+		cfg = g_detect_reload.cfg;   /* private copy, stable across the reload */
 	pthread_mutex_unlock(&g_detect_reload.lock);
 	if (!do_it)
 		return;
 
-	if (g_star6e_control_ctx.pipeline && g_star6e_control_ctx.vcfg)
-		(void)star6e_ipu_yolo_reload(g_star6e_control_ctx.pipeline,
-			g_star6e_control_ctx.vcfg);
+	if (g_star6e_control_ctx.pipeline) {
+		(void)star6e_ipu_yolo_reload(g_star6e_control_ctx.pipeline, &cfg);
+		/* If the swap left the detector down (bad new model, thread create
+		 * failure), free the port1 claim so runtime.vpe_taps reads truthfully.
+		 * A no-op when "detect" does not own port1. */
+		if (!g_star6e_control_ctx.pipeline->detect)
+			star6e_vpe_port1_release("detect");
+	}
 
 	pthread_mutex_lock(&g_detect_reload.lock);
 	g_detect_reload.done = 1;

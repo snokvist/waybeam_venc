@@ -35,6 +35,11 @@ typedef struct {
 	uint64_t  produced_us;  /* wb_monotonic_us at inference completion     */
 	uint16_t  net_w;        /* model input width  (box coord space)        */
 	uint16_t  net_h;        /* model input height                          */
+	uint16_t  model_id;     /* class-table selector of the model that
+	                           produced these boxes — latched WITH the boxes
+	                           so a live model swap flips the wire model_id
+	                           in lockstep with the first new-model DETECT,
+	                           never tagging old boxes with the new id      */
 } Star6eDetectSnapshot;
 
 /* Start the detector: resolve + init the configured backend, create the

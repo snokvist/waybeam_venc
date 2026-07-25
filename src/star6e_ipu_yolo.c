@@ -94,6 +94,9 @@ typedef struct Star6eIpuDetect {
 	int              port1_enabled;
 	uint32_t         net_w;
 	uint32_t         net_h;
+	uint32_t         model_id;       /* class-table id of the loaded model;
+	                                    set at load, stamped into the snapshot
+	                                    so boxes + model_id stay latched */
 	int              infer_interval; /* process 1 of every N captured frames */
 
 	pthread_t              reader;
@@ -454,6 +457,7 @@ int star6e_ipu_yolo_start(Star6ePipelineState *state, const VencConfig *vcfg)
 		.module = I6_SYS_MOD_VPE, .device = 0, .channel = 0, .port = 1 };
 	d->net_w = net_w;
 	d->net_h = net_h;
+	d->model_id = vcfg->detect.model_id;
 	d->infer_interval = vcfg->detect.infer_interval > 0
 		? vcfg->detect.infer_interval : 1;
 
@@ -553,6 +557,10 @@ int star6e_ipu_yolo_reload(Star6ePipelineState *state, const VencConfig *vcfg)
 		return -1;
 	}
 	d->reader_started = 1;
+	/* Latch the new model_id before unpausing the consumer: paused was held
+	 * across the whole swap and pub_valid was cleared, so the first snapshot
+	 * the encode thread reads after this carries the new boxes AND this id. */
+	d->model_id = vcfg->detect.model_id;
 	d->paused = 0;
 
 	fprintf(stderr, "[ipu-yolo] model reloaded live: backend=%s %ux%u "
@@ -607,6 +615,7 @@ int star6e_ipu_yolo_snapshot(Star6ePipelineState *state,
 		out->produced_us = d->pub_produced_us;
 		out->net_w = (uint16_t)d->net_w;
 		out->net_h = (uint16_t)d->net_h;
+		out->model_id = (uint16_t)d->model_id;
 		have = 1;
 	}
 	pthread_mutex_unlock(&d->pub_lock);

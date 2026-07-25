@@ -25,11 +25,16 @@ independent of the video0 encode path, so a detector-only reload is clean.
   via a request posted by the HTTP apply hook and serviced between frames
   (`star6e_controls_service_detect_reload`), so it is atomic w.r.t. the
   per-frame `DETECT` snapshot query and the failure path (which frees the
-  detector context) can never race a `snapshot()` read. A `paused` flag quiesces
-  the consumer across the swap; the `DETECT` sidecar trailer is simply absent
-  for the ~tens of ms of the swap (consumers already tolerate "no DETECT"). The
-  wire `model_id` flips in lockstep with the first new-model `DETECT`, and the
-  `describe()` class-count cross-check re-runs after each reload.
+  detector context) can never race a `snapshot()` read. The request carries a
+  full `VencConfig` snapshot taken under `g_cfg_mutex`, and the pipeline thread
+  reloads from a private copy of it — so the (potentially slow) NPU graph load
+  never reads the live config lock-free, even if the HTTP wait times out or a
+  second `/set` arrives. A `paused` flag quiesces the consumer across the swap;
+  the `DETECT` sidecar trailer is simply absent for the ~tens of ms of the swap
+  (consumers already tolerate "no DETECT"). The wire `model_id` is latched into
+  the detector snapshot alongside the boxes, so it flips in lockstep with the
+  first new-model `DETECT` (never tagging the last old-model boxes with the new
+  id), and the `describe()` class-count cross-check re-runs after each reload.
 - Both `.img` files can be pre-staged (e.g. on SD); switching needs no
   `/api/v1/restart`. Changing `netWidth`/`netHeight` still takes the full
   respawn path (unchanged). No change to the RTP-sidecar wire ABI.
