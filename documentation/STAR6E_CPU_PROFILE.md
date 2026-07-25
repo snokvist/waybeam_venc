@@ -209,6 +209,46 @@ against the busy fields — which is exactly the 2–25% range reported. A singl
 when direct measurement showed 68% busy and waybeam at 23%: a **10x
 under-report**.
 
+## The debug OSD `cpu NN%` readout (fixed)
+
+The built-in debug OSD had the identical bug. `src/debug_osd.c`'s shared
+`OsdCpuSampler` (used by both the Star6E and Maruko backends, rendered as
+`cpu NN%` from `star6e_runtime.c:1284` / `maruko_pipeline.c:3984`) computed:
+
+```c
+total = user + nice + sys + idle + iowait + irq + softirq;  /* the bad sum */
+dt = total - ring[oldest].total;
+pct = (dt - di) * 100 / dt;                                 /* over ~1 s */
+```
+
+— a field-sum denominator over a ~1 s window, i.e. the worst possible regime.
+
+**Fix:** derive busy from `idle` against a wall-clock denominator, and widen the
+window to ~2 s:
+
+```c
+avail = span_ms * USER_HZ * ncores / 1000;   /* capacity in jiffies */
+busy  = avail - delta_idle;
+pct   = busy * 100 / avail;
+```
+
+The bursty fields are no longer read at all. `ncores` is counted from the
+`cpuN` lines in `/proc/stat` rather than `sysconf(_SC_NPROCESSORS_ONLN)`, since
+the Maruko backend builds against musl; `USER_HZ` comes from
+`sysconf(_SC_CLK_TCK)` with a fallback of 100. Semantics are unchanged — still
+a percentage of total capacity across all cores.
+
+Both samplers simulated on .232 at the same instants, 60 × 0.5 s:
+
+| | mean | min | max | range | **stdev** |
+|---|---|---|---|---|---|
+| **OLD** (field sum, ~1 s) | 19.1% | **2** | **54** | **52** | **18.0** |
+| **NEW** (idle + wall clock, ~2 s) | 31.1% | 30 | 32 | 2 | **0.5** |
+
+The old readout swung 2–54% and **under-reported the mean by a third** (19.1 vs
+31.1), consistent with the field deficit measured above. The new one holds
+±1 point.
+
 ### Rules for reading CPU on Star6E
 
 1. **Do not trust busybox `top` percentages.** Use `cpu_profile.sh` /
