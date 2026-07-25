@@ -289,6 +289,42 @@ static void iy_check_model_id(const Star6eIpuDetect *d, uint32_t model_id)
 			"fix detect.modelId\n", model_id, want, have);
 }
 
+/* Verify the loaded model's REAL input geometry against the port1 tap that was
+ * created for it.  This is the only check that can catch an operator pointing
+ * detect.model_path at a .img compiled for different dims: config is not
+ * evidence of what the model wants, and the failure is silent either way: a
+ * backend that enforces its frame contract (as the native one does) rejects
+ * every frame, and process() errors are not logged, so the detector reports
+ * "active" and simply never detects; one that does not enforce it decodes in
+ * the wrong coordinate space and misplaces every box.  Because model_path is
+ * live-swappable but net_width/net_height are restart-scope, that skew is easy
+ * to reach by accident.
+ *
+ * Returns 0 when the model agrees, -1 to refuse the load.  A backend that
+ * cannot report its dims is refused too: "unverified" is exactly the state this
+ * check exists to eliminate, and model_dims() is mandatory at this ABI. */
+static int iy_check_model_dims(const Star6eIpuDetect *d, uint32_t net_w,
+	uint32_t net_h)
+{
+	uint32_t mw = 0, mh = 0;
+
+	if (d->backend->model_dims(&mw, &mh) != 0 || mw == 0 || mh == 0) {
+		fprintf(stderr, "[ipu-yolo] backend '%s' could not report its model "
+			"input dims — refusing, the %ux%u tap cannot be verified\n",
+			d->backend->name, net_w, net_h);
+		return -1;
+	}
+	if (mw != net_w || mh != net_h) {
+		fprintf(stderr, "[ipu-yolo] model geometry mismatch: '%s' expects "
+			"%ux%u but the tap is %ux%u — refusing, it would run without "
+			"ever detecting.  Set detect.netWidth=%u and "
+			"detect.netHeight=%u (both restart-scope) to use this model.\n",
+			d->backend->name, mw, mh, net_w, net_h, mw, mh);
+		return -1;
+	}
+	return 0;
+}
+
 /* Resolve + validate the tap/model dims from config.  Tap geometry follows the
  * compiled model, so a higher-resolution .img needs no code change.  Both dims
  * must be a multiple of 32 (>=64): the YOLO head strides 8/16/32, and a ragged
@@ -346,6 +382,14 @@ static int iy_load_graph(Star6eIpuDetect *d, const VencConfig *vcfg,
 		d->backend = NULL;
 		goto fail_plugin;
 	}
+	/* model_dims() is mandatory at this ABI: without it the tap geometry
+	 * cannot be verified against the model, and a mismatch is silent. */
+	if (!d->backend->model_dims) {
+		fprintf(stderr, "[ipu-yolo] plugin '%s' claims ABI %u but has no "
+			"model_dims()\n", plugin, DETECT_PLUGIN_ABI);
+		d->backend = NULL;
+		goto fail_plugin;
+	}
 
 	if (iy_load_sys_symbols(d) != 0) {
 		fprintf(stderr, "[ipu-yolo] MI_SYS symbols unavailable\n");
@@ -383,9 +427,21 @@ static int iy_load_graph(Star6eIpuDetect *d, const VencConfig *vcfg,
 		/* 0 leaves the plugin on its own defaults (0.40 / 0.45). */
 		cfg.conf_thresh = vcfg->detect.conf_thresh;
 		cfg.nms_iou = vcfg->detect.nms_iou;
+		/* ABI 2: the tap geometry, so a backend can refuse a model it
+		 * cannot be fed.  Harmless to fill for an ABI-1 plugin — the
+		 * host owns this struct, so the tail is simply never read. */
+		cfg.net_width = net_w;
+		cfg.net_height = net_h;
 		if (d->backend->init(&cfg) != 0) {
 			fprintf(stderr, "[ipu-yolo] backend '%s' init failed\n",
 				d->backend->name);
+			MI_VPE_DisablePort(0, 1);
+			d->port1_enabled = 0;
+			d->backend = NULL;
+			goto fail_plugin;
+		}
+		if (iy_check_model_dims(d, net_w, net_h) != 0) {
+			d->backend->deinit();
 			MI_VPE_DisablePort(0, 1);
 			d->port1_enabled = 0;
 			d->backend = NULL;

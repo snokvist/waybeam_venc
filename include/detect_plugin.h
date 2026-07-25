@@ -26,7 +26,26 @@
 
 #include <stdint.h>
 
-#define DETECT_PLUGIN_ABI 1u
+/*
+ * ABI version.  The host requires an EXACT match and rejects anything else —
+ * during beta there is no compatibility window, so there is deliberately no
+ * "older plugin, reduced checking" mode: every accepted plugin supports the
+ * full vtable below.  Bump this whenever the vtable or a struct layout
+ * changes, and rebuild the plugins.
+ *
+ *   1  initial: init / process / set_display / deinit / describe.
+ *   2  adds model_dims() plus the net_width/net_height config fields, so the
+ *      host verifies the tap geometry against the model's real input dims
+ *      rather than trusting config.
+ *
+ * Note for any future compatibility window: `abi` bounds how much of
+ * DetectBackend the host may read, because the PLUGIN owns that struct (it
+ * returns a static one, sized by the header it compiled against) — reading a
+ * field its ABI predates is out of bounds.  DetectBackendConfig is the other
+ * direction (host-allocated, passed by pointer), so appending fields there is
+ * always safe.
+ */
+#define DETECT_PLUGIN_ABI 2u
 
 /* One detection.  Box coords are FP32 PIXELS in the model's NETWORK space
  * (e.g. 640x352), corner form.  24-byte layout (see ABI note above). */
@@ -61,6 +80,11 @@ typedef struct {
 	int         display_h;
 	float       conf_thresh;     /* <=0 -> plugin default */
 	float       nms_iou;         /* <=0 -> plugin default */
+	/* ABI 2: the tap geometry frames will arrive at.  A backend MAY refuse
+	 * init() on a mismatch with its model; the host checks independently via
+	 * model_dims(), so a backend that ignores these is still covered. */
+	uint32_t    net_width;
+	uint32_t    net_height;
 } DetectBackendConfig;
 
 /*
@@ -77,6 +101,15 @@ typedef struct {
  *  describe(&names)          optional; set *names to a static array of class
  *                            label strings and return the class count, or 0 /
  *                            leave the field pointer NULL if not provided.
+ *  model_dims(&w,&h)         REQUIRED.  Report the loaded model's REAL input
+ *                            geometry (what the compiled .img expects), not
+ *                            what config asked for.  Valid only after a
+ *                            successful init(); 0 on success, <0 if unknown.
+ *                            The host compares this against the tap it created
+ *                            and refuses a mismatch — the only way to catch
+ *                            "operator pointed model_path at a
+ *                            different-geometry .img", since config is not
+ *                            evidence of what the model wants.
  */
 typedef struct DetectBackend {
 	const char *name;
@@ -87,6 +120,7 @@ typedef struct DetectBackend {
 	void (*set_display)(int width, int height);
 	void (*deinit)(void);
 	int  (*describe)(const char *const **class_names);
+	int  (*model_dims)(uint32_t *width, uint32_t *height);   /* ABI 2 */
 } DetectBackend;
 
 /*

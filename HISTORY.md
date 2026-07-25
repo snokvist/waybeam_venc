@@ -16,6 +16,25 @@ independent of the video0 encode path, so a detector-only reload is clean.
   are unchanged; a dims change needs the VPE port recreated, so it falls back to
   the full `MUT_RESTART` respawn. The multiple-of-32 / min-64 checks are shared
   by start and reload via `iy_resolve_net_dims()`.
+- **Model geometry is now verified against the tap** — plugin ABI bumped to `2`,
+  adding a required `model_dims()` that reports the loaded `.img`'s REAL input
+  geometry, plus `net_width`/`net_height` in `DetectBackendConfig`. The host
+  compares the two and refuses a mismatch (`iy_check_model_dims()`), because
+  config is not evidence of what a model expects. Since `model_path` is live but
+  the dims are restart-scope, pointing `model_path` at a different-geometry
+  model was previously accepted silently and left an "active" detector that
+  never detected — the backend rejects every frame and `process()` errors are
+  not logged. A refusal names both geometries and the exact `netWidth`/
+  `netHeight` to set, leaves detection off, releases the port1 claim, and does
+  not disturb the stream. ABI is an exact match (no compatibility window during
+  beta), so an ABI-1 plugin is rejected at load with a clear diagnostic.
+- **Swap cost, measured** — the swap does not respawn the pipeline, drop frames
+  at the transport, force a keyframe, or reconnect, but it is not free: the NPU
+  graph load runs on the pipeline thread (which is what makes it atomic against
+  the per-frame snapshot), so frame output stalls for its duration. On Star6E
+  .232 at 100 fps: **~200-450 ms** freshly booted, rising to **~2.2-2.5 s** once
+  the pipeline has respawned at least once; a process restart does not reset
+  that, only a reboot does. Budget for ~2.3 s in normal operation.
 - **Mutability wiring** (`venc_api.c`) — `detect.model_path` is now `MUT_LIVE`,
   and `detect.model_id` / `conf_thresh` / `nms_iou` are newly settable
   (`MUT_LIVE`); a new `LIVE_GROUP_DETECT` applies them via `apply_detect_reload`
@@ -30,7 +49,7 @@ independent of the video0 encode path, so a detector-only reload is clean.
   reloads from a private copy of it — so the (potentially slow) NPU graph load
   never reads the live config lock-free, even if the HTTP wait times out or a
   second `/set` arrives. A `paused` flag quiesces the consumer across the swap;
-  the `DETECT` sidecar trailer is simply absent for the ~tens of ms of the swap
+  the `DETECT` sidecar trailer is simply absent for the duration of the swap
   (consumers already tolerate "no DETECT"). The wire `model_id` is latched into
   the detector snapshot alongside the boxes, so it flips in lockstep with the
   first new-model `DETECT` (never tagging the last old-model boxes with the new

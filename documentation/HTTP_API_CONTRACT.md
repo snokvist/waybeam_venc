@@ -1423,7 +1423,7 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `video0.codec=h264` | 404 unknown_field | 404 unknown_field | Field retired in 0.10.12; codec is hardcoded H.265 on both backends. |
 | `video0.scene_threshold` / `scene_holdoff` | yes | yes | Restart-required fields; both backends run the shared scene detector. |
 | `video0.framing` / `zoom_x` / `zoom_y` | yes | partial | `framing` requires reinit; zoom presets work on both backends, the `stab` preset is Star6E-only (no-op on Maruko); `zoom_x/y` are live pan controls (ignored under `stab`). |
-| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **501** | Star6E hot-swaps the NPU detector `.img` in place (VPE port1 + plugin re-created on the pipeline thread) with the video0 RTP stream uninterrupted, provided `net_width`/`net_height` are unchanged. Maruko has no detector path (`apply_detect_reload` unset → 501). |
+| `detect.model_path` / `model_id` / `conf_thresh` / `nms_iou` | **live** | **501** | Star6E hot-swaps the NPU detector `.img` in place (VPE port1 + plugin re-created on the pipeline thread) without respawning the pipeline, provided `net_width`/`net_height` are unchanged. The stream keeps running (no reconnect, no drops), but the graph load runs on the pipeline thread, so frame output stalls for the duration — see the `0.14.0` note. A model whose real input geometry disagrees with the tap is refused and leaves detection off. Maruko has no detector path (`apply_detect_reload` unset → 501). |
 | `detect.net_width` / `net_height` | restart | **501** | Tap geometry: the VPE port output is fixed at create, so a dims change takes the full respawn path. |
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
@@ -1433,10 +1433,31 @@ divergence is listed.  As of `contract_version: 0.12.1`:
     `detect.model_id` / `detect.conf_thresh` / `detect.nms_iou` are now
     settable (`MUT_LIVE`).  Changing any of them re-creates only the NPU
     detector plugin + VPE port1 tap on the pipeline thread — the video0
-    encode/RTP path keeps running, so there is no gap, keyframe reset, or
-    reconnect.  The sidecar `model_id` flips to the new value in lockstep
-    with the first new-model `DETECT` trailer.  Star6E only; Maruko returns
-    `501` (no `apply_detect_reload`).
+    encode/RTP path keeps running, so there is no pipeline respawn, keyframe
+    reset, reconnect, or transport drop.  It is **not** free, though: the NPU
+    graph load runs on the pipeline thread (that is what makes the swap atomic
+    against the per-frame `DETECT` snapshot), so frame output stalls while it
+    runs.  Measured on Star6E .232 at 100 fps: **~200-450 ms** on a freshly
+    booted system, rising to **~2.2-2.5 s** once the pipeline has respawned at
+    least once (any `MUT_RESTART` change); a process restart does not reset it,
+    only a reboot does.  Budget for the ~2.3 s figure in normal operation.
+    The sidecar `model_id` flips to the new value in lockstep with the first
+    new-model `DETECT` trailer.  Star6E only; Maruko returns `501` (no
+    `apply_detect_reload`).
+  - The host now verifies the loaded model's **real** input geometry (reported
+    by the plugin via the new ABI-2 `model_dims()`) against the VPE port1 tap
+    it created, and refuses a mismatch — `net_width`/`net_height` are config,
+    not evidence of what a `.img` expects.  Because `model_path` is live but
+    the dims are restart-scope, pointing `model_path` at a different-geometry
+    model used to be accepted silently and left an "active" detector that
+    never detected (the backend rejects every frame and `process()` errors are
+    not logged).  A refused swap logs both geometries and the exact
+    `netWidth`/`netHeight` to set, leaves detection off, and releases the
+    port1 claim (`runtime.vpe_taps.port1` reads `null`); the stream is
+    unaffected.  Note `/set` still returns `200` — the reload is serviced
+    asynchronously on the pipeline thread, so the stored value is accepted
+    even when the model is then rejected; check `runtime.vpe_taps` or the log
+    for the outcome.
   - `detect.net_width` / `detect.net_height` are now settable as
     `MUT_RESTART` (a tap-geometry change needs the VPE port recreated).
     Both must be `0` (default) or a multiple of 32 (`>=64`).
