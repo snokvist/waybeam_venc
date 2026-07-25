@@ -176,6 +176,18 @@ void venc_api_clear_active_precrop(void);
 int  venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
 	uint16_t *w, uint16_t *h);
 
+/* VPE scaler-output tap map for /api/v1/config runtime.vpe_taps (Star6E only).
+ * The backend's port arbiter publishes a JSON object string
+ * (e.g. {"port0":["main","jpeg"],"port1":"detect"}) on every change; pass NULL
+ * to clear.  Stored verbatim and emitted inside the config runtime block, so
+ * an operator/CI can see which feature owns the single second scaler (port1)
+ * and who rides the shared main output (port0).  venc_api does not interpret
+ * the string — it only relays it. */
+void venc_api_set_vpe_taps(const char *json_obj);
+/* Copy the stored tap-map object into buf (NUL-terminated).  Returns 1 when a
+ * map is published (buf filled), 0 otherwise (buf untouched). */
+int  venc_api_get_vpe_taps(char *buf, size_t buf_size);
+
 /* Record status callback — set by backend to expose status to HTTP API. */
 typedef struct {
 	int active;

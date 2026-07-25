@@ -119,6 +119,37 @@ int venc_api_get_active_precrop(uint16_t *x, uint16_t *y,
 	return valid;
 }
 
+/* VPE tap map published by the Star6E port arbiter (star6e_vpe_ports.c) and
+ * emitted in /api/v1/config runtime.vpe_taps.  Guarded by its own mutex: the
+ * pipeline thread writes it, the httpd thread reads it in handle_config. */
+static pthread_mutex_t g_vpe_taps_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_vpe_taps[192];
+static int g_vpe_taps_valid;
+
+void venc_api_set_vpe_taps(const char *json_obj)
+{
+	pthread_mutex_lock(&g_vpe_taps_mutex);
+	if (json_obj && json_obj[0]) {
+		snprintf(g_vpe_taps, sizeof(g_vpe_taps), "%s", json_obj);
+		g_vpe_taps_valid = 1;
+	} else {
+		g_vpe_taps_valid = 0;
+	}
+	pthread_mutex_unlock(&g_vpe_taps_mutex);
+}
+
+int venc_api_get_vpe_taps(char *buf, size_t buf_size)
+{
+	int valid;
+
+	pthread_mutex_lock(&g_vpe_taps_mutex);
+	valid = g_vpe_taps_valid;
+	if (valid && buf && buf_size > 0)
+		snprintf(buf, buf_size, "%s", g_vpe_taps);
+	pthread_mutex_unlock(&g_vpe_taps_mutex);
+	return valid;
+}
+
 void venc_api_set_config_path(const char *path)
 {
 	pthread_mutex_lock(&g_cfg_mutex);
@@ -2395,7 +2426,9 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 {
 	uint16_t px = 0, py = 0, pw = 0, ph = 0;
 	int precrop_valid;
-	char runtime[160];
+	char taps[192];
+	int taps_valid;
+	char runtime[384];
 
 	(void)req; (void)ctx;
 	pthread_mutex_lock(&g_cfg_mutex);
@@ -2405,12 +2438,22 @@ static int handle_config(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 500, "internal_error",
 			"failed to serialize config");
 
+	/* runtime block: active_precrop (VIF capture rect) and vpe_taps (VPE
+	 * scaler-output ownership).  Either may be absent; emit the object only
+	 * when at least one is present, comma-joining what is. */
 	precrop_valid = venc_api_get_active_precrop(&px, &py, &pw, &ph);
-	if (precrop_valid) {
-		snprintf(runtime, sizeof(runtime),
-			",\"runtime\":{\"active_precrop\":"
-			"{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}}",
-			px, py, pw, ph);
+	taps_valid = venc_api_get_vpe_taps(taps, sizeof(taps));
+	if (precrop_valid || taps_valid) {
+		int n = snprintf(runtime, sizeof(runtime), ",\"runtime\":{");
+		if (precrop_valid)
+			n += snprintf(runtime + n, sizeof(runtime) - n,
+				"\"active_precrop\":{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u}",
+				px, py, pw, ph);
+		if (taps_valid)
+			n += snprintf(runtime + n, sizeof(runtime) - n,
+				"%s\"vpe_taps\":%s",
+				precrop_valid ? "," : "", taps);
+		snprintf(runtime + n, sizeof(runtime) - n, "}");
 	} else {
 		runtime[0] = '\0';
 	}

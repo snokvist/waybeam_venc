@@ -36,6 +36,29 @@ independent of the video0 encode path, so a detector-only reload is clean.
 - Contract `0.14.0`; `test_venc_api` gains four detect live/restart/validation
   cases (2089/0); both backends build clean.
 
+### VPE port-ownership arbiter + `vpe_taps` observability
+
+Cross-feature alignment for the VPE0 scaler outputs, so the detector and the
+stab framing tap cannot both program the single second scaler, and an operator
+can see the allocation.
+
+- **Arbiter** (`star6e_vpe_ports.{c,h}`) — a single owner for VPE0 **port1**
+  (the lone second scaler output): stab XOR detect. `star6e_vpe_port1_claim()`
+  refuses a second claim while it is held; the pipeline claims it for the stab
+  motion tap and for the detector, so their mutual exclusion is now enforced by
+  the arbiter instead of an ad-hoc `if (g_framing)`. `FramingModule` gains a
+  `uses_vpe_port1` flag (stab=true; stab-fill=false — it drains port0 and
+  composes in SW, so it takes no port1 tap but stays detect-exclusive by an
+  explicit resource policy).
+- **Observability** — the arbiter publishes a `runtime.vpe_taps` block to
+  `/api/v1/config` via `venc_api_set_vpe_taps()`: `port0` lists the 1:N
+  consumers of the shared main output (`main` always; `jpeg`/`record` when
+  those channels are up — the JPEG snapshot is a port0 consumer, not a second
+  tap), and `port1` names its sole owner or `null`. Star6E only; absent on
+  Maruko.
+- `test_star6e_vpe_ports` covers claim/refuse/release/idempotence and the
+  published JSON (2103/0).
+
 ## [0.51.1] - 2026-07-24
 
 Detector hardening follow-ups from the v0.51.0 upstream review — four

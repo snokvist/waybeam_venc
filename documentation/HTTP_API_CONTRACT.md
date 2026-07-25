@@ -112,7 +112,8 @@ Response `200`:
       "debug": { "showOsd": false }
     },
     "runtime": {
-      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 }
+      "active_precrop": { "x": 0, "y": 240, "w": 2560, "h": 1440 },
+      "vpe_taps": { "port0": ["main", "jpeg"], "port1": "detect" }
     }
   }
 }
@@ -125,6 +126,16 @@ part of the editable config:
   any sensor overscan offsets or SCL crop origin). Present whenever a
   Star6E or Maruko pipeline has been started; absent before pipeline start
   or after pipeline stop.
+- `vpe_taps` — VPE scaler-output ownership (Star6E only; absent on Maruko
+  and before pipeline start). `port0` is the main SCL output, a 1:N-shareable
+  buffer listing its consumers (`main` — the H.265 encoder, always present;
+  plus `jpeg` when the snapshot channel is up and `record` when a dual/record
+  channel is bound — these bind alongside on the same buffer, not a second
+  scaler). `port1` is the **single** second scaler output: a string naming its
+  sole owner (`"stab"` or `"detect"`), or `null` when free. The arbiter refuses
+  a second `port1` claim, so `stab` and `detect` are mutually exclusive on the
+  hardware; `stab-fill` rides `port0` only (no `port1` tap) but stays mutually
+  exclusive with `detect` by resource policy.
 
 ### `GET /api/v1/capabilities`
 
