@@ -111,9 +111,36 @@ across identical 2.02 s windows, where the true available budget is
 | `/proc/stat` busy fields | **26–323** | **12x swing** |
 | `/proc/stat` idle field | 259–286 | stable |
 
-The busy fields — `system` above all — are **flushed in bursts**, while `idle`
-and the per-task counters track real time. Busybox `top` divides each process's
-jiffie delta by a `/proc/stat`-derived total, so it inherits that noise:
+Broken out per field, the first line of `/proc/stat` being
+`cpu user nice system idle iowait irq softirq steal guest guest_nice`:
+
+| field | delta range over 2 s (budget 400) | |
+|---|---|---|
+| `idle` | **273–279** | rock stable |
+| `system` | **6 → 236** | **39x swing** |
+| `user` | 4 → 118 | ~30x swing |
+| `softirq` | 0–18 | small |
+| `nice` / `irq` / `iowait` / `steal` | ~0 | unused on this SoC |
+| **busy sum** | **11 → 263** | **24x swing** |
+
+`user` and `system` burst **together** (one window user=118/system=127, a quiet
+one user=5/system=6) while `idle` never moves. They are also wrong on average,
+not merely noisy: over 28 s the busy fields summed to 1228 jiffies while `idle`
+implies 1791 — a **31% under-count**, and the idle-derived figure is the one
+that matches per-task measurement. In the worst window the fields claim 263
+busy jiffies while `idle` allows only ~123, i.e. the kernel reports "131% of one
+core" and "61% of one core" for the same 2 s. **`idle` is the only field on this
+kernel that tracks reality.**
+
+This is a kernel accounting defect, **not** a workload effect and **not**
+attributable to `waybeam`: the binary's own per-task counters are flat (44–49
+jiffies), no process in a 40-sample sweep had a stdev above 0.7 points, and a
+process cannot influence how the kernel buckets time into these global fields.
+The burst pattern is consistent with accumulated time being flushed in batches
+rather than per tick, but that mechanism is unconfirmed in the kernel source.
+
+Busybox `top` divides each process's jiffie delta by a `/proc/stat`-derived
+total, so it inherits that noise:
 
 ```
 dt=2.02 dproc=47 dtot=363 | wall%=23.3  top%=12.9
