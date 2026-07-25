@@ -476,7 +476,26 @@ static void iy_unload_graph(Star6eIpuDetect *d)
 		d->backend = NULL;
 	}
 	if (d->port1_enabled) {
-		MI_VPE_DisablePort(0, 1);
+		MI_S32 dret, rret;
+
+		/* Release the user output-port depth BEFORE disabling the port.
+		 * iy_load_graph registered a (2,4) user depth on port1; leaving it
+		 * registered means the kernel SCL keeps queueing port1 output tasks
+		 * for a consumer that no longer exists.  A successor process that
+		 * re-enables port1 reconfigures that state harmlessly, but one that
+		 * leaves port1 alone (detect.enabled true -> false across a respawn)
+		 * inherits a stale queue whose fence never completes:
+		 * `outputtask's fence is not finished` on vpe0_P0_MAIN plus an
+		 * ISP_IRQ_WQ_FRAME_START storm, and the fresh pipeline never emits a
+		 * frame.  (Not the cause of the detect-off respawn wedge — both
+		 * calls below were device-verified to succeed there — but the
+		 * registration is ours to release, and leaving it set is the kind
+		 * of stale state that wedge class feeds on.) */
+		rret = MI_SYS_SetChnOutputPortDepth(&d->vpe1_port, 0, 0);
+		dret = MI_VPE_DisablePort(0, 1);
+		if (rret != 0 || dret != 0)
+			fprintf(stderr, "[ipu-yolo] port1 teardown: depth_reset=%d "
+				"disable=%d\n", (int)rret, (int)dret);
 		d->port1_enabled = 0;
 	}
 	if (d->plugin_handle) {
