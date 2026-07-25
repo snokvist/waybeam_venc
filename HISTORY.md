@@ -4,7 +4,8 @@
 
 Startup NPU scrub: every Star6E start runs a bare `MI_IPU_CreateDevice` +
 `MI_IPU_DestroyDevice` cycle before pipeline bring-up (`star6e_ipu_scrub`,
-~110 ms, no-op when `/dev/mi_ipu` is absent). This closes the residual ISP-CMDQ
+measured 0.1–2.2 s depending on how cold the IPU firmware is, no-op when
+`/dev/mi_ipu` is absent). This closes the residual ISP-CMDQ
 wedge left open by 0.53.0, and fresh bench work on a healthy box narrowed that
 wedge considerably:
 
@@ -20,6 +21,11 @@ wedge considerably:
   ~1-2 s of teardown); and a `MUT_RESTART` respawn while detection is *running*
   (the successor re-creates the IPU device from the carried config and
   reconciles the state).
+- **Maruko/i6c**: setting `detect.enabled` now returns HTTP 501 (the live-apply
+  group requires the backend's `apply_detect_reload` callback, which only
+  Star6E registers). Intentional — previously the set was accepted and burned a
+  full respawn on a backend that has no detector at all; an explicit refusal is
+  more honest than a pointless restart.
 - **Why the scrub works**: whatever state a predecessor's IPU teardown leaves
   behind is reset by the next IPU device create — from any process. Running the
   cycle before VIF/VPE/ISP bring-up makes every successor a reconciler

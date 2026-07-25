@@ -137,7 +137,10 @@ int star6e_ipu_scrub(void)
 			star6e_ipu_unload();
 		return -1;
 	}
-	g_mi_ipu.fnDestroyDevice();
+	if (g_mi_ipu.fnDestroyDevice() != 0)
+		fprintf(stderr, "[ipu-scrub] DestroyDevice failed — throwaway "
+			"device leaks until exit; a later detector start may "
+			"fail its own CreateDevice\n");
 
 	if (loaded_here)
 		star6e_ipu_unload();
