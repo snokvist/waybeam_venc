@@ -4,6 +4,7 @@
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "star6e_audio.h"
+#include "star6e_awb.h"
 #include "star6e_cus3a.h"
 #include "star6e_ipu_yolo.h"
 #include "star6e_iq.h"
@@ -724,6 +725,38 @@ static uint32_t ae_diag_isp_gain(const AeDiagSnapshot *snapshot)
 	return snapshot->plane.compGain;
 }
 
+typedef struct { uint32_t r, g, b; } AwbCus3aStatus;
+
+/* Applied AWB gains as the ISP reports them (MI_ISP_CUS3A_GetAwbStatus).  This
+ * is the truth under userspace AWB — MI_ISP_AWB_QueryInfo tracks the internal
+ * algorithm, which is not the one driving.  Returns 0 on success. */
+static int awb_cus3a_applied_gains(AwbCus3aStatus *out)
+{
+	typedef MI_S32 (*fn_t)(uint32_t, AwbCus3aInfo_t *);
+	void *handle = dlopen("libmi_isp.so", RTLD_LAZY | RTLD_GLOBAL);
+	int rc = -1;
+
+	if (!handle)
+		return -1;
+	{
+		fn_t fn = (fn_t)dlsym(handle, "MI_ISP_CUS3A_GetAwbStatus");
+		AwbCus3aInfo_t info;
+
+		if (fn) {
+			memset(&info, 0, sizeof(info));
+			info.Size = sizeof(info);
+			if (fn(0, &info) == 0) {
+				out->r = info.CurRGain;
+				out->g = info.CurGGain;
+				out->b = info.CurBGain;
+				rc = 0;
+			}
+		}
+	}
+	dlclose(handle);
+	return rc;
+}
+
 void star6e_controls_ae_osd_status(Star6eAeOsdStatus *out)
 {
 	AeDiagSnapshot s;
@@ -769,6 +802,43 @@ void star6e_controls_ae_osd_status(Star6eAeOsdStatus *out)
 				}
 			}
 			dlclose(handle);
+		}
+	}
+
+	/* When the userspace loop owns AWB, MI_ISP_AWB_QueryInfo reports the
+	 * ISP-internal algorithm's last state — frozen precisely because that
+	 * algorithm is no longer running.  Show the applied gains instead.
+	 *
+	 * Ownership is decided from config, NOT from whether the loop thread
+	 * happens to be up yet: keying off liveness made the row render the
+	 * stale internal view (with its misleading "adj") for the first refresh
+	 * after a start or reinit, then flip format once the thread ticked. */
+	{
+		const VencConfig *vc = g_star6e_control_ctx.vcfg;
+		int owns = vc && vc->isp.awb_fps > 0 &&
+			strcmp(vc->isp.awb_mode, "auto") == 0;
+
+		if (owns) {
+			uint32_t lr = 0, lg = 0, lb = 0, lticks = 0;
+			int lpaused = 0;
+			AwbCus3aStatus st;
+
+			out->awb_valid = 1;
+			out->awb_userspace = 1;
+			out->color_temp = 0;   /* not estimated by the loop */
+			out->awb_stable = 0;
+			if (star6e_awb_status(&lr, &lg, &lb, &lticks, &lpaused))
+				out->awb_ticks = lticks;
+			/* Applied gains straight from the ISP — correct even
+			 * before the loop's first tick has populated its own
+			 * cache. */
+			if (awb_cus3a_applied_gains(&st) == 0) {
+				out->rgain = st.r;
+				out->bgain = st.b;
+			} else if (lr || lb) {
+				out->rgain = lr;
+				out->bgain = lb;
+			}
 		}
 	}
 }
@@ -1062,6 +1132,11 @@ static int apply_awb_mode(int mode, uint32_t ct)
 					ret = -1;
 				} else {
 					printf("> AWB mode: auto\n");
+					/* Userspace loop owns AWB in auto —
+					 * the ISP-internal algorithm does not
+					 * converge on this platform. */
+					star6e_pipeline_set_awb_userspace(1);
+					star6e_awb_set_paused(0);
 				}
 			} else {
 				ret = -1;
@@ -1097,6 +1172,11 @@ static int apply_awb_mode(int mode, uint32_t ct)
 						ret = -1;
 					} else {
 						printf("> AWB mode: ct_manual (%uK)\n", ct);
+						/* ISP-internal owns AWB again so
+						 * the CT apply above reaches the
+						 * hardware; our loop stands down. */
+						star6e_awb_set_paused(1);
+						star6e_pipeline_set_awb_userspace(0);
 					}
 				} else {
 					ret = -1;

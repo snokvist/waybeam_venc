@@ -368,6 +368,14 @@ typedef struct {
  * dashboard.html edit / webui-blob rebuild.  Ranges mirror the validators in
  * validate_field(); 0 = "use preset default" where noted.  group = the
  * collapsible section title the renderer buckets them under. */
+static const FieldUi ui_awb_fps = {
+	"Image", "AWB rate (Hz)", "number", 0, 30, 1, NULL,
+	"Rate of the userspace auto-white-balance loop. The ISP-internal AWB does "
+	"not converge on this platform, so AWB is driven from userspace instead. "
+	"Deliberately decoupled from frame rate — 5 Hz costs the same at 120fps as "
+	"at 60fps. 0 disables the loop and leaves AWB wherever the ISP last put it. "
+	"Ignored while awbMode=ct_manual. Requires restart."
+};
 static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
 	"Kept-frame percentage for framing=stab / stab-fill. 0 = preset default "
@@ -479,6 +487,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, ae_engine,         FT_STRING, MUT_RESTART),
 	FIELD(isp, ae_fps,            FT_UINT,   MUT_RESTART),
+	FIELD_UI(isp, awb_fps,        FT_UINT,   MUT_RESTART, &ui_awb_fps),
 	FIELD(isp, keep_aspect,       FT_BOOL,   MUT_RESTART),
 	FIELD(isp, shutter_rule_180,  FT_BOOL,   MUT_RESTART),
 
@@ -624,6 +633,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "fpv.noiseLevel", "fpv.noise_level" },
 	{ "isp.aeEngine", "isp.ae_engine" },
 	{ "isp.aeFps", "isp.ae_fps" },
+	{ "isp.awbFps", "isp.awb_fps" },
 	{ "isp.keepAspect", "isp.keep_aspect" },
 	{ "isp.shutterRule180", "isp.shutter_rule_180" },
 	{ "audio.sampleRate", "audio.sample_rate" },

@@ -164,7 +164,9 @@ static int connect_api_test_socket(void)
 static int read_http_response(int fd, int *http_status, char *response_buf,
 	size_t response_buf_size)
 {
-	char raw[8192];
+	/* Must exceed the largest response under test — /api/v1/capabilities
+	 * grows with every config field and silently truncated here before. */
+	char raw[65536];
 	char *body;
 	size_t used = 0;
 	ssize_t n;
@@ -1337,7 +1339,7 @@ static int test_capabilities_emits_ui(void)
 	VencConfig cfg;
 	VencApplyCallbacks cb;
 	int status = 0, fd;
-	char response[16384];
+	char response[65536];
 	char request[256];
 	size_t sent = 0, req_len;
 
