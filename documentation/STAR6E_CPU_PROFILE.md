@@ -124,13 +124,39 @@ Broken out per field, the first line of `/proc/stat` being
 | **busy sum** | **11 → 263** | **24x swing** |
 
 `user` and `system` burst **together** (one window user=118/system=127, a quiet
-one user=5/system=6) while `idle` never moves. They are also wrong on average,
-not merely noisy: over 28 s the busy fields summed to 1228 jiffies while `idle`
-implies 1791 — a **31% under-count**, and the idle-derived figure is the one
-that matches per-task measurement. In the worst window the fields claim 263
-busy jiffies while `idle` allows only ~123, i.e. the kernel reports "131% of one
-core" and "61% of one core" for the same 2 s. **`idle` is the only field on this
-kernel that tracks reality.**
+one user=5/system=6) while `idle` never moves. In the worst window the fields
+claim 263 busy jiffies while `idle` allows only ~123, i.e. the kernel reports
+"131% of one core" and "61% of one core" for the same 2 s.
+
+### The busy time is real — it is credited late, to the wrong bucket
+
+The fields are **not** inventing load. Comparing three independent estimates of
+busy jiffies over one window, at three window sizes:
+
+| window | `FIELD` | `IDLE` (ref) | `PER-TASK` (ref) | FIELD/IDLE |
+|---|---|---|---|---|
+| 2 s | 14 | 130 | 115 | **0.11** |
+| 10 s | 597 | 628 | 425 | 0.95 |
+| 60 s | 2958 | 3749 | 3483 | 0.79 |
+
+Over 2 s the fields report **11%** of the true busy time; widen the window and
+they land within 5–21% of the reference. A kernel fabricating load would show
+the same error at every window size. Instead it largely averages out — the
+signature of **delayed, batched crediting**: work done in one short window is
+booked in a later one. The single-window over-report above is late credit for
+earlier work, not work that never happened.
+
+So the defect is **misattribution, in two dimensions**:
+
+- **In time** — recoverable by measuring over ≥10 s, or by using `idle` (which
+  tracks real time) instead of the busy fields.
+- **In category** — *not* recoverable at any window size. A syscall-free shell
+  loop cannot generate system time, yet `system` swung 10 → 319 for exactly such
+  a load (see below). Treat the `usr`/`sys` split on this kernel as
+  indicative only.
+
+`idle` and the per-task counters are the two trustworthy sources; they agree
+with each other and disagree with the busy fields.
 
 This is a kernel accounting defect, **not** a workload effect and **not**
 attributable to `waybeam`: the binary's own per-task counters are flat (44–49
