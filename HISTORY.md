@@ -29,7 +29,7 @@ a rate we choose rather than per frame:
 AWB is handed to userspace (`Cus3AEnable_t.bAWB = 1`) so this loop owns it.
 Because nothing is per frame, **cost is independent of frame rate** — that is the
 entire point, and it is what the SDK stack could not offer. Rate is
-`isp.awbFps` (default 5 Hz, 0 disables). Gains are damped (1/4 per tick) and
+`isp.awbFps` (default 15 Hz, 0 disables). Gains are damped (1/4 per tick) and
 gated by a 3% deadband so a settled scene stops rewriting them; degenerate
 scenes are handled by rejecting saturated/black blocks, requiring ≥5% of the
 frame usable, and clamping the result.

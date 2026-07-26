@@ -94,7 +94,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->isp.sensor_bin[0] = '\0';
 	safe_strcpy(cfg->isp.ae_engine, sizeof(cfg->isp.ae_engine), "sdk");
 	cfg->isp.ae_fps = 15;
-	cfg->isp.awb_fps = 5;
+	cfg->isp.awb_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
 	cfg->isp.keep_aspect = true;

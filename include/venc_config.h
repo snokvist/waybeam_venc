@@ -64,7 +64,7 @@ typedef struct {
 	 * warns and falls back to "sdk". */
 	char ae_engine[8];     /* "sdk" (only valid value) */
 	uint32_t ae_fps;       /* custom AE rate in Hz (default 15) */
-	uint32_t awb_fps;      /* userspace AWB loop rate in Hz (default 5, 0=off).
+	uint32_t awb_fps;      /* userspace AWB loop rate in Hz (default 15, 0=off).
 	                        * Decoupled from frame rate by design — this is
 	                        * what keeps AWB affordable at 120fps. */
 	uint32_t gain_max;     /* max sensor gain (0 = use ISP bin default) */

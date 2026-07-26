@@ -21,7 +21,8 @@
  *     MI_ISP_CUS3A_SetAwbParam     — apply
  *
  * Because nothing here is per-frame, the cost is independent of frame rate:
- * 120fps costs exactly what 60fps costs.  That is the whole point.
+ * 120fps costs exactly what 60fps costs.  That is the whole point — 15 Hz
+ * (the default) was measured negligible at 100fps.
  *
  * Threading: one thread, started/stopped with the pipeline.  All SDK calls are
  * made from that thread only.
