@@ -1,5 +1,30 @@
 # History
 
+## [0.59.0] - 2026-07-26
+
+New `GET /api/v1/snapshot.pgm` endpoint returns a grayscale frame as a binary
+P5 PGM — the luma plane of the same uncompressed NV12 source the JPEG snapshot
+comes from, at the main stream resolution, with no JPEG encode/decode step. It
+rides the existing `snapshot.enabled` gate and the snapshot subsystem mutex, so
+`.jpg` and `.pgm` share one switch and never run concurrently. Star6E only;
+Maruko returns `501` via the weak backend default until ported.
+
+On Star6E the grayscale grab attaches a short-lived user-frame reader to VPE
+port0 (`MI_SYS_ChnOutputPortGetBuf`, mirroring the detector tap in
+`star6e_ipu_yolo.c`) and registers a user output depth only for the duration of
+one capture (mirroring the stab tap), leaving the running pipeline untouched
+between snapshots. Port0 is `I6_COMPR_NONE` YUV420SP, so its Y plane is a
+CPU-readable luma image. Capture failure is non-fatal — the endpoint serves an
+error and nothing else in the pipeline is affected.
+
+Ships the on-device consumer under `tools/qr/`: `qr_decode.c` (vendored quirc,
+ISC) decodes a QR code from a P5 PGM, and `qr_boot_action.sh` polls the
+endpoint for the first 15 s of runtime and, on a `cmd=pair;gs=…;psk=…` payload,
+applies a waybeam-link RF pairing key from a ground-station QR code. Trust is
+by proximity: whoever holds a QR in front of the camera during the boot window
+can pair. The link-apply step is a marked integration hook. Build with
+`make qr-decode`.
+
 ## [0.58.0] - 2026-07-26
 
 Maruko gains IPU object-detection parity with Star6E: a raw 800x448 NV12 tap

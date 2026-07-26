@@ -16,6 +16,7 @@
 #include "venc_jpeg.h"
 #include "star6e.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -211,6 +212,187 @@ int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
 
 stop:
 	(void)MI_VENC_StopRecvPic(g_chn);
+	return rc;
+}
+
+/* ── Grayscale (P5 PGM) capture ──────────────────────────────────────────
+ *
+ * The MJPEG path feeds NV12 frames straight into a hardware VENC channel, so
+ * the host never sees raw pixels.  To hand a consumer (e.g. a boot-time QR
+ * scan) plain grayscale, we attach our OWN user-frame reader to the same VPE
+ * output port the JPEG channel taps — port0 is I6_COMPR_NONE YUV420SP
+ * (star6e_pipeline.c), so its Y plane is a CPU-readable luma image at the
+ * main stream resolution.  Same source as the JPEG; second consumer.
+ *
+ * The MI_SYS buffer ABI and the GetBuf/PutBuf idiom mirror the proven
+ * detector tap in star6e_ipu_yolo.c; the port0 user-depth registration
+ * mirrors the stab tap in star6e_framing_stab.c.  A user output depth is
+ * registered only for the duration of one capture and released again, so the
+ * running pipeline is left exactly as it was between snapshots.  Every step
+ * is best-effort: any failure returns an error and the endpoint serves it —
+ * nothing else in the pipeline is touched. */
+
+typedef struct {
+	int eTileMode;
+	int ePixelFormat;
+	int eCompressMode;
+	int eFrameScanMode;
+	int eFieldType;
+	int ePhylayoutType;
+	MI_U16 u16Width;
+	MI_U16 u16Height;
+	void *pVirAddr[3];
+	MI_U64 phyAddr[3];
+	MI_U32 u32Stride[3];
+	MI_U32 u32BufSize;
+	MI_U16 u16RingBufStartLine;
+	MI_U16 u16RingBufRealTotalHeight;
+	struct {
+		int eType;
+		union { MI_U32 u32GlobalGradient; } uIspInfo;
+	} stFrameIspInfo;
+	MI_U8 reserved_rect[16];
+} GrayFrameData_t;
+
+typedef struct {
+	MI_U64 u64Pts;
+	MI_U64 u64SidebandMsg;
+	int eBufType;
+	MI_BOOL bEndOfStream;
+	MI_BOOL bUsrBuf;
+	MI_U32 u32SequenceNumber;
+	MI_BOOL bDrop;
+	union {
+		GrayFrameData_t stFrameData;
+		MI_U8 reserved_union[512];
+	};
+	MI_U8 u8CusFlag;
+} GrayBufInfo_t;
+
+#define GRAY_E_BUFDATA_FRAME 1
+#define GRAY_MAX_DIM         8192u   /* sanity clamp on frame geometry */
+
+typedef MI_S32 (*gray_get_buf_fn)(MI_SYS_ChnPort_t *port, GrayBufInfo_t *buf,
+	MI_S32 *handle);
+typedef MI_S32 (*gray_put_buf_fn)(MI_S32 handle);
+typedef MI_S32 (*gray_mmap_fn)(MI_U64 phy, MI_U32 size, void **vir, MI_U8 cache);
+typedef MI_S32 (*gray_munmap_fn)(void *vir, MI_U32 size);
+
+static gray_get_buf_fn g_gray_get_buf;
+static gray_put_buf_fn g_gray_put_buf;
+static gray_mmap_fn    g_gray_mmap;
+static gray_munmap_fn  g_gray_munmap;
+
+static int gray_load_syms(void)
+{
+	/* libmi_sys stays resident for the whole run; open once and cache. */
+	static void *sys_h;
+	if (g_gray_get_buf && g_gray_put_buf && g_gray_mmap)
+		return 0;
+	if (!sys_h) {
+		sys_h = dlopen("libmi_sys.so", RTLD_LAZY | RTLD_GLOBAL);
+		if (!sys_h)
+			return -1;
+	}
+	g_gray_get_buf = (gray_get_buf_fn)dlsym(sys_h,
+		"MI_SYS_ChnOutputPortGetBuf");
+	g_gray_put_buf = (gray_put_buf_fn)dlsym(sys_h,
+		"MI_SYS_ChnOutputPortPutBuf");
+	g_gray_mmap = (gray_mmap_fn)dlsym(sys_h, "MI_SYS_Mmap");
+	g_gray_munmap = (gray_munmap_fn)dlsym(sys_h, "MI_SYS_Munmap");
+	if (!g_gray_get_buf || !g_gray_put_buf || !g_gray_mmap)
+		return -1;
+	return 0;
+}
+
+/* Pack the Y plane of one NV12 frame into a freshly malloc'd P5 PGM blob
+ * (header + tightly-packed rows, stride removed).  Returns 0 on success. */
+static int gray_frame_to_pgm(const GrayFrameData_t *fr, uint8_t **out_buf,
+	size_t *out_len)
+{
+	uint32_t w = fr->u16Width, h = fr->u16Height;
+	uint32_t stride = fr->u32Stride[0] ? fr->u32Stride[0] : w;
+	MI_U64 phy = fr->phyAddr[0];
+	void *vir = NULL;
+
+	if (w == 0 || h == 0 || w > GRAY_MAX_DIM || h > GRAY_MAX_DIM || !phy)
+		return -EIO;
+
+	/* Map the Y plane non-cached (flag 0) so reads see the latest DMA
+	 * without a cache invalidate; the source stays untouched. */
+	if (g_gray_mmap(phy, stride * h, &vir, 0) != 0 || !vir)
+		return -EIO;
+
+	char hdr[32];
+	int hlen = snprintf(hdr, sizeof(hdr), "P5\n%u %u\n255\n", w, h);
+	size_t total = (size_t)hlen + (size_t)w * h;
+	uint8_t *out = malloc(total);
+	if (!out) {
+		g_gray_munmap(vir, stride * h);
+		return -ENOMEM;
+	}
+
+	memcpy(out, hdr, (size_t)hlen);
+	const uint8_t *src = (const uint8_t *)vir;
+	uint8_t *dst = out + hlen;
+	for (uint32_t row = 0; row < h; ++row)
+		memcpy(dst + (size_t)row * w, src + (size_t)row * stride, w);
+
+	g_gray_munmap(vir, stride * h);
+
+	*out_buf = out;
+	*out_len = total;
+	return 0;
+}
+
+int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
+	uint32_t timeout_ms)
+{
+	if (!out_buf || !out_len)
+		return -EINVAL;
+	*out_buf = NULL;
+	*out_len = 0;
+	if (!g_have_vpe_port)
+		return -ENODEV;
+	if (gray_load_syms() != 0)
+		return -EIO;
+	if (timeout_ms == 0)
+		timeout_ms = 1500;
+
+	/* Register a shallow user-frame queue on the (already bound) VPE port so
+	 * GetBuf sees frames; without it an unregistered user consumer reads 0. */
+	if (MI_SYS_SetChnOutputPortDepth(&g_vpe_port, 2, 4) != 0) {
+		fprintf(stderr, "[jpeg-star6e] gray: SetChnOutputPortDepth failed\n");
+		return -EIO;
+	}
+
+	int rc = -ETIMEDOUT;
+	int64_t deadline = now_ms() + (int64_t)timeout_ms;
+	for (;;) {
+		GrayBufInfo_t buf;
+		MI_S32 handle = 0;
+
+		memset(&buf, 0, sizeof(buf));
+		if (g_gray_get_buf(&g_vpe_port, &buf, &handle) != 0) {
+			if (now_ms() >= deadline)
+				break;
+			usleep(2000);
+			continue;
+		}
+		if (buf.eBufType != GRAY_E_BUFDATA_FRAME ||
+		    !buf.stFrameData.phyAddr[0]) {
+			g_gray_put_buf(handle);
+			if (now_ms() >= deadline)
+				break;
+			usleep(2000);
+			continue;
+		}
+		rc = gray_frame_to_pgm(&buf.stFrameData, out_buf, out_len);
+		g_gray_put_buf(handle);
+		break;
+	}
+
+	(void)MI_SYS_SetChnOutputPortDepth(&g_vpe_port, 0, 0);
 	return rc;
 }
 

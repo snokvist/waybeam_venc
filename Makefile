@@ -222,6 +222,21 @@ $(IPU_PROBE_TARGET): $(IPU_PROBE_SRC) include/star6e_ipu.h include/detect_dequan
 	@mkdir -p $(@D)
 	$(CC) -Os -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Iinclude $(IPU_PROBE_SRC) -ldl -o $@
 
+# qr_decode — decode a QR code from a P5 PGM grayscale image.  Pairs with the
+# GET /api/v1/snapshot.pgm endpoint for on-device boot-time QR scanning (e.g.
+# waybeam-link pairing via tools/qr/qr_boot_action.sh).  quirc (ISC) is
+# vendored under tools/qr/quirc/.  Cross-compiled for the target.
+QR_DECODE_TARGET := $(OUT_DIR)/qr_decode
+QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/quirc/quirc.c \
+                    tools/qr/quirc/decode.c tools/qr/quirc/identify.c \
+                    tools/qr/quirc/version_db.c
+qr-decode: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
+qr-decode: $(QR_DECODE_TARGET)
+
+$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+	@mkdir -p $(@D)
+	$(CC) -Os -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc $(QR_DECODE_SRC) -lm -o $@
+
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
 	@if [ -n "$(DRV)" ]; then cp -f $(DRV)/*.so $(OUT_DIR)/lib/; fi

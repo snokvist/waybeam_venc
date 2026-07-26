@@ -82,6 +82,24 @@ int venc_jpeg_capture(uint8_t **out_buf, size_t *out_len,
 	return rc;
 }
 
+int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
+	uint32_t timeout_ms)
+{
+	if (!out_buf || !out_len)
+		return -EINVAL;
+	*out_buf = NULL;
+	*out_len = 0;
+
+	pthread_mutex_lock(&g_jpeg_mutex);
+	if (!g_initialized || !g_cfg.enabled) {
+		pthread_mutex_unlock(&g_jpeg_mutex);
+		return -ENODEV;
+	}
+	int rc = venc_jpeg_backend_capture_gray(out_buf, out_len, timeout_ms);
+	pthread_mutex_unlock(&g_jpeg_mutex);
+	return rc;
+}
+
 void venc_jpeg_free(uint8_t *buf)
 {
 	free(buf);
@@ -131,6 +149,38 @@ int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx)
 	return sent;
 }
 
+int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+
+	uint8_t *buf = NULL;
+	size_t   len = 0;
+	int rc = venc_jpeg_capture_gray(&buf, &len, 1500);
+	if (rc == -ENODEV) {
+		return httpd_send_error(client_fd, 503, "snapshot_disabled",
+			"snapshot endpoint not available (subsystem disabled or "
+			"pipeline not running)");
+	}
+	if (rc == -ENOSYS) {
+		return httpd_send_error(client_fd, 501, "snapshot_gray_unsupported",
+			"grayscale snapshot not implemented on this backend");
+	}
+	if (rc == -ETIMEDOUT) {
+		return httpd_send_error(client_fd, 504, "snapshot_timeout",
+			"timed out waiting for a frame from the VPE port");
+	}
+	if (rc != 0 || !buf || len == 0) {
+		venc_jpeg_free(buf);
+		return httpd_send_error(client_fd, 500, "snapshot_failed",
+			"backend grayscale capture failed");
+	}
+
+	int sent = httpd_send_binary(client_fd, 200, "image/x-portable-graymap",
+		buf, (int)len);
+	venc_jpeg_free(buf);
+	return sent;
+}
+
 /* Default fallback for builds that don't link a backend (e.g. host-native
  * test runner).  Per-backend files override these with strong symbols.  */
 __attribute__((weak)) void venc_jpeg_set_source(const void *vpe_port_opaque)
@@ -145,6 +195,13 @@ __attribute__((weak)) int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 }
 
 __attribute__((weak)) int venc_jpeg_backend_capture(uint8_t **out_buf,
+	size_t *out_len, uint32_t timeout_ms)
+{
+	(void)out_buf; (void)out_len; (void)timeout_ms;
+	return -ENOSYS;
+}
+
+__attribute__((weak)) int venc_jpeg_backend_capture_gray(uint8_t **out_buf,
 	size_t *out_len, uint32_t timeout_ms)
 {
 	(void)out_buf; (void)out_len; (void)timeout_ms;

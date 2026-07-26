@@ -838,6 +838,34 @@ Response `200`:
 {"ok":true,"data":{"imported":true}}
 ```
 
+### `GET /api/v1/snapshot.jpg`
+
+Capture one JPEG frame from the snapshot subsystem and return it as
+`image/jpeg`.  Gated by `snapshot.enabled`; returns `503`
+(`snapshot_disabled`) when the subsystem is off or the pipeline is not
+running, `504` (`snapshot_timeout`) if no frame arrives, `500`
+(`snapshot_failed`) on backend error.  Not a JSON endpoint on success.
+
+### `GET /api/v1/snapshot.pgm`
+
+Capture one **grayscale** frame and return it as a binary P5 PGM
+(`image/x-portable-graymap`): the luma (Y) plane of the same
+uncompressed NV12 source the JPEG snapshot is derived from, at the main
+stream resolution, with no JPEG encode/decode step.
+
+Intended for on-device consumers that want raw grayscale — e.g. a
+boot-time QR scan (`tools/qr/qr_decode.c` + `tools/qr/qr_boot_action.sh`)
+that pairs the RF link from a ground-station QR code.
+
+Shares the `snapshot.enabled` gate and the subsystem mutex with
+`snapshot.jpg` (the two never run concurrently).  Errors mirror
+`snapshot.jpg`, plus `501` (`snapshot_gray_unsupported`) on backends that
+do not implement grayscale capture (currently Maruko).  Star6E only.
+
+```bash
+curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode
+```
+
 ### `GET /` (Web Dashboard)
 
 Serves a self-contained HTML dashboard (gzip-compressed, ~14KB). The dashboard
