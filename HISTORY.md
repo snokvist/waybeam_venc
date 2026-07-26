@@ -40,6 +40,22 @@ what the existing `MI_ISP_AWB_SetCTMwbAttr` path applies through, and stands the
 loop down. `awbFps=0`, a failed loop start, or manual mode all leave AWB exactly
 where it is today.
 
+`isp.awbFps` applies **live** — retuning the rate, stopping the loop and
+restarting it all happen without a restart, because the rate is a plain store
+the loop thread reads on its next wake and ownership of the AWB module can be
+moved at any time. Crossing 0 in either direction moves that ownership: 0 hands
+AWB back to the ISP before standing the thread down, and a non-zero rate starts
+the loop and takes ownership only if the mode is `auto`. Range is clamped to
+[0, 30] — the loop sleeps `1000/hz` integer milliseconds, so a large enough rate
+would round to a zero sleep and spin a core. Backends without the loop (Maruko,
+whose AWB is driven by the SDK's own 3A) answer `501` rather than accept the
+write and silently do nothing with it.
+
+Related fix in the same area: `isp.awbMode=auto` handed AWB to the userspace
+loop unconditionally, including when `awbFps=0` meant no loop was running. That
+left the module owned by an algorithm that does not exist — strictly worse than
+the non-converging internal one it replaced. Ownership now follows the loop.
+
 The debug OSD `awb` row now reads the applied gains from the loop rather than
 `MI_ISP_AWB_QueryInfo` — that reports the ISP-internal algorithm's last state,
 which is frozen precisely because it is no longer running. In userspace mode the

@@ -42,6 +42,8 @@ typedef struct {
 	int apply_qp_delta_calls;
 	int apply_verbose_calls;
 	int apply_awb_mode_calls;
+	int apply_awb_rate_calls;
+	uint32_t last_awb_rate;
 	int apply_server_calls;
 	int apply_max_payload_calls;
 	int apply_zoom_calls;
@@ -296,6 +298,13 @@ static int test_apply_awb_mode(int mode, uint32_t ct)
 	g_api_cb_state.apply_awb_mode_calls++;
 	g_api_cb_state.last_awb_mode = mode;
 	g_api_cb_state.last_awb_ct = ct;
+	return 0;
+}
+
+static int test_apply_awb_rate(uint32_t hz)
+{
+	g_api_cb_state.apply_awb_rate_calls++;
+	g_api_cb_state.last_awb_rate = hz;
 	return 0;
 }
 
@@ -610,6 +619,69 @@ static int test_multi_set_awb_grouped_apply(void)
 	CHECK("multi awb mode value", g_api_cb_state.last_awb_mode == 1);
 	CHECK("multi awb ct value", g_api_cb_state.last_awb_ct == 6000);
 	CHECK("multi awb response alias", strstr(response, "isp.awbMode") != NULL);
+
+	return failures;
+}
+
+static int test_awb_rate_live_apply(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_awb_mode = test_apply_awb_mode;
+	cb.apply_awb_rate = test_apply_awb_rate;
+
+	/* Rate alone applies live and must NOT re-drive the AWB mode. */
+	CHECK("awbFps live ok",
+		apply_set_query_http(&cfg, "star6e", &cb, "isp.awbFps=10",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps live status 200", status == 200);
+	CHECK("awbFps live cfg", cfg.isp.awb_fps == 10);
+	CHECK("awbFps live rate call", g_api_cb_state.apply_awb_rate_calls == 1);
+	CHECK("awbFps live rate value", g_api_cb_state.last_awb_rate == 10);
+	CHECK("awbFps live no mode call",
+		g_api_cb_state.apply_awb_mode_calls == 0);
+	CHECK("awbFps live not restart",
+		strstr(response, "\"reinit_pending\":true") == NULL);
+
+	/* Batched with the mode: one call each, rate before mode so the mode
+	 * apply sees the committed rate when it decides AWB ownership. */
+	reset_api_cb_state();
+	CHECK("awbFps batch ok",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"isp.awbFps=0&isp.awbMode=auto",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps batch status 200", status == 200);
+	CHECK("awbFps batch cfg", cfg.isp.awb_fps == 0);
+	CHECK("awbFps batch rate call", g_api_cb_state.apply_awb_rate_calls == 1);
+	CHECK("awbFps batch rate value", g_api_cb_state.last_awb_rate == 0);
+	CHECK("awbFps batch mode call", g_api_cb_state.apply_awb_mode_calls == 1);
+
+	/* Out of range is rejected: 1000/hz is integer ms, so a large rate
+	 * would round the loop's sleep to zero and spin a core. */
+	reset_api_cb_state();
+	CHECK("awbFps range rejected",
+		apply_set_query_http(&cfg, "star6e", &cb, "isp.awbFps=5000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps range status 409", status == 409);
+	CHECK("awbFps range no apply",
+		g_api_cb_state.apply_awb_rate_calls == 0);
+
+	/* A backend without the loop reports it unsupported rather than
+	 * accepting the write and silently doing nothing. */
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_awb_mode = test_apply_awb_mode;
+	CHECK("awbFps unsupported ok",
+		apply_set_query_http(&cfg, "maruko", &cb, "isp.awbFps=10",
+			&status, response, sizeof(response)) == 0);
+	CHECK("awbFps unsupported status 501", status == 501);
 
 	return failures;
 }
@@ -1430,6 +1502,7 @@ int test_venc_api(void)
 	failures += test_detect_net_width_restart();
 	failures += test_detect_field_validation();
 	failures += test_multi_set_awb_grouped_apply();
+	failures += test_awb_rate_live_apply();
 	failures += test_multi_set_video_timing_grouped_apply();
 	failures += test_multi_set_rejects_restart_fields();
 	failures += test_multi_set_rejects_duplicate_fields();

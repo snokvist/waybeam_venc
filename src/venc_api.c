@@ -373,9 +373,9 @@ static const FieldUi ui_awb_fps = {
 	"Rate of the userspace auto-white-balance loop. The ISP-internal AWB does "
 	"not converge on this platform, so AWB is driven from userspace instead. "
 	"Deliberately decoupled from frame rate — the same cost at 120fps as at "
-	"60fps. Default 15. 0 disables the loop and leaves AWB wherever the ISP "
-	"last put it. "
-	"Ignored while awbMode=ct_manual. Requires restart."
+	"60fps. Default 15. 0 stops the loop and hands AWB back to the ISP, "
+	"which leaves it wherever it last was. "
+	"Ignored while awbMode=ct_manual. Star6E only; applies live."
 };
 static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
@@ -488,7 +488,7 @@ static const FieldDesc g_fields[] = {
 
 	FIELD(isp, ae_engine,         FT_STRING, MUT_RESTART),
 	FIELD(isp, ae_fps,            FT_UINT,   MUT_RESTART),
-	FIELD_UI(isp, awb_fps,        FT_UINT,   MUT_RESTART, &ui_awb_fps),
+	FIELD_UI(isp, awb_fps,        FT_UINT,   MUT_LIVE,    &ui_awb_fps),
 	FIELD(isp, keep_aspect,       FT_BOOL,   MUT_RESTART),
 	FIELD(isp, shutter_rule_180,  FT_BOOL,   MUT_RESTART),
 
@@ -963,6 +963,15 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (!framing_stab_accuracy_valid(cfg->video0.stab_accuracy))
 			return "stab_accuracy must be one of: auto, high, medium, low";
 	}
+	if (strcmp(key, "isp.awb_fps") == 0) {
+		/* Ceiling, not a tuning limit: the loop derives its sleep as
+		 * 1000/hz in integer ms, so anything above 1000 Hz would round
+		 * to a zero sleep and spin a core. 30 is already far past the
+		 * point where AWB tracking improves. */
+		if (cfg->isp.awb_fps > 30)
+			return "awb_fps must be in range [0, 30] "
+				"(0 = stop the userspace AWB loop)";
+	}
 	if (strcmp(key, "fpv.roi_qp") == 0) {
 		if (cfg->fpv.roi_qp < -30 || cfg->fpv.roi_qp > 30)
 			return "roi_qp must be in range [-30, 30]";
@@ -1218,6 +1227,7 @@ typedef struct {
 	int video_gop;
 	int awb_mode;
 	int awb_ct;
+	int awb_fps;
 	int outgoing_enabled;
 	int outgoing_server;
 	int isp_sensor_bin;
@@ -1365,7 +1375,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "isp.shutter_min_us") == 0)
 		return LIVE_GROUP_SHUTTER_MIN;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
-	    strcmp(canonical_key, "isp.awb_ct") == 0)
+	    strcmp(canonical_key, "isp.awb_ct") == 0 ||
+	    strcmp(canonical_key, "isp.awb_fps") == 0)
 		return LIVE_GROUP_AWB;
 	if (strcmp(canonical_key, "system.verbose") == 0)
 		return LIVE_GROUP_VERBOSE;
@@ -1458,6 +1469,8 @@ static void note_live_group_touch(LiveBatchTouched *touched,
 		touched->awb_mode = 1;
 	else if (strcmp(canonical_key, "isp.awb_ct") == 0)
 		touched->awb_ct = 1;
+	else if (strcmp(canonical_key, "isp.awb_fps") == 0)
+		touched->awb_fps = 1;
 	else if (strcmp(canonical_key, "outgoing.enabled") == 0)
 		touched->outgoing_enabled = 1;
 	else if (strcmp(canonical_key, "outgoing.server") == 0)
@@ -1579,6 +1592,13 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min != NULL;
 	case LIVE_GROUP_AWB:
+		/* awbFps drives a backend-specific loop that only Star6E has;
+		 * report it unsupported rather than accept the write and do
+		 * nothing with it. */
+		if (touched && touched->awb_fps && !g_cb->apply_awb_rate)
+			return 0;
+		if (touched && !touched->awb_mode && !touched->awb_ct)
+			return 1;
 		return g_cb->apply_awb_mode != NULL;
 	case LIVE_GROUP_VERBOSE:
 		return g_cb->apply_verbose != NULL;
@@ -1654,6 +1674,8 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		}
 		if (touched && touched->awb_ct)
 			dst->isp.awb_ct = src->isp.awb_ct;
+		if (touched && touched->awb_fps)
+			dst->isp.awb_fps = src->isp.awb_fps;
 		break;
 	case LIVE_GROUP_VERBOSE:
 		dst->system.verbose = src->system.verbose;
@@ -1788,6 +1810,15 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min(cfg->isp.shutter_min_us);
 	case LIVE_GROUP_AWB:
+		/* Rate first: it starts/stops the userspace loop, and the mode
+		 * apply below decides ownership from the committed awbFps. */
+		if (touched && touched->awb_fps) {
+			rc = g_cb->apply_awb_rate(cfg->isp.awb_fps);
+			if (rc != 0)
+				return -1;
+			if (!touched->awb_mode && !touched->awb_ct)
+				return 0;
+		}
 		mode = strcmp(cfg->isp.awb_mode, "ct_manual") == 0 ? 1 : 0;
 		return g_cb->apply_awb_mode(mode, cfg->isp.awb_ct);
 	case LIVE_GROUP_VERBOSE:

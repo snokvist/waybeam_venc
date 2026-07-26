@@ -1154,12 +1154,23 @@ static int apply_awb_mode(int mode, uint32_t ct)
 						(unsigned)awb_ret);
 					ret = -1;
 				} else {
+					const VencConfig *vc =
+						g_star6e_control_ctx.vcfg;
+
 					printf("> AWB mode: auto\n");
 					/* Userspace loop owns AWB in auto —
 					 * the ISP-internal algorithm does not
-					 * converge on this platform. */
-					star6e_pipeline_set_awb_userspace(1);
-					star6e_awb_set_paused(0);
+					 * converge on this platform.  Only hand
+					 * it over when that loop is actually
+					 * running: with awbFps=0 nothing would
+					 * drive AWB at all, which is worse than
+					 * the non-converging internal one. */
+					if (vc && vc->isp.awb_fps > 0) {
+						star6e_pipeline_set_awb_userspace(1);
+						star6e_awb_set_paused(0);
+					} else {
+						star6e_pipeline_set_awb_userspace(0);
+					}
 				}
 			} else {
 				ret = -1;
@@ -1205,6 +1216,31 @@ static int apply_awb_mode(int mode, uint32_t ct)
 
 	dlclose(handle);
 	return ret;
+}
+
+/* Live rate change for the userspace AWB loop.  Retuning the rate is just a
+ * volatile store the loop thread picks up on its next wake, but crossing 0 in
+ * either direction also moves ownership of the AWB module, so it has to
+ * follow the same rule the pipeline uses at startup: hand AWB to userspace
+ * only while this loop is running AND the operator asked for auto. */
+static int apply_awb_rate(uint32_t hz)
+{
+	const VencConfig *vc = g_star6e_control_ctx.vcfg;
+	int manual = vc && strcmp(vc->isp.awb_mode, "auto") != 0;
+
+	if (hz == 0) {
+		star6e_pipeline_set_awb_userspace(0);
+		star6e_awb_stop();
+		printf("> AWB: userspace loop stopped (awbFps=0)\n");
+		return 0;
+	}
+
+	/* Already running: this is a no-op start that just retunes the rate. */
+	if (star6e_awb_start(hz) != 0)
+		return -1;
+	star6e_awb_set_paused(manual);
+	star6e_pipeline_set_awb_userspace(!manual);
+	return 0;
 }
 
 static int apply_output_enabled(bool on)
@@ -1609,6 +1645,7 @@ static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.query_awb_info = query_awb_info,
 	.query_isp_metrics = query_isp_metrics,
 	.apply_awb_mode = apply_awb_mode,
+	.apply_awb_rate = apply_awb_rate,
 	.query_iq_info = star6e_iq_query,
 	.apply_iq_param = star6e_iq_set,
 	.apply_max_payload_size = apply_max_payload_size,
