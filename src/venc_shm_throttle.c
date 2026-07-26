@@ -40,6 +40,7 @@ void venc_shm_throttle_reset(VencShmThrottle *t, uint64_t now_us)
 		return;
 	memset(t, 0, sizeof(*t));
 	t->permille = (uint16_t)VENC_SHM_THROTTLE_FULL_PERMILLE;
+	t->window_low_slots = VENC_SHM_THROTTLE_NO_SAMPLE;
 	t->window_start_us = now_us;
 	t->enabled = 1;
 }
@@ -53,9 +54,10 @@ void venc_shm_throttle_set_enabled(VencShmThrottle *t, int enabled,
 		return;
 
 	t->enabled = want;
-	t->window_high_slots = 0;
+	t->window_low_slots = VENC_SHM_THROTTLE_NO_SAMPLE;
 	t->window_start_us = now_us;
 	t->seeded = 0;
+	t->drop_charged = 0;
 
 	/* Both directions land on 1000: disabling must actively release the
 	 * clamp (otherwise the encoder stays pinned wherever the loop last
@@ -75,8 +77,8 @@ void venc_shm_throttle_observe(VencShmThrottle *t, uint32_t used_slots,
 	if (!t || !t->enabled)
 		return;
 
-	if (used_slots > t->window_high_slots)
-		t->window_high_slots = used_slots;
+	if (used_slots < t->window_low_slots)
+		t->window_low_slots = used_slots;
 
 	/* First observation only seeds the baseline — a producer that has
 	 * been dropping since before the throttle was enabled must not be
@@ -91,8 +93,16 @@ void venc_shm_throttle_observe(VencShmThrottle *t, uint32_t used_slots,
 		t->last_full_drops = full_drops;
 		/* A drop already happened: react now, do not wait for the
 		 * window to close.  Harder than the occupancy decrease
-		 * because occupancy is a prediction and this is proof. */
-		set_permille(t, (uint32_t)t->permille * 3u / 5u);
+		 * because occupancy is a prediction and this is proof.
+		 *
+		 * Once per window, though: a full ring increments full_drops
+		 * on every frame, and an uncapped charge would be 0.6^20 in
+		 * one window -- straight to the floor with no chance to
+		 * settle at an intermediate rate. */
+		if (!t->drop_charged) {
+			t->drop_charged = 1;
+			set_permille(t, (uint32_t)t->permille * 3u / 5u);
+		}
 	} else if (full_drops < t->last_full_drops) {
 		/* Counter went backwards — the ring was re-created under us.
 		 * Re-seed rather than treating the wrap as a huge drop burst. */
@@ -108,17 +118,23 @@ int venc_shm_throttle_tick(VencShmThrottle *t, uint64_t now_us)
 		return 0;
 
 	if (now_us - t->window_start_us >= VENC_SHM_THROTTLE_WINDOW_US) {
-		if (t->enabled) {
-			if (t->window_high_slots >=
+		/* NO_SAMPLE means no frame was written in this window at all
+		 * (encoder idle, output disabled).  No evidence either way,
+		 * so hold -- decreasing on a silent window would clamp an
+		 * idle encoder for no reason. */
+		if (t->enabled &&
+		    t->window_low_slots != VENC_SHM_THROTTLE_NO_SAMPLE) {
+			if (t->window_low_slots >=
 			    VENC_SHM_THROTTLE_ENGAGE_SLOTS)
 				set_permille(t,
 					(uint32_t)t->permille * 4u / 5u);
-			else if (t->window_high_slots <=
+			else if (t->window_low_slots <=
 			         VENC_SHM_THROTTLE_RECOVER_SLOTS)
 				set_permille(t, (uint32_t)t->permille +
 					VENC_SHM_THROTTLE_AI_STEP);
 		}
-		t->window_high_slots = 0;
+		t->window_low_slots = VENC_SHM_THROTTLE_NO_SAMPLE;
+		t->drop_charged = 0;
 		t->window_start_us = now_us;
 	}
 

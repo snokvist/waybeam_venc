@@ -28,13 +28,29 @@
  * That inner/outer separation is what keeps the two controllers from
  * coupling into oscillation.  Preserve it if you retune either side.
  *
- * Control law (AIMD, evaluated on each window's high-water mark):
- *   used_slots >= ENGAGE_SLOTS   -> permille = max(FLOOR, permille * 4/5)
- *   full_drops increased         -> permille = max(FLOOR, permille * 3/5)
- *                                   immediately, without waiting for the
- *                                   window to close (a drop is proof, not
- *                                   a prediction)
- *   used_slots <= RECOVER_SLOTS  -> permille = min(1000, permille + 50)
+ * Control law (AIMD, evaluated on each window's LOW-water mark):
+ *   low_water >= ENGAGE_SLOTS   -> permille = max(FLOOR, permille * 4/5)
+ *   full_drops increased        -> permille = max(FLOOR, permille * 3/5),
+ *                                  immediately, but at most ONCE per window
+ *   low_water <= RECOVER_SLOTS  -> permille = min(1000, permille + 50)
+ *
+ * Low-water, not high-water, and that distinction is the whole difference
+ * between this working and not.  Measured on a Star6E at 100 fps into an
+ * 8-slot ring with a perfectly healthy consumer, the ring routinely spikes
+ * to 2-3 slots inside a 200 ms window and drains again -- the consumer
+ * reads one frame per event-loop iteration, so short bursts are normal.
+ * High-water saw those bursts as congestion and clamped the encoder
+ * 15-25 % essentially at random, oscillating 740-1000 with nothing wrong.
+ * Low-water asks the question that actually matters: did the ring fail to
+ * drain *at any point* in the whole window?  If it touched bottom the
+ * consumer is keeping up and the spike was transient; if it never got
+ * below ENGAGE_SLOTS across 20 frame times, that is real standing backlog.
+ *
+ * The drop charge is capped at once per window for the same reason it has
+ * to exist at all: when the ring is full, full_drops increments on EVERY
+ * frame, so an uncapped per-frame x3/5 is 1000 * 0.6^20 within one window
+ * -- an instant slam to the floor on the first congested window, with no
+ * chance for the multiplicative decrease to find an intermediate rate.
  *
  * Multiplicative-decrease / additive-increase, so recovery is deliberately
  * slower than the retreat: 1000 -> floor takes 7 windows (~1.4 s), floor ->
@@ -69,14 +85,18 @@ extern "C" {
 #define VENC_SHM_THROTTLE_FULL_PERMILLE 1000u
 #define VENC_SHM_THROTTLE_AI_STEP         50u  /* additive increase */
 
+#define VENC_SHM_THROTTLE_NO_SAMPLE  0xFFFFFFFFu
+
 typedef struct {
 	uint16_t permille;          /* current clamp, FLOOR..1000 */
-	uint32_t window_high_slots; /* high-water used_slots this window */
+	uint32_t window_low_slots;  /* low-water used_slots this window,
+	                             * NO_SAMPLE until the first observation */
 	uint64_t window_start_us;
 	uint64_t last_full_drops;
 	uint8_t  seeded;            /* last_full_drops is meaningful */
 	uint8_t  enabled;
 	uint8_t  pending_change;     /* consumed by _tick */
+	uint8_t  drop_charged;       /* drop MD already applied this window */
 	uint8_t  at_floor;           /* edge state for _floor_edge */
 	uint8_t  floor_edge_pending; /* 1 = entered, 2 = left */
 } VencShmThrottle;

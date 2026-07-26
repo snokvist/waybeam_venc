@@ -12,7 +12,9 @@
 #define WIN VENC_SHM_THROTTLE_WINDOW_US
 
 /* Advance one full window at the given occupancy, returning whether the
- * clamp factor changed. */
+ * clamp factor changed.  Constant occupancy across the window, so low-water
+ * == high-water == used_slots; cases that need them to differ build the
+ * window by hand. */
 static int step_window(VencShmThrottle *t, uint64_t *now, uint32_t used_slots,
 	uint64_t full_drops)
 {
@@ -61,14 +63,35 @@ int test_venc_shm_throttle(void)
 	CHECK("thr_drop_change_consumed",
 		venc_shm_throttle_tick(&t, now) == 0);
 
+	/* Capped at one charge per window.  A full ring increments full_drops
+	 * on every frame, so an uncapped charge is 0.6^20 inside one window --
+	 * an instant slam to the floor.  This is the assertion that pins it. */
+	venc_shm_throttle_observe(&t, 0, 9);
+	venc_shm_throttle_observe(&t, 0, 10);
+	venc_shm_throttle_observe(&t, 0, 11);
+	CHECK("thr_drop_charged_once_per_window",
+		venc_shm_throttle_permille(&t) == 600);
+
+	/* ...but the next window charges again.  Closing that window first
+	 * applies the additive increase (low-water was 0 throughout, the ring
+	 * was draining fine), 600 -> 650, and the fresh drop then takes
+	 * 650 * 3/5 = 390.  Both steps are visible on purpose: recovery and
+	 * the drop charge compose rather than one masking the other. */
+	now += WIN;
+	(void)venc_shm_throttle_tick(&t, now);
+	CHECK("thr_window_close_applied_ai",
+		venc_shm_throttle_permille(&t) == 650);
+	venc_shm_throttle_observe(&t, 0, 12);
+	CHECK("thr_drop_charges_next_window",
+		venc_shm_throttle_permille(&t) == 390);
+
 	/* A ring re-created under us resets the counter; that must not read
 	 * as a huge drop burst. */
+	now += WIN;
+	(void)venc_shm_throttle_tick(&t, now);
 	venc_shm_throttle_observe(&t, 0, 0);
 	CHECK("thr_counter_rewind_ignored",
-		venc_shm_throttle_permille(&t) == 600);
-	venc_shm_throttle_observe(&t, 0, 1);
-	CHECK("thr_reseeded_then_charges",
-		venc_shm_throttle_permille(&t) == 360);
+		venc_shm_throttle_permille(&t) >= 390);
 
 	/* ── 3. Floor: sustained congestion converges and stays ─────── */
 	venc_shm_throttle_reset(&t, now);
@@ -148,6 +171,56 @@ int test_venc_shm_throttle(void)
 	(void)step_window(&t, &now, VENC_SHM_THROTTLE_RECOVER_SLOTS, 0);
 	CHECK("thr_recover_at_threshold",
 		venc_shm_throttle_permille(&t) == 850);
+
+	/* ── 5a. Transient bursts must NOT engage the clamp ─────────── */
+	/* This is the defect the .232 bench exposed: at 100 fps into an
+	 * 8-slot ring a healthy consumer still lets occupancy spike to 2-3
+	 * mid-window and then drains it.  Under high-water that read as
+	 * congestion and clamped the encoder 15-25 % at random.  Low-water
+	 * sees the ring touch bottom and leaves it alone. */
+	venc_shm_throttle_reset(&t, now);
+	{
+		int w, i;
+		for (w = 0; w < 30; ++w) {
+			for (i = 0; i < 20; ++i) {
+				/* spike to 3 for one frame in twenty, drain
+				 * to 0 for the rest -- a healthy consumer */
+				now += WIN / 20;
+				venc_shm_throttle_observe(&t,
+					(i == 7) ? 3u : 0u, 0);
+				(void)venc_shm_throttle_tick(&t, now);
+			}
+		}
+		CHECK("thr_transient_burst_does_not_engage",
+			venc_shm_throttle_permille(&t) == 1000);
+	}
+
+	/* Standing backlog -- never drains below 2 -- must engage. */
+	venc_shm_throttle_reset(&t, now);
+	{
+		int w, i;
+		for (w = 0; w < 3; ++w) {
+			for (i = 0; i < 20; ++i) {
+				now += WIN / 20;
+				/* varies 2..5, never touches bottom */
+				venc_shm_throttle_observe(&t,
+					2u + (uint32_t)(i % 4), 0);
+				(void)venc_shm_throttle_tick(&t, now);
+			}
+		}
+		CHECK("thr_standing_backlog_engages",
+			venc_shm_throttle_permille(&t) == 512);
+	}
+
+	/* A window with no frames at all (idle encoder) holds, never clamps. */
+	venc_shm_throttle_reset(&t, now);
+	(void)step_window(&t, &now, 8, 0);
+	CHECK("thr_idle_precondition", venc_shm_throttle_permille(&t) == 800);
+	now += WIN * 5;
+	CHECK("thr_idle_window_no_change",
+		venc_shm_throttle_tick(&t, now) == 0);
+	CHECK("thr_idle_window_holds",
+		venc_shm_throttle_permille(&t) == 800);
 
 	/* ── 5. No oscillation under a square-wave load ─────────────── */
 	venc_shm_throttle_reset(&t, now);

@@ -3956,7 +3956,9 @@ static void maruko_service_shm_throttle(MarukoOutput *output,
 			"— the consumer is not draining\n",
 			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10);
 	else if (edge < 0)
-		printf("> [maruko] shm throttle left the floor, recovering\n");
+		/* stderr for the same buffering reason as star6e_runtime. */
+		fprintf(stderr,
+			"> [maruko] shm throttle left the floor, recovering\n");
 }
 
 static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,

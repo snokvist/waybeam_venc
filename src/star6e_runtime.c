@@ -1098,12 +1098,18 @@ static void star6e_service_shm_throttle(Star6eOutput *output,
 	edge = venc_shm_throttle_floor_edge(&g_shm_throttle);
 	if (edge > 0)
 		fprintf(stderr,
-			"WARNING: shm throttle pinned at floor %u%%%% — the "
+			"WARNING: shm throttle pinned at floor %u%% — the "
 			"consumer is not draining %s\n",
 			VENC_SHM_THROTTLE_FLOOR_PERMILLE / 10,
 			output->frame_ring ? output->frame_ring->name : "");
 	else if (edge < 0)
-		printf("> shm throttle left the floor, recovering\n");
+		/* stderr, not stdout: stdout is fully buffered once the
+		 * daemon's output is redirected to a file, so the recovery
+		 * line sat unflushed while the entry warning (stderr) showed
+		 * up immediately -- the pair read as "pinned, never
+		 * recovered" on a box that had in fact recovered. */
+		fprintf(stderr,
+			"> shm throttle left the floor, recovering\n");
 }
 
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,

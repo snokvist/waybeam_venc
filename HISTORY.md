@@ -18,11 +18,26 @@ is *full* the latency budget is already gone, so the control variable is
 occupancy, not the drop counter.
 
 **What shipped** — `src/venc_shm_throttle.c`, a pure AIMD controller evaluated
-every 200 ms on the window's high-water occupancy:
+every 200 ms on the window's **low-water** occupancy:
 
-    used_slots >= 2      permille = max(250, permille * 4/5)
-    full_drops increased permille = max(250, permille * 3/5), immediately
-    used_slots <= 1      permille = min(1000, permille + 50)
+    low_water >= 2       permille = max(250, permille * 4/5)
+    full_drops increased permille = max(250, permille * 3/5), once per window
+    low_water <= 1       permille = min(1000, permille + 50)
+
+Low-water, not high-water, and the bench is what settled it. On `.232` at
+100 fps a *healthy* consumer still lets the ring spike to 2-3 slots inside a
+200 ms window and drains it again — it reads one frame per event-loop
+iteration, so short bursts are normal. High-water read those as congestion
+and clamped 15-25 % at random, oscillating 740-1000 with nothing wrong.
+Low-water asks whether the ring failed to drain *at any point* in the window;
+if it touched bottom, the consumer is keeping up. After the change, 30 s of
+healthy operation holds at exactly 1000 with zero drops.
+
+The drop charge is capped at once per window for a related reason: a full
+ring increments `full_drops` on *every* frame, so an uncapped per-frame x3/5
+is `0.6^20` inside one window — an instant slam to the floor on the first
+congested window, with no chance to settle at an intermediate rate. That is
+what the bench showed before the cap: 781 -> 250 in well under a second.
 
 Retreat to the floor takes ~1.4 s, recovery to unclamped ~3.0 s. The 250 floor
 means a wedged consumer cannot drive the encoder to nothing; entering and
@@ -75,6 +90,21 @@ flag condition had only ever covered `shm://` and the socket transports.
 Both backends, one control law — Star6E and Maruko are byte-symmetric here
 (same 8 x 384 KB ring), and a per-backend divergence in shared behaviour is a
 standing drift trap in this repo.
+
+**Measured on Star6E `.232`**, IMX335 100 fps, `frame-shm://venc_frame`
+consumed by `waybeam-link tx`, encoder asked for 60000 kbps on a link that
+cannot carry it, 40 s each:
+
+| | frames dropped | frames delivered | loss |
+|---|---|---|---|
+| 0.56.0 | 1949 | 2069 | **48.5 %** |
+| 0.57.0 | 110 | 3892 | **2.7 %** |
+
+Half the encoded stream was being discarded post-encode, every drop breaking
+the reference chain. Also device-confirmed: `video0.bitrate` reads 25000 (then
+60000) in `/api/v1/config` throughout, unchanged by the clamp; recovery from
+the floor is 250 -> 500 -> 750 -> 1000 in exactly 3 s with no overshoot, then
+pinned; and the floor warning fires exactly once on entry and once on exit.
 
 Not included: the bounded `outgoing.shm_block_us` net. It only engages after
 this clamp has already failed, and it blocks the encode thread — the
