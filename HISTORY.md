@@ -1,5 +1,86 @@
 # History
 
+## [0.57.0] - 2026-07-26
+
+`frame-shm://` egress no longer answers a full ring by throwing away an
+encoded frame. When the ring backs up, the encoder now lowers its own
+bitrate until the consumer keeps up.
+
+**The bug this closes.** `venc_frame_ring_begin_write()` returns -1 on a full
+ring and `star6e_output_send_frame_ring()` discards the whole frame. That drop
+lands *after* encode, so the H.265 reference chain breaks and the receiver
+decodes garbage until the next IDR or the end of the GDR cycle. Post-encode
+frame skipping is the same mistake v0.9.2 shipped and reverted; dropping
+frames was never backpressure, it was the damage.
+
+Ring geometry is 8 slots x 384 KB — 80 ms of queue at 100 fps. By the time it
+is *full* the latency budget is already gone, so the control variable is
+occupancy, not the drop counter.
+
+**What shipped** — `src/venc_shm_throttle.c`, a pure AIMD controller evaluated
+every 200 ms on the window's high-water occupancy:
+
+    used_slots >= 2      permille = max(250, permille * 4/5)
+    full_drops increased permille = max(250, permille * 3/5), immediately
+    used_slots <= 1      permille = min(1000, permille + 50)
+
+Retreat to the floor takes ~1.4 s, recovery to unclamped ~3.0 s. The 250 floor
+means a wedged consumer cannot drive the encoder to nothing; entering and
+leaving the floor is logged exactly once each, because a clamp silently pinned
+at its floor has spent all its authority and reads as "working" when it is not.
+
+**It is a clamp, never a veto.** The factor multiplies the bitrate programmed
+into the SDK and `video0.bitrate` is never written. That is what keeps an
+external rate controller's write-on-change cache coherent — every write still
+succeeds and lands in config — and keeps the WebUI slider, `mod_venc` and curl
+truthful. Returning an error from the setter was considered and rejected: a
+write-on-change controller treats non-2xx as a failure, never commits, and
+re-pushes the identical value forever.
+
+Steady-state rate stays owned by the external controller. The split is by
+timescale: this loop is ~200 ms, the link's actuators are 1.5-8 s. Keep that
+>=5x separation if you retune either side, or the two couple into oscillation.
+
+**The IDR trap.** `apply_bitrate()` forces an IDR so the decoder resyncs
+against the new RC state. The clamp re-programs as often as every 200 ms while
+the ring is backed up, and an IDR is the largest frame the encoder emits —
+IDR-ing through congestion would feed the queue being drained. The throttle
+path goes through `apply_bitrate_ex(kbps, want_idr=0)`; small between-IDR rate
+changes are absorbed by the rate controller, which the existing rate-limit
+gate already relies on.
+
+Pipeline-thread applies take `venc_api_cfg_trylock()` rather than blocking:
+a restart-class HTTP set holds that mutex across a full pipeline reinit, and
+stalling the encode loop behind it is worse than skipping one advisory update.
+A missed window is retried 200 ms later.
+
+**Config** — `outgoing.shmThrottle` (bool, live, **default on**). Everything
+else is compile-time, following `include/idr_rate_limit.h`; exposing water
+marks as config was tried in v0.9.2 and removed as more noise than useful.
+Default-on because a clamp that only ever reduces below what was already
+requested is hard to make worse than an uncorrected whole-frame drop, and the
+wfb rigs, bench harnesses and `radeon-vrx` / hub consumers have no rate
+controller at all.
+
+**Observability** — `throttlePermille` and `effectiveBitrateKbps` in
+`/api/v1/transport/status`; a `thrNN%` suffix on the debug-OSD `br` row when
+engaged (absent when unclamped, so the common case stays uncluttered); and
+`throttle_permille` in the sidecar TRANSPORT_INFO trailer, carved from the old
+`_pad[2]` so the trailer stays 16 bytes and every later trailer keeps its
+offset. A pre-0.57 producer sends 0 there, which consumers must read as "not
+reported", not "clamped to nothing". `_Static_assert`s now pin all three
+trailer sizes. frame-shm also emits a TRANSPORT_INFO trailer at all now — the
+flag condition had only ever covered `shm://` and the socket transports.
+
+Both backends, one control law — Star6E and Maruko are byte-symmetric here
+(same 8 x 384 KB ring), and a per-backend divergence in shared behaviour is a
+standing drift trap in this repo.
+
+Not included: the bounded `outgoing.shm_block_us` net. It only engages after
+this clamp has already failed, and it blocks the encode thread — the
+SigmaStar D-state / MI_SYS wedge path. It waits until the clamp has device
+numbers.
+
 ## [0.56.0] - 2026-07-25
 
 Star6E AWB actually adapts now. `isp.awbMode=auto` was not adaptive: AWB latched
