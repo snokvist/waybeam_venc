@@ -370,15 +370,19 @@ typedef struct {
  * collapsible section title the renderer buckets them under. */
 static const FieldUi ui_awb_fps = {
 	"ISP", "AWB rate (Hz)", "number", 0, 30, 1, NULL,
-	"Rate of the userspace auto-white-balance loop. The ISP-internal AWB does "
-	"not converge on this platform, so AWB is driven from userspace instead. "
+	/* Reads on BOTH backends — this text is served to Maruko too, where the
+	 * control is greyed out, so it must not assert the i6e-only behaviour as
+	 * if it were universal. */
+	"Rate of the Star6E userspace auto-white-balance loop. The i6e "
+	"ISP-internal AWB does not converge, so on that SoC AWB is driven from "
+	"userspace instead. "
 	"Deliberately decoupled from frame rate — the same cost at 120fps as at "
 	"60fps. Default 15. 0 stops the loop and hands AWB back to the ISP, "
 	"which leaves it wherever it last was. "
 	"Ignored while awbMode=ct_manual. Applied live. "
-	"Star6E only — Maruko/I6C has no such loop (its AWB is driven by the "
-	"SDK's own 3A through the CUS3A RunOnce pacer, which i6e does not "
-	"export), so there is no rate to set and the control is disabled."
+	"Not on Maruko/I6C, whose AWB is driven by the SDK's own 3A through the "
+	"CUS3A RunOnce pacer (which i6e does not export) — there is no rate to "
+	"set, so the control is disabled."
 };
 static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,

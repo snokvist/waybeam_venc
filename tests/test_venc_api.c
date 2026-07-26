@@ -1561,8 +1561,8 @@ static int test_capabilities_awb_fps_backend_gate(void)
 			strstr(p, "\"mutability\":\"live\"") != NULL &&
 			(!end || strstr(p, "\"mutability\":\"live\"") < end));
 		CHECK("cap maruko awb_fps tooltip explains",
-			strstr(p, "Star6E only") != NULL &&
-			(!end || strstr(p, "Star6E only") < end));
+			strstr(p, "no rate to set") != NULL &&
+			(!end || strstr(p, "no rate to set") < end));
 	}
 
 	/* Same build, Star6E backend: the control is live and adjustable. */
