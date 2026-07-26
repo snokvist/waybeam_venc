@@ -369,11 +369,12 @@ typedef struct {
  * validate_field(); 0 = "use preset default" where noted.  group = the
  * collapsible section title the renderer buckets them under. */
 static const FieldUi ui_awb_fps = {
-	"Image", "AWB rate (Hz)", "number", 0, 30, 1, NULL,
+	"ISP", "AWB rate (Hz)", "number", 0, 30, 1, NULL,
 	"Rate of the userspace auto-white-balance loop. The ISP-internal AWB does "
 	"not converge on this platform, so AWB is driven from userspace instead. "
-	"Deliberately decoupled from frame rate — 5 Hz costs the same at 120fps as "
-	"at 60fps. 0 disables the loop and leaves AWB wherever the ISP last put it. "
+	"Deliberately decoupled from frame rate — the same cost at 120fps as at "
+	"60fps. Default 15. 0 disables the loop and leaves AWB wherever the ISP "
+	"last put it. "
 	"Ignored while awbMode=ct_manual. Requires restart."
 };
 static const FieldUi ui_stab_crop_pct = {
@@ -426,14 +427,14 @@ static const FieldUi ui_pause_stab = {
  * "Frame size caps" group purely from capabilities — the caps were API-only
  * until now (no static SECTIONS rows). */
 static const FieldUi ui_max_i_bytes = {
-	"Frame size caps", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
 	"An IDR is requested after each apply. Applied live."
 };
 static const FieldUi ui_max_p_bytes = {
-	"Frame size caps", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
+	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
