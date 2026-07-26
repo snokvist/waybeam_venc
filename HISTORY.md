@@ -1,5 +1,28 @@
 # History
 
+## [0.58.0] - 2026-07-26
+
+Maruko gains IPU object-detection parity with Star6E: a raw 800x448 NV12 tap
+on SCL port 3 feeds the shared ABI-3 plugin, publishes the unchanged DETECT
+sidecar trailer, draws optional debug-OSD boxes, and supports pipeline-thread
+enable/disable and model reload without restarting video. Teardown follows the
+i6c drain-while-disable rule so an IPU reader cannot pin ISP-to-SCL shutdown.
+
+The I6C model is platform-specific; an I6E `.img` is rejected. On the
+SSC378QE bench, `inferInterval=1` held the SCL buffer through every IPU invoke
+and reduced video from 59.7 to 38.0 fps while producing only 6.9 inferences/s.
+At the new Maruko default `inferInterval=2`, the alternate-frame drain breaks
+that backpressure loop: video stays at 59.7 fps and detection reaches 8.5-10.1
+Hz. The final 15-second sample measured 9.46 Hz with 51 ms median / 94 ms p95
+snapshot age and no new VENC ring-drop lines. Star6E's existing 800x448 bench
+is 9-10 Hz, 52/96 ms age, and 90 FRAME/s. Detector throughput and freshness
+are therefore at parity; encode rate remains the configured sensor/backend
+difference.
+
+Small-flash Maruko deployments can keep the model as an xz archive under
+`/root/models`; `S95waybeam` stages the exact configured `/tmp/*.img` before
+startup. Contract 0.15.0 records Maruko support for the existing detect fields.
+
 ## [0.57.0] - 2026-07-26
 
 `frame-shm://` egress no longer answers a full ring by throwing away an
