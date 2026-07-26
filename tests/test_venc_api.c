@@ -1500,6 +1500,108 @@ static int test_capabilities_emits_ui(void)
 	return failures;
 }
 
+/* The dashboard greys a control off `supported:false` in /api/v1/capabilities,
+ * so assert the JSON the browser actually consumes — not just the predicate
+ * behind it.  isp.awb_fps paces a loop only Star6E has; on Maruko the entry
+ * must still be present (schema is shared) but marked unsupported, with the
+ * tooltip explaining why. */
+static int test_capabilities_awb_fps_backend_gate(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0, fd;
+	char response[65536];
+	static const char *const req =
+		"GET /api/v1/capabilities HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+	size_t sent = 0, req_len = strlen(req);
+	const char *p, *end;
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+
+	if (venc_api_register(&cfg, "maruko", &cb) != 0) {
+		CHECK("cap maruko register", 0);
+		return failures;
+	}
+	if (ensure_api_test_server() != 0) {
+		CHECK("cap maruko server", 0);
+		return failures;
+	}
+	fd = connect_api_test_socket();
+	CHECK("cap maruko connect", fd >= 0);
+	if (fd < 0)
+		return failures;
+	while (sent < req_len) {
+		ssize_t n = write(fd, req + sent, req_len - sent);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			close(fd);
+			CHECK("cap maruko write", 0);
+			return failures;
+		}
+		sent += (size_t)n;
+	}
+	shutdown(fd, SHUT_WR);
+	CHECK("cap maruko read",
+		read_http_response(fd, &status, response, sizeof(response)) == 0);
+	close(fd);
+	CHECK("cap maruko status", status == 200);
+
+	p = strstr(response, "\"isp.awb_fps\"");
+	CHECK("cap maruko has awb_fps", p != NULL);
+	if (p) {
+		/* Confine to this field's entry so a neighbour can't satisfy it. */
+		end = strstr(p, "\"isp.keep_aspect\"");
+		CHECK("cap maruko awb_fps unsupported",
+			strstr(p, "\"supported\":false") != NULL &&
+			(!end || strstr(p, "\"supported\":false") < end));
+		CHECK("cap maruko awb_fps still live",
+			strstr(p, "\"mutability\":\"live\"") != NULL &&
+			(!end || strstr(p, "\"mutability\":\"live\"") < end));
+		CHECK("cap maruko awb_fps tooltip explains",
+			strstr(p, "Star6E only") != NULL &&
+			(!end || strstr(p, "Star6E only") < end));
+	}
+
+	/* Same build, Star6E backend: the control is live and adjustable. */
+	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+		CHECK("cap star6e re-register", 0);
+		return failures;
+	}
+	fd = connect_api_test_socket();
+	CHECK("cap star6e connect", fd >= 0);
+	if (fd < 0)
+		return failures;
+	sent = 0;
+	while (sent < req_len) {
+		ssize_t n = write(fd, req + sent, req_len - sent);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			close(fd);
+			CHECK("cap star6e write", 0);
+			return failures;
+		}
+		sent += (size_t)n;
+	}
+	shutdown(fd, SHUT_WR);
+	CHECK("cap star6e read",
+		read_http_response(fd, &status, response, sizeof(response)) == 0);
+	close(fd);
+	p = strstr(response, "\"isp.awb_fps\"");
+	CHECK("cap star6e has awb_fps", p != NULL);
+	if (p) {
+		end = strstr(p, "\"isp.keep_aspect\"");
+		CHECK("cap star6e awb_fps supported",
+			strstr(p, "\"supported\":true") != NULL &&
+			(!end || strstr(p, "\"supported\":true") < end));
+	}
+
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -1537,6 +1639,7 @@ int test_venc_api(void)
 	failures += test_multi_set_url_decodes_values();
 	failures += test_set_rejects_malformed_percent_escape();
 	failures += test_capabilities_emits_ui();
+	failures += test_capabilities_awb_fps_backend_gate();
 	stop_api_test_server();
 	return failures;
 }
