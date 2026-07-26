@@ -451,6 +451,16 @@ static int test_field_support_by_backend(void)
 	CHECK("regular field supported maruko",
 		venc_api_field_supported_for_backend("maruko",
 			"video0.bitrate") == 1);
+	/* The userspace AWB loop is Star6E-only; Maruko greys the control. */
+	CHECK("awb_fps supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"isp.awb_fps") == 1);
+	CHECK("awb_fps unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.awb_fps") == 0);
+	CHECK("awb_fps alias unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"isp.awbFps") == 0);
 
 	return failures;
 }
@@ -673,8 +683,9 @@ static int test_awb_rate_live_apply(void)
 	CHECK("awbFps range no apply",
 		g_api_cb_state.apply_awb_rate_calls == 0);
 
-	/* A backend without the loop reports it unsupported rather than
-	 * accepting the write and silently doing nothing. */
+	/* A backend without the loop advertises the field unsupported, so the
+	 * write is rejected up front rather than accepted and silently
+	 * dropped.  The WebUI greys the control off the same signal. */
 	reset_api_cb_state();
 	memset(&cb, 0, sizeof(cb));
 	cb.apply_awb_mode = test_apply_awb_mode;
@@ -682,6 +693,8 @@ static int test_awb_rate_live_apply(void)
 		apply_set_query_http(&cfg, "maruko", &cb, "isp.awbFps=10",
 			&status, response, sizeof(response)) == 0);
 	CHECK("awbFps unsupported status 501", status == 501);
+	CHECK("awbFps unsupported message",
+		strstr(response, "not supported on this backend") != NULL);
 
 	return failures;
 }

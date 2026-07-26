@@ -375,7 +375,10 @@ static const FieldUi ui_awb_fps = {
 	"Deliberately decoupled from frame rate — the same cost at 120fps as at "
 	"60fps. Default 15. 0 stops the loop and hands AWB back to the ISP, "
 	"which leaves it wherever it last was. "
-	"Ignored while awbMode=ct_manual. Star6E only; applies live."
+	"Ignored while awbMode=ct_manual. Applied live. "
+	"Star6E only — Maruko/I6C has no such loop (its AWB is driven by the "
+	"SDK's own 3A through the CUS3A RunOnce pacer, which i6e does not "
+	"export), so there is no rate to set and the control is disabled."
 };
 static const FieldUi ui_stab_crop_pct = {
 	"Stabilization", "Stab crop %", "number", 60, 100, 1, NULL,
@@ -710,6 +713,17 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	 * re-enable it without a config migration. */
 	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
 	    strcmp(canonical_key, "isp.keep_aspect") == 0)
+		return 0;
+
+	/* isp.awb_fps paces the Star6E userspace AWB loop (src/star6e_awb.c),
+	 * which exists because the i6e ISP-internal AWB does not converge.
+	 * Maruko has no such loop — its AWB is driven by the SDK's own 3A via
+	 * the CUS3A RunOnce pacer, which i6e does not export — so there is no
+	 * rate to set.  Advertise it unsupported: the WebUI greys the control
+	 * and the set-path rejects writes, rather than accepting a value that
+	 * would silently do nothing. */
+	if (backend_name && strcmp(backend_name, "maruko") == 0 &&
+	    strcmp(canonical_key, "isp.awb_fps") == 0)
 		return 0;
 
 	/* Image stabilization (video0.framing=stab + the stab_* / pause_stab tuning
@@ -1592,9 +1606,12 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min != NULL;
 	case LIVE_GROUP_AWB:
-		/* awbFps drives a backend-specific loop that only Star6E has;
-		 * report it unsupported rather than accept the write and do
-		 * nothing with it. */
+		/* Backstop, not the primary gate: awbFps is advertised
+		 * unsupported on backends without the loop (see
+		 * venc_api_field_supported_for_backend), so a write is normally
+		 * rejected before it reaches here.  This keeps the apply below
+		 * from calling through a NULL pointer if a future backend is
+		 * added without its gate entry. */
 		if (touched && touched->awb_fps && !g_cb->apply_awb_rate)
 			return 0;
 		if (touched && !touched->awb_mode && !touched->awb_ct)
