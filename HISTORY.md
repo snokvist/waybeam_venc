@@ -43,7 +43,10 @@ ISC) decodes a QR code from a P5 PGM, and `qr_boot_action.sh` polls the
 endpoint for the first 15 s of runtime and, on a `cmd=pair;gs=…;psk=…` payload,
 applies a waybeam-link RF pairing key from a ground-station QR code. Trust is
 by proximity: whoever holds a QR in front of the camera during the boot window
-can pair. The link-apply step is a marked integration hook. Build with
+can pair. The link-apply step is a marked integration hook. `qr_watch.sh` is
+the interactive counterpart — it polls the endpoint until a code decodes,
+prints the payload on stdout, and exits, reporting `409`/`503` distinctly so a
+busy tap or a disabled snapshot does not read as an empty frame. Build with
 `make qr-decode`.
 
 ## [0.58.0] - 2026-07-26

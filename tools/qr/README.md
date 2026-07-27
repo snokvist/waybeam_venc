@@ -17,6 +17,7 @@ quirc locates and decodes it directly from the full grayscale frame.
 | `qr_decode.c` | Reads a P5 PGM, decodes the first QR code, prints its payload. Exit 0 = decoded, 1 = none, 2 = input error. |
 | `quirc/` | Vendored quirc QR library (ISC; see `quirc/LICENSE`). |
 | `qr_boot_action.sh` | rc.local scanner: polls `snapshot.pgm`, decodes, dispatches. |
+| `qr_watch.sh` | Interactive scanner: polls until a QR decodes, prints the payload, exits. |
 
 The firmware half is just `GET /api/v1/snapshot.pgm` (the Y plane of the same
 NV12 source the JPEG snapshot comes from; gated by `snapshot.enabled`). See
@@ -33,6 +34,7 @@ make qr-decode          # -> out/<soc>/qr_decode (cross-compiled for the target)
 ```bash
 scp out/star6e/qr_decode        root@<dev>:/usr/bin/qr_decode
 scp tools/qr/qr_boot_action.sh  root@<dev>:/usr/bin/qr_boot_action.sh
+scp tools/qr/qr_watch.sh        root@<dev>:/usr/bin/qr_watch.sh
 ```
 
 Then invoke it early from `/etc/rc.local` (after waybeam starts), e.g.:
@@ -43,6 +45,25 @@ Then invoke it early from `/etc/rc.local` (after waybeam starts), e.g.:
 
 `snapshot.enabled` must be true in `/etc/waybeam.json`. The script tolerates
 the endpoint returning `503` while the pipeline is still coming up.
+
+## Interactive scanning
+
+`qr_watch.sh` is the bench counterpart — no boot window, no payload grammar, no
+action. It polls until something decodes, prints the payload, and exits:
+
+```sh
+qr_watch.sh                          # every 15 s until a QR decodes
+msg="$(qr_watch.sh)"                 # payload on stdout, status on stderr
+QR_INTERVAL_S=2 QR_MAX_TRIES=5 qr_watch.sh
+```
+
+Exit 0 = decoded, 1 = hit `QR_MAX_TRIES` (default 0 = never give up), 2 = setup
+error. It reports the HTTP status rather than retrying blind, which matters
+because `409` (the scaler tap is owned by stab framing or NPU detection) and
+`503` (`snapshot.enabled` false) would otherwise look like an empty frame.
+
+Tunables (env): `QR_ENDPOINT`, `QR_INTERVAL_S` (15), `QR_MAX_TRIES` (0),
+`QR_DECODE_BIN`, `QR_TMP_PGM`.
 
 ## Payload format
 
