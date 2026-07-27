@@ -15,6 +15,9 @@ quirc locates and decodes it directly from the full grayscale frame.
 | File | Role |
 |------|------|
 | `qr_decode.c` | Reads a P5 PGM, decodes the first QR code, prints its payload. Exit 0 = decoded, 1 = none, 2 = input error. |
+| `quirc/` | Vendored quirc QR library (ISC; see `quirc/LICENSE`). |
+| `qr_boot_action.sh` | rc.local scanner: polls `snapshot.pgm`, decodes, dispatches. |
+| `qr_watch.sh` | Interactive scanner: polls until a QR decodes, prints the payload, exits. |
 
 `qr_decode` is tuned for real captures: each candidate is retried mirror-flipped
 (flipped codes), decoding is attempted over the full frame, overlapping tiles,
@@ -35,9 +38,6 @@ The real levers there are more pixels on the code: present the QR larger/closer,
 or capture at a higher `snapshot`/main-stream resolution. If small-code
 reliability is still short after that, a heavier decoder (zbar) detects small/
 noisy codes better than quirc but is a larger dependency to cross-compile.
-| `quirc/` | Vendored quirc QR library (ISC; see `quirc/LICENSE`). |
-| `qr_boot_action.sh` | rc.local scanner: polls `snapshot.pgm`, decodes, dispatches. |
-| `qr_watch.sh` | Interactive scanner: polls until a QR decodes, prints the payload, exits. |
 
 The firmware half is just `GET /api/v1/snapshot.pgm` (the Y plane of the same
 NV12 source the JPEG snapshot comes from; gated by `snapshot.enabled`). See
