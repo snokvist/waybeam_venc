@@ -74,16 +74,28 @@ action. It polls until something decodes, prints the payload, and exits:
 ```sh
 qr_watch.sh                          # every 15 s until a QR decodes
 msg="$(qr_watch.sh)"                 # payload on stdout, status on stderr
-QR_INTERVAL_S=2 QR_MAX_TRIES=5 qr_watch.sh
+qr_watch.sh -c -i 2                  # continuous: stream every decode
+qr_watch.sh -c -i 2 | while read -r p; do echo "saw: $p"; done
 ```
 
-Exit 0 = decoded, 1 = hit `QR_MAX_TRIES` (default 0 = never give up), 2 = setup
-error. It reports the HTTP status rather than retrying blind, which matters
-because `409` (the scaler tap is owned by stab framing or NPU detection) and
-`503` (`snapshot.enabled` false) would otherwise look like an empty frame.
+`-c` keeps scanning past the first hit and prints one payload per line, for
+leaving a scanner running while you present codes, tune focus, or check how
+reliably one decodes. Without it the first decode exits.
 
-Tunables (env): `QR_ENDPOINT`, `QR_INTERVAL_S` (15), `QR_MAX_TRIES` (0),
-`QR_DECODE_BIN`, `QR_TMP_PGM`.
+Flags: `-c` continuous, `-i` interval seconds, `-n` stop after N snapshots,
+`-e` endpoint, `-h` usage. Exit 0 = decoded at least once, 1 = hit `-n` with no
+decode (default 0 = never give up), 2 = setup or usage error.
+
+It reports the HTTP status rather than retrying blind, which matters because
+`409` (the scaler tap is owned by stab framing or NPU detection) and `503`
+(`snapshot.enabled` false) would otherwise look like an empty frame.
+
+A miss costs more than a hit — `qr_decode` runs its full pass chain before
+giving up (~0.7 s vs ~0.1 s on a 1280x720 frame on an SSC338Q), so keep the
+interval well clear of that.
+
+Tunables (env, flags win): `QR_ENDPOINT`, `QR_INTERVAL_S` (15), `QR_MAX_TRIES`
+(0), `QR_CONTINUOUS` (0), `QR_DECODE_BIN`, `QR_TMP_PGM`.
 
 ## Payload format
 

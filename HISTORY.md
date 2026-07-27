@@ -50,7 +50,8 @@ by proximity: whoever holds a QR in front of the camera during the boot window
 can pair. The link-apply step is a marked integration hook. `qr_watch.sh` is
 the interactive counterpart — it polls the endpoint until a code decodes,
 prints the payload on stdout, and exits, reporting `409`/`503` distinctly so a
-busy tap or a disabled snapshot does not read as an empty frame. Build with
+busy tap or a disabled snapshot does not read as an empty frame; `-c` keeps it
+scanning and streams every decode instead of stopping at the first. Build with
 `make qr-decode`.
 
 ## [0.58.0] - 2026-07-26
