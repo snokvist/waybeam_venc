@@ -18,9 +18,15 @@ quirc locates and decodes it directly from the full grayscale frame.
 
 `qr_decode` is tuned for real captures: each candidate is retried mirror-flipped
 (flipped codes), decoding is attempted over the full frame, overlapping tiles,
-and a half-scale copy (small codes in a large frame), and a light-denoised copy
-is tried as a fallback (noisy captures). The first success wins, so a clean
-code still returns on the first pass.
+and a half-scale copy (small codes in a large frame), a light-denoised copy is
+tried as a fallback (noisy captures), and finally one inverted pass (light-on-
+dark codes). The first success wins, so a clean code still returns on the first
+pass.
+
+No contrast-stretch / gamma / extra-binarization pass is applied: quirc's own
+adaptive threshold already normalises local contrast and brightness — measured,
+it decodes delta-10 low-contrast and near-black frames unaided — so such a pass
+adds cost with no gain. Don't add one.
 
 **Resolution floor (important):** these passes fix orientation, threshold, and
 noise — they do **not** add resolution. A QR whose modules are only ~2–3 px in

@@ -41,7 +41,8 @@ publishes via `venc_jpeg_set_gray_crop()`.
 Ships the on-device consumer under `tools/qr/`: `qr_decode.c` (vendored quirc,
 ISC) decodes a QR code from a P5 PGM — with a mirror-flip retry (decodes
 flipped codes), overlapping-tile and half-scale passes (small codes in a large
-frame), and a light-denoise fallback (noisy captures) — and `qr_boot_action.sh`
+frame), a light-denoise fallback (noisy captures), and one inverted pass
+(light-on-dark codes) — and `qr_boot_action.sh`
 polls the
 endpoint for the first 15 s of runtime and, on a `cmd=pair;gs=…;psk=…` payload,
 applies a waybeam-link RF pairing key from a ground-station QR code. Trust is

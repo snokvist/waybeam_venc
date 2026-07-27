@@ -240,8 +240,30 @@ static int decode_passes(struct quirc *q, const uint8_t *pix, int w, int h)
 	return 0;
 }
 
+/* One inverted full-frame pass.  Some codes are rendered light-on-dark (an
+ * inverted display, a reversed print); quirc assumes dark-on-light and never
+ * tries inversion itself, so a single 255-p pass covers them.  Kept to one
+ * full-frame attempt — an inverted code that is also small/noisy is rare
+ * enough not to warrant the full multi-pass strategy.  quirc already
+ * normalises contrast/brightness via its adaptive threshold, so no
+ * stretch/gamma pass is needed (measured: it decodes delta-10 contrast and
+ * near-black frames unaided). */
+static int decode_inverted(struct quirc *q, const uint8_t *pix, int w, int h)
+{
+	size_t n = (size_t)w * h;
+	uint8_t *inv = malloc(n);
+	if (!inv)
+		return 0;
+	for (size_t i = 0; i < n; i++)
+		inv[i] = (uint8_t)(255 - pix[i]);
+	int ok = decode_region(q, inv, w, 0, 0, w, h);
+	free(inv);
+	return ok;
+}
+
 /* Try the sharp image first; if nothing decodes, retry a light-denoised copy
- * (rescues noisy captures).  Returns 1 on first decode. */
+ * (rescues noisy captures), then one inverted pass.  Returns 1 on first
+ * decode. */
 static int decode_image(struct quirc *q, const uint8_t *pix, int w, int h)
 {
 	if (decode_passes(q, pix, w, h))
@@ -254,7 +276,8 @@ static int decode_image(struct quirc *q, const uint8_t *pix, int w, int h)
 		if (ok)
 			return 1;
 	}
-	return 0;
+
+	return decode_inverted(q, pix, w, h);
 }
 
 int main(int argc, char **argv)
