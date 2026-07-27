@@ -849,18 +849,39 @@ running, `504` (`snapshot_timeout`) if no frame arrives, `500`
 ### `GET /api/v1/snapshot.pgm`
 
 Capture one **grayscale** frame and return it as a binary P5 PGM
-(`image/x-portable-graymap`): the luma (Y) plane of the same
-uncompressed NV12 source the JPEG snapshot is derived from, at the main
-stream resolution, with no JPEG encode/decode step.
+(`image/x-portable-graymap`): the luma (Y) plane of an uncompressed NV12
+frame, with no JPEG encode/decode step.
 
 Intended for on-device consumers that want raw grayscale — e.g. a
 boot-time QR scan (`tools/qr/qr_decode.c` + `tools/qr/qr_boot_action.sh`)
 that pairs the RF link from a ground-station QR code.
 
+**Source and geometry.** The frame comes from a short-lived VPE **port1**
+tap, not from the encoder's port0 — a user frame queue may only be
+registered on a port with no downstream hardware bind, and port0 is bound
+to the H.265 encoder (registering one there faults the SCL allocator).
+The tap is programmed, drained for exactly one frame, and torn down per
+request; the encode path is never touched.  Geometry starts from the
+configured snapshot size and caps the long side at **1280 px**
+(aspect-preserved, width 16-aligned) — PGM is self-describing, so read
+the real dimensions from the header rather than assuming the main-stream
+size.
+
+**port1 is exclusive.** Stab framing and NPU detection each own that tap
+for a whole run, so a capture attempted while either is active returns
+`409` (`snapshot_gray_busy`) rather than programming the tap underneath
+them.  Capture before those features start, or disable them.
+
 Shares the `snapshot.enabled` gate and the subsystem mutex with
 `snapshot.jpg` (the two never run concurrently).  Errors mirror
-`snapshot.jpg`, plus `501` (`snapshot_gray_unsupported`) on backends that
-do not implement grayscale capture (currently Maruko).  Star6E only.
+`snapshot.jpg`, plus:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `409` | `snapshot_gray_busy` | VPE port1 held by stab framing or NPU detection |
+| `501` | `snapshot_gray_unsupported` | backend has no grayscale capture (Maruko) |
+
+Star6E only.
 
 ```bash
 curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode

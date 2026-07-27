@@ -15,6 +15,7 @@
 
 #include "venc_jpeg.h"
 #include "star6e.h"
+#include "star6e_vpe_ports.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -33,6 +34,9 @@ static MI_VENC_CHN g_chn = -1;
 static int g_bound = 0;
 static int g_chn_created = 0;
 static uint32_t g_quality = 80;
+/* Configured snapshot geometry, kept for the grayscale port1 tap (which does
+ * not go through the MJPEG channel and so cannot read it back from VENC). */
+static uint32_t g_snap_w, g_snap_h;
 
 void venc_jpeg_set_source(const void *vpe_port_opaque)
 {
@@ -64,6 +68,8 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	if (q > 99) q = 99;
 	if (q < 1) q = 1;
 	g_quality = q;
+	g_snap_w = w;
+	g_snap_h = h;
 	g_chn = (MI_VENC_CHN)cfg->channel;
 
 	MI_VENC_ChnAttr_t attr = {0};
@@ -219,18 +225,31 @@ stop:
  *
  * The MJPEG path feeds NV12 frames straight into a hardware VENC channel, so
  * the host never sees raw pixels.  To hand a consumer (e.g. a boot-time QR
- * scan) plain grayscale, we attach our OWN user-frame reader to the same VPE
- * output port the JPEG channel taps — port0 is I6_COMPR_NONE YUV420SP
- * (star6e_pipeline.c), so its Y plane is a CPU-readable luma image at the
- * main stream resolution.  Same source as the JPEG; second consumer.
+ * scan) plain grayscale we open a short-lived VPE **port1** tap and copy the
+ * luma plane out of one uncompressed NV12 frame.
  *
- * The MI_SYS buffer ABI and the GetBuf/PutBuf idiom mirror the proven
- * detector tap in star6e_ipu_yolo.c; the port0 user-depth registration
- * mirrors the stab tap in star6e_framing_stab.c.  A user output depth is
- * registered only for the duration of one capture and released again, so the
- * running pipeline is left exactly as it was between snapshots.  Every step
- * is best-effort: any failure returns an error and the endpoint serves it —
- * nothing else in the pipeline is touched. */
+ * WHY NOT port0 (the JPEG/encoder source): a user output depth may only be
+ * registered on a port with NO downstream hardware bind.  port0 is bound to
+ * the main H.265 VENC (star6e_pipeline.c) — and 1:N to the MJPEG channel —
+ * so registering a user queue on it makes the kernel SCL run user output
+ * tasks alongside the bind and the allocator trips a hard BUG in
+ * _MI_SYS_IMPL_AllocBufDefaultPolicy (seen on the vpe0_P0_MAIN worker,
+ * followed by an EnsureInputPortFifoEmpty stall on the live encode path and,
+ * on some runs, a board reset).  The rule holds across the tree: every
+ * working user drain — the stab detector tap, the NPU detector, stab-fill's
+ * manual port0 drain — registers its depth on an UNBOUND port.
+ *
+ * port1 is the single second scaler output, so it is taken through the
+ * star6e_vpe_ports arbiter: stab or the NPU detector own it for a whole run,
+ * and a snapshot must lose that race rather than program the tap underneath
+ * them (-EBUSY -> HTTP 409).  When free we program it, pull exactly one
+ * frame, and hand it back — the encode path on port0 is never touched.
+ *
+ * Teardown order is load-bearing: reset the user depth BEFORE DisablePort,
+ * on every exit path (see iy_port1_teardown in star6e_ipu_yolo.c — a depth
+ * left registered leaves the kernel queueing output tasks for a consumer
+ * that no longer exists, and a later process inherits a queue whose fence
+ * never completes).  The single `out:` epilogue below exists for that. */
 
 typedef struct {
 	int eTileMode;
@@ -271,6 +290,14 @@ typedef struct {
 
 #define GRAY_E_BUFDATA_FRAME 1
 #define GRAY_MAX_DIM         8192u   /* sanity clamp on frame geometry */
+#define GRAY_TAP_MAX_DIM     1280u   /* long-side cap for the port1 tap */
+#define GRAY_TAP_OWNER       "snapshot"   /* star6e_vpe_ports claim label */
+/* The tap port.  There is no third scaler output to escape to on i6e: a
+ * device probe of port2 (SetPortMode+EnablePort) did not fail cleanly — it
+ * stalled port0 with "EnsureInputPortFifoEmpty ... no response in 1000ms" and
+ * wedged the encode path, so port1 really is the only second output and the
+ * arbiter below is the way to share it. */
+#define GRAY_TAP_PORT        1
 
 typedef MI_S32 (*gray_get_buf_fn)(MI_SYS_ChnPort_t *port, GrayBufInfo_t *buf,
 	MI_S32 *handle);
@@ -345,9 +372,75 @@ static int gray_frame_to_pgm(const GrayFrameData_t *fr, uint8_t **out_buf,
 	return 0;
 }
 
+/* Geometry for the port1 tap.  Starts from the configured snapshot size (the
+ * same dims the MJPEG channel uses) and caps the long side: port1 is the small
+ * second scaler output, the consumers of this endpoint are code (QR/vision),
+ * not viewers, and a capped frame keeps both the SCL request and the per-row
+ * copy cheap.  PGM is self-describing, so a consumer reads the real dims from
+ * the header rather than assuming the main-stream size. */
+static void gray_tap_dims(uint32_t *out_w, uint32_t *out_h)
+{
+	uint32_t w = g_snap_w ? g_snap_w : 1280;
+	uint32_t h = g_snap_h ? g_snap_h : 720;
+	uint32_t longest = (w > h) ? w : h;
+
+	if (longest > GRAY_TAP_MAX_DIM) {
+		w = (uint32_t)((uint64_t)w * GRAY_TAP_MAX_DIM / longest);
+		h = (uint32_t)((uint64_t)h * GRAY_TAP_MAX_DIM / longest);
+	}
+	w &= ~15u;            /* 16-align the width so the SCL stride is sane */
+	h &= ~1u;             /* NV12 needs an even height */
+	if (w < 64) w = 64;
+	if (h < 64) h = 64;
+	*out_w = w;
+	*out_h = h;
+}
+
+/* Drain one frame off an already-programmed tap port.  Split out so the
+ * caller's teardown epilogue stays the single exit for the port lifecycle. */
+static int gray_drain_one(MI_SYS_ChnPort_t *tap, uint8_t **out_buf,
+	size_t *out_len, uint32_t timeout_ms)
+{
+	int64_t deadline = now_ms() + (int64_t)timeout_ms;
+
+	for (;;) {
+		GrayBufInfo_t buf;
+		MI_S32 handle = 0;
+
+		memset(&buf, 0, sizeof(buf));
+		if (g_gray_get_buf(tap, &buf, &handle) != 0) {
+			if (now_ms() >= deadline)
+				return -ETIMEDOUT;
+			usleep(2000);
+			continue;
+		}
+		if (buf.eBufType != GRAY_E_BUFDATA_FRAME ||
+		    !buf.stFrameData.phyAddr[0]) {
+			g_gray_put_buf(handle);
+			if (now_ms() >= deadline)
+				return -ETIMEDOUT;
+			usleep(2000);
+			continue;
+		}
+		{
+			int rc = gray_frame_to_pgm(&buf.stFrameData, out_buf, out_len);
+			g_gray_put_buf(handle);
+			return rc;
+		}
+	}
+}
+
 int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	uint32_t timeout_ms)
 {
+	MI_VPE_PortAttr_t attr;
+	MI_SYS_ChnPort_t tap;
+	MI_VPE_CHANNEL vpe_chn;
+	uint32_t tap_w = 0, tap_h = 0;
+	int port_enabled = 0, depth_set = 0, claimed = 0;
+	int rc;
+	MI_S32 ret;
+
 	if (!out_buf || !out_len)
 		return -EINVAL;
 	*out_buf = NULL;
@@ -359,40 +452,65 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	if (timeout_ms == 0)
 		timeout_ms = 1500;
 
-	/* Register a shallow user-frame queue on the (already bound) VPE port so
-	 * GetBuf sees frames; without it an unregistered user consumer reads 0. */
-	if (MI_SYS_SetChnOutputPortDepth(&g_vpe_port, 2, 4) != 0) {
-		fprintf(stderr, "[jpeg-star6e] gray: SetChnOutputPortDepth failed\n");
-		return -EIO;
+	/* port1 has exactly one owner.  Losing to stab/detect is a normal
+	 * outcome, not an error — the endpoint turns it into a 409. */
+	if (star6e_vpe_port1_claim(GRAY_TAP_OWNER) != 0) {
+		char owner[16];
+		star6e_vpe_port1_owner_copy(owner, sizeof(owner));
+		fprintf(stderr, "[jpeg-star6e] gray: VPE port1 tap busy (owner=%s)\n",
+			owner[0] ? owner : "?");
+		return -EBUSY;
 	}
+	claimed = 1;
 
-	int rc = -ETIMEDOUT;
-	int64_t deadline = now_ms() + (int64_t)timeout_ms;
-	for (;;) {
-		GrayBufInfo_t buf;
-		MI_S32 handle = 0;
+	gray_tap_dims(&tap_w, &tap_h);
+	vpe_chn = (MI_VPE_CHANNEL)g_vpe_port.channel;
+	tap = g_vpe_port;
+	tap.port = GRAY_TAP_PORT;
 
-		memset(&buf, 0, sizeof(buf));
-		if (g_gray_get_buf(&g_vpe_port, &buf, &handle) != 0) {
-			if (now_ms() >= deadline)
-				break;
-			usleep(2000);
-			continue;
-		}
-		if (buf.eBufType != GRAY_E_BUFDATA_FRAME ||
-		    !buf.stFrameData.phyAddr[0]) {
-			g_gray_put_buf(handle);
-			if (now_ms() >= deadline)
-				break;
-			usleep(2000);
-			continue;
-		}
-		rc = gray_frame_to_pgm(&buf.stFrameData, out_buf, out_len);
-		g_gray_put_buf(handle);
-		break;
+	memset(&attr, 0, sizeof(attr));
+	attr.output.width  = (unsigned short)tap_w;
+	attr.output.height = (unsigned short)tap_h;
+	attr.pixFmt   = I6_PIXFMT_YUV420SP;
+	attr.compress = I6_COMPR_NONE;
+
+	ret = MI_VPE_SetPortMode(vpe_chn, GRAY_TAP_PORT, &attr);
+	if (ret != 0) {
+		fprintf(stderr, "[jpeg-star6e] gray: port1 SetPortMode %ux%u failed "
+			"%d\n", tap_w, tap_h, (int)ret);
+		rc = -EIO;
+		goto out;
 	}
+	ret = MI_VPE_EnablePort(vpe_chn, GRAY_TAP_PORT);
+	if (ret != 0) {
+		fprintf(stderr, "[jpeg-star6e] gray: port1 EnablePort failed %d\n",
+			(int)ret);
+		rc = -EIO;
+		goto out;
+	}
+	port_enabled = 1;
 
-	(void)MI_SYS_SetChnOutputPortDepth(&g_vpe_port, 0, 0);
+	/* Legal here and only here: port1 carries no downstream bind, so this
+	 * user queue is the port's only consumer. */
+	ret = MI_SYS_SetChnOutputPortDepth(&tap, 2, 4);
+	if (ret != 0) {
+		fprintf(stderr, "[jpeg-star6e] gray: port1 SetChnOutputPortDepth "
+			"failed %d\n", (int)ret);
+		rc = -EIO;
+		goto out;
+	}
+	depth_set = 1;
+
+	rc = gray_drain_one(&tap, out_buf, out_len, timeout_ms);
+
+out:
+	/* Depth reset BEFORE DisablePort, always — see the header comment. */
+	if (depth_set)
+		(void)MI_SYS_SetChnOutputPortDepth(&tap, 0, 0);
+	if (port_enabled)
+		(void)MI_VPE_DisablePort(vpe_chn, GRAY_TAP_PORT);
+	if (claimed)
+		star6e_vpe_port1_release(GRAY_TAP_OWNER);
 	return rc;
 }
 

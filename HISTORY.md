@@ -3,19 +3,31 @@
 ## [0.59.0] - 2026-07-26
 
 New `GET /api/v1/snapshot.pgm` endpoint returns a grayscale frame as a binary
-P5 PGM — the luma plane of the same uncompressed NV12 source the JPEG snapshot
-comes from, at the main stream resolution, with no JPEG encode/decode step. It
-rides the existing `snapshot.enabled` gate and the snapshot subsystem mutex, so
-`.jpg` and `.pgm` share one switch and never run concurrently. Star6E only;
-Maruko returns `501` via the weak backend default until ported.
+P5 PGM — the luma plane of an uncompressed NV12 frame, with no JPEG
+encode/decode step. It rides the existing `snapshot.enabled` gate and the
+snapshot subsystem mutex, so `.jpg` and `.pgm` share one switch and never run
+concurrently. Star6E only; Maruko returns `501` via the weak backend default
+until ported.
 
-On Star6E the grayscale grab attaches a short-lived user-frame reader to VPE
-port0 (`MI_SYS_ChnOutputPortGetBuf`, mirroring the detector tap in
-`star6e_ipu_yolo.c`) and registers a user output depth only for the duration of
-one capture (mirroring the stab tap), leaving the running pipeline untouched
-between snapshots. Port0 is `I6_COMPR_NONE` YUV420SP, so its Y plane is a
-CPU-readable luma image. Capture failure is non-fatal — the endpoint serves an
-error and nothing else in the pipeline is affected.
+On Star6E the grab programs a short-lived VPE **port1** tap, drains exactly one
+frame (`MI_SYS_ChnOutputPortGetBuf`, mirroring the detector tap in
+`star6e_ipu_yolo.c`), and tears the tap back down — resetting the user output
+depth before `MI_VPE_DisablePort` on every exit path. It deliberately does not
+touch port0: a user frame queue may only be registered on a port with no
+downstream hardware bind, and port0 is bound to the H.265 encoder (1:N with the
+MJPEG channel), where registering one makes the kernel SCL run user output
+tasks alongside the bind and trips a hard `BUG` in
+`_MI_SYS_IMPL_AllocBufDefaultPolicy` on the `vpe0_P0_MAIN` worker — stalling
+the live encode path and, on some runs, resetting the board.
+
+Because port1 is the single second scaler output, the capture takes it through
+the `star6e_vpe_ports` arbiter: stab framing and NPU detection own that tap for
+a whole run, so a capture attempted while either is active returns `409`
+(`snapshot_gray_busy`) instead of reprogramming the tap underneath them. Tap
+geometry starts from the configured snapshot size and caps the long side at
+1280 px (aspect-preserved, width 16-aligned); PGM is self-describing, so
+consumers read the real dimensions from the header. Capture failure is
+non-fatal — the endpoint serves an error and the encode path is unaffected.
 
 Ships the on-device consumer under `tools/qr/`: `qr_decode.c` (vendored quirc,
 ISC) decodes a QR code from a P5 PGM, and `qr_boot_action.sh` polls the

@@ -165,6 +165,12 @@ int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(client_fd, 501, "snapshot_gray_unsupported",
 			"grayscale snapshot not implemented on this backend");
 	}
+	if (rc == -EBUSY) {
+		return httpd_send_error(client_fd, 409, "snapshot_gray_busy",
+			"the VPE tap this capture needs is owned by another feature "
+			"(stab framing or NPU detection); disable it or capture before "
+			"it starts");
+	}
 	if (rc == -ETIMEDOUT) {
 		return httpd_send_error(client_fd, 504, "snapshot_timeout",
 			"timed out waiting for a frame from the VPE port");
