@@ -113,6 +113,12 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg);
 int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
 	uint32_t timeout_ms);
 
+/* Backend-private: register the scaler crop window the grayscale tap should
+ * request.  Maruko needs it (its SCL taps are programmed with an explicit
+ * crop); Star6E derives the tap from the VPE channel and ignores this.  Weak
+ * no-op default, so a backend that does not need it links unchanged. */
+void venc_jpeg_set_gray_crop(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+
 /* Backend-private: capture one grayscale frame as a complete binary P5
  * PGM blob (header + tightly-packed Y-plane rows).  Called from
  * venc_jpeg_capture_gray under the module lock.  Grabs an uncompressed

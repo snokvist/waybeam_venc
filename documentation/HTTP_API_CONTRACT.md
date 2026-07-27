@@ -856,21 +856,27 @@ Intended for on-device consumers that want raw grayscale — e.g. a
 boot-time QR scan (`tools/qr/qr_decode.c` + `tools/qr/qr_boot_action.sh`)
 that pairs the RF link from a ground-station QR code.
 
-**Source and geometry.** The frame comes from a short-lived VPE **port1**
-tap, not from the encoder's port0 — a user frame queue may only be
-registered on a port with no downstream hardware bind, and port0 is bound
-to the H.265 encoder (registering one there faults the SCL allocator).
-The tap is programmed, drained for exactly one frame, and torn down per
-request; the encode path is never touched.  Geometry starts from the
-configured snapshot size and caps the long side at **1280 px**
-(aspect-preserved, width 16-aligned) — PGM is self-describing, so read
-the real dimensions from the header rather than assuming the main-stream
-size.
+**Source and geometry.** The frame comes from a short-lived scaler tap,
+not from the encoder's output port — a user frame queue may only be
+registered on a port with no downstream hardware bind, and the encode port
+is bound to the H.265 encoder (registering one there faults the MI_SYS
+allocator).  The tap is programmed, drained for exactly one frame, and torn
+down per request; the encode path is never touched.
 
-**port1 is exclusive.** Stab framing and NPU detection each own that tap
-for a whole run, so a capture attempted while either is active returns
-`409` (`snapshot_gray_busy`) rather than programming the tap underneath
-them.  Capture before those features start, or disable them.
+| Backend | Tap | Contends with |
+|---|---|---|
+| Star6E (i6e) | VPE port1 | stab framing, NPU detection |
+| Maruko (i6c) | SCL port3 | NPU detection |
+
+Geometry starts from the configured snapshot size and caps the long side at
+**1280 px** (aspect-preserved, width 16-aligned) — PGM is self-describing,
+so read the real dimensions from the header rather than assuming the
+main-stream size.
+
+**The tap is exclusive.** Its other claimants own it for a whole run, so a
+capture attempted while one is active returns `409` (`snapshot_gray_busy`)
+rather than programming the tap underneath them.  Capture before those
+features start, or disable them.
 
 Shares the `snapshot.enabled` gate and the subsystem mutex with
 `snapshot.jpg` (the two never run concurrently).  Errors mirror
@@ -878,10 +884,10 @@ Shares the `snapshot.enabled` gate and the subsystem mutex with
 
 | Status | Code | Meaning |
 |---|---|---|
-| `409` | `snapshot_gray_busy` | VPE port1 held by stab framing or NPU detection |
-| `501` | `snapshot_gray_unsupported` | backend has no grayscale capture (Maruko) |
+| `409` | `snapshot_gray_busy` | the scaler tap is held by stab framing or NPU detection |
+| `501` | `snapshot_gray_unsupported` | backend has no grayscale capture |
 
-Star6E only.
+Supported on both Star6E and Maruko.
 
 ```bash
 curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode

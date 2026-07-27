@@ -214,6 +214,12 @@ __attribute__((weak)) int venc_jpeg_backend_capture_gray(uint8_t **out_buf,
 	return -ENOSYS;
 }
 
+__attribute__((weak)) void venc_jpeg_set_gray_crop(uint32_t x, uint32_t y,
+	uint32_t w, uint32_t h)
+{
+	(void)x; (void)y; (void)w; (void)h;
+}
+
 __attribute__((weak)) void venc_jpeg_backend_shutdown(void) { }
 
 __attribute__((weak)) int venc_jpeg_backend_set_quality(uint32_t q)

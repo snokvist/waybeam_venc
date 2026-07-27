@@ -6,8 +6,8 @@ New `GET /api/v1/snapshot.pgm` endpoint returns a grayscale frame as a binary
 P5 PGM — the luma plane of an uncompressed NV12 frame, with no JPEG
 encode/decode step. It rides the existing `snapshot.enabled` gate and the
 snapshot subsystem mutex, so `.jpg` and `.pgm` share one switch and never run
-concurrently. Star6E only; Maruko returns `501` via the weak backend default
-until ported.
+concurrently. Implemented on both backends: Star6E taps VPE port1, Maruko taps
+SCL port3.
 
 On Star6E the grab programs a short-lived VPE **port1** tap, drains exactly one
 frame (`MI_SYS_ChnOutputPortGetBuf`, mirroring the detector tap in
@@ -28,6 +28,15 @@ geometry starts from the configured snapshot size and caps the long side at
 1280 px (aspect-preserved, width 16-aligned); PGM is self-describing, so
 consumers read the real dimensions from the header. Capture failure is
 non-fatal — the endpoint serves an error and the encode path is unaffected.
+
+Maruko follows the same shape on i6c primitives. Every SCL output already has
+an owner — port0 is the main H.265 output (RING, 1:1), port1 carries the bound
+MJPEG channel, port2 is the stab tap — so the grayscale tap uses **port3**, the
+NPU detector's, arbitrated by the new `maruko_scl_ports` module so a capture
+loses to a running detector instead of reprogramming its tap mid-inference. The
+i6c MI_SYS entry points take a leading `u16 soc_id` and the port is configured
+through `SetPortConfig` with an explicit crop window, which the pipeline now
+publishes via `venc_jpeg_set_gray_crop()`.
 
 Ships the on-device consumer under `tools/qr/`: `qr_decode.c` (vendored quirc,
 ISC) decodes a QR code from a P5 PGM, and `qr_boot_action.sh` polls the
