@@ -28,9 +28,15 @@ MAX_TRIES="${QR_MAX_TRIES:-0}"          # 0 = no limit
 ENDPOINT="${QR_ENDPOINT:-http://127.0.0.1/api/v1/snapshot.pgm}"
 CONTINUOUS="${QR_CONTINUOUS:-0}"        # 1 = keep scanning past the first hit
 STATS="${QR_STATS:-0}"                  # 1 = show qr_decode stage diagnostics
-TMP_PGM="${QR_TMP_PGM:-/tmp/qr_watch.pgm}"
+TMP_PGM="${QR_TMP_PGM:-}"
+TMP_OWNED=0
 
 log() { echo "[qr-watch] $*" >&2; }
+cleanup() {
+	if [ "$TMP_OWNED" = "1" ]; then
+		rm -f "$TMP_PGM"
+	fi
+}
 
 if [ -n "${QR_DECODE_BIN:-}" ]; then
 	QR_DECODE=$QR_DECODE_BIN
@@ -141,6 +147,16 @@ shift $((OPTIND - 1))
 [ "$STATS" = "0" ] || [ "$STATS" = "1" ] ||
 	{ log "QR_STATS must be 0 or 1 (got '$STATS')"; exit 2; }
 
+if [ -z "$TMP_PGM" ]; then
+	TMP_PGM="$(mktemp /tmp/qr_watch.XXXXXX)" ||
+		{ log "cannot create temporary snapshot file"; exit 2; }
+	TMP_OWNED=1
+fi
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Numeric gates, so a typo fails now instead of inside the arithmetic below.
 interval_to_cs "$INTERVAL_S" ||
 	{ log "-i takes non-negative seconds with at most two decimals (got '$INTERVAL_S')"; exit 2; }
@@ -177,18 +193,21 @@ while :; do
 			# order, while the legacy decoder treats argv[1] as the filename.
 			payload="$("$QR_DECODE" "$TMP_PGM" --stats)"
 		else
-			payload="$("$QR_DECODE" "$TMP_PGM" 2>/dev/null)"
+			payload="$("$QR_DECODE" "$TMP_PGM")"
 		fi
-		if [ -n "$payload" ]; then
+		decode_rc=$?
+		if [ "$decode_rc" -eq 0 ] && [ -n "$payload" ]; then
 			hits=$((hits + 1))
 			log "decoded on try $try (hit $hits)"
 			printf '%s\n' "$payload"
 			if [ "$CONTINUOUS" != "1" ]; then
-				rm -f "$TMP_PGM"
 				exit 0
 			fi
-		else
+		elif [ "$decode_rc" -eq 1 ]; then
 			log "try $try: snapshot ok, no QR in frame"
+		else
+			log "try $try: decoder failed (exit $decode_rc)"
+			exit 2
 		fi
 	elif [ -n "$code" ] && [ "$code" != "000" ]; then
 		log "try $try: HTTP $code — $(head -c 200 "$TMP_PGM" 2>/dev/null)"
@@ -197,7 +216,6 @@ while :; do
 	fi
 
 	if [ "$MAX_TRIES" -gt 0 ] && [ "$try" -ge "$MAX_TRIES" ]; then
-		rm -f "$TMP_PGM"
 		if [ "$hits" -gt 0 ]; then
 			log "stopping after $try tries ($hits decoded)"
 			exit 0

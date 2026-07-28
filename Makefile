@@ -111,7 +111,7 @@ LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
-        qr-decode qr-test-host qr-test-extended webui webui-check
+        qr-decode qr-test-host qr-test-cli qr-test-extended webui webui-check
 
 help:
 	@echo "Targets:"
@@ -120,6 +120,7 @@ help:
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
 	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
 	@echo "  make qr-test-host Run the deterministic QR perspective corpus"
+	@echo "  make qr-test-cli Run decoder CLI and PGM parser regressions"
 	@echo "  make qr-test-extended Run the extended QR skew/defocus series"
 	@echo "  make lint SOC_BUILD=maruko"
 	@echo "  make stage       Build and stage runtime bundle in out/"
@@ -236,15 +237,17 @@ QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/waybeam_qr_format.c \
                     tools/qr/quirc/version_db.c
 # Both supported targets are 32-bit ARM SoCs. quirc supports single-precision
 # perspective math specifically for this class of CPU; on Cortex-A7 this also
-# avoids the non-NEON double-precision path.
+# avoids the non-NEON double-precision path. Separate functions and data so
+# the standalone link can discard anything the bounded backend does not use.
 QR_MATH_CFLAGS   := -DQUIRC_FLOAT_TYPE=float -DQUIRC_USE_TGMATH
-QR_PERF_CFLAGS   := $(if $(filter star6e,$(SOC_BUILD)),-funroll-loops)
+QR_SIZE_CFLAGS   := -Os -ffunction-sections -fdata-sections
+QR_SIZE_LDFLAGS  := -Wl,--gc-sections
 qr-decode: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
 qr-decode: $(QR_DECODE_TARGET)
 
 $(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
 	@mkdir -p $(@D)
-	$(CC) -O3 $(SOC_CFLAGS) $(QR_MATH_CFLAGS) $(QR_PERF_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc $(QR_DECODE_SRC) -lm -lrt -o $@
+	$(CC) $(QR_SIZE_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc $(QR_DECODE_SRC) $(QR_SIZE_LDFLAGS) -lm -lrt -o $@
 
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
@@ -335,6 +338,7 @@ test-tsan:
 test-ci: test test-asan test-tsan
 
 QR_TEST_RUNNER := tests/test_qr_marker
+QR_HOST_DECODE := tests/qr_decode_host
 QR_TEST_SRCS   := tests/test_qr_marker.c tools/qr/waybeam_qr_format.c \
 		  tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
 		  tools/qr/quirc/identify.c tools/qr/quirc/version_db.c
@@ -347,6 +351,15 @@ $(QR_TEST_RUNNER): $(QR_TEST_SRCS) tools/qr/waybeam_qr_format.h \
 
 qr-test-host: $(QR_TEST_RUNNER)
 	./$(QR_TEST_RUNNER)
+
+$(QR_HOST_DECODE): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h \
+		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+	$(HOST_CC) $(QR_SIZE_CFLAGS) -Wall -Wextra -std=c99 -D_GNU_SOURCE \
+		$(QR_MATH_CFLAGS) -Itools/qr/quirc $(QR_DECODE_SRC) \
+		$(QR_SIZE_LDFLAGS) -lm -lrt -o $@
+
+qr-test-cli: $(QR_HOST_DECODE)
+	sh tests/test_qr_cli.sh "$(CURDIR)/$(QR_HOST_DECODE)"
 
 qr-test-extended: $(QR_TEST_RUNNER)
 	./$(QR_TEST_RUNNER) --extended
@@ -467,7 +480,7 @@ webui:
 webui-check:
 	python3 tools/build_webui.py --check
 
-verify: webui-check qr-test-host
+verify: webui-check qr-test-host qr-test-cli
 	@echo "=== Building Maruko backend ==="
 	$(MAKE) build SOC_BUILD=maruko
 	$(MAKE) qr-decode SOC_BUILD=maruko
@@ -509,4 +522,5 @@ clean:
 	rm -f $(TIMING_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
 	rm -f $(QR_TEST_RUNNER)
+	rm -f $(QR_HOST_DECODE)
 	rm -f .build_soc

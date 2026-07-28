@@ -1,8 +1,9 @@
 # Phone camera fixtures
 
 `bounded-P23456789ABCDEFG.svg` is the vector master and
-`bounded-P23456789ABCDEFG.png` is a 1200×1200 phone-ready rendering. They use
-the exact Version-1/Q matrix from the deterministic corpus, wrapped in the
+`bounded-P23456789ABCDEFG.png` is a binary-clean 1230×1230 phone-ready
+rendering. `bounded-P23456789ABCDEFG.pgm` is a compact 246×246 decoder
+regression fixture. They use the exact Version-1/Q matrix wrapped in the
 required 33×33 Waybeam outer-frame profile. Their decoded payload is:
 
 ```text
@@ -24,3 +25,12 @@ Suggested optical test order:
 
 Use `qr_watch.sh -v -i 2` during the test. Payloads remain on stdout; frame
 discovery, decode outcome, applied pass, and timings appear on stderr.
+
+Regenerate all three with the checked-in generator:
+
+```bash
+python3 -m pip install -r tools/qr/requirements-generator.txt
+python3 tools/qr/generate_qr.py P23456789ABCDEFG tools/qr/test-images/bounded-P23456789ABCDEFG.svg --scale 30
+python3 tools/qr/generate_qr.py P23456789ABCDEFG tools/qr/test-images/bounded-P23456789ABCDEFG.png --scale 30
+python3 tools/qr/generate_qr.py P23456789ABCDEFG tools/qr/test-images/bounded-P23456789ABCDEFG.pgm --scale 6
+```

@@ -16,8 +16,10 @@ integration belong to a later standalone shell/action work package.
 | `qr_decode.c` | Freestanding PGM decoder and scan-pass orchestration. |
 | `waybeam_qr_format.c` | Minimal Version-1/Q transport-envelope validation. |
 | `quirc/` | Vendored quirc library plus required outer-frame identification. |
+| `generate_qr.py` | Creates valid bounded SVG, PNG, or PGM markers. |
 | `qr_watch.sh` | Standalone polling helper; prints valid envelopes and performs no action. |
 | `tests/test_qr_marker.c` | Deterministic host perspective corpus and envelope tests. |
+| `tests/test_qr_cli.sh` | Decoder CLI, PGM hardening, and fixture regression tests. |
 
 ## Minimal format
 
@@ -75,6 +77,23 @@ Stock quirc behavior is unchanged unless a caller enables marker mode.
 Render every module with integer scaling and no interpolation. The compressed
 edge still needs real sensor resolution: use roughly 3 px/module as a lab
 minimum and 4 px/module as a real-camera target.
+
+## Generate a marker
+
+The included generator locks the QR metadata and outer-frame geometry. It
+accepts only the minimal 16-character `P`/`C` envelope and writes vector SVG,
+two-color PNG, or decoder-ready PGM:
+
+```bash
+python3 -m pip install -r tools/qr/requirements-generator.txt
+python3 tools/qr/generate_qr.py P23456789ABCDEFG waybeam-pair.svg
+python3 tools/qr/generate_qr.py CRES1080P60A0030 command.png --scale 30
+python3 tools/qr/generate_qr.py P23456789ABCDEFG bench.pgm --scale 6
+```
+
+`--scale` is the integer number of pixels per marker unit for raster output.
+The generated image includes four white presentation units outside the 33×33
+marker so the connected black border does not touch the image edge.
 
 ## Capture robustness
 
@@ -136,6 +155,7 @@ qr_watch.sh -c -v
 make qr-decode SOC_BUILD=star6e
 make qr-decode SOC_BUILD=maruko
 make qr-test-host
+make qr-test-cli
 make qr-test-extended
 ```
 
@@ -174,42 +194,29 @@ on-screen sizes. With the radial fallback enabled, a subsequent live
 five-frame burst decoded 4/5: one through normal `blur/full/refine`, two
 through `lens/full/refine`, and one through `lens-blur/full/refine`.
 
-## Star6E performance
+## Size and Star6E performance
 
-The production QR target builds with `-O3`, the Star6E NEON/VFPv4 flags, and
-quirc's supported single-precision perspective math. GCC auto-vectorizes the
-regular blur, downscale, and inversion loops; disabling vectorization was
-measurably slower. Explicit NEON flags beyond the existing SoC flags and LTO
-did not improve the benchmark, and the remaining projective sampling and lens
-remap are irregular gathers that do not map cleanly to SIMD.
+The final standalone target is size-optimized with `-Os`, per-function/data
+sections, and linker garbage collection. It retains the target's existing
+Star6E NEON/VFPv4 flags and quirc's single-precision perspective math. The
+stripped binaries are 30,288 bytes on Star6E and 30,136 bytes on Maruko,
+instead of 63,052 bytes for the earlier Star6E `-O3`/loop-unrolled build.
 
-The larger wins came from avoiding work:
+The algorithmic reductions remain in place: outer-frame geometry is scored
+once per symmetric candidate, expensive tiles stay late, radial correction
+precomputes invariant column terms, repeated cell coordinates are cached, and
+quirc retains high-water image/flood-fill allocations across scan sizes.
+Changing compiler optimization does not alter samples, thresholds, candidates,
+scan coverage, or the 768-case recognition counts.
 
-- outer-frame/quiet-zone geometry is scored once per symmetric frame
-  candidate instead of once for all eight QR orientations;
-- full-frame and half-scale passes run before the nine overlapping tiles;
-- blur-half no longer delays the measured lens-correction rescue path;
-- radial correction uses float arithmetic and precomputes the invariant
-  per-column terms in about 10 KiB of temporary storage.
-
-On the SSC338Q Star6E, the saved 1280×720 hard fisheye capture improved from
-roughly 1.28–1.33 seconds with the original `-Os`/pass ordering to a 257 ms
-mean over 30 paired final-build runs. Saved normal optical captures decoded
-in 57 ms (`sharp/full/refine`) and 146 ms (`blur/full/refine`).
-These are end-to-end `--stats` times including PGM load and all preceding
-failed bounded passes. All three returned the exact expected envelope.
-
-The final behavior-preserving pass changed no samples, thresholds, candidates,
-or scan coverage. It uses four independent histogram counters before an exact
-merge, caches repeated cell-coordinate additions, reduces each flood-fill
-span to the endpoint which is algebraically maximal in the requested
-direction, and rejects only quadrilaterals whose bounding-box upper area
-cannot beat the current winner. quirc also retains its high-water image and
-flood-fill allocations between full, half, and ROI sizes instead of repeatedly
-allocating and copying them. Star6E enables compiler loop unrolling; Maruko is
-left unchanged because that code-generation choice was measured only on
-Star6E. Against the previous optimized build, the paired Star6E mean improved
-from 291 ms to 257 ms (11.4%) with identical successful stages and payloads.
+There is a measured speed/flash tradeoff. On SSC338Q Star6E, the final `-Os`
+binary decoded the saved hard 1280×720 fisheye capture through
+`lens-blur/full/refine` in a 425 ms mean over 20 runs (404 ms minimum, 472 ms
+maximum). The previous 63 KB speed-focused build averaged 257 ms on the same
+capture. The smaller build still fits the watcher's 0.5-second minimum start
+cadence for successful hard captures; a complete no-code cascade can take
+roughly 0.55 seconds and therefore starts the next capture immediately on
+completion.
 
 ## Standalone use
 

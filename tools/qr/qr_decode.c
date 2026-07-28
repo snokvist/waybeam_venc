@@ -30,6 +30,7 @@
 #include "quirc.h"
 #include "waybeam_qr_format.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +38,7 @@
 #include <time.h>
 
 #define MIN_REGION   40   /* skip regions too small to hold a findable code */
+#define MAX_INPUT_DIM 4096u
 #define MAX_BOUNDED_ROIS 12
 #define LENS_FALLBACK_K1 (-0.30)
 
@@ -48,6 +50,7 @@ struct decode_options {
 
 struct decode_stats {
 	int enabled;
+	int fatal_error;
 	uint64_t started_us;
 	uint64_t load_us;
 	uint64_t prepare_us;
@@ -76,7 +79,7 @@ struct bounded_roi {
 static void usage(FILE *f)
 {
 	fprintf(f,
-		"usage: qr_decode [--raw] [--stats] [FILE|-]\n"
+		"usage: qr_decode [--raw] [--stats] [--] [FILE|-]\n"
 		"\n"
 		"Default: decode the first valid Waybeam Version-1/Q 16-character\n"
 		"envelope inside the required continuous outer-frame profile.\n"
@@ -86,6 +89,8 @@ static void usage(FILE *f)
 
 static int parse_options(int argc, char **argv, struct decode_options *opts)
 {
+	int input_seen = 0;
+	int options_done = 0;
 	int i;
 
 	memset(opts, 0, sizeof(*opts));
@@ -93,19 +98,22 @@ static int parse_options(int argc, char **argv, struct decode_options *opts)
 	for (i = 1; i < argc; i++) {
 		const char *arg = argv[i];
 
-		if (strcmp(arg, "--raw") == 0) {
+		if (!options_done && strcmp(arg, "--raw") == 0) {
 			opts->raw = 1;
-		} else if (strcmp(arg, "--stats") == 0) {
+		} else if (!options_done && strcmp(arg, "--stats") == 0) {
 			opts->stats = 1;
-		} else if (strcmp(arg, "-h") == 0 ||
-			   strcmp(arg, "--help") == 0) {
+		} else if (!options_done && (strcmp(arg, "-h") == 0 ||
+					    strcmp(arg, "--help") == 0)) {
 			usage(stdout);
 			return 1;
-		} else if (strcmp(arg, "-") == 0 || arg[0] != '-') {
-			if (opts->path) {
+		} else if (!options_done && strcmp(arg, "--") == 0) {
+			options_done = 1;
+		} else if (strcmp(arg, "-") == 0 || options_done || arg[0] != '-') {
+			if (input_seen) {
 				fprintf(stderr, "qr_decode: only one input is allowed\n");
 				return -1;
 			}
+			input_seen = 1;
 			opts->path = strcmp(arg, "-") == 0 ? NULL : arg;
 		} else {
 			fprintf(stderr, "qr_decode: unknown option: %s\n", arg);
@@ -128,6 +136,14 @@ static uint64_t monotonic_us(void)
 static uint64_t stats_now(const struct decode_stats *stats)
 {
 	return stats->enabled ? monotonic_us() : 0;
+}
+
+static int allocation_failed(struct decode_stats *stats, const char *stage)
+{
+	if (!stats->fatal_error)
+		fprintf(stderr, "qr_decode: allocation failed during %s\n", stage);
+	stats->fatal_error = 1;
+	return 0;
 }
 
 /* Read the next unsigned integer from a P5 header, skipping whitespace and
@@ -154,9 +170,15 @@ static int pgm_read_uint(FILE *f, unsigned *out)
 
 	unsigned v = 0;
 	while (c >= '0' && c <= '9') {
-		v = v * 10u + (unsigned)(c - '0');
+		unsigned digit = (unsigned)(c - '0');
+
+		if (v > (UINT_MAX - digit) / 10u)
+			return -1;
+		v = v * 10u + digit;
 		c = fgetc(f);
 	}
+	if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+		return -1;
 	*out = v;
 	return 0;
 }
@@ -177,9 +199,11 @@ static uint8_t *pgm_load(FILE *f, unsigned *w, unsigned *h)
 		fprintf(stderr, "qr_decode: malformed PGM header\n");
 		return NULL;
 	}
-	if (*w == 0 || *h == 0 || maxval == 0 || maxval > 255) {
+	if (*w == 0 || *h == 0 || *w > MAX_INPUT_DIM ||
+	    *h > MAX_INPUT_DIM || maxval != 255) {
 		fprintf(stderr, "qr_decode: unsupported PGM (w=%u h=%u max=%u; "
-			"need 8-bit)\n", *w, *h, maxval);
+			"need dimensions 1..%u and maxval 255)\n",
+			*w, *h, maxval, MAX_INPUT_DIM);
 		return NULL;
 	}
 	/* Exactly one whitespace byte separates the header from the raster;
@@ -331,7 +355,7 @@ static int decode_bounded_refinement(struct quirc *q, const uint8_t *src,
 	const char *result;
 
 	if (quirc_resize(q, roi->w, roi->h) != 0)
-		return 0;
+		return allocation_failed(stats, stage);
 	quirc_set_marker_mode(q, QUIRC_MARKER_OFF,
 			      QUIRC_MARKER_PROFILE_NONE);
 	buf = quirc_begin(q, NULL, NULL);
@@ -406,7 +430,7 @@ static int decode_region(struct quirc *q, const uint8_t *src, int sstride,
 		return 0;
 	started = stats_now(stats);
 	if (quirc_resize(q, w, h) != 0)
-		return 0;
+		return allocation_failed(stats, stage);
 
 	quirc_set_marker_mode(q, QUIRC_MARKER_ONLY,
 			      QUIRC_MARKER_PROFILE_OUTER_FRAME_V1);
@@ -467,6 +491,8 @@ static int decode_region(struct quirc *q, const uint8_t *src, int sstride,
 					      &rois[i], raw, refine_stage,
 					      stats))
 			return 1;
+		if (stats->fatal_error)
+			return 0;
 	}
 	return 0;
 }
@@ -630,11 +656,15 @@ static int decode_tiles(struct quirc *q, const uint8_t *pix, int w, int h,
 		int nx = tile_offsets(w, tw, xs);
 		int ny = tile_offsets(h, th, ys);
 		snprintf(stage, sizeof(stage), "%s/tile", variant);
-		for (int yi = 0; yi < ny; yi++)
-			for (int xi = 0; xi < nx; xi++)
+		for (int yi = 0; yi < ny; yi++) {
+			for (int xi = 0; xi < nx; xi++) {
 				if (decode_region(q, pix, w, xs[xi], ys[yi],
 						  tw, th, raw, stage, stats))
 					return 1;
+				if (stats->fatal_error)
+					return 0;
+			}
+		}
 	}
 	return 0;
 }
@@ -647,17 +677,19 @@ static int decode_half(struct quirc *q, const uint8_t *pix, int w, int h,
 	char stage[32];
 	int hw = 0, hh = 0;
 	uint64_t transform_started = stats_now(stats);
+
+	if (w / 2 < MIN_REGION || h / 2 < MIN_REGION)
+		return 0;
 	uint8_t *half = downscale2(pix, w, h, &hw, &hh);
 	stats->transform_us += stats_now(stats) - transform_started;
-	if (half) {
-		snprintf(stage, sizeof(stage), "%s/half", variant);
-		int ok = decode_region(q, half, hw, 0, 0, hw, hh, raw,
-				       stage, stats);
-		free(half);
-		if (ok)
-			return 1;
-	}
-	return 0;
+	if (!half)
+		return allocation_failed(stats, "half-scale transform");
+
+	snprintf(stage, sizeof(stage), "%s/half", variant);
+	int ok = decode_region(q, half, hw, 0, 0, hw, hh, raw,
+			       stage, stats);
+	free(half);
+	return ok;
 }
 
 /* One inverted full-frame pass.  Some codes are rendered light-on-dark (an
@@ -675,7 +707,7 @@ static int decode_inverted(struct quirc *q, const uint8_t *pix, int w, int h,
 	uint64_t transform_started = stats_now(stats);
 	uint8_t *inv = malloc(n);
 	if (!inv)
-		return 0;
+		return allocation_failed(stats, "inversion");
 	for (size_t i = 0; i < n; i++)
 		inv[i] = (uint8_t)(255 - pix[i]);
 	stats->transform_us += stats_now(stats) - transform_started;
@@ -694,34 +726,39 @@ static int decode_lens(struct quirc *q, const uint8_t *pix, int w, int h,
 	corrected = lens_correct_radial(pix, w, h, LENS_FALLBACK_K1);
 	stats->transform_us += stats_now(stats) - transform_started;
 	if (!corrected)
-		return 0;
+		return allocation_failed(stats, "lens correction");
 
 	stats->lens_corrections++;
 	if (decode_full(q, corrected, w, h, raw, "lens", stats)) {
 		free(corrected);
 		return 1;
 	}
+	if (stats->fatal_error) {
+		free(corrected);
+		return 0;
+	}
 
 	transform_started = stats_now(stats);
 	uint8_t *corrected_blur = box_blur3(corrected, w, h);
 	stats->transform_us += stats_now(stats) - transform_started;
-	if (corrected_blur) {
-		int ok = decode_full(q, corrected_blur, w, h, raw,
-				     "lens-blur", stats);
+	if (!corrected_blur) {
+		free(corrected);
+		return allocation_failed(stats, "lens blur");
+	}
+	int ok = decode_full(q, corrected_blur, w, h, raw,
+			     "lens-blur", stats);
 
-		free(corrected_blur);
-		if (ok) {
-			free(corrected);
-			return 1;
-		}
+	free(corrected_blur);
+	if (ok) {
+		free(corrected);
+		return 1;
 	}
 	free(corrected);
 	return 0;
 }
 
-/* Try the sharp image first; if nothing decodes, retry a light-denoised copy
- * (rescues noisy captures), then one inverted pass.  Returns 1 on first
- * decode. */
+/* Run the measured bounded cascade from the cheapest sharp/blur attempts
+ * through half-scale, lens, tiles, and finally inversion. */
 static int decode_image(struct quirc *q, const uint8_t *pix, int w, int h,
 			int raw, struct decode_stats *stats)
 {
@@ -730,20 +767,30 @@ static int decode_image(struct quirc *q, const uint8_t *pix, int w, int h,
 
 	if (decode_full(q, pix, w, h, raw, "sharp", stats))
 		return 1;
+	if (stats->fatal_error)
+		return 0;
 
 	transform_started = stats_now(stats);
 	blur = box_blur3(pix, w, h);
 	stats->transform_us += stats_now(stats) - transform_started;
-	if (blur) {
-		if (decode_full(q, blur, w, h, raw, "blur", stats)) {
-			free(blur);
-			return 1;
-		}
+	if (!blur)
+		return allocation_failed(stats, "blur");
+	if (decode_full(q, blur, w, h, raw, "blur", stats)) {
+		free(blur);
+		return 1;
+	}
+	if (stats->fatal_error) {
+		free(blur);
+		return 0;
 	}
 
 	if (decode_half(q, pix, w, h, raw, "sharp", stats)) {
 		free(blur);
 		return 1;
+	}
+	if (stats->fatal_error) {
+		free(blur);
+		return 0;
 	}
 
 	/* Strong fisheye curvature cannot be represented by the frame's direct
@@ -755,19 +802,35 @@ static int decode_image(struct quirc *q, const uint8_t *pix, int w, int h,
 		free(blur);
 		return 1;
 	}
+	if (stats->fatal_error) {
+		free(blur);
+		return 0;
+	}
 
-	if (blur && decode_half(q, blur, w, h, raw, "blur", stats)) {
+	if (decode_half(q, blur, w, h, raw, "blur", stats)) {
 		free(blur);
 		return 1;
+	}
+	if (stats->fatal_error) {
+		free(blur);
+		return 0;
 	}
 
 	if (decode_tiles(q, pix, w, h, raw, "sharp", stats)) {
 		free(blur);
 		return 1;
 	}
-	if (blur && decode_tiles(q, blur, w, h, raw, "blur", stats)) {
+	if (stats->fatal_error) {
+		free(blur);
+		return 0;
+	}
+	if (decode_tiles(q, blur, w, h, raw, "blur", stats)) {
 		free(blur);
 		return 1;
+	}
+	if (stats->fatal_error) {
+		free(blur);
+		return 0;
 	}
 	free(blur);
 	return decode_inverted(q, pix, w, h, raw, stats);
@@ -815,8 +878,9 @@ int main(int argc, char **argv)
 		free(pix);
 		return 2;
 	}
-	int rc = decode_image(q, pix, (int)w, (int)h, opts.raw,
-			      &stats) ? 0 : 1;
+	int decoded = decode_image(q, pix, (int)w, (int)h, opts.raw,
+				   &stats);
+	int rc = stats.fatal_error ? 2 : (decoded ? 0 : 1);
 
 	quirc_destroy(q);
 	free(pix);
@@ -830,7 +894,8 @@ int main(int argc, char **argv)
 			"qr_candidates=%u "
 			"mirror_attempts=%u qr_decoded=%u "
 			"envelope_rejected=%u\n",
-			rc == 0 ? "decoded" : "no-decode",
+			rc == 0 ? "decoded" :
+			(rc == 1 ? "no-decode" : "fatal-error"),
 			stats.success_stage[0] ? stats.success_stage : "none",
 			(unsigned long long)(monotonic_us() -
 					     stats.started_us),
