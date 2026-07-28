@@ -17,6 +17,7 @@ tools/ive_i6c_hwop
 
 tests/test_runner
 tests/test_imu_ring
+tests/test_qr_marker
 
 enc-ctrl/tests/test_runner
 

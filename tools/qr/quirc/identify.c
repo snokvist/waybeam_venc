@@ -294,13 +294,28 @@ static uint8_t otsu(const struct quirc *q)
 
 	// Calculate histogram
 	unsigned int histogram[UINT8_MAX + 1];
+	unsigned int histogram1[UINT8_MAX + 1];
+	unsigned int histogram2[UINT8_MAX + 1];
+	unsigned int histogram3[UINT8_MAX + 1];
 	(void)memset(histogram, 0, sizeof(histogram));
-	uint8_t* ptr = q->image;
+	(void)memset(histogram1, 0, sizeof(histogram1));
+	(void)memset(histogram2, 0, sizeof(histogram2));
+	(void)memset(histogram3, 0, sizeof(histogram3));
+	const uint8_t *ptr = q->image;
 	unsigned int length = numPixels;
-	while (length--) {
-		uint8_t value = *ptr++;
-		histogram[value]++;
+	while (length >= 4) {
+		histogram[ptr[0]]++;
+		histogram1[ptr[1]]++;
+		histogram2[ptr[2]]++;
+		histogram3[ptr[3]]++;
+		ptr += 4;
+		length -= 4;
 	}
+	while (length--)
+		histogram[*ptr++]++;
+	for (unsigned int i = 0; i <= UINT8_MAX; ++i)
+		histogram[i] += histogram1[i] + histogram2[i] +
+				histogram3[i];
 
 	// Calculate weighted sum of histogram values
 	quirc_float_t sum = (quirc_float_t)0;
@@ -341,6 +356,7 @@ static uint8_t otsu(const struct quirc *q)
 
 static void area_count(void *user_data, int y, int left, int right)
 {
+	(void)y;
 	((struct quirc_region *)user_data)->count += right - left + 1;
 }
 
@@ -541,7 +557,7 @@ static void finder_scan(struct quirc *q, unsigned int y)
 	unsigned int pb[5];
 
 	memset(pb, 0, sizeof(pb));
-	for (x = 0; x < q->w; x++) {
+	for (x = 0; x < (unsigned int)q->w; x++) {
 		int color = row[x] ? 1 : 0;
 
 		if (x && color != last_color) {
@@ -683,6 +699,48 @@ static void measure_grid_size(struct quirc *q, int index)
 	qr->grid_size =  4*ver + 17;
 }
 
+static int read_marker_cell(const struct quirc *q,
+			    const struct quirc_grid *qr, int x, int y)
+{
+	/* Keep the vote near the module center. Wider 0.3/0.7 offsets sample
+	 * neighbouring modules under defocus plus a heavily compressed edge. */
+	static const quirc_float_t offsets[] = {0.4, 0.5, 0.6};
+	struct quirc_point seen[9];
+	int seen_count = 0;
+	int black = 0;
+	int white = 0;
+	int u, v;
+
+	for (v = 0; v < 3; v++) {
+		for (u = 0; u < 3; u++) {
+			struct quirc_point p;
+			int i;
+
+			perspective_map(qr->c, x + offsets[u],
+					y + offsets[v], &p);
+			if (p.y < 0 || p.y >= q->h ||
+			    p.x < 0 || p.x >= q->w)
+				continue;
+
+			for (i = 0; i < seen_count; i++)
+				if (seen[i].x == p.x && seen[i].y == p.y)
+					break;
+			if (i < seen_count)
+				continue;
+
+			seen[seen_count++] = p;
+			if (q->pixels[p.y * q->w + p.x])
+				black++;
+			else
+				white++;
+		}
+	}
+
+	if (!black && !white)
+		return 0;
+	return black > white ? 1 : -1;
+}
+
 /* Read a cell from a grid using the currently set perspective
  * transform. Returns +/- 1 for black/white, 0 for cells which are
  * out of image bounds.
@@ -691,6 +749,9 @@ static int read_cell(const struct quirc *q, int index, int x, int y)
 {
 	const struct quirc_grid *qr = &q->grids[index];
 	struct quirc_point p;
+
+	if (qr->marker_grid)
+		return read_marker_cell(q, qr, x, y);
 
 	perspective_map(qr->c, x + (quirc_float_t)0.5, y + (quirc_float_t)0.5, &p);
 	if (p.y < 0 || p.y >= q->h || p.x < 0 || p.x >= q->w)
@@ -702,16 +763,22 @@ static int read_cell(const struct quirc *q, int index, int x, int y)
 static int fitness_cell(const struct quirc *q, int index, int x, int y)
 {
 	const struct quirc_grid *qr = &q->grids[index];
+	static const quirc_float_t offsets[] = {0.3, 0.5, 0.7};
+	quirc_float_t sample_x[3];
+	quirc_float_t sample_y[3];
 	int score = 0;
 	int u, v;
 
+	for (u = 0; u < 3; u++) {
+		sample_x[u] = x + offsets[u];
+		sample_y[u] = y + offsets[u];
+	}
 	for (v = 0; v < 3; v++)
 		for (u = 0; u < 3; u++) {
-			static const quirc_float_t offsets[] = {0.3, 0.5, 0.7};
 			struct quirc_point p;
 
-			perspective_map(qr->c, x + offsets[u],
-					       y + offsets[v], &p);
+			perspective_map(qr->c, sample_x[u],
+					       sample_y[v], &p);
 			if (p.y < 0 || p.y >= q->h || p.x < 0 || p.x >= q->w)
 				continue;
 
@@ -803,6 +870,524 @@ static int fitness_all(const struct quirc *q, int index)
 					info->apat[i], info->apat[j]);
 
 	return score;
+}
+
+#define MARKER_MAX_CANDIDATES	12
+#define MARKER_REGION_BUDGET	120
+#define MARKER_FRAME_UNITS	33
+#define MARKER_QR_OFFSET	6
+#define MARKER_QR_SIZE		21
+#define MARKER_EXTREME_DIRECTIONS 16
+
+struct marker_region_stats {
+	int count;
+	int min_x;
+	int min_y;
+	int max_x;
+	int max_y;
+	long long extreme_score[MARKER_EXTREME_DIRECTIONS];
+	struct quirc_point extreme[MARKER_EXTREME_DIRECTIONS];
+};
+
+struct marker_candidate {
+	struct quirc_point corners[4];
+	long long area2;
+	long long quality;
+};
+
+static void marker_area_count(void *user_data, int y, int left, int right)
+{
+	static const int directions[MARKER_EXTREME_DIRECTIONS][2] = {
+		{1024, 0}, {946, 392}, {724, 724}, {392, 946},
+		{0, 1024}, {-392, 946}, {-724, 724}, {-946, 392},
+		{-1024, 0}, {-946, -392}, {-724, -724}, {-392, -946},
+		{0, -1024}, {392, -946}, {724, -724}, {946, -392}
+	};
+	struct marker_region_stats *stats = user_data;
+	int count = right - left + 1;
+	int d;
+
+	stats->count += count;
+	if (left < stats->min_x)
+		stats->min_x = left;
+	if (right > stats->max_x)
+		stats->max_x = right;
+	if (y < stats->min_y)
+		stats->min_y = y;
+	if (y > stats->max_y)
+		stats->max_y = y;
+	for (d = 0; d < MARKER_EXTREME_DIRECTIONS; d++) {
+		/* Along one horizontal span, only the endpoint facing the
+		 * direction can be maximal. This selects the same endpoint and
+		 * preserves the left-first tie used by the former two-endpoint
+		 * loop, while halving the dot products. */
+		int x = directions[d][0] > 0 ? right : left;
+		long long score =
+			(long long)x * directions[d][0] +
+			(long long)y * directions[d][1];
+
+		if (score > stats->extreme_score[d]) {
+			stats->extreme_score[d] = score;
+			stats->extreme[d].x = x;
+			stats->extreme[d].y = y;
+		}
+	}
+}
+
+static int marker_region_code(struct quirc *q, int x, int y,
+			      struct marker_region_stats *stats)
+{
+	struct quirc_region *box;
+	int region;
+	int i;
+
+	if (q->pixels[y * q->w + x] != QUIRC_PIXEL_BLACK)
+		return -1;
+	if (q->num_regions >= QUIRC_MAX_REGIONS)
+		return -1;
+
+	region = q->num_regions;
+	box = &q->regions[q->num_regions++];
+	memset(box, 0, sizeof(*box));
+	box->seed.x = x;
+	box->seed.y = y;
+	box->capstone = -1;
+
+	stats->count = 0;
+	stats->min_x = stats->max_x = x;
+	stats->min_y = stats->max_y = y;
+	for (i = 0; i < MARKER_EXTREME_DIRECTIONS; i++)
+		stats->extreme_score[i] = LLONG_MIN;
+	flood_fill_seed(q, x, y, QUIRC_PIXEL_BLACK, region,
+			marker_area_count, stats);
+	box->count = stats->count;
+	return region;
+}
+
+static int marker_pixel_black(const struct quirc *q, int x, int y)
+{
+	if (x < 0 || y < 0 || x >= q->w || y >= q->h)
+		return 0;
+	return q->pixels[y * q->w + x] != QUIRC_PIXEL_WHITE;
+}
+
+static int marker_seed_has_extent(const struct quirc *q, int x, int y,
+				  int probe)
+{
+	static const int dirs[8][2] = {
+		{1, 0}, {-1, 0}, {0, 1}, {0, -1},
+		{1, 1}, {1, -1}, {-1, 1}, {-1, -1}
+	};
+	int i;
+
+	if (x >= probe && x < q->w - probe &&
+	    y >= probe && y < q->h - probe) {
+		for (i = 0; i < 8; i++)
+			if (q->pixels[(y + dirs[i][1] * probe) * q->w +
+				      x + dirs[i][0] * probe] !=
+			    QUIRC_PIXEL_WHITE)
+				return 1;
+		return 0;
+	}
+
+	for (i = 0; i < 8; i++)
+		if (marker_pixel_black(q, x + dirs[i][0] * probe,
+				      y + dirs[i][1] * probe))
+			return 1;
+	return 0;
+}
+
+static long long marker_cross(const struct quirc_point *a,
+			      const struct quirc_point *b,
+			      const struct quirc_point *c)
+{
+	return (long long)(b->x - a->x) * (c->y - b->y) -
+		(long long)(b->y - a->y) * (c->x - b->x);
+}
+
+static long long marker_area2(const struct quirc_point *p)
+{
+	long long area = 0;
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		const struct quirc_point *a = &p[i];
+		const struct quirc_point *b = &p[(i + 1) & 3];
+
+		area += (long long)a->x * b->y - (long long)a->y * b->x;
+	}
+	return area < 0 ? -area : area;
+}
+
+static void marker_order_corners(struct quirc_point *p)
+{
+	quirc_float_t angle[4];
+	struct quirc_point ordered[4];
+	quirc_float_t cx = 0;
+	quirc_float_t cy = 0;
+	int first = 0;
+	int i, j;
+
+	for (i = 0; i < 4; i++) {
+		cx += p[i].x;
+		cy += p[i].y;
+	}
+	cx *= (quirc_float_t)0.25;
+	cy *= (quirc_float_t)0.25;
+
+	for (i = 0; i < 4; i++) {
+		angle[i] = atan2((quirc_float_t)p[i].y - cy,
+				 (quirc_float_t)p[i].x - cx);
+		ordered[i] = p[i];
+	}
+	for (i = 1; i < 4; i++) {
+		struct quirc_point point = ordered[i];
+		quirc_float_t value = angle[i];
+
+		for (j = i; j > 0 && angle[j - 1] > value; j--) {
+			ordered[j] = ordered[j - 1];
+			angle[j] = angle[j - 1];
+		}
+		ordered[j] = point;
+		angle[j] = value;
+	}
+	for (i = 1; i < 4; i++)
+		if (ordered[i].x + ordered[i].y <
+		    ordered[first].x + ordered[first].y)
+			first = i;
+	for (i = 0; i < 4; i++)
+		p[i] = ordered[(first + i) & 3];
+}
+
+static int marker_quad_valid(const struct marker_region_stats *stats,
+			     struct marker_candidate *candidate)
+{
+	long long area2;
+	long long min_side2 = LLONG_MAX;
+	long long sign = 0;
+	long long ratio_pct;
+	int i;
+
+	marker_order_corners(candidate->corners);
+	for (i = 0; i < 4; i++) {
+		const struct quirc_point *a = &candidate->corners[i];
+		const struct quirc_point *b = &candidate->corners[(i + 1) & 3];
+		const struct quirc_point *c = &candidate->corners[(i + 2) & 3];
+		long long dx = b->x - a->x;
+		long long dy = b->y - a->y;
+		long long side2 = dx * dx + dy * dy;
+		long long cross = marker_cross(a, b, c);
+
+		if (side2 < min_side2)
+			min_side2 = side2;
+		if (!cross || (sign && ((cross < 0) != (sign < 0))))
+			return 0;
+		sign = cross;
+	}
+
+	area2 = marker_area2(candidate->corners);
+	if (area2 < 800 || min_side2 < 400)
+		return 0;
+
+	/* A two-module frame around a 33x33-unit square occupies about 22%
+	 * of the projected quadrilateral. Allow blur and thresholding plenty of
+	 * room, while rejecting filled scene regions and hairline contours. */
+	ratio_pct = (long long)stats->count * 200 / area2;
+	if (ratio_pct < 3 || ratio_pct > 60)
+		return 0;
+
+	candidate->area2 = area2;
+	candidate->quality = area2 /
+		(1 + llabs(ratio_pct - 22));
+	return 1;
+}
+
+static int marker_region_quad(const struct marker_region_stats *stats,
+			      struct marker_candidate *best)
+{
+	struct quirc_point points[MARKER_EXTREME_DIRECTIONS];
+	long long best_area = 0;
+	int count = 0;
+	int a, b, c, d, i;
+
+	for (i = 0; i < MARKER_EXTREME_DIRECTIONS; i++) {
+		int duplicate = 0;
+		int j;
+
+		for (j = 0; j < count; j++)
+			if (points[j].x == stats->extreme[i].x &&
+			    points[j].y == stats->extreme[i].y) {
+				duplicate = 1;
+				break;
+			}
+		if (!duplicate)
+			points[count++] = stats->extreme[i];
+	}
+	if (count < 4)
+		return 0;
+
+	for (a = 0; a < count - 3; a++) {
+		for (b = a + 1; b < count - 2; b++) {
+			for (c = b + 1; c < count - 1; c++) {
+				for (d = c + 1; d < count; d++) {
+					struct marker_candidate candidate;
+					int min_x = points[a].x;
+					int max_x = points[a].x;
+					int min_y = points[a].y;
+					int max_y = points[a].y;
+					int index[3] = {b, c, d};
+					int k;
+					long long upper_area2;
+
+					for (k = 0; k < 3; k++) {
+						const struct quirc_point *p =
+							&points[index[k]];
+
+						if (p->x < min_x)
+							min_x = p->x;
+						if (p->x > max_x)
+							max_x = p->x;
+						if (p->y < min_y)
+							min_y = p->y;
+						if (p->y > max_y)
+							max_y = p->y;
+					}
+					/* Any valid quadrilateral is contained by its
+					 * axis-aligned bounds. If even twice that box
+					 * area cannot beat the current winner, the
+					 * existing <= best-area test must reject it. */
+					upper_area2 =
+						2LL * (max_x - min_x) *
+						(max_y - min_y);
+					if (upper_area2 <= best_area)
+						continue;
+
+					candidate.corners[0] = points[a];
+					candidate.corners[1] = points[b];
+					candidate.corners[2] = points[c];
+					candidate.corners[3] = points[d];
+					if (!marker_quad_valid(stats, &candidate) ||
+					    candidate.area2 <= best_area)
+						continue;
+					*best = candidate;
+					best_area = candidate.area2;
+				}
+			}
+		}
+	}
+	return best_area > 0;
+}
+
+static void marker_candidate_add(struct marker_candidate *candidates,
+				 int *count,
+				 const struct marker_candidate *candidate)
+{
+	int n = *count;
+	int i;
+
+	if (n < MARKER_MAX_CANDIDATES) {
+		candidates[n++] = *candidate;
+	} else if (candidate->quality > candidates[n - 1].quality) {
+		candidates[n - 1] = *candidate;
+	} else {
+		return;
+	}
+
+	for (i = n - 1; i > 0 &&
+	     candidates[i].quality > candidates[i - 1].quality; i--) {
+		struct marker_candidate swap = candidates[i - 1];
+
+		candidates[i - 1] = candidates[i];
+		candidates[i] = swap;
+	}
+	*count = n;
+}
+
+static int marker_find_candidates(struct quirc *q,
+				  struct marker_candidate *candidates)
+{
+	int start_regions = q->num_regions;
+	int min_dim = q->w < q->h ? q->w : q->h;
+	int min_count = q->w * q->h / 8000;
+	int probe = min_dim / 120;
+	int count = 0;
+	int x, y;
+
+	if (min_count < 64)
+		min_count = 64;
+	if (probe < 4)
+		probe = 4;
+	if (probe > 12)
+		probe = 12;
+
+	for (y = 0; y < q->h; y += 2) {
+		for (x = 0; x < q->w; x += 2) {
+			struct marker_region_stats stats;
+			struct marker_candidate candidate;
+			int region;
+
+			if (q->pixels[y * q->w + x] != QUIRC_PIXEL_BLACK ||
+			    !marker_seed_has_extent(q, x, y, probe))
+				continue;
+			if (q->num_regions - start_regions >= MARKER_REGION_BUDGET ||
+			    q->num_regions >= QUIRC_MAX_REGIONS)
+				return count;
+
+			region = marker_region_code(q, x, y, &stats);
+			if (region < 0 || stats.count < min_count ||
+			    stats.max_x - stats.min_x < 20 ||
+			    stats.max_y - stats.min_y < 20)
+				continue;
+
+			if (!marker_region_quad(&stats, &candidate))
+				continue;
+			marker_candidate_add(candidates, &count, &candidate);
+		}
+	}
+	return count;
+}
+
+static int marker_geometry_fitness(const struct quirc *q, int index)
+{
+	static const int frame_offsets[] = {-6, -5, 25, 26};
+	int score = 0;
+	int d, i, p;
+
+	/* The four-module white quiet zone remains standards-compliant and is
+	 * the strongest guard against treating arbitrary scene quadrilaterals as
+	 * markers. */
+	for (d = 1; d <= 4; d++) {
+		for (i = -d; i <= 20 + d; i++) {
+			score -= fitness_cell(q, index, i, -d);
+			score -= fitness_cell(q, index, i, 20 + d);
+		}
+		for (i = 1 - d; i < 20 + d; i++) {
+			score -= fitness_cell(q, index, -d, i);
+			score -= fitness_cell(q, index, 20 + d, i);
+		}
+	}
+
+	/* Two black modules around the outside of the quiet zone. */
+	for (p = 0; p < 2; p++) {
+		int lo = frame_offsets[p];
+		int hi = frame_offsets[p + 2];
+
+		for (i = -6; i <= 26; i++) {
+			score += fitness_cell(q, index, i, lo);
+			score += fitness_cell(q, index, i, hi);
+		}
+		for (i = -5; i <= 25; i++) {
+			score += fitness_cell(q, index, lo, i);
+			score += fitness_cell(q, index, hi, i);
+		}
+	}
+	return score;
+}
+
+static int marker_try_candidate(struct quirc *q,
+				const struct marker_candidate *candidate,
+				quirc_float_t *best_c)
+{
+	struct quirc_grid *qr;
+	int qr_index = q->num_grids;
+	int best_score = INT_MIN;
+	int geometry = INT_MIN;
+	int winding, shift;
+
+	if (qr_index >= QUIRC_MAX_GRIDS)
+		return 0;
+	qr = &q->grids[qr_index];
+
+	for (winding = 0; winding < 2; winding++) {
+		for (shift = 0; shift < 4; shift++) {
+			quirc_float_t frame_c[QUIRC_PERSPECTIVE_PARAMS];
+			struct quirc_point frame_rect[4];
+			struct quirc_point qr_rect[4];
+			static const int qr_coord[4][2] = {
+				{MARKER_QR_OFFSET, MARKER_QR_OFFSET},
+				{MARKER_QR_OFFSET + MARKER_QR_SIZE,
+				 MARKER_QR_OFFSET},
+				{MARKER_QR_OFFSET + MARKER_QR_SIZE,
+				 MARKER_QR_OFFSET + MARKER_QR_SIZE},
+				{MARKER_QR_OFFSET,
+				 MARKER_QR_OFFSET + MARKER_QR_SIZE}
+			};
+			int score;
+			int i;
+
+			for (i = 0; i < 4; i++) {
+				int src = winding ?
+					(shift - i + 4) & 3 :
+					(shift + i) & 3;
+
+				frame_rect[i] = candidate->corners[src];
+			}
+			perspective_setup(frame_c, frame_rect,
+					MARKER_FRAME_UNITS,
+					MARKER_FRAME_UNITS);
+			for (i = 0; i < 4; i++)
+				perspective_map(frame_c, qr_coord[i][0],
+						qr_coord[i][1], &qr_rect[i]);
+
+			memset(qr, 0, sizeof(*qr));
+			qr->grid_size = MARKER_QR_SIZE;
+			qr->marker_grid = 1;
+			qr->align_region = -1;
+			qr->caps[0] = qr->caps[1] = qr->caps[2] = -1;
+			perspective_setup(qr->c, qr_rect,
+					MARKER_QR_SIZE, MARKER_QR_SIZE);
+
+			/* The outer frame and quiet zone are symmetric under every
+			 * rotation and winding tried below. Their projected sample
+			 * locations are therefore identical; validate this expensive
+			 * signal once, then use QR structure to choose orientation. */
+			if (geometry == INT_MIN) {
+				geometry = marker_geometry_fitness(q, qr_index);
+				if (geometry < 2200)
+					return 0;
+			}
+			score = fitness_all(q, qr_index);
+			if (score > best_score) {
+				best_score = score;
+				memcpy(best_c, qr->c, sizeof(qr->c));
+			}
+		}
+	}
+
+	/* The thresholds are intentionally conservative relative to a clean
+	 * frame, but require independent frame/quiet-zone and QR-structure
+	 * signals. QR fitness uses the marker grid's multi-point sampling. */
+	return geometry >= 2200 && best_score >= 120;
+}
+
+static void marker_identify_outer_frame_v1(struct quirc *q)
+{
+	struct marker_candidate candidates[MARKER_MAX_CANDIDATES];
+	int candidate_count;
+	int i;
+
+	candidate_count = marker_find_candidates(q, candidates);
+	for (i = 0; i < candidate_count &&
+	     q->num_grids < QUIRC_MAX_GRIDS; i++) {
+		quirc_float_t c[QUIRC_PERSPECTIVE_PARAMS];
+		struct quirc_grid *qr;
+
+		if (!marker_try_candidate(q, &candidates[i], c))
+			continue;
+		qr = &q->grids[q->num_grids++];
+		memset(qr, 0, sizeof(*qr));
+		qr->grid_size = MARKER_QR_SIZE;
+		qr->marker_grid = 1;
+		qr->align_region = -1;
+		qr->caps[0] = qr->caps[1] = qr->caps[2] = -1;
+		memcpy(qr->c, c, sizeof(qr->c));
+	}
+}
+
+static void marker_identify(struct quirc *q)
+{
+	if (q->marker_profile == QUIRC_MARKER_PROFILE_OUTER_FRAME_V1)
+		marker_identify_outer_frame_v1(q);
 }
 
 static void jiggle_perspective(struct quirc *q, int index)
@@ -1043,7 +1628,7 @@ static void test_grouping(struct quirc *q, unsigned int i)
 		struct quirc_capstone *c2 = &q->capstones[j];
 		quirc_float_t u, v;
 
-		if (i == j)
+		if (i == (unsigned int)j)
 			continue;
 
 		perspective_unmap(c1->c, &c2->center, &u, &v);
@@ -1108,11 +1693,23 @@ void quirc_end(struct quirc *q)
 	uint8_t threshold = otsu(q);
 	pixels_setup(q, threshold);
 
-	for (i = 0; i < q->h; i++)
-		finder_scan(q, i);
+	/* The normal finder scan labels connected regions as it goes. Preserve
+	 * the continuous outer frame as one candidate by identifying it first;
+	 * finder scanning can then reuse the labels without changing pixels. */
+	if (q->marker_mode != QUIRC_MARKER_OFF) {
+		marker_identify(q);
+	}
 
-	for (i = 0; i < q->num_capstones; i++)
-		test_grouping(q, i);
+	/* Marker and standards-only discovery are intentionally exclusive per
+	 * quirc_end() call. Production first uses MARKER_ONLY, then may use OFF
+	 * only on a tight ROI derived from accepted marker geometry. OFF also
+	 * remains available to the deterministic corpus as a comparison. */
+	if (q->marker_mode == QUIRC_MARKER_OFF) {
+		for (i = 0; i < q->h; i++)
+			finder_scan(q, i);
+		for (i = 0; i < q->num_capstones; i++)
+			test_grouping(q, i);
+	}
 }
 
 void quirc_extract(const struct quirc *q, int index,

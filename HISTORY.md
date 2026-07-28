@@ -38,21 +38,72 @@ i6c MI_SYS entry points take a leading `u16 soc_id` and the port is configured
 through `SetPortConfig` with an explicit crop window, which the pipeline now
 publishes via `venc_jpeg_set_gray_crop()`.
 
-Ships the on-device consumer under `tools/qr/`: `qr_decode.c` (vendored quirc,
-ISC) decodes a QR code from a P5 PGM — with a mirror-flip retry (decodes
-flipped codes), overlapping-tile and half-scale passes (small codes in a large
-frame), a light-denoise fallback (noisy captures), and one inverted pass
-(light-on-dark codes) — and `qr_boot_action.sh`
-polls the
-endpoint for the first 15 s of runtime and, on a `cmd=pair;gs=…;psk=…` payload,
-applies a waybeam-link RF pairing key from a ground-station QR code. Trust is
-by proximity: whoever holds a QR in front of the camera during the boot window
-can pair. The link-apply step is a marked integration hook. `qr_watch.sh` is
-the interactive counterpart — it polls the endpoint until a code decodes,
-prints the payload on stdout, and exits, reporting `409`/`503` distinctly so a
-busy tap or a disabled snapshot does not read as an empty frame; `-c` keeps it
-scanning and streams every decode instead of stopping at the first. Build with
-`make qr-decode`.
+Ships a freestanding scanning backend under `tools/qr/`: `qr_decode.c`
+(vendored quirc, ISC) decodes P5 PGM captures with mirror, overlapping-tile,
+half-scale, light-denoise, and inverted passes. A required continuous black
+outer frame now supplies direct four-corner projective geometry for a
+Version-1 QR while keeping extraction in the original image; framed grids use
+3×3 majority sampling. The default output is limited to the minimal
+Version-1/Q alphanumeric envelope — exactly 16 characters, leading type `P` or
+`C` — while `--raw` keeps arbitrary-symbol bench diagnostics available.
+
+`qr_watch.sh` remains a standalone polling helper with no action dispatch. It
+reports `409`/`503` distinctly and can stream decodes with `-c`. Pairing,
+commands, boot scheduling, persistence, packaging, and service integration are
+deferred to a separate consumer work package. A deterministic host corpus
+compares stock and frame-assisted recognition across front, rotated, mirrored,
+small, and projectively compressed renders. Build with `make qr-decode`; run
+the core corpus with `make qr-test-host`. An extended 768-image Version-1/Q
+series sweeps marker width, four perspective ratios down to 0.35, rotation,
+perspective direction, and four defocus levels. The outer frame was identified
+in 768/768 cases; exact payload decode reached 709/768 (92.3%) versus stock
+quirc's 506/768 (65.9%). The SSC338Q Star6E bench reproduced those exact
+counts natively. The production decoder now strictly requires the bounded
+outer frame and never performs global finder discovery. It tries the frame's
+direct transform first, then—only after ECC failure—runs finder refinement in
+a tight ROI derived from the accepted frame. This preserves rejection of bare
+QRs while absorbing fisheye curvature that a four-corner homography cannot
+model. Opt-in `--stats` diagnostics report each applied pass, per-stage
+monotonic timings, frame/refinement/finder candidate counts, QR and envelope
+outcomes, and a final summary on stderr without contaminating payload-only
+stdout. `qr_watch.sh -v` exposes the same trace during polling.
+Continuous polling is completion-aware: the next snapshot starts immediately
+after the previous capture/decode returns unless that would place capture
+starts less than 0.5 seconds apart. This removes the former fixed post-decode
+sleep for direct on-camera stress testing; `-i` may still request a slower
+minimum start cadence.
+
+Live phone-display validation on the SSC338Q Star6E confirmed the combined
+path on real optical captures: the exact `P23456789ABCDEFG` envelope decoded
+through both `sharp/tile/refine` and `sharp/half/refine`. The initial
+five-frame run succeeded 2/5 times. Failed large presentations remain
+dominated by the bench camera's strong fisheye curvature; offline radial
+correction made those same frames decodable. The decoder now includes that
+compensation as a late, single-coefficient (`k1=-0.30`) nearest-neighbour
+fallback. It retries only corrected full-frame sharp and light-denoised images,
+and both remain subject to the mandatory frame gate; no unbounded finder path
+is introduced. A fresh live five-frame Star6E burst improved from 2/5 to 4/5
+exact decodes: one normal bounded refinement and three lens-corrected bounded
+refinements. The remaining miss found no acceptable frame even after
+correction.
+
+The bounded scan path is also tuned for the Star6E Cortex-A7. The QR target now
+uses `-O3`, the existing NEON/VFPv4 SoC flags, and quirc's supported
+single-precision perspective math. Regular grayscale transforms are
+auto-vectorized; explicit extra NEON flags and LTO measured no faster.
+Algorithmic reductions were larger: symmetric frame geometry is scored once
+per candidate, nine-tile scans are deferred, blur-half no longer delays the
+fisheye fallback, and the radial remap precomputes invariant column terms.
+The saved hard 1280x720 fisheye capture fell from roughly 1.28–1.33 seconds to
+a 257 ms mean over 30 paired final-build Star6E runs. A final
+behavior-preserving pass added exact four-way histogram accumulation,
+algebraically dominant flood-span endpoints, quadrilateral bounding-box upper
+bounds, cached cell coordinates, retained high-water quirc work buffers, and
+Star6E-only compiler loop unrolling. That pass improved the prior optimized
+build's paired mean from 291 ms to 257 ms (11.4%) without changing sampling,
+thresholds, candidates, scan coverage, successful stages, or payloads. Exact
+decodes and the full 768-case host and native-Star6E results remained
+unchanged.
 
 ## [0.58.0] - 2026-07-26
 

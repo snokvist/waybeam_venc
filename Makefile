@@ -111,13 +111,16 @@ LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
-        webui webui-check
+        qr-decode qr-test-host qr-test-extended webui webui-check
 
 help:
 	@echo "Targets:"
 	@echo "  make build       Build standalone binaries (default, SOC_BUILD=star6e)"
 	@echo "  make build SOC_BUILD=maruko"
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
+	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
+	@echo "  make qr-test-host Run the deterministic QR perspective corpus"
+	@echo "  make qr-test-extended Run the extended QR skew/defocus series"
 	@echo "  make lint SOC_BUILD=maruko"
 	@echo "  make stage       Build and stage runtime bundle in out/"
 	@echo "  make test        Run host-native unit tests"
@@ -222,20 +225,26 @@ $(IPU_PROBE_TARGET): $(IPU_PROBE_SRC) include/star6e_ipu.h include/detect_dequan
 	@mkdir -p $(@D)
 	$(CC) -Os -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Iinclude $(IPU_PROBE_SRC) -ldl -o $@
 
-# qr_decode — decode a QR code from a P5 PGM grayscale image.  Pairs with the
-# GET /api/v1/snapshot.pgm endpoint for on-device boot-time QR scanning (e.g.
-# waybeam-link pairing via tools/qr/qr_boot_action.sh).  quirc (ISC) is
-# vendored under tools/qr/quirc/.  Cross-compiled for the target.
+# qr_decode — decode a QR code from a P5 PGM grayscale image. It is a
+# freestanding backend for scripts which fetch GET /api/v1/snapshot.pgm;
+# command/pairing semantics intentionally live outside this repository.
+# quirc (ISC) is vendored under tools/qr/quirc/. Cross-compiled for the target.
 QR_DECODE_TARGET := $(OUT_DIR)/qr_decode
-QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/quirc/quirc.c \
+QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/waybeam_qr_format.c \
+                    tools/qr/quirc/quirc.c \
                     tools/qr/quirc/decode.c tools/qr/quirc/identify.c \
                     tools/qr/quirc/version_db.c
+# Both supported targets are 32-bit ARM SoCs. quirc supports single-precision
+# perspective math specifically for this class of CPU; on Cortex-A7 this also
+# avoids the non-NEON double-precision path.
+QR_MATH_CFLAGS   := -DQUIRC_FLOAT_TYPE=float -DQUIRC_USE_TGMATH
+QR_PERF_CFLAGS   := $(if $(filter star6e,$(SOC_BUILD)),-funroll-loops)
 qr-decode: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
 qr-decode: $(QR_DECODE_TARGET)
 
-$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
 	@mkdir -p $(@D)
-	$(CC) -Os -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc $(QR_DECODE_SRC) -lm -o $@
+	$(CC) -O3 $(SOC_CFLAGS) $(QR_MATH_CFLAGS) $(QR_PERF_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc $(QR_DECODE_SRC) -lm -lrt -o $@
 
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
@@ -324,6 +333,23 @@ test-tsan:
 	./$(TEST_RUNNER)
 
 test-ci: test test-asan test-tsan
+
+QR_TEST_RUNNER := tests/test_qr_marker
+QR_TEST_SRCS   := tests/test_qr_marker.c tools/qr/waybeam_qr_format.c \
+		  tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
+		  tools/qr/quirc/identify.c tools/qr/quirc/version_db.c
+
+$(QR_TEST_RUNNER): $(QR_TEST_SRCS) tools/qr/waybeam_qr_format.h \
+		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+	$(HOST_CC) -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE \
+		$(QR_MATH_CFLAGS) -Itools/qr -Itools/qr/quirc \
+		$(QR_TEST_SRCS) -lm -o $@
+
+qr-test-host: $(QR_TEST_RUNNER)
+	./$(QR_TEST_RUNNER)
+
+qr-test-extended: $(QR_TEST_RUNNER)
+	./$(QR_TEST_RUNNER) --extended
 
 toolchain:
 	@if [ ! -x "$(CC_BIN)" ]; then \
@@ -432,8 +458,8 @@ remote-test:
 
 # ── Verification targets ──────────────────────────────────────────────
 
-STAR6E_BINS := out/star6e/waybeam
-MARUKO_BINS := out/maruko/waybeam
+STAR6E_BINS := out/star6e/waybeam out/star6e/qr_decode
+MARUKO_BINS := out/maruko/waybeam out/maruko/qr_decode
 
 webui:
 	python3 tools/build_webui.py
@@ -441,9 +467,10 @@ webui:
 webui-check:
 	python3 tools/build_webui.py --check
 
-verify: webui-check
+verify: webui-check qr-test-host
 	@echo "=== Building Maruko backend ==="
 	$(MAKE) build SOC_BUILD=maruko
+	$(MAKE) qr-decode SOC_BUILD=maruko
 	@echo ""
 	@echo "=== Verifying Maruko binaries ==="
 	@for f in $(MARUKO_BINS); do \
@@ -453,6 +480,7 @@ verify: webui-check
 	@echo ""
 	@echo "=== Building Star6E backend ==="
 	$(MAKE) build SOC_BUILD=star6e
+	$(MAKE) qr-decode SOC_BUILD=star6e
 	@echo ""
 	@echo "=== Verifying Star6E binaries ==="
 	@for f in $(STAR6E_BINS); do \
@@ -480,4 +508,5 @@ clean:
 	rm -rf out/star6e out/maruko
 	rm -f $(TIMING_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
+	rm -f $(QR_TEST_RUNNER)
 	rm -f .build_soc

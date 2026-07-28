@@ -44,6 +44,23 @@ void quirc_destroy(struct quirc *q);
  */
 int quirc_resize(struct quirc *q, int w, int h);
 
+/* Optional marker-assisted identification. The default is OFF and preserves
+ * normal quirc behaviour. Marker profiles describe geometry outside a
+ * standards-compliant QR symbol; extraction and decoding still use the normal
+ * quirc APIs and sample directly from the original image. */
+enum quirc_marker_mode {
+	QUIRC_MARKER_OFF = 0,
+	QUIRC_MARKER_ONLY
+};
+
+enum quirc_marker_profile {
+	QUIRC_MARKER_PROFILE_NONE = 0,
+	QUIRC_MARKER_PROFILE_OUTER_FRAME_V1
+};
+
+void quirc_set_marker_mode(struct quirc *q, enum quirc_marker_mode mode,
+			   enum quirc_marker_profile profile);
+
 /* These functions are used to process images for QR-code recognition.
  * quirc_begin() must first be called to obtain access to a buffer into
  * which the input image should be placed. Optionally, the current

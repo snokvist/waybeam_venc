@@ -91,6 +91,7 @@ struct quirc_grid {
 	/* Grid size and perspective transform */
 	int			grid_size;
 	quirc_float_t		c[QUIRC_PERSPECTIVE_PARAMS];
+	int			marker_grid;
 };
 
 struct quirc_flood_fill_vars {
@@ -105,6 +106,7 @@ struct quirc {
 	quirc_pixel_t		*pixels;
 	int			w;
 	int			h;
+	size_t			image_capacity;
 
 	int			num_regions;
 	struct quirc_region	regions[QUIRC_MAX_REGIONS];
@@ -115,7 +117,11 @@ struct quirc {
 	int			num_grids;
 	struct quirc_grid	grids[QUIRC_MAX_GRIDS];
 
-	size_t      		num_flood_fill_vars;
+	enum quirc_marker_mode	marker_mode;
+	enum quirc_marker_profile marker_profile;
+
+	size_t			num_flood_fill_vars;
+	size_t			flood_fill_vars_capacity;
 	struct quirc_flood_fill_vars *flood_fill_vars;
 };
 

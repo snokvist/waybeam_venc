@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="-4 -4 41 41"
+     width="1200"
+     height="1200"
+     shape-rendering="crispEdges">
+  <title>Waybeam bounded QR test — P23456789ABCDEFG</title>
+  <desc>Version 1, ECC Q, 2-module continuous outer frame, 4-module inner quiet zone.</desc>
+  <rect x="-4" y="-4" width="41" height="41" fill="#fff"/>
+  <path fill="#000" fill-rule="evenodd"
+        d="M0 0H33V33H0ZM2 2V31H31V2Z"/>
+  <path fill="#000"
+        d="M6 6h7v1h-7zM16 6h3v1h-3zM20 6h7v1h-7zM6 7h1v1h-1zM12 7h1v1h-1zM15 7h2v1h-2zM20 7h1v1h-1zM26 7h1v1h-1zM6 8h1v1h-1zM8 8h3v1h-3zM12 8h1v1h-1zM14 8h1v1h-1zM17 8h1v1h-1zM20 8h1v1h-1zM22 8h3v1h-3zM26 8h1v1h-1zM6 9h1v1h-1zM8 9h3v1h-3zM12 9h1v1h-1zM15 9h1v1h-1zM18 9h1v1h-1zM20 9h1v1h-1zM22 9h3v1h-3zM26 9h1v1h-1zM6 10h1v1h-1zM8 10h3v1h-3zM12 10h1v1h-1zM14 10h2v1h-2zM17 10h1v1h-1zM20 10h1v1h-1zM22 10h3v1h-3zM26 10h1v1h-1zM6 11h1v1h-1zM12 11h1v1h-1zM14 11h3v1h-3zM20 11h1v1h-1zM26 11h1v1h-1zM6 12h7v1h-7zM14 12h1v1h-1zM16 12h1v1h-1zM18 12h1v1h-1zM20 12h7v1h-7zM17 13h2v1h-2zM7 14h1v1h-1zM10 14h1v1h-1zM12 14h1v1h-1zM14 14h1v1h-1zM17 14h3v1h-3zM21 14h2v1h-2zM24 14h1v1h-1zM6 15h6v1h-6zM13 15h2v1h-2zM16 15h2v1h-2zM21 15h2v1h-2zM24 15h1v1h-1zM8 16h6v1h-6zM17 16h1v1h-1zM19 16h4v1h-4zM25 16h1v1h-1zM6 17h1v1h-1zM8 17h1v1h-1zM11 17h1v1h-1zM13 17h4v1h-4zM18 17h2v1h-2zM23 17h1v1h-1zM26 17h1v1h-1zM6 18h1v1h-1zM10 18h6v1h-6zM18 18h2v1h-2zM21 18h4v1h-4zM26 18h1v1h-1zM14 19h1v1h-1zM16 19h1v1h-1zM19 19h1v1h-1zM21 19h1v1h-1zM23 19h4v1h-4zM6 20h7v1h-7zM16 20h4v1h-4zM21 20h1v1h-1zM23 20h3v1h-3zM6 21h1v1h-1zM12 21h1v1h-1zM19 21h1v1h-1zM22 21h2v1h-2zM6 22h1v1h-1zM8 22h3v1h-3zM12 22h1v1h-1zM14 22h2v1h-2zM17 22h2v1h-2zM20 22h1v1h-1zM22 22h2v1h-2zM25 22h1v1h-1zM6 23h1v1h-1zM8 23h3v1h-3zM12 23h1v1h-1zM15 23h1v1h-1zM18 23h1v1h-1zM21 23h1v1h-1zM25 23h2v1h-2zM6 24h1v1h-1zM8 24h3v1h-3zM12 24h1v1h-1zM15 24h1v1h-1zM17 24h3v1h-3zM21 24h2v1h-2zM6 25h1v1h-1zM12 25h1v1h-1zM14 25h1v1h-1zM19 25h1v1h-1zM21 25h1v1h-1zM24 25h1v1h-1zM26 25h1v1h-1zM6 26h7v1h-7zM16 26h1v1h-1zM20 26h1v1h-1zM22 26h1v1h-1zM24 26h3v1h-3z"/>
+</svg>

@@ -852,9 +852,9 @@ Capture one **grayscale** frame and return it as a binary P5 PGM
 (`image/x-portable-graymap`): the luma (Y) plane of an uncompressed NV12
 frame, with no JPEG encode/decode step.
 
-Intended for on-device consumers that want raw grayscale — e.g. a
-boot-time QR scan (`tools/qr/qr_decode.c` + `tools/qr/qr_boot_action.sh`)
-that pairs the RF link from a ground-station QR code.
+Intended for freestanding on-device consumers that want raw grayscale — for
+example `tools/qr/qr_decode.c`. Pairing, commands, boot scheduling, and action
+dispatch are deliberately outside the waybeam binary and this endpoint.
 
 **Source and geometry.** The frame comes from a short-lived scaler tap,
 not from the encoder's output port — a user frame queue may only be

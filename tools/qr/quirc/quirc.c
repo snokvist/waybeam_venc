@@ -45,10 +45,32 @@ void quirc_destroy(struct quirc *q)
 	free(q);
 }
 
+void quirc_set_marker_mode(struct quirc *q, enum quirc_marker_mode mode,
+			   enum quirc_marker_profile profile)
+{
+	if (!q)
+		return;
+
+	if (mode < QUIRC_MARKER_OFF || mode > QUIRC_MARKER_ONLY)
+		mode = QUIRC_MARKER_OFF;
+	if (profile < QUIRC_MARKER_PROFILE_NONE ||
+	    profile > QUIRC_MARKER_PROFILE_OUTER_FRAME_V1)
+		profile = QUIRC_MARKER_PROFILE_NONE;
+	if (mode != QUIRC_MARKER_OFF &&
+	    profile == QUIRC_MARKER_PROFILE_NONE)
+		mode = QUIRC_MARKER_OFF;
+
+	q->marker_mode = mode;
+	q->marker_profile = profile;
+}
+
 int quirc_resize(struct quirc *q, int w, int h)
 {
 	uint8_t		*image  = NULL;
 	quirc_pixel_t	*pixels = NULL;
+	size_t olddim;
+	size_t newdim;
+	size_t min;
 	size_t num_vars;
 	size_t vars_byte_size;
 	struct quirc_flood_fill_vars *vars = NULL;
@@ -62,6 +84,41 @@ int quirc_resize(struct quirc *q, int w, int h)
 	if (w < 0 || h < 0)
 		goto fail;
 
+	/* Resizing to the current non-empty dimensions preserves every byte.
+	 * Avoid allocating, copying and freeing an identical image/work area;
+	 * quirc_begin() resets the per-scan state and callers overwrite the
+	 * image before quirc_end(). */
+	if (w > 0 && h > 0 && w == q->w && h == q->h)
+		return 0;
+
+	/* Compute the old/new image dimensions and required flood-fill depth
+	 * before allocating so an alias-image build can reuse larger buffers. */
+	olddim = (size_t)q->w * q->h;
+	newdim = (size_t)w * h;
+	if (w && newdim / (size_t)w != (size_t)h)
+		goto fail;
+	min = olddim < newdim ? olddim : newdim;
+	if ((size_t)h * 2 / 2 != (size_t)h)
+		goto fail;
+	num_vars = (size_t)h * 2;
+	if (num_vars == 0)
+		num_vars = 1;
+
+	/* The marker build aliases pixels to image. Retaining the high-water
+	 * allocations across full/half/ROI passes preserves resize contents:
+	 * shrinking keeps the common prefix, while growth zeroes exactly the
+	 * suffix that a fresh calloc would have supplied. */
+	if (QUIRC_PIXEL_ALIAS_IMAGE && q->image &&
+	    newdim <= q->image_capacity &&
+	    num_vars <= q->flood_fill_vars_capacity) {
+		if (newdim > olddim)
+			memset(q->image + olddim, 0, newdim - olddim);
+		q->w = w;
+		q->h = h;
+		q->num_flood_fill_vars = num_vars;
+		return 0;
+	}
+
 	/*
 	 * alloc a new buffer for q->image. We avoid realloc(3) because we want
 	 * on failure to be leave `q` in a consistant, unmodified state.
@@ -70,18 +127,13 @@ int quirc_resize(struct quirc *q, int w, int h)
 	if (!image)
 		goto fail;
 
-	/* compute the "old" (i.e. currently allocated) and the "new"
-	   (i.e. requested) image dimensions */
-	size_t olddim = q->w * q->h;
-	size_t newdim = w * h;
-	size_t min = (olddim < newdim ? olddim : newdim);
-
 	/*
 	 * copy the data into the new buffer, avoiding (a) to read beyond the
 	 * old buffer when the new size is greater and (b) to write beyond the
 	 * new buffer when the new size is smaller, hence the min computation.
 	 */
-	(void)memcpy(image, q->image, min);
+	if (min)
+		(void)memcpy(image, q->image, min);
 
 	/* alloc a new buffer for q->pixels if needed */
 	if (!QUIRC_PIXEL_ALIAS_IMAGE) {
@@ -98,16 +150,10 @@ int quirc_resize(struct quirc *q, int w, int h)
 	 * - rings are the regions which requires the biggest work area.
 	 * - they consumes the most when they are rotated by about 45 degree.
 	 *   in that case, the necessary depth is about (2 * height_of_the_ring).
-	 * - the maximum height of rings would be about 1/3 of the image height.
+	 * - normal finder rings are at most about 1/3 of the image height.
+	 * - an optional continuous outer-frame marker may span the full image,
+	 *   so reserve the conservative 2 * image-height depth.
 	 */
-
-	if ((size_t)h * 2 / 2 != h) {
-		goto fail; /* size_t overflow */
-	}
-	num_vars = (size_t)h * 2 / 3;
-	if (num_vars == 0) {
-		num_vars = 1;
-	}
 
 	vars_byte_size = sizeof(*vars) * num_vars;
 	if (vars_byte_size / sizeof(*vars) != num_vars) {
@@ -122,6 +168,7 @@ int quirc_resize(struct quirc *q, int w, int h)
 	q->h = h;
 	free(q->image);
 	q->image = image;
+	q->image_capacity = newdim;
 	if (!QUIRC_PIXEL_ALIAS_IMAGE) {
 		free(q->pixels);
 		q->pixels = pixels;
@@ -129,6 +176,7 @@ int quirc_resize(struct quirc *q, int w, int h)
 	free(q->flood_fill_vars);
 	q->flood_fill_vars = vars;
 	q->num_flood_fill_vars = num_vars;
+	q->flood_fill_vars_capacity = num_vars;
 
 	return 0;
 	/* NOTREACHED */
