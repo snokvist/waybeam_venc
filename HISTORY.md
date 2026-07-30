@@ -38,12 +38,17 @@ linear dimension — a quarter of the area) at full source resolution.
   the VPE channel input, Maruko's to the published ISP-plane window), covering
   the even-alignment both scalers require, pass-through at pct 0/100, and the
   2 px floor.
+- **`qr_watch.sh` now defaults to the cropped endpoint.** Scanning is what the
+  watcher is for, and on the wide lenses these cameras carry the cropped
+  capture is both the cheaper and the more decodable one — making the operator
+  opt in to that would have been backwards. `-e` (or `QR_ENDPOINT`) still
+  selects the whole field of view; the usage text and README name both.
 - `make verify` clean on both backends; host tests **2287/0** under `-Werror`
   and ASan/UBSan (+7 crop-rect cases, +4 route cases including a 404 proving
-  `snapshot-centre.pgm` is not an alias). **Not device-verified** — no bench was
-  reachable. First run should confirm `MI_VPE_SetPortCrop` on port1 accepts the
-  sub-rect and that a detect start after a cropped capture still sees the full
-  frame.
+  `snapshot-centre.pgm` is not an alias); `make qr-test-cli` PASS.
+  **Not device-verified** — no bench was reachable. First run should confirm
+  `MI_VPE_SetPortCrop` on port1 accepts the sub-rect and that a detect start
+  after a cropped capture still sees the full frame.
 
 ## [0.60.0] - 2026-07-30
 

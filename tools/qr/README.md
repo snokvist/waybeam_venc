@@ -5,9 +5,10 @@ endpoint. It reads a binary P5 PGM, identifies and decodes a QR symbol, checks
 the minimal Waybeam transport envelope, and prints the 16-character payload.
 It does not interpret, authorize, persist, or execute that payload.
 
-The waybeam process remains responsible only for
-`GET /api/v1/snapshot.pgm`. Pairing, commands, boot scheduling, and service
-integration belong to a later standalone shell/action work package.
+The waybeam process remains responsible only for the grayscale snapshot
+endpoints, `GET /api/v1/snapshot.pgm` and `GET /api/v1/snapshot-center.pgm`.
+Pairing, commands, boot scheduling, and service integration belong to a later
+standalone shell/action work package.
 
 ## Pieces
 
@@ -234,7 +235,8 @@ completion.
 ## Standalone use
 
 ```bash
-curl -s http://127.0.0.1/api/v1/snapshot.pgm | qr_decode
+curl -s http://127.0.0.1/api/v1/snapshot-center.pgm | qr_decode
+curl -s http://127.0.0.1/api/v1/snapshot.pgm | qr_decode   # whole frame
 qr_decode --raw capture.pgm
 qr_decode --stats capture.pgm
 ```
@@ -247,18 +249,21 @@ qr_watch.sh -c
 qr_watch.sh -c -v
 ```
 
-`snapshot.enabled` must be true. The captures above arrive at the sensor mode's
-full resolution; the decode timings in the section above were measured on a
-1280×720 capture, so a larger frame costs proportionally more per pass. Point
-the watcher at another endpoint to trade differently:
+`snapshot.enabled` must be true. `qr_watch.sh` defaults to
+`snapshot-center.pgm`: full pixels-per-module over a quarter of the bytes and
+decode time, clear of the fisheye-distorted frame edge. The trade is field of
+view — the code has to be nearer frame centre. Use `-e` to choose otherwise:
 
 ```bash
-# centre 50% at full detail — fisheye-friendly, 4x cheaper, narrower view
-QR_ENDPOINT='http://127.0.0.1/api/v1/snapshot-center.pgm' qr_watch.sh -c
+# whole field of view at full sensor detail (largest, slowest)
+qr_watch.sh -c -e http://127.0.0.1/api/v1/snapshot.pgm
 
-# full view, downscaled — cheaper but costs px/module
-QR_ENDPOINT='http://127.0.0.1/api/v1/snapshot.pgm?maxDim=1280' qr_watch.sh -c
+# whole field of view, downscaled — cheap, but costs px/module
+qr_watch.sh -c -e 'http://127.0.0.1/api/v1/snapshot.pgm?maxDim=1280'
 ```
+
+The decode timings in the section above were measured on a 1280×720 capture;
+cost scales with the pixel count the endpoint returns.
 
 `qr_watch.sh` reports HTTP `409` when the
 scaler tap is occupied and `503` when snapshots are disabled. It exits after
