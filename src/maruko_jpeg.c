@@ -26,9 +26,7 @@
 #include "maruko_mi.h"
 #include "sigmastar_types.h"
 #include "star6e.h"
-#include "maruko_scl_ports.h"
 
-#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>

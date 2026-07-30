@@ -15,9 +15,7 @@
 
 #include "venc_jpeg.h"
 #include "star6e.h"
-#include "star6e_vpe_ports.h"
 
-#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
