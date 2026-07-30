@@ -916,11 +916,45 @@ Shares the `snapshot.enabled` gate and the subsystem mutex with
 Supported on both Star6E and Maruko.
 
 ```bash
-# full sensor-mode resolution (best QR range)
+# full sensor-mode resolution (widest field of view)
 curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode
 
 # capped for a cheap, fast poll
 curl -s 'http://<device-ip>/api/v1/snapshot.pgm?maxDim=1280' | qr_decode
+```
+
+### `GET /api/v1/snapshot-center.pgm`
+
+The centre **50%** of the same window, in each linear dimension — a quarter of
+the area — at full source resolution.  Identical format, query surface and
+error mapping to `snapshot.pgm`; it is a separate route rather than a flag so
+callers choose a *behaviour*, not a geometry.
+
+This is the endpoint to scan QR codes with on a high-resolution sensor or
+behind a fisheye lens.  Cropping is not scaling: it keeps every pixel it
+covers, so pixels-per-module — the thing QR decoding is actually limited by —
+is untouched, while the bytes and the decode time fall by 4x.  What it discards
+is the frame *edge*, which is exactly where a fisheye's barrel distortion is
+worst and where the decoder's projective corner mapping is least reliable.  The
+only cost is field of view: the code has to be nearer the centre of frame.
+
+| Endpoint | imx335 2592x1944 mode, 16:9 precrop | Field of view | Pixels per module |
+|---|---|---|---|
+| `snapshot.pgm` | 2592x1458, 3.6 MiB | full | full |
+| `snapshot.pgm?maxDim=1280` | 1280x720, 0.9 MiB | full | **halved** |
+| `snapshot-center.pgm` | 1296x728, 0.9 MiB | centre 50% | **full** |
+
+The two size levers compose: `snapshot-center.pgm?maxDim=640` crops *and* then
+scales.
+
+On Star6E the crop is programmed with `MI_VPE_SetPortCrop` on the tap port,
+which is sticky and which the NPU detector does not set for itself — so the
+backend restores the full window on every exit path.  A capture cannot leave a
+later inference running on a centre crop.
+
+```bash
+# QR scanning on a fisheye / high-res sensor
+curl -s http://<device-ip>/api/v1/snapshot-center.pgm | qr_decode
 ```
 
 ### `GET /` (Web Dashboard)

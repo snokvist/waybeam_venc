@@ -1631,19 +1631,25 @@ static int test_capabilities_awb_fps_backend_gate(void)
 	return failures;
 }
 
-/* GET /api/v1/snapshot.pgm validates its optional `?maxDim=` long-side cap
- * before touching the capture path, so a typo cannot silently fall through to
- * a full-resolution capture.  No backend is linked in the host runner, so a
- * well-formed request gets as far as the disabled-subsystem 503. */
+/* Both PGM routes are registered and share one query surface and one error
+ * mapping: `?maxDim=` is validated before the capture path, so a typo cannot
+ * silently fall through to a full-resolution capture.  No backend is linked in
+ * the host runner, so a well-formed request gets as far as the
+ * disabled-subsystem 503 (and a bogus path still 404s). */
 static int test_snapshot_pgm_max_dim_validation(void)
 {
-	static const struct { const char *query; int want; } cases[] = {
-		{ "",                503 },  /* absent -> full window, then no backend */
-		{ "?maxDim=1280",    503 },
-		{ "?maxDim=abc",     400 },
-		{ "?maxDim=",        400 },
-		{ "?maxDim=0",       400 },
-		{ "?maxDim=99999",   400 },
+	static const struct { const char *path; const char *query; int want; } cases[] = {
+		{ "snapshot.pgm",        "",              503 },  /* full window */
+		{ "snapshot.pgm",        "?maxDim=1280",  503 },
+		{ "snapshot.pgm",        "?maxDim=abc",   400 },
+		{ "snapshot.pgm",        "?maxDim=",      400 },
+		{ "snapshot.pgm",        "?maxDim=0",     400 },
+		{ "snapshot.pgm",        "?maxDim=99999", 400 },
+		/* The centre-crop variant is its own route, no parameters needed. */
+		{ "snapshot-center.pgm", "",              503 },
+		{ "snapshot-center.pgm", "?maxDim=640",   503 },
+		{ "snapshot-center.pgm", "?maxDim=abc",   400 },
+		{ "snapshot-centre.pgm", "",              404 },  /* not an alias */
 	};
 	int failures = 0;
 	VencConfig cfg;
@@ -1671,9 +1677,9 @@ static int test_snapshot_pgm_max_dim_validation(void)
 		if (fd < 0)
 			continue;
 		req_len = (size_t)snprintf(request, sizeof(request),
-			"GET /api/v1/snapshot.pgm%s HTTP/1.0\r\n"
+			"GET /api/v1/%s%s HTTP/1.0\r\n"
 			"Host: 127.0.0.1\r\n"
-			"\r\n", cases[i].query);
+			"\r\n", cases[i].path, cases[i].query);
 		while (sent < req_len) {
 			ssize_t n = write(fd, request + sent, req_len - sent);
 			if (n < 0 && errno == EINTR)
@@ -1687,8 +1693,8 @@ static int test_snapshot_pgm_max_dim_validation(void)
 			read_http_response(fd, &status, response, sizeof(response)) == 0);
 		close(fd);
 		if (status != cases[i].want)
-			fprintf(stderr, "  maxDim case '%s': got %d want %d\n",
-				cases[i].query, status, cases[i].want);
+			fprintf(stderr, "  pgm case '%s%s': got %d want %d\n",
+				cases[i].path, cases[i].query, status, cases[i].want);
 		CHECK("pgm maxDim status", status == cases[i].want);
 	}
 	return failures;

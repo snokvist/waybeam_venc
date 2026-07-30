@@ -84,6 +84,13 @@ than the main stream's — a 2592-wide mode reaches roughly twice the distance a
 1280-wide capture does for the same marker. Append `?maxDim=<px>` to the
 endpoint when a smaller, cheaper frame is enough.
 
+To spend fewer bytes *without* spending px/module, use `snapshot-center.pgm`
+instead: the centre 50% of each dimension at full source resolution, a quarter
+of the area. It also drops the frame edge, where a fisheye's barrel distortion
+is worst and the outer-frame corner mapping is least reliable — so on a wide
+lens it is usually the more reliable capture as well as the cheaper one. The
+marker has to be nearer the centre of frame.
+
 ## Generate a marker
 
 The included generator locks the QR metadata and outer-frame geometry. It
@@ -242,10 +249,14 @@ qr_watch.sh -c -v
 
 `snapshot.enabled` must be true. The captures above arrive at the sensor mode's
 full resolution; the decode timings in the section above were measured on a
-1280×720 capture, so a larger frame costs proportionally more per pass. To trade
-range for cadence, point the watcher at a capped endpoint:
+1280×720 capture, so a larger frame costs proportionally more per pass. Point
+the watcher at another endpoint to trade differently:
 
 ```bash
+# centre 50% at full detail — fisheye-friendly, 4x cheaper, narrower view
+QR_ENDPOINT='http://127.0.0.1/api/v1/snapshot-center.pgm' qr_watch.sh -c
+
+# full view, downscaled — cheaper but costs px/module
 QR_ENDPOINT='http://127.0.0.1/api/v1/snapshot.pgm?maxDim=1280' qr_watch.sh -c
 ```
 

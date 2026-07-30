@@ -368,13 +368,19 @@ static int gray_load_syms(void)
  * rather than fail the request: boot-time QR pairing depends on this endpoint
  * answering.  The achieved geometry is not returned — the PGM header the
  * caller builds from the drained frame is the authority. */
-static int gray_tap_program(uint32_t max_dim)
+static int gray_tap_program(const VencJpegGrayReq *req)
 {
-	uint32_t w, h;
+	uint32_t cx, cy, cw, ch, w, h;
 	int tries, i;
 
-	if (venc_jpeg_gray_tap_dims(g_gray_crop_w, g_gray_crop_h, max_dim,
-	    &w, &h) != 0)
+	/* fnSetPortConfig takes ISP-plane coordinates, so the centre rect is
+	 * measured from the crop window the pipeline published, not from 0,0. */
+	if (venc_jpeg_gray_center_rect(g_gray_crop_x, g_gray_crop_y,
+	    g_gray_crop_w, g_gray_crop_h, req->crop_pct, &cx, &cy, &cw, &ch) != 0)
+		return -ENODEV;
+	/* Output is sized from the CROP, not the full window: a cropped capture
+	 * keeps its source pixels 1:1 instead of scaling them away. */
+	if (venc_jpeg_gray_tap_dims(cw, ch, req->max_dim, &w, &h) != 0)
 		return -ENODEV;
 	tries = (w > VENC_JPEG_GRAY_SAFE_DIM ||
 	         h > VENC_JPEG_GRAY_SAFE_DIM) ? 2 : 1;
@@ -384,13 +390,13 @@ static int gray_tap_program(uint32_t max_dim)
 		MI_S32 ret;
 
 		if (i > 0)
-			(void)venc_jpeg_gray_tap_dims(g_gray_crop_w, g_gray_crop_h,
+			(void)venc_jpeg_gray_tap_dims(cw, ch,
 				VENC_JPEG_GRAY_SAFE_DIM, &w, &h);
 		memset(&p, 0, sizeof(p));
-		p.crop.x = (MI_U16)g_gray_crop_x;
-		p.crop.y = (MI_U16)g_gray_crop_y;
-		p.crop.width = (MI_U16)g_gray_crop_w;
-		p.crop.height = (MI_U16)g_gray_crop_h;
+		p.crop.x = (MI_U16)cx;
+		p.crop.y = (MI_U16)cy;
+		p.crop.width = (MI_U16)cw;
+		p.crop.height = (MI_U16)ch;
 		p.output.width = (MI_U16)w;
 		p.output.height = (MI_U16)h;
 		p.pixFmt = I6_PIXFMT_YUV420SP;
@@ -480,14 +486,15 @@ static int gray_drain_one(MI_SYS_ChnPort_t *tap, uint8_t **out_buf,
 }
 
 int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t max_dim, uint32_t timeout_ms)
+	const VencJpegGrayReq *req)
 {
 	MI_SYS_ChnPort_t tap;
+	uint32_t timeout_ms;
 	int port_enabled = 0, depth_set = 0, claimed = 0;
 	int rc;
 	MI_S32 ret;
 
-	if (!out_buf || !out_len)
+	if (!out_buf || !out_len || !req)
 		return -EINVAL;
 	*out_buf = NULL;
 	*out_len = 0;
@@ -497,8 +504,7 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 		return -ENODEV;   /* pipeline has not published a crop window yet */
 	if (gray_load_syms() != 0)
 		return -EIO;
-	if (timeout_ms == 0)
-		timeout_ms = 1500;
+	timeout_ms = req->timeout_ms ? req->timeout_ms : 1500;
 
 	if (maruko_scl_tap_claim(GRAY_TAP_OWNER) != 0) {
 		char owner[16];
@@ -512,7 +518,7 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	tap = (MI_SYS_ChnPort_t){ .module = I6_SYS_MOD_SCL, .device = 0,
 		.channel = 0, .port = GRAY_TAP_PORT };
 
-	rc = gray_tap_program(max_dim);
+	rc = gray_tap_program(req);
 	if (rc != 0)
 		goto out;
 

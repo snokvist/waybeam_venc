@@ -3682,6 +3682,8 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.pgm", handle_snapshot_pgm, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/snapshot-center.pgm",
+		handle_snapshot_pgm_center, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);

@@ -83,9 +83,9 @@ int venc_jpeg_capture(uint8_t **out_buf, size_t *out_len,
 }
 
 int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t max_dim, uint32_t timeout_ms)
+	const VencJpegGrayReq *req)
 {
-	if (!out_buf || !out_len)
+	if (!out_buf || !out_len || !req)
 		return -EINVAL;
 	*out_buf = NULL;
 	*out_len = 0;
@@ -95,8 +95,7 @@ int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
 		pthread_mutex_unlock(&g_jpeg_mutex);
 		return -ENODEV;
 	}
-	int rc = venc_jpeg_backend_capture_gray(out_buf, out_len, max_dim,
-		timeout_ms);
+	int rc = venc_jpeg_backend_capture_gray(out_buf, out_len, req);
 	pthread_mutex_unlock(&g_jpeg_mutex);
 	return rc;
 }
@@ -123,6 +122,35 @@ int venc_jpeg_gray_tap_dims(uint32_t src_w, uint32_t src_h, uint32_t max_dim,
 	if (h < VENC_JPEG_GRAY_MIN_DIM) h = VENC_JPEG_GRAY_MIN_DIM;
 	*out_w = w;
 	*out_h = h;
+	return 0;
+}
+
+int venc_jpeg_gray_center_rect(uint32_t src_x, uint32_t src_y,
+	uint32_t src_w, uint32_t src_h, uint32_t pct,
+	uint32_t *out_x, uint32_t *out_y, uint32_t *out_w, uint32_t *out_h)
+{
+	uint32_t w, h;
+
+	if (!out_x || !out_y || !out_w || !out_h)
+		return -EINVAL;
+	if (src_w == 0 || src_h == 0)
+		return -EINVAL;
+
+	if (pct == 0 || pct >= 100) {
+		w = src_w;
+		h = src_h;
+	} else {
+		w = src_w * pct / 100;
+		h = src_h * pct / 100;
+	}
+	w &= ~1u;            /* both scalers reject an odd crop rect */
+	h &= ~1u;
+	if (w < 2) w = 2;    /* never hand the scaler an empty rect */
+	if (h < 2) h = 2;
+	*out_w = w;
+	*out_h = h;
+	*out_x = src_x + (((src_w - w) / 2) & ~1u);
+	*out_y = src_y + (((src_h - h) / 2) & ~1u);
 	return 0;
 }
 
@@ -196,21 +224,22 @@ static int pgm_parse_max_dim(const HttpRequest *req, uint32_t *out)
 	return 0;
 }
 
-int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
+/* Shared body of both PGM routes.  They differ only in crop_pct — the format,
+ * the query surface and every error mapping are identical, so there is one
+ * implementation and two thin entry points. */
+static int pgm_respond(int client_fd, const HttpRequest *req, uint32_t crop_pct)
 {
-	(void)ctx;
-
 	uint8_t *buf = NULL;
 	size_t   len = 0;
-	uint32_t max_dim = 0;
+	VencJpegGrayReq greq = { .crop_pct = crop_pct, .timeout_ms = 1500 };
 
-	if (pgm_parse_max_dim(req, &max_dim) != 0) {
+	if (pgm_parse_max_dim(req, &greq.max_dim) != 0) {
 		return httpd_send_error(client_fd, 400, "bad_max_dim",
 			"maxDim must be a positive integer up to 8192 (omit it for the "
 			"full sensor-mode resolution)");
 	}
 
-	int rc = venc_jpeg_capture_gray(&buf, &len, max_dim, 1500);
+	int rc = venc_jpeg_capture_gray(&buf, &len, &greq);
 	if (rc == -ENODEV) {
 		return httpd_send_error(client_fd, 503, "snapshot_disabled",
 			"snapshot endpoint not available (subsystem disabled or "
@@ -242,6 +271,18 @@ int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
 	return sent;
 }
 
+int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
+{
+	(void)ctx;
+	return pgm_respond(client_fd, req, 0);
+}
+
+int handle_snapshot_pgm_center(int client_fd, const HttpRequest *req, void *ctx)
+{
+	(void)ctx;
+	return pgm_respond(client_fd, req, VENC_JPEG_GRAY_CENTER_PCT);
+}
+
 /* Default fallback for builds that don't link a backend (e.g. host-native
  * test runner).  Per-backend files override these with strong symbols.  */
 __attribute__((weak)) void venc_jpeg_set_source(const void *vpe_port_opaque)
@@ -263,9 +304,9 @@ __attribute__((weak)) int venc_jpeg_backend_capture(uint8_t **out_buf,
 }
 
 __attribute__((weak)) int venc_jpeg_backend_capture_gray(uint8_t **out_buf,
-	size_t *out_len, uint32_t max_dim, uint32_t timeout_ms)
+	size_t *out_len, const VencJpegGrayReq *req)
 {
-	(void)out_buf; (void)out_len; (void)max_dim; (void)timeout_ms;
+	(void)out_buf; (void)out_len; (void)req;
 	return -ENOSYS;
 }
 

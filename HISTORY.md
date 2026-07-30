@@ -1,5 +1,50 @@
 # History
 
+## [0.61.0] - 2026-07-30
+
+New `GET /api/v1/snapshot-center.pgm`: the centre 50% of the scaler window (per
+linear dimension — a quarter of the area) at full source resolution.
+
+- **Cropping is the right lever for QR, not scaling.** `?maxDim=` buys bytes by
+  throwing away pixels-per-module, which is the one thing QR decoding is
+  actually limited by. A crop keeps every pixel it covers, so it is 4x cheaper
+  in bytes *and* decode time at **no** loss of module resolution — the cost is
+  field of view. On the imx335 2592x1944 mode: `snapshot.pgm` is 2592x1458 /
+  3.6 MiB at full detail, `?maxDim=1280` is 0.9 MiB at *half* detail, and
+  `snapshot-center.pgm` is 1296x728 / 0.9 MiB at **full** detail.
+- **It also fixes fisheye.** The discarded region is the frame edge, where
+  barrel distortion is worst and where the decoder's projective corner mapping
+  off the marker's outer frame is least reliable. On a wide lens the cropped
+  capture is usually the more *decodable* one, not just the cheaper one.
+- **A separate route, not another parameter.** Callers pick a behaviour ("scan
+  a code") rather than composing a geometry, and nothing lands in the JSON
+  config. The two routes share one handler body, one query surface and one
+  error mapping; they differ by a single `crop_pct`. The levers still compose —
+  `snapshot-center.pgm?maxDim=640` crops and then scales.
+- **Star6E: the crop is sticky, so teardown restores it.** The tap crop goes
+  through `MI_VPE_SetPortCrop` on port1 (after `EnablePort`, matching
+  `star6e_framing_stab.c`), and the NPU detector programs only `SetPortMode` —
+  it assumes a full frame. A rect left behind would silently run a later
+  inference on a centre crop, so every exit path restores the full window,
+  under the same discipline as the user-depth reset. Maruko needs none of this:
+  its `fnSetPortConfig` carries the crop per request and the detector writes its
+  own.
+- **Request parameters are now a struct** (`VencJpegGrayReq`: `crop_pct`,
+  `max_dim`, `timeout_ms`) instead of positional `uint32_t`s. Three adjacent
+  integers threaded through two backends and a weak stub is an easy
+  transposition to make and a hard one to see.
+- Crop geometry is a shared host-tested function, `venc_jpeg_gray_center_rect()`
+  — one implementation for both coordinate domains (Star6E's rect is relative to
+  the VPE channel input, Maruko's to the published ISP-plane window), covering
+  the even-alignment both scalers require, pass-through at pct 0/100, and the
+  2 px floor.
+- `make verify` clean on both backends; host tests **2287/0** under `-Werror`
+  and ASan/UBSan (+7 crop-rect cases, +4 route cases including a 404 proving
+  `snapshot-centre.pgm` is not an alias). **Not device-verified** — no bench was
+  reachable. First run should confirm `MI_VPE_SetPortCrop` on port1 accepts the
+  sub-rect and that a detect start after a cropped capture still sees the full
+  frame.
+
 ## [0.60.0] - 2026-07-30
 
 `GET /api/v1/snapshot.pgm` now captures at the active sensor mode's resolution

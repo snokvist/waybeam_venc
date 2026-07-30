@@ -391,13 +391,13 @@ static int gray_frame_to_pgm(const GrayFrameData_t *fr, uint8_t **out_buf,
  * rather than fail the request outright: boot-time QR pairing depends on this
  * endpoint answering.  The achieved geometry is not returned — the PGM header
  * the caller builds from the drained frame is the authority. */
-static int gray_tap_program(MI_VPE_CHANNEL chn, uint32_t max_dim)
+static int gray_tap_program(MI_VPE_CHANNEL chn, uint32_t src_w, uint32_t src_h,
+	uint32_t max_dim)
 {
 	uint32_t w, h;
 	int tries, i;
 
-	if (venc_jpeg_gray_tap_dims(g_gray_src_w, g_gray_src_h, max_dim,
-	    &w, &h) != 0) {
+	if (venc_jpeg_gray_tap_dims(src_w, src_h, max_dim, &w, &h) != 0) {
 		fprintf(stderr, "[jpeg-star6e] gray: no scaler source window "
 			"registered\n");
 		return -ENODEV;
@@ -410,7 +410,7 @@ static int gray_tap_program(MI_VPE_CHANNEL chn, uint32_t max_dim)
 		MI_S32 ret;
 
 		if (i > 0)
-			(void)venc_jpeg_gray_tap_dims(g_gray_src_w, g_gray_src_h,
+			(void)venc_jpeg_gray_tap_dims(src_w, src_h,
 				VENC_JPEG_GRAY_SAFE_DIM, &w, &h);
 		memset(&attr, 0, sizeof(attr));
 		attr.output.width  = (unsigned short)w;
@@ -430,6 +430,28 @@ static int gray_tap_program(MI_VPE_CHANNEL chn, uint32_t max_dim)
 			(i + 1 < tries) ? "; retrying capped" : "");
 	}
 	return -EIO;
+}
+
+/* Apply a port1 crop rect.  MI_VPE_SetPortCrop is relative to the VPE channel
+ * input (the precrop window), origin 0,0 — the same domain the stab detector
+ * tap uses in star6e_framing_stab.c — and it must run AFTER EnablePort.
+ *
+ * The crop is sticky on the port, and the NPU detector never sets one of its
+ * own (star6e_ipu_yolo.c programs only SetPortMode, assuming a full frame), so
+ * a rect left behind here would silently run a later inference on a centre
+ * crop.  Every exit path restores the full window before DisablePort — same
+ * discipline as the user-depth reset. */
+static int gray_tap_crop(MI_VPE_CHANNEL chn, uint32_t x, uint32_t y,
+	uint32_t w, uint32_t h)
+{
+	i6_common_rect rect;
+
+	memset(&rect, 0, sizeof(rect));
+	rect.x = (unsigned short)x;
+	rect.y = (unsigned short)y;
+	rect.width = (unsigned short)w;
+	rect.height = (unsigned short)h;
+	return MI_VPE_SetPortCrop(chn, GRAY_TAP_PORT, &rect) == 0 ? 0 : -EIO;
 }
 
 /* Drain one frame off an already-programmed tap port.  Split out so the
@@ -467,15 +489,17 @@ static int gray_drain_one(MI_SYS_ChnPort_t *tap, uint8_t **out_buf,
 }
 
 int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t max_dim, uint32_t timeout_ms)
+	const VencJpegGrayReq *req)
 {
 	MI_SYS_ChnPort_t tap;
 	MI_VPE_CHANNEL vpe_chn;
-	int port_enabled = 0, depth_set = 0, claimed = 0;
+	uint32_t cx, cy, cw, ch;
+	uint32_t timeout_ms;
+	int port_enabled = 0, depth_set = 0, claimed = 0, cropped = 0;
 	int rc;
 	MI_S32 ret;
 
-	if (!out_buf || !out_len)
+	if (!out_buf || !out_len || !req)
 		return -EINVAL;
 	*out_buf = NULL;
 	*out_len = 0;
@@ -483,8 +507,13 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 		return -ENODEV;
 	if (gray_load_syms() != 0)
 		return -EIO;
-	if (timeout_ms == 0)
-		timeout_ms = 1500;
+	timeout_ms = req->timeout_ms ? req->timeout_ms : 1500;
+
+	/* SetPortCrop is relative to the VPE channel input, so the rect origin is
+	 * 0,0 — not the precrop offset the pipeline published. */
+	if (venc_jpeg_gray_center_rect(0, 0, g_gray_src_w, g_gray_src_h,
+	    req->crop_pct, &cx, &cy, &cw, &ch) != 0)
+		return -ENODEV;
 
 	/* port1 has exactly one owner.  Losing to stab/detect is a normal
 	 * outcome, not an error — the endpoint turns it into a 409. */
@@ -501,7 +530,9 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	tap = g_vpe_port;
 	tap.port = GRAY_TAP_PORT;
 
-	rc = gray_tap_program(vpe_chn, max_dim);
+	/* Output is sized from the CROP, not the full window: a cropped capture
+	 * keeps its source pixels 1:1 instead of scaling them away. */
+	rc = gray_tap_program(vpe_chn, cw, ch, req->max_dim);
 	if (rc != 0)
 		goto out;
 
@@ -513,6 +544,17 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 		goto out;
 	}
 	port_enabled = 1;
+
+	/* Crop after EnablePort (the order star6e_framing_stab.c uses). */
+	if (cw != g_gray_src_w || ch != g_gray_src_h) {
+		cropped = 1;   /* set before the call: a partial apply still needs the reset */
+		rc = gray_tap_crop(vpe_chn, cx, cy, cw, ch);
+		if (rc != 0) {
+			fprintf(stderr, "[jpeg-star6e] gray: port1 SetPortCrop "
+				"%ux%u+%u+%u failed\n", cw, ch, cx, cy);
+			goto out;
+		}
+	}
 
 	/* Legal here and only here: port1 carries no downstream bind, so this
 	 * user queue is the port's only consumer. */
@@ -531,6 +573,15 @@ out:
 	/* Depth reset BEFORE DisablePort, always — see the header comment. */
 	if (depth_set)
 		(void)MI_SYS_SetChnOutputPortDepth(&tap, 0, 0);
+	/* Restore the full window: the crop is sticky and the NPU detector never
+	 * programs one of its own (see gray_tap_crop).  Loud on failure — this is
+	 * the one path that could leave a later inference on a centre crop. */
+	if (cropped &&
+	    gray_tap_crop(vpe_chn, 0, 0, g_gray_src_w, g_gray_src_h) != 0)
+		fprintf(stderr, "[jpeg-star6e] gray: WARNING failed to restore the "
+			"full port1 crop window (%ux%u); a detect start may see a "
+			"cropped frame until the pipeline restarts\n",
+			g_gray_src_w, g_gray_src_h);
 	if (port_enabled)
 		(void)MI_VPE_DisablePort(vpe_chn, GRAY_TAP_PORT);
 	if (claimed)

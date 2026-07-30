@@ -60,22 +60,42 @@ void venc_jpeg_shutdown(void);
 int venc_jpeg_capture(uint8_t **out_buf, size_t *out_len,
 	uint32_t timeout_ms);
 
+/* What a grayscale capture should ask the scaler for.  Grouped rather than
+ * passed positionally: three adjacent uint32_t arguments across two backends
+ * and a weak stub is an easy transposition to make and a hard one to see. */
+typedef struct {
+	/* Centre sub-rect of the scaler input window to capture, as a percentage
+	 * of each linear dimension.  0 or >=100 = the whole window.  50 halves
+	 * width and height (a quarter of the area) around the centre.
+	 *
+	 * Cropping is not scaling: it keeps every source pixel it covers, so
+	 * pixels-per-module is untouched — and it drops the frame edges, where a
+	 * fisheye lens distorts the most and a QR decoder's corner mapping is
+	 * least reliable.  Narrower field of view is the whole cost. */
+	uint32_t crop_pct;
+	/* Long-side cap on the returned frame (0 = no cap).  Applied after the
+	 * crop, so it scales whatever the crop selected. */
+	uint32_t max_dim;
+	/* Frame wait budget; 0 = backend default (1500 ms). */
+	uint32_t timeout_ms;
+} VencJpegGrayReq;
+
 /* Capture one grayscale frame as a binary P5 PGM: the luma/Y plane of an
- * uncompressed NV12 frame off the scaler, at the FULL resolution of the
- * active sensor mode's scaler input window by default (see
- * venc_jpeg_gray_tap_dims).  max_dim caps the long side (0 = no cap) for
- * consumers that would rather have a small frame fast.  Allocates *out_buf
- * (caller frees via venc_jpeg_free).
+ * uncompressed NV12 frame off the scaler.  With a zeroed req this is the FULL
+ * resolution of the active sensor mode's scaler input window (see
+ * venc_jpeg_gray_tap_dims).  Allocates *out_buf (caller frees via
+ * venc_jpeg_free).
  *
- * Returns 0 on success, -ENODEV if the snapshot subsystem is disabled,
- * -ETIMEDOUT if no frame within timeout_ms, -ENOSYS if the backend has no
- * grayscale hook, -EIO on SDK failure.
+ * Returns 0 on success, -EINVAL on a NULL argument, -ENODEV if the snapshot
+ * subsystem is disabled, -ETIMEDOUT if no frame arrives in time, -ENOSYS if
+ * the backend has no grayscale hook, -EBUSY if another feature owns the tap,
+ * -EIO on SDK failure.
  *
  * Shares the snapshot subsystem's enable gate and mutex with
  * venc_jpeg_capture(): the two never run concurrently, and both are off
  * when snapshot.enabled is false. */
 int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t max_dim, uint32_t timeout_ms);
+	const VencJpegGrayReq *req);
 
 /* Free a buffer returned by venc_jpeg_capture() / venc_jpeg_capture_gray(). */
 void venc_jpeg_free(uint8_t *buf);
@@ -95,8 +115,19 @@ int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx);
  * (image/x-portable-graymap) on success, application/json
  * {ok:false,error:{...}} on failure.  Intended for on-device consumers
  * (e.g. a boot-time QR scan) that want raw grayscale without a JPEG
- * decode step.  Honours an optional `?maxDim=<px>` query parameter. */
+ * decode step.  The whole scaler input window; honours an optional
+ * `?maxDim=<px>` query parameter. */
 int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx);
+
+/* HTTP handler for GET /api/v1/snapshot-center.pgm.  Same format and error
+ * surface as handle_snapshot_pgm, but captures only the centre
+ * VENC_JPEG_GRAY_CENTER_PCT% of the window — a fixed, parameterless variant
+ * for QR scanning on a high-resolution sensor or behind a fisheye lens, where
+ * the frame edges cost bytes and decode time and carry the worst distortion.
+ * A separate route rather than a flag on the one above: the caller picks a
+ * behaviour, not a geometry. */
+int handle_snapshot_pgm_center(int client_fd, const HttpRequest *req,
+	void *ctx);
 
 /* ── Grayscale tap geometry (shared by both backends) ────────────────── */
 
@@ -108,6 +139,9 @@ int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx);
 
 /* Smallest tap the SCL is asked for, whatever maxDim says. */
 #define VENC_JPEG_GRAY_MIN_DIM   64u
+
+/* Centre fraction (per linear dimension) served by snapshot-center.pgm. */
+#define VENC_JPEG_GRAY_CENTER_PCT  50u
 
 /* Derive the grayscale tap geometry from the scaler's input window.
  *
@@ -125,6 +159,21 @@ int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx);
  * source window. */
 int venc_jpeg_gray_tap_dims(uint32_t src_w, uint32_t src_h, uint32_t max_dim,
 	uint32_t *out_w, uint32_t *out_h);
+
+/* Shrink a scaler source rect to its centre `pct`% in each linear dimension.
+ * pct 0 or >=100 copies the rect through unchanged.
+ *
+ * The in/out rect is in whichever coordinate domain the caller's crop
+ * primitive uses — Star6E passes (0, 0, w, h) because MI_VPE_SetPortCrop is
+ * relative to the VPE channel input, Maruko passes the published SCL crop
+ * window because fnSetPortConfig takes ISP-plane coordinates.  Origin and
+ * size are aligned even (both scalers reject odd crop rects) and the size is
+ * floored at 2 px so a degenerate pct cannot produce an empty rect.
+ *
+ * Returns 0 on success, -EINVAL on a NULL out pointer or empty source. */
+int venc_jpeg_gray_center_rect(uint32_t src_x, uint32_t src_y,
+	uint32_t src_w, uint32_t src_h, uint32_t pct,
+	uint32_t *out_x, uint32_t *out_y, uint32_t *out_w, uint32_t *out_h);
 
 /* ── Backend interface (implemented per-SOC) ─────────────────────────── */
 
@@ -158,13 +207,14 @@ void venc_jpeg_set_gray_source(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
  * PGM blob (header + tightly-packed Y-plane rows).  Called from
  * venc_jpeg_capture_gray under the module lock.  Programs a short-lived tap
  * on the scaler, grabs one uncompressed NV12 frame and copies its luma
- * plane.  Geometry comes from venc_jpeg_gray_tap_dims(source window,
- * max_dim).  Returns 0 on success (allocating *out_buf), -ENOSYS when the
- * backend does not implement grayscale capture, -ENODEV when no source
- * window has been registered, -EBUSY when another feature owns the tap,
- * -ETIMEDOUT if no frame arrives, -EIO on SDK failure. */
+ * plane.  Geometry is venc_jpeg_gray_center_rect(source window, req->crop_pct)
+ * fed through venc_jpeg_gray_tap_dims(.., req->max_dim).  `req` is never NULL.
+ * Returns 0 on success (allocating *out_buf), -ENOSYS when the backend does
+ * not implement grayscale capture, -ENODEV when no source window has been
+ * registered, -EBUSY when another feature owns the tap, -ETIMEDOUT if no
+ * frame arrives, -EIO on SDK failure. */
 int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t max_dim, uint32_t timeout_ms);
+	const VencJpegGrayReq *req);
 
 /* Backend-private: destroy MJPEG channel.  Called from venc_jpeg_shutdown. */
 void venc_jpeg_backend_shutdown(void);

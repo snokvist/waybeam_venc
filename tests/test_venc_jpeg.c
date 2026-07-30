@@ -87,6 +87,55 @@ int test_venc_jpeg(void)
 			w == VENC_JPEG_GRAY_MIN_DIM && h == VENC_JPEG_GRAY_MIN_DIM);
 	}
 
+	/* Centre crop rect: keeps source pixels 1:1 (unlike maxDim) and drops the
+	 * frame edges, where a fisheye distorts worst. */
+	{
+		uint32_t x = 9, y = 9, w = 9, h = 9;
+
+		CHECK("center rect rejects an empty source",
+			venc_jpeg_gray_center_rect(0, 0, 0, 1458, 50,
+				&x, &y, &w, &h) == -EINVAL);
+		CHECK("center rect rejects NULL out",
+			venc_jpeg_gray_center_rect(0, 0, 2592, 1458, 50,
+				&x, &y, &w, NULL) == -EINVAL);
+
+		/* pct 0 and >=100 both mean "the whole window", origin preserved. */
+		CHECK("pct 0 passes the rect through",
+			venc_jpeg_gray_center_rect(0, 0, 2592, 1458, 0,
+				&x, &y, &w, &h) == 0 &&
+			x == 0 && y == 0 && w == 2592 && h == 1458);
+		CHECK("pct 100 passes the rect through",
+			venc_jpeg_gray_center_rect(0, 0, 2592, 1458, 100,
+				&x, &y, &w, &h) == 0 &&
+			x == 0 && y == 0 && w == 2592 && h == 1458);
+
+		/* 50% of each linear dimension, centred — Star6E's domain (origin 0). */
+		CHECK("50pct halves and centres",
+			venc_jpeg_gray_center_rect(0, 0, 2592, 1458,
+				VENC_JPEG_GRAY_CENTER_PCT, &x, &y, &w, &h) == 0 &&
+			w == 1296 && h == 728 && x == 648 && y == 364);
+
+		/* Maruko's domain: the rect is measured from the published window, so
+		 * a non-zero origin has to carry through. */
+		CHECK("50pct keeps a non-zero origin",
+			venc_jpeg_gray_center_rect(0, 244, 2592, 1458, 50,
+				&x, &y, &w, &h) == 0 &&
+			w == 1296 && h == 728 && x == 648 && y == 244 + 364);
+
+		/* Both scalers reject odd crop rects — origin and size stay even. */
+		CHECK("odd geometry stays even",
+			venc_jpeg_gray_center_rect(1, 1, 999, 555, 50,
+				&x, &y, &w, &h) == 0 &&
+			(w % 2) == 0 && (h % 2) == 0 &&
+			((x - 1) % 2) == 0 && ((y - 1) % 2) == 0 &&
+			x + w <= 1 + 999 && y + h <= 1 + 555);
+
+		/* The rect can never collapse to nothing. */
+		CHECK("degenerate pct floors at 2px",
+			venc_jpeg_gray_center_rect(0, 0, 64, 64, 1,
+				&x, &y, &w, &h) == 0 && w == 2 && h == 2);
+	}
+
 	/* Init with NULL cfg rejected. */
 	CHECK("init rejects NULL cfg", venc_jpeg_init(NULL) == -EINVAL);
 
