@@ -1,5 +1,56 @@
 # History
 
+## [0.60.0] - 2026-07-30
+
+`GET /api/v1/snapshot.pgm` now captures at the active sensor mode's resolution
+instead of defaulting to 1280 px, and the snapshot subsystem finally has a
+WebUI card.
+
+- **Root cause of the 1280 default.** The grayscale tap derived its geometry
+  from the *configured snapshot size* — which inherits the main stream, not the
+  sensor — and then capped the long side at a hardcoded `GRAY_TAP_MAX_DIM`
+  (1280 px) in both backends. On the standard 1920x1080-over-2592x1944 setup
+  that produced a 1280x720 PGM: 2x fewer pixels per QR module than the sensor
+  can actually deliver, and QR decoding is limited by pixels per module, so it
+  halved the usable marker distance. Nothing about the tap required 1280.
+- **The tap now sizes itself from the scaler input window** — the frame the
+  active sensor mode delivers after precrop, i.e. the largest luma frame
+  obtainable without upscaling (`2592x1458` for the case above). The pipeline
+  publishes that window on both backends through the renamed
+  `venc_jpeg_set_gray_source()` hook (was `venc_jpeg_set_gray_crop()`, Maruko
+  only — Star6E now implements it too and stops guessing from the MJPEG config).
+  `snapshot.width`/`snapshot.height` keep sizing the MJPEG channel only.
+- **New `?maxDim=<px>` query parameter** caps the long side for a single
+  request (aspect-preserved, never upscales), because a full-resolution capture
+  is a real cost: a 4K mode means an ~8 MB response and that much luma copied
+  per request. Chosen over a persisted config field deliberately — the right
+  size is a property of the consumer (boot pairing wants range, a continuous
+  watcher wants cadence), not of the device, and it keeps the append-only
+  `VencConfig` layout untouched. Junk values answer `400` (`bad_max_dim`)
+  rather than silently capturing full-res.
+- **Graceful degrade instead of a hard failure.** The vendor per-port output
+  limits are undocumented, so if the scaler refuses the full-window request
+  each backend retries once at a 1280 px long side and logs `capped to <w>x<h>
+  (BSP refused the full window)`. Boot-time QR pairing depends on this endpoint
+  answering; a silent 500 there would be worse than a smaller frame.
+- **Geometry math is now one shared, tested function** —
+  `venc_jpeg_gray_tap_dims()` in `venc_jpeg.c`, replacing the duplicated
+  `gray_tap_dims()` in `star6e_jpeg.c` and `maruko_jpeg.c`. It is host-linked,
+  so the alignment rules (width 16-aligned for the SCL stride, height even for
+  NV12), the no-upscale rule and the floor are covered by unit tests instead of
+  only by device runs. Both backends also drop the now-unused `g_snap_w/h`.
+- **WebUI: new "Snapshot" card.** The whole `snapshot.*` section was API-only —
+  neither snapshot endpoint could be enabled or tuned from the dashboard at
+  all. `snapshot.enabled`, `quality`, `width` and `height` now carry `FIELD_UI`
+  metadata, so the group renders from `/api/v1/capabilities` with no
+  `dashboard.html` edit or webui-blob rebuild. Tooltips state which fields
+  affect `.jpg` versus `.pgm`.
+- `make verify` clean on both backends; host tests **2245/0** (+8 tap-geometry
+  cases). **Not yet device-verified** — no bench was reachable from the build
+  environment. The full-resolution `MI_VPE_SetPortMode` / SCL `SetPortConfig`
+  request and the ~8 MB allocation path are the two things to watch on the
+  first Star6E/Maruko run.
+
 ## [0.59.0] - 2026-07-26
 
 New `GET /api/v1/snapshot.pgm` endpoint returns a grayscale frame as a binary

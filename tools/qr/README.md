@@ -78,6 +78,12 @@ Render every module with integer scaling and no interpolation. The compressed
 edge still needs real sensor resolution: use roughly 3 px/module as a lab
 minimum and 4 px/module as a real-camera target.
 
+`snapshot.pgm` serves the full scaler input window of the active sensor mode,
+so those px/module budgets are spent against the sensor's own resolution rather
+than the main stream's — a 2592-wide mode reaches roughly twice the distance a
+1280-wide capture does for the same marker. Append `?maxDim=<px>` to the
+endpoint when a smaller, cheaper frame is enough.
+
 ## Generate a marker
 
 The included generator locks the QR metadata and outer-frame geometry. It
@@ -234,7 +240,16 @@ qr_watch.sh -c
 qr_watch.sh -c -v
 ```
 
-`snapshot.enabled` must be true. `qr_watch.sh` reports HTTP `409` when the
+`snapshot.enabled` must be true. The captures above arrive at the sensor mode's
+full resolution; the decode timings in the section above were measured on a
+1280×720 capture, so a larger frame costs proportionally more per pass. To trade
+range for cadence, point the watcher at a capped endpoint:
+
+```bash
+QR_ENDPOINT='http://127.0.0.1/api/v1/snapshot.pgm?maxDim=1280' qr_watch.sh -c
+```
+
+`qr_watch.sh` reports HTTP `409` when the
 scaler tap is occupied and `503` when snapshots are disabled. It exits after
 the first decode by default; `-c` streams decoded envelopes continuously.
 The default stress cadence starts the next capture as soon as the preceding

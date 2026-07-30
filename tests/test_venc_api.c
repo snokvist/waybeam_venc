@@ -1506,6 +1506,26 @@ static int test_capabilities_emits_ui(void)
 				end && m && m < end);
 		}
 	}
+	/* The snapshot section is data-driven too — it has no static SECTIONS row,
+	 * so without this ui block neither snapshot endpoint is reachable from the
+	 * dashboard at all.  Confine the checks to the field's own object. */
+	{
+		const char *p = strstr(response, "\"snapshot.enabled\"");
+		CHECK("cap has snapshot.enabled", p != NULL);
+		if (p) {
+			const char *end = strchr(p, '}');
+			const char *g = strstr(p, "\"group\":\"Snapshot\"");
+			CHECK("cap snapshot.enabled ui group", end && g && g < end);
+		}
+		p = strstr(response, "\"snapshot.quality\"");
+		CHECK("cap has snapshot.quality", p != NULL);
+		if (p) {
+			const char *end = strchr(p, '}');
+			const char *c = strstr(p, "\"control\":\"number\"");
+			CHECK("cap snapshot.quality number control",
+				end && c && c < end);
+		}
+	}
 	return failures;
 }
 
@@ -1611,6 +1631,69 @@ static int test_capabilities_awb_fps_backend_gate(void)
 	return failures;
 }
 
+/* GET /api/v1/snapshot.pgm validates its optional `?maxDim=` long-side cap
+ * before touching the capture path, so a typo cannot silently fall through to
+ * a full-resolution capture.  No backend is linked in the host runner, so a
+ * well-formed request gets as far as the disabled-subsystem 503. */
+static int test_snapshot_pgm_max_dim_validation(void)
+{
+	static const struct { const char *query; int want; } cases[] = {
+		{ "",                503 },  /* absent -> full window, then no backend */
+		{ "?maxDim=1280",    503 },
+		{ "?maxDim=abc",     400 },
+		{ "?maxDim=",        400 },
+		{ "?maxDim=0",       400 },
+		{ "?maxDim=99999",   400 },
+	};
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	size_t i;
+
+	venc_config_defaults(&cfg);
+	memset(&cb, 0, sizeof(cb));
+	if (venc_api_register(&cfg, "star6e", &cb) != 0) {
+		CHECK("pgm register", 0);
+		return failures;
+	}
+	if (ensure_api_test_server() != 0) {
+		CHECK("pgm server", 0);
+		return failures;
+	}
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		char request[256], response[65536];
+		int status = 0, fd;
+		size_t sent = 0, req_len;
+
+		fd = connect_api_test_socket();
+		CHECK("pgm connect", fd >= 0);
+		if (fd < 0)
+			continue;
+		req_len = (size_t)snprintf(request, sizeof(request),
+			"GET /api/v1/snapshot.pgm%s HTTP/1.0\r\n"
+			"Host: 127.0.0.1\r\n"
+			"\r\n", cases[i].query);
+		while (sent < req_len) {
+			ssize_t n = write(fd, request + sent, req_len - sent);
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0)
+				break;
+			sent += (size_t)n;
+		}
+		shutdown(fd, SHUT_WR);
+		CHECK("pgm read",
+			read_http_response(fd, &status, response, sizeof(response)) == 0);
+		close(fd);
+		if (status != cases[i].want)
+			fprintf(stderr, "  maxDim case '%s': got %d want %d\n",
+				cases[i].query, status, cases[i].want);
+		CHECK("pgm maxDim status", status == cases[i].want);
+	}
+	return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int test_venc_api(void)
@@ -1649,6 +1732,7 @@ int test_venc_api(void)
 	failures += test_set_rejects_malformed_percent_escape();
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
+	failures += test_snapshot_pgm_max_dim_validation();
 	stop_api_test_server();
 	return failures;
 }

@@ -48,9 +48,6 @@ static int      g_chn_created   = 0;
 static int      g_bound         = 0;
 static int      g_started       = 0;
 static uint32_t g_quality       = 80;
-/* Configured snapshot geometry, kept for the grayscale SCL tap (which does
- * not go through the MJPEG channel and so cannot read it back from VENC). */
-static uint32_t g_snap_w, g_snap_h;
 
 void venc_jpeg_set_source(const void *port_opaque)
 {
@@ -82,8 +79,6 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	if (q > 99) q = 99;
 	if (q < 1)  q = 1;
 	g_quality = q;
-	g_snap_w = w;
-	g_snap_h = h;
 
 	/* CreateDev for MJPG device 8 — separate from main H.26x dev 0. */
 	i6c_venc_init init = {
@@ -291,12 +286,16 @@ stop:
  * i6c ABI notes (these differ from i6e — see the SDK headers, never assume
  * the Star6E layout): MI_SYS entry points carry a leading u16 soc_id, and the
  * SCL port is configured through fnSetPortConfig(dev, chn, port, i6c_scl_port)
- * with an explicit crop window rather than a VPE port-mode struct. */
+ * with an explicit crop window rather than a VPE port-mode struct.
+ *
+ * Geometry is the full scaler input window by default — the frame the active
+ * sensor mode delivers post-precrop — not the (smaller) main-stream size: the
+ * consumers here are QR/vision decoders that fail on pixels-per-module, not
+ * viewers.  `?maxDim=` scales it back down per request. */
 
 #define GRAY_TAP_PORT      3
 #define GRAY_TAP_OWNER     "snapshot"
 #define GRAY_BUFDATA_FRAME 1
-#define GRAY_TAP_MAX_DIM   1280u   /* long-side cap; QR/vision consumers */
 #define GRAY_MAX_DIM       8192u   /* sanity clamp on returned geometry */
 
 /* Layout copied from the proven detector definition in maruko_ipu_yolo.c. */
@@ -332,9 +331,12 @@ static GrayGetBufFn  g_gray_get_buf;
 static GrayPutBufFn  g_gray_put_buf;
 static GrayMmapFn    g_gray_mmap;
 static GrayMunmapFn  g_gray_munmap;
+/* Scaler input window published by the pipeline: x/y is the crop the i6c SCL
+ * port has to be programmed with, w/h doubles as the tap's full-resolution
+ * default (see venc_jpeg.h). */
 static uint32_t g_gray_crop_x, g_gray_crop_y, g_gray_crop_w, g_gray_crop_h;
 
-void venc_jpeg_set_gray_crop(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+void venc_jpeg_set_gray_source(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
 	g_gray_crop_x = x;
 	g_gray_crop_y = y;
@@ -359,24 +361,53 @@ static int gray_load_syms(void)
 	return 0;
 }
 
-/* Tap geometry: the configured snapshot size with the long side capped.
- * PGM is self-describing, so consumers read the real dims from the header. */
-static void gray_tap_dims(uint32_t *out_w, uint32_t *out_h)
+/* Program the SCL port3 tap, preferring the caller's geometry (by default the
+ * full scaler input window — QR/vision consumers are resolution-limited) and
+ * retrying once at VENC_JPEG_GRAY_SAFE_DIM if the BSP refuses it.  The i6c
+ * port output limits are undocumented, so a refusal has to degrade loudly
+ * rather than fail the request: boot-time QR pairing depends on this endpoint
+ * answering.  The achieved geometry is not returned — the PGM header the
+ * caller builds from the drained frame is the authority. */
+static int gray_tap_program(uint32_t max_dim)
 {
-	uint32_t w = g_snap_w ? g_snap_w : 1280;
-	uint32_t h = g_snap_h ? g_snap_h : 720;
-	uint32_t longest = (w > h) ? w : h;
+	uint32_t w, h;
+	int tries, i;
 
-	if (longest > GRAY_TAP_MAX_DIM) {
-		w = (uint32_t)((uint64_t)w * GRAY_TAP_MAX_DIM / longest);
-		h = (uint32_t)((uint64_t)h * GRAY_TAP_MAX_DIM / longest);
+	if (venc_jpeg_gray_tap_dims(g_gray_crop_w, g_gray_crop_h, max_dim,
+	    &w, &h) != 0)
+		return -ENODEV;
+	tries = (w > VENC_JPEG_GRAY_SAFE_DIM ||
+	         h > VENC_JPEG_GRAY_SAFE_DIM) ? 2 : 1;
+
+	for (i = 0; i < tries; ++i) {
+		i6c_scl_port p;
+		MI_S32 ret;
+
+		if (i > 0)
+			(void)venc_jpeg_gray_tap_dims(g_gray_crop_w, g_gray_crop_h,
+				VENC_JPEG_GRAY_SAFE_DIM, &w, &h);
+		memset(&p, 0, sizeof(p));
+		p.crop.x = (MI_U16)g_gray_crop_x;
+		p.crop.y = (MI_U16)g_gray_crop_y;
+		p.crop.width = (MI_U16)g_gray_crop_w;
+		p.crop.height = (MI_U16)g_gray_crop_h;
+		p.output.width = (MI_U16)w;
+		p.output.height = (MI_U16)h;
+		p.pixFmt = I6_PIXFMT_YUV420SP;
+		p.compress = (i6_common_compr)0;
+
+		ret = g_mi_scl.fnSetPortConfig(0, 0, GRAY_TAP_PORT, &p);
+		if (ret == 0) {
+			if (i > 0)
+				fprintf(stderr, "[jpeg-maruko] gray: port%d capped to %ux%u "
+					"(BSP refused the full window)\n", GRAY_TAP_PORT, w, h);
+			return 0;
+		}
+		fprintf(stderr, "[jpeg-maruko] gray: SCL port%d config %ux%u failed "
+			"%d%s\n", GRAY_TAP_PORT, w, h, (int)ret,
+			(i + 1 < tries) ? "; retrying capped" : "");
 	}
-	w &= ~15u;
-	h &= ~1u;
-	if (w < 64) w = 64;
-	if (h < 64) h = 64;
-	*out_w = w;
-	*out_h = h;
+	return -EIO;
 }
 
 /* Pack the Y plane of one NV12 frame into a malloc'd P5 PGM blob. */
@@ -449,11 +480,9 @@ static int gray_drain_one(MI_SYS_ChnPort_t *tap, uint8_t **out_buf,
 }
 
 int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t timeout_ms)
+	uint32_t max_dim, uint32_t timeout_ms)
 {
 	MI_SYS_ChnPort_t tap;
-	i6c_scl_port p;
-	uint32_t tap_w = 0, tap_h = 0;
 	int port_enabled = 0, depth_set = 0, claimed = 0;
 	int rc;
 	MI_S32 ret;
@@ -480,28 +509,13 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	}
 	claimed = 1;
 
-	gray_tap_dims(&tap_w, &tap_h);
-
 	tap = (MI_SYS_ChnPort_t){ .module = I6_SYS_MOD_SCL, .device = 0,
 		.channel = 0, .port = GRAY_TAP_PORT };
 
-	memset(&p, 0, sizeof(p));
-	p.crop.x = (MI_U16)g_gray_crop_x;
-	p.crop.y = (MI_U16)g_gray_crop_y;
-	p.crop.width = (MI_U16)g_gray_crop_w;
-	p.crop.height = (MI_U16)g_gray_crop_h;
-	p.output.width = (MI_U16)tap_w;
-	p.output.height = (MI_U16)tap_h;
-	p.pixFmt = I6_PIXFMT_YUV420SP;
-	p.compress = (i6_common_compr)0;
-
-	ret = g_mi_scl.fnSetPortConfig(0, 0, GRAY_TAP_PORT, &p);
-	if (ret != 0) {
-		fprintf(stderr, "[jpeg-maruko] gray: SCL port%d config %ux%u failed "
-			"%d\n", GRAY_TAP_PORT, tap_w, tap_h, (int)ret);
-		rc = -EIO;
+	rc = gray_tap_program(max_dim);
+	if (rc != 0)
 		goto out;
-	}
+
 	ret = g_mi_scl.fnEnablePort(0, 0, GRAY_TAP_PORT);
 	if (ret != 0) {
 		fprintf(stderr, "[jpeg-maruko] gray: SCL port%d enable failed %d\n",

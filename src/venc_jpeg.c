@@ -83,7 +83,7 @@ int venc_jpeg_capture(uint8_t **out_buf, size_t *out_len,
 }
 
 int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t timeout_ms)
+	uint32_t max_dim, uint32_t timeout_ms)
 {
 	if (!out_buf || !out_len)
 		return -EINVAL;
@@ -95,9 +95,35 @@ int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
 		pthread_mutex_unlock(&g_jpeg_mutex);
 		return -ENODEV;
 	}
-	int rc = venc_jpeg_backend_capture_gray(out_buf, out_len, timeout_ms);
+	int rc = venc_jpeg_backend_capture_gray(out_buf, out_len, max_dim,
+		timeout_ms);
 	pthread_mutex_unlock(&g_jpeg_mutex);
 	return rc;
+}
+
+int venc_jpeg_gray_tap_dims(uint32_t src_w, uint32_t src_h, uint32_t max_dim,
+	uint32_t *out_w, uint32_t *out_h)
+{
+	uint32_t w = src_w, h = src_h;
+	uint32_t longest = (w > h) ? w : h;
+
+	if (!out_w || !out_h)
+		return -EINVAL;
+	if (w == 0 || h == 0)
+		return -EINVAL;
+
+	/* Scale down only — asking the scaler to upscale buys no detail. */
+	if (max_dim != 0 && longest > max_dim) {
+		w = (uint32_t)((uint64_t)w * max_dim / longest);
+		h = (uint32_t)((uint64_t)h * max_dim / longest);
+	}
+	w &= ~15u;   /* 16-align the width so the scaler stride is sane */
+	h &= ~1u;    /* NV12 needs an even height */
+	if (w < VENC_JPEG_GRAY_MIN_DIM) w = VENC_JPEG_GRAY_MIN_DIM;
+	if (h < VENC_JPEG_GRAY_MIN_DIM) h = VENC_JPEG_GRAY_MIN_DIM;
+	*out_w = w;
+	*out_h = h;
+	return 0;
 }
 
 void venc_jpeg_free(uint8_t *buf)
@@ -149,13 +175,42 @@ int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx)
 	return sent;
 }
 
+/* Parse the optional `?maxDim=<px>` long-side cap.  Absent → 0 (the full
+ * scaler input window).  Returns -1 on a value that is not a plain positive
+ * integer, so a typo fails loudly rather than silently capturing full-res. */
+static int pgm_parse_max_dim(const HttpRequest *req, uint32_t *out)
+{
+	char raw[16];
+	char *end = NULL;
+	unsigned long v;
+
+	*out = 0;
+	if (!req || httpd_query_param(req, "maxDim", raw, sizeof(raw)) != 0)
+		return 0;
+	if (raw[0] < '1' || raw[0] > '9')   /* also rejects "", "0…", "-1", " 1" */
+		return -1;
+	v = strtoul(raw, &end, 10);
+	if (*end != '\0' || v > 8192)
+		return -1;
+	*out = (uint32_t)v;
+	return 0;
+}
+
 int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
 {
-	(void)req; (void)ctx;
+	(void)ctx;
 
 	uint8_t *buf = NULL;
 	size_t   len = 0;
-	int rc = venc_jpeg_capture_gray(&buf, &len, 1500);
+	uint32_t max_dim = 0;
+
+	if (pgm_parse_max_dim(req, &max_dim) != 0) {
+		return httpd_send_error(client_fd, 400, "bad_max_dim",
+			"maxDim must be a positive integer up to 8192 (omit it for the "
+			"full sensor-mode resolution)");
+	}
+
+	int rc = venc_jpeg_capture_gray(&buf, &len, max_dim, 1500);
 	if (rc == -ENODEV) {
 		return httpd_send_error(client_fd, 503, "snapshot_disabled",
 			"snapshot endpoint not available (subsystem disabled or "
@@ -208,13 +263,13 @@ __attribute__((weak)) int venc_jpeg_backend_capture(uint8_t **out_buf,
 }
 
 __attribute__((weak)) int venc_jpeg_backend_capture_gray(uint8_t **out_buf,
-	size_t *out_len, uint32_t timeout_ms)
+	size_t *out_len, uint32_t max_dim, uint32_t timeout_ms)
 {
-	(void)out_buf; (void)out_len; (void)timeout_ms;
+	(void)out_buf; (void)out_len; (void)max_dim; (void)timeout_ms;
 	return -ENOSYS;
 }
 
-__attribute__((weak)) void venc_jpeg_set_gray_crop(uint32_t x, uint32_t y,
+__attribute__((weak)) void venc_jpeg_set_gray_source(uint32_t x, uint32_t y,
 	uint32_t w, uint32_t h)
 {
 	(void)x; (void)y; (void)w; (void)h;

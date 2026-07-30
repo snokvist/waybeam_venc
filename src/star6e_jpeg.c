@@ -34,9 +34,19 @@ static MI_VENC_CHN g_chn = -1;
 static int g_bound = 0;
 static int g_chn_created = 0;
 static uint32_t g_quality = 80;
-/* Configured snapshot geometry, kept for the grayscale port1 tap (which does
- * not go through the MJPEG channel and so cannot read it back from VENC). */
-static uint32_t g_snap_w, g_snap_h;
+/* Scaler input window (post-precrop frame of the active sensor mode), published
+ * by the pipeline.  The grayscale port1 tap sizes itself from this: it does not
+ * go through the MJPEG channel, so it cannot read a geometry back from VENC. */
+static uint32_t g_gray_src_w, g_gray_src_h;
+
+/* The VPE tap inherits its window from the channel, so only the size is used;
+ * x/y are Maruko's (explicit SCL crop).  See venc_jpeg.h. */
+void venc_jpeg_set_gray_source(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+	(void)x; (void)y;
+	g_gray_src_w = w;
+	g_gray_src_h = h;
+}
 
 void venc_jpeg_set_source(const void *vpe_port_opaque)
 {
@@ -68,8 +78,6 @@ int venc_jpeg_backend_init(const VencJpegConfig *cfg)
 	if (q > 99) q = 99;
 	if (q < 1) q = 1;
 	g_quality = q;
-	g_snap_w = w;
-	g_snap_h = h;
 	g_chn = (MI_VENC_CHN)cfg->channel;
 
 	MI_VENC_ChnAttr_t attr = {0};
@@ -249,7 +257,12 @@ stop:
  * on every exit path (see iy_port1_teardown in star6e_ipu_yolo.c — a depth
  * left registered leaves the kernel queueing output tasks for a consumer
  * that no longer exists, and a later process inherits a queue whose fence
- * never completes).  The single `out:` epilogue below exists for that. */
+ * never completes).  The single `out:` epilogue below exists for that.
+ *
+ * Geometry is the full scaler input window by default — the frame the active
+ * sensor mode delivers post-precrop — not the (smaller) main-stream size: the
+ * consumers here are QR/vision decoders that fail on pixels-per-module, not
+ * viewers.  `?maxDim=` scales it back down per request. */
 
 typedef struct {
 	int eTileMode;
@@ -290,7 +303,6 @@ typedef struct {
 
 #define GRAY_E_BUFDATA_FRAME 1
 #define GRAY_MAX_DIM         8192u   /* sanity clamp on frame geometry */
-#define GRAY_TAP_MAX_DIM     1280u   /* long-side cap for the port1 tap */
 #define GRAY_TAP_OWNER       "snapshot"   /* star6e_vpe_ports claim label */
 /* The tap port.  There is no third scaler output to escape to on i6e: a
  * device probe of port2 (SetPortMode+EnablePort) did not fail cleanly — it
@@ -372,28 +384,52 @@ static int gray_frame_to_pgm(const GrayFrameData_t *fr, uint8_t **out_buf,
 	return 0;
 }
 
-/* Geometry for the port1 tap.  Starts from the configured snapshot size (the
- * same dims the MJPEG channel uses) and caps the long side: port1 is the small
- * second scaler output, the consumers of this endpoint are code (QR/vision),
- * not viewers, and a capped frame keeps both the SCL request and the per-row
- * copy cheap.  PGM is self-describing, so a consumer reads the real dims from
- * the header rather than assuming the main-stream size. */
-static void gray_tap_dims(uint32_t *out_w, uint32_t *out_h)
+/* Program the port1 tap, preferring the caller's geometry (by default the full
+ * scaler input window — QR/vision consumers are resolution-limited) and
+ * retrying once at VENC_JPEG_GRAY_SAFE_DIM if the BSP refuses it.  The i6e
+ * port1 output limits are undocumented, so a refusal has to degrade loudly
+ * rather than fail the request outright: boot-time QR pairing depends on this
+ * endpoint answering.  The achieved geometry is not returned — the PGM header
+ * the caller builds from the drained frame is the authority. */
+static int gray_tap_program(MI_VPE_CHANNEL chn, uint32_t max_dim)
 {
-	uint32_t w = g_snap_w ? g_snap_w : 1280;
-	uint32_t h = g_snap_h ? g_snap_h : 720;
-	uint32_t longest = (w > h) ? w : h;
+	uint32_t w, h;
+	int tries, i;
 
-	if (longest > GRAY_TAP_MAX_DIM) {
-		w = (uint32_t)((uint64_t)w * GRAY_TAP_MAX_DIM / longest);
-		h = (uint32_t)((uint64_t)h * GRAY_TAP_MAX_DIM / longest);
+	if (venc_jpeg_gray_tap_dims(g_gray_src_w, g_gray_src_h, max_dim,
+	    &w, &h) != 0) {
+		fprintf(stderr, "[jpeg-star6e] gray: no scaler source window "
+			"registered\n");
+		return -ENODEV;
 	}
-	w &= ~15u;            /* 16-align the width so the SCL stride is sane */
-	h &= ~1u;             /* NV12 needs an even height */
-	if (w < 64) w = 64;
-	if (h < 64) h = 64;
-	*out_w = w;
-	*out_h = h;
+	tries = (w > VENC_JPEG_GRAY_SAFE_DIM ||
+	         h > VENC_JPEG_GRAY_SAFE_DIM) ? 2 : 1;
+
+	for (i = 0; i < tries; ++i) {
+		MI_VPE_PortAttr_t attr;
+		MI_S32 ret;
+
+		if (i > 0)
+			(void)venc_jpeg_gray_tap_dims(g_gray_src_w, g_gray_src_h,
+				VENC_JPEG_GRAY_SAFE_DIM, &w, &h);
+		memset(&attr, 0, sizeof(attr));
+		attr.output.width  = (unsigned short)w;
+		attr.output.height = (unsigned short)h;
+		attr.pixFmt   = I6_PIXFMT_YUV420SP;
+		attr.compress = I6_COMPR_NONE;
+
+		ret = MI_VPE_SetPortMode(chn, GRAY_TAP_PORT, &attr);
+		if (ret == 0) {
+			if (i > 0)
+				fprintf(stderr, "[jpeg-star6e] gray: port1 capped to %ux%u "
+					"(BSP refused the full window)\n", w, h);
+			return 0;
+		}
+		fprintf(stderr, "[jpeg-star6e] gray: port1 SetPortMode %ux%u failed "
+			"%d%s\n", w, h, (int)ret,
+			(i + 1 < tries) ? "; retrying capped" : "");
+	}
+	return -EIO;
 }
 
 /* Drain one frame off an already-programmed tap port.  Split out so the
@@ -431,12 +467,10 @@ static int gray_drain_one(MI_SYS_ChnPort_t *tap, uint8_t **out_buf,
 }
 
 int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
-	uint32_t timeout_ms)
+	uint32_t max_dim, uint32_t timeout_ms)
 {
-	MI_VPE_PortAttr_t attr;
 	MI_SYS_ChnPort_t tap;
 	MI_VPE_CHANNEL vpe_chn;
-	uint32_t tap_w = 0, tap_h = 0;
 	int port_enabled = 0, depth_set = 0, claimed = 0;
 	int rc;
 	MI_S32 ret;
@@ -445,7 +479,7 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 		return -EINVAL;
 	*out_buf = NULL;
 	*out_len = 0;
-	if (!g_have_vpe_port)
+	if (!g_have_vpe_port || g_gray_src_w == 0 || g_gray_src_h == 0)
 		return -ENODEV;
 	if (gray_load_syms() != 0)
 		return -EIO;
@@ -463,24 +497,14 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	}
 	claimed = 1;
 
-	gray_tap_dims(&tap_w, &tap_h);
 	vpe_chn = (MI_VPE_CHANNEL)g_vpe_port.channel;
 	tap = g_vpe_port;
 	tap.port = GRAY_TAP_PORT;
 
-	memset(&attr, 0, sizeof(attr));
-	attr.output.width  = (unsigned short)tap_w;
-	attr.output.height = (unsigned short)tap_h;
-	attr.pixFmt   = I6_PIXFMT_YUV420SP;
-	attr.compress = I6_COMPR_NONE;
-
-	ret = MI_VPE_SetPortMode(vpe_chn, GRAY_TAP_PORT, &attr);
-	if (ret != 0) {
-		fprintf(stderr, "[jpeg-star6e] gray: port1 SetPortMode %ux%u failed "
-			"%d\n", tap_w, tap_h, (int)ret);
-		rc = -EIO;
+	rc = gray_tap_program(vpe_chn, max_dim);
+	if (rc != 0)
 		goto out;
-	}
+
 	ret = MI_VPE_EnablePort(vpe_chn, GRAY_TAP_PORT);
 	if (ret != 0) {
 		fprintf(stderr, "[jpeg-star6e] gray: port1 EnablePort failed %d\n",

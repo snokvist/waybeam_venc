@@ -204,7 +204,10 @@ edit or webui-blob rebuild is needed to surface a new module field.  Keys:
 dashboard's static schema.  The entire **Stabilization** section is data-driven:
 the four persisted `video0.stab_*` knobs (`stab_crop_pct`, `stab_kalman_q`,
 `stab_kalman_r`, `stab_recenter_speed`) plus the runtime-only `video0.pause_stab`
-(the live stab pause — not in `/api/v1/config`) are all surfaced this way.
+(the live stab pause — not in `/api/v1/config`) are all surfaced this way.  So
+is the **Snapshot** section (`snapshot.enabled`, `snapshot.quality`,
+`snapshot.width`, `snapshot.height`) — the switch for both snapshot endpoints,
+which was API-only before.
 
 ### `GET /api/v1/config.json`
 
@@ -868,10 +871,32 @@ down per request; the encode path is never touched.
 | Star6E (i6e) | VPE port1 | stab framing, NPU detection |
 | Maruko (i6c) | SCL port3 | NPU detection |
 
-Geometry starts from the configured snapshot size and caps the long side at
-**1280 px** (aspect-preserved, width 16-aligned) — PGM is self-describing,
-so read the real dimensions from the header rather than assuming the
-main-stream size.
+Geometry defaults to the **full scaler input window** — the frame the active
+sensor mode delivers after precrop, i.e. the largest grayscale frame the tap
+can produce without upscaling (e.g. `2592x1458` on an imx335 in its 2592x1944
+mode with a 16:9 precrop, not the `1280x720` main stream).  This is deliberate:
+the consumers are QR/vision decoders that fail on pixels-per-module, not
+viewers, and halving the frame halves the working distance.
+
+The `snapshot.width`/`snapshot.height` config sizes the **MJPEG** channel only
+and has no effect here.  Width is 16-aligned and height even for the scaler;
+PGM is self-describing, so read the real dimensions from the header rather than
+computing them.
+
+**Query parameters**
+
+| Param | Default | Meaning |
+|---|---|---|
+| `maxDim` | *(absent)* = full window | Cap the long side to this many pixels, aspect-preserved. For consumers that want a smaller frame and a faster request; never upscales. |
+
+A full-resolution capture is a real cost — a 4K sensor mode yields an ~8 MB
+response and copies that much luma per request — so pass `maxDim` when the code
+reading it does not need the pixels.
+
+If the vendor scaler refuses the full-window request (the per-port output
+limits are undocumented), the backend retries once at a 1280 px long side and
+logs `capped to <w>x<h> (BSP refused the full window)` rather than failing the
+request; use `maxDim` to pick that size explicitly.
 
 **The tap is exclusive.** Its other claimants own it for a whole run, so a
 capture attempted while one is active returns `409` (`snapshot_gray_busy`)
@@ -884,13 +909,18 @@ Shares the `snapshot.enabled` gate and the subsystem mutex with
 
 | Status | Code | Meaning |
 |---|---|---|
+| `400` | `bad_max_dim` | `maxDim` was not a positive integer ≤ 8192 |
 | `409` | `snapshot_gray_busy` | the scaler tap is held by stab framing or NPU detection |
 | `501` | `snapshot_gray_unsupported` | backend has no grayscale capture |
 
 Supported on both Star6E and Maruko.
 
 ```bash
+# full sensor-mode resolution (best QR range)
 curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode
+
+# capped for a cheap, fast poll
+curl -s 'http://<device-ip>/api/v1/snapshot.pgm?maxDim=1280' | qr_decode
 ```
 
 ### `GET /` (Web Dashboard)
