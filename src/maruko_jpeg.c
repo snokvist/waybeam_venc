@@ -296,7 +296,6 @@ stop:
 #define GRAY_TAP_PORT      3
 #define GRAY_TAP_OWNER     "snapshot"
 #define GRAY_BUFDATA_FRAME 1
-#define GRAY_MAX_DIM       8192u   /* sanity clamp on returned geometry */
 
 /* Layout copied from the proven detector definition in maruko_ipu_yolo.c. */
 typedef struct { MI_U16 x, y, w, h; } GrayRect;
@@ -361,44 +360,37 @@ static int gray_load_syms(void)
 	return 0;
 }
 
-/* Program the SCL port3 tap, preferring the caller's geometry (by default the
- * full scaler input window — QR/vision consumers are resolution-limited) and
- * retrying once at VENC_JPEG_GRAY_SAFE_DIM if the BSP refuses it.  The i6c
- * port output limits are undocumented, so a refusal has to degrade loudly
- * rather than fail the request: boot-time QR pairing depends on this endpoint
- * answering.  The achieved geometry is not returned — the PGM header the
- * caller builds from the drained frame is the authority. */
+/* Program the SCL port3 tap with the first geometry the BSP accepts.  The
+ * candidate list and the degrade-on-refusal policy are shared with Star6E in
+ * venc_jpeg_gray_tap_geoms(); this only makes the i6c SDK call per candidate.
+ * The achieved geometry is not returned — the PGM header the caller builds
+ * from the drained frame is the authority. */
 static int gray_tap_program(const VencJpegGrayReq *req)
 {
-	uint32_t cx, cy, cw, ch, w, h;
-	int tries, i;
+	uint32_t cx, cy, cw, ch;
+	VencJpegGrayGeom geom[2];
+	int n, i;
 
 	/* fnSetPortConfig takes ISP-plane coordinates, so the centre rect is
-	 * measured from the crop window the pipeline published, not from 0,0. */
-	if (venc_jpeg_gray_center_rect(g_gray_crop_x, g_gray_crop_y,
-	    g_gray_crop_w, g_gray_crop_h, req->crop_pct, &cx, &cy, &cw, &ch) != 0)
-		return -ENODEV;
+	 * measured from the crop window the pipeline published, not from 0,0.
+	 * Cannot fail: the caller checked the window is non-empty. */
+	(void)venc_jpeg_gray_center_rect(g_gray_crop_x, g_gray_crop_y,
+		g_gray_crop_w, g_gray_crop_h, req->crop_pct, &cx, &cy, &cw, &ch);
 	/* Output is sized from the CROP, not the full window: a cropped capture
 	 * keeps its source pixels 1:1 instead of scaling them away. */
-	if (venc_jpeg_gray_tap_dims(cw, ch, req->max_dim, &w, &h) != 0)
-		return -ENODEV;
-	tries = (w > VENC_JPEG_GRAY_SAFE_DIM ||
-	         h > VENC_JPEG_GRAY_SAFE_DIM) ? 2 : 1;
+	n = venc_jpeg_gray_tap_geoms(cw, ch, req->max_dim, geom);
 
-	for (i = 0; i < tries; ++i) {
+	for (i = 0; i < n; ++i) {
 		i6c_scl_port p;
 		MI_S32 ret;
 
-		if (i > 0)
-			(void)venc_jpeg_gray_tap_dims(cw, ch,
-				VENC_JPEG_GRAY_SAFE_DIM, &w, &h);
 		memset(&p, 0, sizeof(p));
 		p.crop.x = (MI_U16)cx;
 		p.crop.y = (MI_U16)cy;
 		p.crop.width = (MI_U16)cw;
 		p.crop.height = (MI_U16)ch;
-		p.output.width = (MI_U16)w;
-		p.output.height = (MI_U16)h;
+		p.output.width = (MI_U16)geom[i].w;
+		p.output.height = (MI_U16)geom[i].h;
 		p.pixFmt = I6_PIXFMT_YUV420SP;
 		p.compress = (i6_common_compr)0;
 
@@ -406,12 +398,13 @@ static int gray_tap_program(const VencJpegGrayReq *req)
 		if (ret == 0) {
 			if (i > 0)
 				fprintf(stderr, "[jpeg-maruko] gray: port%d capped to %ux%u "
-					"(BSP refused the full window)\n", GRAY_TAP_PORT, w, h);
+					"(BSP refused the full window)\n", GRAY_TAP_PORT,
+					geom[i].w, geom[i].h);
 			return 0;
 		}
 		fprintf(stderr, "[jpeg-maruko] gray: SCL port%d config %ux%u failed "
-			"%d%s\n", GRAY_TAP_PORT, w, h, (int)ret,
-			(i + 1 < tries) ? "; retrying capped" : "");
+			"%d%s\n", GRAY_TAP_PORT, geom[i].w, geom[i].h, (int)ret,
+			(i + 1 < n) ? "; retrying capped" : "");
 	}
 	return -EIO;
 }
@@ -430,7 +423,7 @@ static int gray_frame_to_pgm(const GrayFrameData *fr, uint8_t **out_buf,
 	uint8_t *out;
 	uint32_t row;
 
-	if (w == 0 || h == 0 || w > GRAY_MAX_DIM || h > GRAY_MAX_DIM || !phy)
+	if (w == 0 || h == 0 || w > VENC_JPEG_GRAY_MAX_DIM || h > VENC_JPEG_GRAY_MAX_DIM || !phy)
 		return -EIO;
 	/* Non-cached (flag 0): reads see the latest DMA with no invalidate. */
 	if (g_gray_mmap(phy, stride * h, &vir, 0) != 0 || !vir)
@@ -489,7 +482,6 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	const VencJpegGrayReq *req)
 {
 	MI_SYS_ChnPort_t tap;
-	uint32_t timeout_ms;
 	int port_enabled = 0, depth_set = 0, claimed = 0;
 	int rc;
 	MI_S32 ret;
@@ -504,7 +496,6 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 		return -ENODEV;   /* pipeline has not published a crop window yet */
 	if (gray_load_syms() != 0)
 		return -EIO;
-	timeout_ms = req->timeout_ms ? req->timeout_ms : 1500;
 
 	if (maruko_scl_tap_claim(GRAY_TAP_OWNER) != 0) {
 		char owner[16];
@@ -541,7 +532,7 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	}
 	depth_set = 1;
 
-	rc = gray_drain_one(&tap, out_buf, out_len, timeout_ms);
+	rc = gray_drain_one(&tap, out_buf, out_len, req->timeout_ms);
 
 out:
 	/* Depth reset BEFORE DisablePort, always — a stranded depth leaves the

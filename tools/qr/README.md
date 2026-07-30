@@ -6,7 +6,8 @@ the minimal Waybeam transport envelope, and prints the 16-character payload.
 It does not interpret, authorize, persist, or execute that payload.
 
 The waybeam process remains responsible only for the grayscale snapshot
-endpoints, `GET /api/v1/snapshot.pgm` and `GET /api/v1/snapshot-center.pgm`.
+endpoint, `GET /api/v1/snapshot.pgm` (and its `?crop=` / `?maxDim=` geometry
+parameters).
 Pairing, commands, boot scheduling, and service integration belong to a later
 standalone shell/action work package.
 
@@ -85,9 +86,9 @@ than the main stream's — a 2592-wide mode reaches roughly twice the distance a
 1280-wide capture does for the same marker. Append `?maxDim=<px>` to the
 endpoint when a smaller, cheaper frame is enough.
 
-To spend fewer bytes *without* spending px/module, use `snapshot-center.pgm`
-instead: the centre 50% of each dimension at full source resolution, a quarter
-of the area. It also drops the frame edge, where a fisheye's barrel distortion
+To spend fewer bytes *without* spending px/module, pass `?crop=50` instead:
+the centre 50% of each dimension at full source resolution, a quarter of the
+area. It also drops the frame edge, where a fisheye's barrel distortion
 is worst and the outer-frame corner mapping is least reliable — so on a wide
 lens it is usually the more reliable capture as well as the cheaper one. The
 marker has to be nearer the centre of frame.
@@ -235,7 +236,7 @@ completion.
 ## Standalone use
 
 ```bash
-curl -s http://127.0.0.1/api/v1/snapshot-center.pgm | qr_decode
+curl -s 'http://127.0.0.1/api/v1/snapshot.pgm?crop=50' | qr_decode
 curl -s http://127.0.0.1/api/v1/snapshot.pgm | qr_decode   # whole frame
 qr_decode --raw capture.pgm
 qr_decode --stats capture.pgm
@@ -250,7 +251,7 @@ qr_watch.sh -c -v
 ```
 
 `snapshot.enabled` must be true. `qr_watch.sh` defaults to
-`snapshot-center.pgm`: full pixels-per-module over a quarter of the bytes and
+`snapshot.pgm?crop=50`: full pixels-per-module over a quarter of the bytes and
 decode time, clear of the fisheye-distorted frame edge. The trade is field of
 view — the code has to be nearer frame centre. Use `-e` to choose otherwise:
 

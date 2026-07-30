@@ -90,12 +90,18 @@ int venc_jpeg_capture_gray(uint8_t **out_buf, size_t *out_len,
 	*out_buf = NULL;
 	*out_len = 0;
 
+	/* Apply the default frame budget once, here, so every backend can treat
+	 * req->timeout_ms as already non-zero. */
+	VencJpegGrayReq eff = *req;
+	if (eff.timeout_ms == 0)
+		eff.timeout_ms = VENC_JPEG_GRAY_TIMEOUT_MS;
+
 	pthread_mutex_lock(&g_jpeg_mutex);
 	if (!g_initialized || !g_cfg.enabled) {
 		pthread_mutex_unlock(&g_jpeg_mutex);
 		return -ENODEV;
 	}
-	int rc = venc_jpeg_backend_capture_gray(out_buf, out_len, req);
+	int rc = venc_jpeg_backend_capture_gray(out_buf, out_len, &eff);
 	pthread_mutex_unlock(&g_jpeg_mutex);
 	return rc;
 }
@@ -154,6 +160,23 @@ int venc_jpeg_gray_center_rect(uint32_t src_x, uint32_t src_y,
 	return 0;
 }
 
+int venc_jpeg_gray_tap_geoms(uint32_t src_w, uint32_t src_h, uint32_t max_dim,
+	VencJpegGrayGeom out[2])
+{
+	if (!out)
+		return -EINVAL;
+	if (venc_jpeg_gray_tap_dims(src_w, src_h, max_dim, &out[0].w,
+	    &out[0].h) != 0)
+		return -EINVAL;
+	if (out[0].w <= VENC_JPEG_GRAY_SAFE_DIM &&
+	    out[0].h <= VENC_JPEG_GRAY_SAFE_DIM)
+		return 1;
+	/* Cannot fail: the source window is non-empty and the cap is non-zero. */
+	(void)venc_jpeg_gray_tap_dims(src_w, src_h, VENC_JPEG_GRAY_SAFE_DIM,
+		&out[1].w, &out[1].h);
+	return 2;
+}
+
 void venc_jpeg_free(uint8_t *buf)
 {
 	free(buf);
@@ -203,37 +226,43 @@ int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx)
 	return sent;
 }
 
-/* Parse the optional `?maxDim=<px>` long-side cap.  Absent → 0 (the full
- * scaler input window).  Returns -1 on a value that is not a plain positive
- * integer, so a typo fails loudly rather than silently capturing full-res. */
-static int pgm_parse_max_dim(const HttpRequest *req, uint32_t *out)
+/* Parse one optional positive-integer query parameter.  Absent → 0, which
+ * every geometry knob reads as "unset, use the default".  Returns -1 on
+ * anything that is not a plain positive integer <= max, so a typo fails
+ * loudly rather than silently capturing at the default geometry. */
+static int pgm_parse_uint(const HttpRequest *req, const char *key,
+	unsigned long max, uint32_t *out)
 {
 	char raw[16];
 	char *end = NULL;
 	unsigned long v;
 
 	*out = 0;
-	if (!req || httpd_query_param(req, "maxDim", raw, sizeof(raw)) != 0)
+	if (!req || httpd_query_param(req, key, raw, sizeof(raw)) != 0)
 		return 0;
 	if (raw[0] < '1' || raw[0] > '9')   /* also rejects "", "0…", "-1", " 1" */
 		return -1;
 	v = strtoul(raw, &end, 10);
-	if (*end != '\0' || v > 8192)
+	if (*end != '\0' || v > max)
 		return -1;
 	*out = (uint32_t)v;
 	return 0;
 }
 
-/* Shared body of both PGM routes.  They differ only in crop_pct — the format,
- * the query surface and every error mapping are identical, so there is one
- * implementation and two thin entry points. */
-static int pgm_respond(int client_fd, const HttpRequest *req, uint32_t crop_pct)
+int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
 {
 	uint8_t *buf = NULL;
 	size_t   len = 0;
-	VencJpegGrayReq greq = { .crop_pct = crop_pct, .timeout_ms = 1500 };
+	VencJpegGrayReq greq = { 0 };
 
-	if (pgm_parse_max_dim(req, &greq.max_dim) != 0) {
+	(void)ctx;
+	if (pgm_parse_uint(req, "crop", 100, &greq.crop_pct) != 0) {
+		return httpd_send_error(client_fd, 400, "bad_crop",
+			"crop must be a percentage from 1 to 100 (omit it, or pass 100, "
+			"for the whole scaler window)");
+	}
+	if (pgm_parse_uint(req, "maxDim", VENC_JPEG_GRAY_MAX_DIM,
+	    &greq.max_dim) != 0) {
 		return httpd_send_error(client_fd, 400, "bad_max_dim",
 			"maxDim must be a positive integer up to 8192 (omit it for the "
 			"full sensor-mode resolution)");
@@ -269,18 +298,6 @@ static int pgm_respond(int client_fd, const HttpRequest *req, uint32_t crop_pct)
 		buf, (int)len);
 	venc_jpeg_free(buf);
 	return sent;
-}
-
-int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx)
-{
-	(void)ctx;
-	return pgm_respond(client_fd, req, 0);
-}
-
-int handle_snapshot_pgm_center(int client_fd, const HttpRequest *req, void *ctx)
-{
-	(void)ctx;
-	return pgm_respond(client_fd, req, VENC_JPEG_GRAY_CENTER_PCT);
 }
 
 /* Default fallback for builds that don't link a backend (e.g. host-native

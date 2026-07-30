@@ -489,7 +489,8 @@ static const FieldUi ui_snapshot_width = {
 	"Snapshot", "JPEG width", "number", 0, 8192, 16, NULL,
 	"Width of the MJPEG snapshot channel. 0 = inherit the main stream. Does "
 	"not affect /api/v1/snapshot.pgm, which is sized from the active sensor "
-	"mode's scaler input window (cap a single request with ?maxDim=<px>)."
+	"mode's scaler input window (narrow a single request with ?crop=<pct> "
+	"and/or ?maxDim=<px>)."
 };
 static const FieldUi ui_snapshot_height = {
 	"Snapshot", "JPEG height", "number", 0, 8192, 2, NULL,
@@ -3682,8 +3683,6 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.pgm", handle_snapshot_pgm, NULL);
-	r |= venc_httpd_route("GET", "/api/v1/snapshot-center.pgm",
-		handle_snapshot_pgm_center, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);

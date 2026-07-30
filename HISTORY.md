@@ -2,25 +2,28 @@
 
 ## [0.61.0] - 2026-07-30
 
-New `GET /api/v1/snapshot-center.pgm`: the centre 50% of the scaler window (per
-linear dimension — a quarter of the area) at full source resolution.
+`GET /api/v1/snapshot.pgm` gains `?crop=<pct>`: capture only the centre
+percentage of each linear dimension (a quarter of the area at `crop=50`) at
+full source resolution.
 
 - **Cropping is the right lever for QR, not scaling.** `?maxDim=` buys bytes by
   throwing away pixels-per-module, which is the one thing QR decoding is
   actually limited by. A crop keeps every pixel it covers, so it is 4x cheaper
   in bytes *and* decode time at **no** loss of module resolution — the cost is
-  field of view. On the imx335 2592x1944 mode: `snapshot.pgm` is 2592x1458 /
-  3.6 MiB at full detail, `?maxDim=1280` is 0.9 MiB at *half* detail, and
-  `snapshot-center.pgm` is 1296x728 / 0.9 MiB at **full** detail.
+  field of view. On the imx335 2592x1944 mode: bare `snapshot.pgm` is 2592x1458
+  / 3.6 MiB at full detail, `?maxDim=1280` is 0.9 MiB at *half* detail, and
+  `?crop=50` is 1296x728 / 0.9 MiB at **full** detail.
 - **It also fixes fisheye.** The discarded region is the frame edge, where
   barrel distortion is worst and where the decoder's projective corner mapping
   off the marker's outer frame is least reliable. On a wide lens the cropped
   capture is usually the more *decodable* one, not just the cheaper one.
-- **A separate route, not another parameter.** Callers pick a behaviour ("scan
-  a code") rather than composing a geometry, and nothing lands in the JSON
-  config. The two routes share one handler body, one query surface and one
-  error mapping; they differ by a single `crop_pct`. The levers still compose —
-  `snapshot-center.pgm?maxDim=640` crops and then scales.
+- **A parameter on the existing route, not a second route.** `crop_pct` is a
+  general 0..100 knob internally, so a fixed `snapshot-center.pgm` route would
+  only have *hidden* the geometry, not removed it — while costing a second
+  handler, a second contract section and its own tests. One route, one handler,
+  one query parser; `?crop=` and `?maxDim=` compose, crop first then scale.
+  Nothing lands in the JSON config: the right geometry is a property of the
+  consumer, not of the device.
 - **Star6E: the crop is sticky, so teardown restores it.** The tap crop goes
   through `MI_VPE_SetPortCrop` on port1 (after `EnablePort`, matching
   `star6e_framing_stab.c`), and the NPU detector programs only `SetPortMode` —
@@ -32,23 +35,24 @@ linear dimension — a quarter of the area) at full source resolution.
 - **Request parameters are now a struct** (`VencJpegGrayReq`: `crop_pct`,
   `max_dim`, `timeout_ms`) instead of positional `uint32_t`s. Three adjacent
   integers threaded through two backends and a weak stub is an easy
-  transposition to make and a hard one to see.
+  transposition to make and a hard one to see. The frame budget defaults once,
+  in `venc_jpeg_capture_gray()`, so no backend carries its own copy of 1500 ms.
 - Crop geometry is a shared host-tested function, `venc_jpeg_gray_center_rect()`
   — one implementation for both coordinate domains (Star6E's rect is relative to
   the VPE channel input, Maruko's to the published ISP-plane window), covering
   the even-alignment both scalers require, pass-through at pct 0/100, and the
   2 px floor.
-- **`qr_watch.sh` now defaults to the cropped endpoint.** Scanning is what the
+- **The BSP-refusal fallback is shared too.** `venc_jpeg_gray_tap_geoms()`
+  returns the candidate geometries to try — the preferred one, plus the 1280 px
+  safe size only when the preferred one is big enough to be refused. Both
+  backends had carried their own copy of that policy; now they only make their
+  own SDK call per candidate, and the policy is unit-tested rather than
+  device-only.
+- **`qr_watch.sh` now defaults to `snapshot.pgm?crop=50`.** Scanning is what the
   watcher is for, and on the wide lenses these cameras carry the cropped
   capture is both the cheaper and the more decodable one — making the operator
   opt in to that would have been backwards. `-e` (or `QR_ENDPOINT`) still
   selects the whole field of view; the usage text and README name both.
-- `make verify` clean on both backends; host tests **2287/0** under `-Werror`
-  and ASan/UBSan (+7 crop-rect cases, +4 route cases including a 404 proving
-  `snapshot-centre.pgm` is not an alias); `make qr-test-cli` PASS.
-  **Not device-verified** — no bench was reachable. First run should confirm
-  `MI_VPE_SetPortCrop` on port1 accepts the sub-rect and that a detect start
-  after a cropped capture still sees the full frame.
 
 ## [0.60.0] - 2026-07-30
 

@@ -302,7 +302,6 @@ typedef struct {
 } GrayBufInfo_t;
 
 #define GRAY_E_BUFDATA_FRAME 1
-#define GRAY_MAX_DIM         8192u   /* sanity clamp on frame geometry */
 #define GRAY_TAP_OWNER       "snapshot"   /* star6e_vpe_ports claim label */
 /* The tap port.  There is no third scaler output to escape to on i6e: a
  * device probe of port2 (SetPortMode+EnablePort) did not fail cleanly — it
@@ -354,7 +353,7 @@ static int gray_frame_to_pgm(const GrayFrameData_t *fr, uint8_t **out_buf,
 	MI_U64 phy = fr->phyAddr[0];
 	void *vir = NULL;
 
-	if (w == 0 || h == 0 || w > GRAY_MAX_DIM || h > GRAY_MAX_DIM || !phy)
+	if (w == 0 || h == 0 || w > VENC_JPEG_GRAY_MAX_DIM || h > VENC_JPEG_GRAY_MAX_DIM || !phy)
 		return -EIO;
 
 	/* Map the Y plane non-cached (flag 0) so reads see the latest DMA
@@ -384,37 +383,25 @@ static int gray_frame_to_pgm(const GrayFrameData_t *fr, uint8_t **out_buf,
 	return 0;
 }
 
-/* Program the port1 tap, preferring the caller's geometry (by default the full
- * scaler input window — QR/vision consumers are resolution-limited) and
- * retrying once at VENC_JPEG_GRAY_SAFE_DIM if the BSP refuses it.  The i6e
- * port1 output limits are undocumented, so a refusal has to degrade loudly
- * rather than fail the request outright: boot-time QR pairing depends on this
- * endpoint answering.  The achieved geometry is not returned — the PGM header
- * the caller builds from the drained frame is the authority. */
+/* Program the port1 tap with the first geometry the BSP accepts.  The
+ * candidate list and the degrade-on-refusal policy are shared with Maruko in
+ * venc_jpeg_gray_tap_geoms(); this only makes the i6e SDK call per candidate.
+ * The achieved geometry is not returned — the PGM header the caller builds
+ * from the drained frame is the authority. */
 static int gray_tap_program(MI_VPE_CHANNEL chn, uint32_t src_w, uint32_t src_h,
 	uint32_t max_dim)
 {
-	uint32_t w, h;
-	int tries, i;
+	VencJpegGrayGeom geom[2];
+	int n = venc_jpeg_gray_tap_geoms(src_w, src_h, max_dim, geom);
+	int i;
 
-	if (venc_jpeg_gray_tap_dims(src_w, src_h, max_dim, &w, &h) != 0) {
-		fprintf(stderr, "[jpeg-star6e] gray: no scaler source window "
-			"registered\n");
-		return -ENODEV;
-	}
-	tries = (w > VENC_JPEG_GRAY_SAFE_DIM ||
-	         h > VENC_JPEG_GRAY_SAFE_DIM) ? 2 : 1;
-
-	for (i = 0; i < tries; ++i) {
+	for (i = 0; i < n; ++i) {
 		MI_VPE_PortAttr_t attr;
 		MI_S32 ret;
 
-		if (i > 0)
-			(void)venc_jpeg_gray_tap_dims(src_w, src_h,
-				VENC_JPEG_GRAY_SAFE_DIM, &w, &h);
 		memset(&attr, 0, sizeof(attr));
-		attr.output.width  = (unsigned short)w;
-		attr.output.height = (unsigned short)h;
+		attr.output.width  = (unsigned short)geom[i].w;
+		attr.output.height = (unsigned short)geom[i].h;
 		attr.pixFmt   = I6_PIXFMT_YUV420SP;
 		attr.compress = I6_COMPR_NONE;
 
@@ -422,12 +409,12 @@ static int gray_tap_program(MI_VPE_CHANNEL chn, uint32_t src_w, uint32_t src_h,
 		if (ret == 0) {
 			if (i > 0)
 				fprintf(stderr, "[jpeg-star6e] gray: port1 capped to %ux%u "
-					"(BSP refused the full window)\n", w, h);
+					"(BSP refused the full window)\n", geom[i].w, geom[i].h);
 			return 0;
 		}
 		fprintf(stderr, "[jpeg-star6e] gray: port1 SetPortMode %ux%u failed "
-			"%d%s\n", w, h, (int)ret,
-			(i + 1 < tries) ? "; retrying capped" : "");
+			"%d%s\n", geom[i].w, geom[i].h, (int)ret,
+			(i + 1 < n) ? "; retrying capped" : "");
 	}
 	return -EIO;
 }
@@ -494,7 +481,6 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	MI_SYS_ChnPort_t tap;
 	MI_VPE_CHANNEL vpe_chn;
 	uint32_t cx, cy, cw, ch;
-	uint32_t timeout_ms;
 	int port_enabled = 0, depth_set = 0, claimed = 0, cropped = 0;
 	int rc;
 	MI_S32 ret;
@@ -507,13 +493,12 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 		return -ENODEV;
 	if (gray_load_syms() != 0)
 		return -EIO;
-	timeout_ms = req->timeout_ms ? req->timeout_ms : 1500;
 
 	/* SetPortCrop is relative to the VPE channel input, so the rect origin is
-	 * 0,0 — not the precrop offset the pipeline published. */
-	if (venc_jpeg_gray_center_rect(0, 0, g_gray_src_w, g_gray_src_h,
-	    req->crop_pct, &cx, &cy, &cw, &ch) != 0)
-		return -ENODEV;
+	 * 0,0 — not the precrop offset the pipeline published.  Cannot fail: the
+	 * source window is non-empty (checked above). */
+	(void)venc_jpeg_gray_center_rect(0, 0, g_gray_src_w, g_gray_src_h,
+		req->crop_pct, &cx, &cy, &cw, &ch);
 
 	/* port1 has exactly one owner.  Losing to stab/detect is a normal
 	 * outcome, not an error — the endpoint turns it into a 409. */
@@ -567,7 +552,7 @@ int venc_jpeg_backend_capture_gray(uint8_t **out_buf, size_t *out_len,
 	}
 	depth_set = 1;
 
-	rc = gray_drain_one(&tap, out_buf, out_len, timeout_ms);
+	rc = gray_drain_one(&tap, out_buf, out_len, req->timeout_ms);
 
 out:
 	/* Depth reset BEFORE DisablePort, always — see the header comment. */

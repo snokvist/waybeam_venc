@@ -111,8 +111,8 @@ int test_venc_jpeg(void)
 
 		/* 50% of each linear dimension, centred — Star6E's domain (origin 0). */
 		CHECK("50pct halves and centres",
-			venc_jpeg_gray_center_rect(0, 0, 2592, 1458,
-				VENC_JPEG_GRAY_CENTER_PCT, &x, &y, &w, &h) == 0 &&
+			venc_jpeg_gray_center_rect(0, 0, 2592, 1458, 50,
+				&x, &y, &w, &h) == 0 &&
 			w == 1296 && h == 728 && x == 648 && y == 364);
 
 		/* Maruko's domain: the rect is measured from the published window, so
@@ -134,6 +134,34 @@ int test_venc_jpeg(void)
 		CHECK("degenerate pct floors at 2px",
 			venc_jpeg_gray_center_rect(0, 0, 64, 64, 1,
 				&x, &y, &w, &h) == 0 && w == 2 && h == 2);
+	}
+
+	/* The candidate list both backends program the tap from: the preferred
+	 * geometry, plus the safe fallback only when the preferred one is large
+	 * enough that the BSP might refuse it. */
+	{
+		VencJpegGrayGeom geom[2];
+
+		CHECK("tap geoms reject NULL out",
+			venc_jpeg_gray_tap_geoms(2592, 1458, 0, NULL) == -EINVAL);
+		CHECK("tap geoms reject an empty source",
+			venc_jpeg_gray_tap_geoms(0, 1458, 0, geom) == -EINVAL);
+
+		/* Full sensor window: preferred, then the 1280 px fallback. */
+		CHECK("large source offers a safe fallback",
+			venc_jpeg_gray_tap_geoms(2592, 1458, 0, geom) == 2 &&
+			geom[0].w == 2592 && geom[0].h == 1458 &&
+			geom[1].w == VENC_JPEG_GRAY_SAFE_DIM && geom[1].h == 720);
+
+		/* Already within the safe size: nothing to fall back to. */
+		CHECK("safe-sized source offers one candidate",
+			venc_jpeg_gray_tap_geoms(1280, 720, 0, geom) == 1 &&
+			geom[0].w == 1280 && geom[0].h == 720);
+
+		/* A maxDim at or below the safe dim needs no fallback either. */
+		CHECK("capped request offers one candidate",
+			venc_jpeg_gray_tap_geoms(2592, 1458, 640, geom) == 1 &&
+			geom[0].w == 640 && geom[0].h == 360);
 	}
 
 	/* Init with NULL cfg rejected. */

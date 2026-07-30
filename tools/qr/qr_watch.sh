@@ -2,7 +2,7 @@
 # qr_watch.sh — poll the waybeam grayscale snapshot and decode QR codes.
 #
 # This standalone helper has no boot window or action dispatch. It grabs
-# GET /api/v1/snapshot-center.pgm and runs qr_decode over it. The next capture
+# GET /api/v1/snapshot.pgm?crop=50 and runs qr_decode over it. The next capture
 # starts as soon as the previous capture/decode returns, subject to a
 # 0.5-second minimum between capture starts. Valid minimal envelopes go to
 # stdout and every status line goes to stderr, so it is safe to capture:
@@ -13,11 +13,11 @@
 # Use one-shot to read a single code; use continuous to leave a scanner running
 # while you present codes, tune focus, or check how reliably one decodes.
 #
-# The default endpoint is the centre-crop one: it keeps full pixels-per-module
-# (the limit on QR decoding) over a quarter of the bytes and decode time, and
-# it drops the frame edge, where a fisheye distorts most and the outer-frame
-# corner mapping is least reliable. The code has to be nearer frame centre.
-# Present codes out at the edges? Take the whole field of view instead:
+# The default asks for the centre 50% (?crop=50): it keeps full
+# pixels-per-module (the limit on QR decoding) over a quarter of the bytes and
+# decode time, and it drops the frame edge, where a fisheye distorts most and
+# the outer-frame corner mapping is least reliable. The code has to be nearer
+# frame centre. Present codes out at the edges? Take the whole field of view:
 #
 #   qr_watch.sh -e http://127.0.0.1/api/v1/snapshot.pgm
 #
@@ -33,7 +33,7 @@ set -u
 INTERVAL_S="${QR_INTERVAL_S:-0.5}"
 MIN_INTERVAL_CS=50
 MAX_TRIES="${QR_MAX_TRIES:-0}"          # 0 = no limit
-ENDPOINT="${QR_ENDPOINT:-http://127.0.0.1/api/v1/snapshot-center.pgm}"
+ENDPOINT="${QR_ENDPOINT:-http://127.0.0.1/api/v1/snapshot.pgm?crop=50}"
 CONTINUOUS="${QR_CONTINUOUS:-0}"        # 1 = keep scanning past the first hit
 STATS="${QR_STATS:-0}"                  # 1 = show qr_decode stage diagnostics
 TMP_PGM="${QR_TMP_PGM:-}"
@@ -134,9 +134,9 @@ usage: qr_watch.sh [-cv] [-i SECONDS] [-n TRIES] [-e URL]
   -n  stop after this many snapshots (default ${MAX_TRIES}, 0 = no limit)
   -e  snapshot endpoint; default
         $ENDPOINT
-      which crops to the centre 50% — full detail at a quarter of the
-      cost, clear of the fisheye-distorted frame edge.  For the whole
-      field of view use .../api/v1/snapshot.pgm
+      whose ?crop=50 takes the centre 50% — full detail at a quarter of
+      the cost, clear of the fisheye-distorted frame edge.  For the whole
+      field of view drop the parameter: .../api/v1/snapshot.pgm
 
 Payloads go to stdout, status to stderr.
 EOF

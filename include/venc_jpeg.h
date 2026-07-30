@@ -76,7 +76,8 @@ typedef struct {
 	/* Long-side cap on the returned frame (0 = no cap).  Applied after the
 	 * crop, so it scales whatever the crop selected. */
 	uint32_t max_dim;
-	/* Frame wait budget; 0 = backend default (1500 ms). */
+	/* Frame wait budget; 0 = VENC_JPEG_GRAY_TIMEOUT_MS, filled in by
+	 * venc_jpeg_capture_gray so the backends never see a zero budget. */
 	uint32_t timeout_ms;
 } VencJpegGrayReq;
 
@@ -115,19 +116,16 @@ int handle_snapshot_jpeg(int client_fd, const HttpRequest *req, void *ctx);
  * (image/x-portable-graymap) on success, application/json
  * {ok:false,error:{...}} on failure.  Intended for on-device consumers
  * (e.g. a boot-time QR scan) that want raw grayscale without a JPEG
- * decode step.  The whole scaler input window; honours an optional
- * `?maxDim=<px>` query parameter. */
+ * decode step.
+ *
+ * Defaults to the whole scaler input window at full resolution.  Two optional
+ * query parameters narrow it, and they compose:
+ *   ?crop=<pct>   capture only the centre <pct>% of each linear dimension
+ *                 (VencJpegGrayReq.crop_pct)
+ *   ?maxDim=<px>  cap the long side of whatever the crop selected
+ * Either one out of range answers 400 rather than silently capturing at the
+ * default geometry. */
 int handle_snapshot_pgm(int client_fd, const HttpRequest *req, void *ctx);
-
-/* HTTP handler for GET /api/v1/snapshot-center.pgm.  Same format and error
- * surface as handle_snapshot_pgm, but captures only the centre
- * VENC_JPEG_GRAY_CENTER_PCT% of the window — a fixed, parameterless variant
- * for QR scanning on a high-resolution sensor or behind a fisheye lens, where
- * the frame edges cost bytes and decode time and carry the worst distortion.
- * A separate route rather than a flag on the one above: the caller picks a
- * behaviour, not a geometry. */
-int handle_snapshot_pgm_center(int client_fd, const HttpRequest *req,
-	void *ctx);
 
 /* ── Grayscale tap geometry (shared by both backends) ────────────────── */
 
@@ -140,8 +138,11 @@ int handle_snapshot_pgm_center(int client_fd, const HttpRequest *req,
 /* Smallest tap the SCL is asked for, whatever maxDim says. */
 #define VENC_JPEG_GRAY_MIN_DIM   64u
 
-/* Centre fraction (per linear dimension) served by snapshot-center.pgm. */
-#define VENC_JPEG_GRAY_CENTER_PCT  50u
+/* Sanity clamp on any tap geometry, and the ceiling on `?maxDim=`. */
+#define VENC_JPEG_GRAY_MAX_DIM   8192u
+
+/* Frame wait budget when the caller passes timeout_ms = 0. */
+#define VENC_JPEG_GRAY_TIMEOUT_MS  1500u
 
 /* Derive the grayscale tap geometry from the scaler's input window.
  *
@@ -174,6 +175,22 @@ int venc_jpeg_gray_tap_dims(uint32_t src_w, uint32_t src_h, uint32_t max_dim,
 int venc_jpeg_gray_center_rect(uint32_t src_x, uint32_t src_y,
 	uint32_t src_w, uint32_t src_h, uint32_t pct,
 	uint32_t *out_x, uint32_t *out_y, uint32_t *out_w, uint32_t *out_h);
+
+/* One candidate output geometry for the tap. */
+typedef struct { uint32_t w, h; } VencJpegGrayGeom;
+
+/* The geometries to try on the tap, in order: the preferred one from
+ * venc_jpeg_gray_tap_dims(), plus — only when that exceeds
+ * VENC_JPEG_GRAY_SAFE_DIM — the safe fallback to retry with if the BSP refuses
+ * it.  The vendor per-port output limits are undocumented, so a refusal has to
+ * degrade to a size known to work rather than fail the request: boot-time QR
+ * pairing depends on this endpoint answering.
+ *
+ * Both backends share this policy and differ only in the SDK call they make
+ * per candidate.  Returns the number of candidates written (1 or 2), or
+ * -EINVAL on a NULL out pointer or an empty source window. */
+int venc_jpeg_gray_tap_geoms(uint32_t src_w, uint32_t src_h, uint32_t max_dim,
+	VencJpegGrayGeom out[2]);
 
 /* ── Backend interface (implemented per-SOC) ─────────────────────────── */
 

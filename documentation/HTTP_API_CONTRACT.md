@@ -883,15 +883,32 @@ and has no effect here.  Width is 16-aligned and height even for the scaler;
 PGM is self-describing, so read the real dimensions from the header rather than
 computing them.
 
-**Query parameters**
+**Query parameters.**  Both are optional, both narrow the default, and they
+compose — `?crop=` selects *which* pixels, `?maxDim=` selects *how many*.
 
 | Param | Default | Meaning |
 |---|---|---|
-| `maxDim` | *(absent)* = full window | Cap the long side to this many pixels, aspect-preserved. For consumers that want a smaller frame and a faster request; never upscales. |
+| `crop` | *(absent)* = 100 = full window | Capture only the centre this-many-percent of each linear dimension. `50` is a quarter of the area. Cropping is not scaling: it keeps every pixel it covers, so pixels-per-module is untouched — what it drops is the frame *edge*, exactly where a fisheye's barrel distortion is worst and the decoder's projective corner mapping is least reliable. The only cost is field of view. |
+| `maxDim` | *(absent)* = no cap | Cap the long side to this many pixels, aspect-preserved, applied *after* the crop. For consumers that want a smaller frame and a faster request; never upscales. |
 
 A full-resolution capture is a real cost — a 4K sensor mode yields an ~8 MB
-response and copies that much luma per request — so pass `maxDim` when the code
-reading it does not need the pixels.
+response and copies that much luma per request — so narrow it when the code
+reading it does not need the pixels.  Which lever to reach for:
+
+| Request | imx335 2592x1944 mode, 16:9 precrop | Field of view | Pixels per module |
+|---|---|---|---|
+| `snapshot.pgm` | 2592x1458, 3.6 MiB | full | full |
+| `snapshot.pgm?maxDim=1280` | 1280x720, 0.9 MiB | full | **halved** |
+| `snapshot.pgm?crop=50` | 1296x728, 0.9 MiB | centre 50% | **full** |
+
+`?crop=50` is the one to scan QR codes with on a high-resolution sensor or
+behind a fisheye lens: full detail at a quarter of the bytes and decode time,
+clear of the distorted frame edge.  The code has to be nearer frame centre.
+
+On Star6E the crop is programmed with `MI_VPE_SetPortCrop` on the tap port,
+which is sticky and which the NPU detector does not set for itself — so the
+backend restores the full window on every exit path.  A capture cannot leave a
+later inference running on a centre crop.
 
 If the vendor scaler refuses the full-window request (the per-port output
 limits are undocumented), the backend retries once at a 1280 px long side and
@@ -909,6 +926,7 @@ Shares the `snapshot.enabled` gate and the subsystem mutex with
 
 | Status | Code | Meaning |
 |---|---|---|
+| `400` | `bad_crop` | `crop` was not a percentage from 1 to 100 |
 | `400` | `bad_max_dim` | `maxDim` was not a positive integer ≤ 8192 |
 | `409` | `snapshot_gray_busy` | the scaler tap is held by stab framing or NPU detection |
 | `501` | `snapshot_gray_unsupported` | backend has no grayscale capture |
@@ -919,42 +937,11 @@ Supported on both Star6E and Maruko.
 # full sensor-mode resolution (widest field of view)
 curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode
 
+# QR scanning on a fisheye / high-res sensor: full detail, quarter the bytes
+curl -s 'http://<device-ip>/api/v1/snapshot.pgm?crop=50' | qr_decode
+
 # capped for a cheap, fast poll
 curl -s 'http://<device-ip>/api/v1/snapshot.pgm?maxDim=1280' | qr_decode
-```
-
-### `GET /api/v1/snapshot-center.pgm`
-
-The centre **50%** of the same window, in each linear dimension — a quarter of
-the area — at full source resolution.  Identical format, query surface and
-error mapping to `snapshot.pgm`; it is a separate route rather than a flag so
-callers choose a *behaviour*, not a geometry.
-
-This is the endpoint to scan QR codes with on a high-resolution sensor or
-behind a fisheye lens.  Cropping is not scaling: it keeps every pixel it
-covers, so pixels-per-module — the thing QR decoding is actually limited by —
-is untouched, while the bytes and the decode time fall by 4x.  What it discards
-is the frame *edge*, which is exactly where a fisheye's barrel distortion is
-worst and where the decoder's projective corner mapping is least reliable.  The
-only cost is field of view: the code has to be nearer the centre of frame.
-
-| Endpoint | imx335 2592x1944 mode, 16:9 precrop | Field of view | Pixels per module |
-|---|---|---|---|
-| `snapshot.pgm` | 2592x1458, 3.6 MiB | full | full |
-| `snapshot.pgm?maxDim=1280` | 1280x720, 0.9 MiB | full | **halved** |
-| `snapshot-center.pgm` | 1296x728, 0.9 MiB | centre 50% | **full** |
-
-The two size levers compose: `snapshot-center.pgm?maxDim=640` crops *and* then
-scales.
-
-On Star6E the crop is programmed with `MI_VPE_SetPortCrop` on the tap port,
-which is sticky and which the NPU detector does not set for itself — so the
-backend restores the full window on every exit path.  A capture cannot leave a
-later inference running on a centre crop.
-
-```bash
-# QR scanning on a fisheye / high-res sensor
-curl -s http://<device-ip>/api/v1/snapshot-center.pgm | qr_decode
 ```
 
 ### `GET /` (Web Dashboard)

@@ -1631,25 +1631,31 @@ static int test_capabilities_awb_fps_backend_gate(void)
 	return failures;
 }
 
-/* Both PGM routes are registered and share one query surface and one error
- * mapping: `?maxDim=` is validated before the capture path, so a typo cannot
- * silently fall through to a full-resolution capture.  No backend is linked in
- * the host runner, so a well-formed request gets as far as the
- * disabled-subsystem 503 (and a bogus path still 404s). */
+/* One PGM route with two composable geometry parameters.  Both are validated
+ * before the capture path, so a typo cannot silently fall through to a
+ * full-resolution capture.  No backend is linked in the host runner, so a
+ * well-formed request gets as far as the disabled-subsystem 503 (and a bogus
+ * path still 404s). */
 static int test_snapshot_pgm_max_dim_validation(void)
 {
 	static const struct { const char *path; const char *query; int want; } cases[] = {
-		{ "snapshot.pgm",        "",              503 },  /* full window */
-		{ "snapshot.pgm",        "?maxDim=1280",  503 },
-		{ "snapshot.pgm",        "?maxDim=abc",   400 },
-		{ "snapshot.pgm",        "?maxDim=",      400 },
-		{ "snapshot.pgm",        "?maxDim=0",     400 },
-		{ "snapshot.pgm",        "?maxDim=99999", 400 },
-		/* The centre-crop variant is its own route, no parameters needed. */
-		{ "snapshot-center.pgm", "",              503 },
-		{ "snapshot-center.pgm", "?maxDim=640",   503 },
-		{ "snapshot-center.pgm", "?maxDim=abc",   400 },
-		{ "snapshot-centre.pgm", "",              404 },  /* not an alias */
+		{ "snapshot.pgm",        "",                     503 },  /* full window */
+		{ "snapshot.pgm",        "?maxDim=1280",         503 },
+		{ "snapshot.pgm",        "?maxDim=abc",          400 },
+		{ "snapshot.pgm",        "?maxDim=",             400 },
+		{ "snapshot.pgm",        "?maxDim=0",            400 },
+		{ "snapshot.pgm",        "?maxDim=99999",        400 },
+		/* The centre crop is a parameter on the same route, and the two
+		 * levers compose. */
+		{ "snapshot.pgm",        "?crop=50",             503 },
+		{ "snapshot.pgm",        "?crop=100",            503 },
+		{ "snapshot.pgm",        "?crop=50&maxDim=640",  503 },
+		{ "snapshot.pgm",        "?crop=0",              400 },
+		{ "snapshot.pgm",        "?crop=101",            400 },
+		{ "snapshot.pgm",        "?crop=abc",            400 },
+		{ "snapshot.pgm",        "?crop=50&maxDim=abc",  400 },
+		/* There is no second route — the crop is not a URL. */
+		{ "snapshot-center.pgm", "",                     404 },
 	};
 	int failures = 0;
 	VencConfig cfg;
