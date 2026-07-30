@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.15.0`
+- `contract_version`: `0.16.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -849,99 +849,27 @@ Capture one JPEG frame from the snapshot subsystem and return it as
 running, `504` (`snapshot_timeout`) if no frame arrives, `500`
 (`snapshot_failed`) on backend error.  Not a JSON endpoint on success.
 
-### `GET /api/v1/snapshot.pgm`
+This is also the **QR-scanning source**: `tools/qr/qr_decode` reads JPEG
+directly (vendored stb_image, luma-only), so the boot-pairing flow is
+`curl … /snapshot.jpg | qr_decode`.  The MJPEG channel is created once at
+pipeline start and pulse-encoded per capture (`StartRecvPic → GetStream →
+StopRecvPic`) — rapid back-to-back captures are safe.  Frame geometry follows
+`snapshot.width`/`snapshot.height` (0 = inherit the main stream); QR range
+scales with pixels per module, so size the channel up for longer-distance
+markers.  Pairing, commands, boot scheduling, and action dispatch are
+deliberately outside the waybeam binary and this endpoint.
 
-Capture one **grayscale** frame and return it as a binary P5 PGM
-(`image/x-portable-graymap`): the luma (Y) plane of an uncompressed NV12
-frame, with no JPEG encode/decode step.
-
-Intended for freestanding on-device consumers that want raw grayscale — for
-example `tools/qr/qr_decode.c`. Pairing, commands, boot scheduling, and action
-dispatch are deliberately outside the waybeam binary and this endpoint.
-
-**Source and geometry.** The frame comes from a short-lived scaler tap,
-not from the encoder's output port — a user frame queue may only be
-registered on a port with no downstream hardware bind, and the encode port
-is bound to the H.265 encoder (registering one there faults the MI_SYS
-allocator).  The tap is programmed, drained for exactly one frame, and torn
-down per request; the encode path is never touched.
-
-| Backend | Tap | Contends with |
-|---|---|---|
-| Star6E (i6e) | VPE port1 | stab framing, NPU detection |
-| Maruko (i6c) | SCL port3 | NPU detection |
-
-Geometry defaults to the **full scaler input window** — the frame the active
-sensor mode delivers after precrop, i.e. the largest grayscale frame the tap
-can produce without upscaling (e.g. `2592x1458` on an imx335 in its 2592x1944
-mode with a 16:9 precrop, not the `1280x720` main stream).  This is deliberate:
-the consumers are QR/vision decoders that fail on pixels-per-module, not
-viewers, and halving the frame halves the working distance.
-
-The `snapshot.width`/`snapshot.height` config sizes the **MJPEG** channel only
-and has no effect here.  Width is 16-aligned and height even for the scaler;
-PGM is self-describing, so read the real dimensions from the header rather than
-computing them.
-
-**Query parameters.**  Both are optional, both narrow the default, and they
-compose — `?crop=` selects *which* pixels, `?maxDim=` selects *how many*.
-
-| Param | Default | Meaning |
-|---|---|---|
-| `crop` | *(absent)* = 100 = full window | Capture only the centre this-many-percent of each linear dimension. `50` is a quarter of the area. Cropping is not scaling: it keeps every pixel it covers, so pixels-per-module is untouched — what it drops is the frame *edge*, exactly where a fisheye's barrel distortion is worst and the decoder's projective corner mapping is least reliable. The only cost is field of view. |
-| `maxDim` | *(absent)* = no cap | Cap the long side to this many pixels, aspect-preserved, applied *after* the crop. For consumers that want a smaller frame and a faster request; never upscales. |
-
-A full-resolution capture is a real cost — a 4K sensor mode yields an ~8 MB
-response and copies that much luma per request — so narrow it when the code
-reading it does not need the pixels.  Which lever to reach for:
-
-| Request | imx335 2592x1944 mode, 16:9 precrop | Field of view | Pixels per module |
-|---|---|---|---|
-| `snapshot.pgm` | 2592x1458, 3.6 MiB | full | full |
-| `snapshot.pgm?maxDim=1280` | 1280x720, 0.9 MiB | full | **halved** |
-| `snapshot.pgm?crop=50` | 1296x728, 0.9 MiB | centre 50% | **full** |
-
-`?crop=50` is the one to scan QR codes with on a high-resolution sensor or
-behind a fisheye lens: full detail at a quarter of the bytes and decode time,
-clear of the distorted frame edge.  The code has to be nearer frame centre.
-
-On Star6E the crop is programmed with `MI_VPE_SetPortCrop` on the tap port,
-which is sticky and which the NPU detector does not set for itself — so the
-backend restores the full window on every exit path.  A capture cannot leave a
-later inference running on a centre crop.
-
-If the vendor scaler refuses the full-window request (the per-port output
-limits are undocumented), the backend retries once at a 1280 px long side and
-logs `capped to <w>x<h> (BSP refused the full window)` rather than failing the
-request; use `maxDim` to pick that size explicitly.
-
-**The tap is exclusive.** Its other claimants own it for a whole run, so a
-capture attempted while one is active returns `409` (`snapshot_gray_busy`)
-rather than programming the tap underneath them.  Capture before those
-features start, or disable them.
-
-Shares the `snapshot.enabled` gate and the subsystem mutex with
-`snapshot.jpg` (the two never run concurrently).  Errors mirror
-`snapshot.jpg`, plus:
-
-| Status | Code | Meaning |
-|---|---|---|
-| `400` | `bad_crop` | `crop` was not a percentage from 1 to 100 |
-| `400` | `bad_max_dim` | `maxDim` was not a positive integer ≤ 8192 |
-| `409` | `snapshot_gray_busy` | the scaler tap is held by stab framing or NPU detection |
-| `501` | `snapshot_gray_unsupported` | backend has no grayscale capture |
-
-Supported on both Star6E and Maruko.
+> **Retired:** `GET /api/v1/snapshot.pgm` (grayscale P5 PGM, added 0.59.0)
+> was removed in 0.60.0 and now answers `404`.  It captured through a
+> short-lived per-request VPE/SCL tap, and device stress-testing showed the
+> tap's enable/disable cycle can race an in-flight MHAL buffer and wedge the
+> whole VPE — up to a kernel panic or hard hang.  The MJPEG channel above has
+> no such cycle; consumers that want grayscale decode the JPEG's luma plane
+> (`qr_decode` does this natively).
 
 ```bash
-# full sensor-mode resolution (widest field of view)
-curl -s http://<device-ip>/api/v1/snapshot.pgm | qr_decode
-
-# QR scanning on a fisheye / high-res sensor: full detail, quarter the bytes
-curl -s 'http://<device-ip>/api/v1/snapshot.pgm?crop=50' | qr_decode
-
-# capped for a cheap, fast poll
-curl -s 'http://<device-ip>/api/v1/snapshot.pgm?maxDim=1280' | qr_decode
+# QR scanning (boot pairing, bench)
+curl -s http://<device-ip>/api/v1/snapshot.jpg | qr_decode
 ```
 
 ### `GET /` (Web Dashboard)
@@ -1562,6 +1490,15 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.16.0` (breaking — snapshot.pgm retired):
+  - `GET /api/v1/snapshot.pgm` removed; answers `404`. Its per-request VPE/SCL
+    tap could wedge the SoC (device-verified: `DisablePort … mhal not return
+    buffer` → `EnsureInputPortFifoEmpty` storm). QR scanning now consumes
+    `GET /api/v1/snapshot.jpg`; `qr_decode` reads JPEG natively. Error codes
+    `bad_crop`, `bad_max_dim`, `snapshot_gray_busy` and
+    `snapshot_gray_unsupported` are gone with it.
+  - The `snapshot.*` config section is dashboard-visible (FieldUi group
+    "Snapshot", rendered from capabilities).
 - `0.15.0` (additive — Maruko detector parity):
   - Maruko now implements the ABI-3 detector host on SCL port 3, including
     live enable/disable and model reload, `detect.osd`, and the unchanged RTP

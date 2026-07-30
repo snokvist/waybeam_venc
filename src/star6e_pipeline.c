@@ -2146,12 +2146,6 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	 * section; width=0/height=0 inherits main stream dimensions. */
 	{
 		venc_jpeg_set_source(&state->vpe_port);
-		/* The grayscale tap programs VPE port1 itself and sizes itself from
-		 * the VPE input window — the active sensor mode's frame post-precrop,
-		 * i.e. the largest luma frame it can pull without upscaling.  Not the
-		 * main-stream size: QR/vision consumers are pixels-per-module bound. */
-		venc_jpeg_set_gray_source(pconf->precrop.x, pconf->precrop.y,
-			pconf->precrop.w, pconf->precrop.h);
 		const VencConfigSnapshot *snap = &vcfg->snapshot;
 		VencJpegConfig jcfg = {
 			.width   = snap->width  ? snap->width  : state->image_width,
@@ -2432,9 +2426,6 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * must run while the SDK still holds a consistent view of the VPE
 	 * source.  Idempotent; safe even if init was skipped or failed. */
 	venc_jpeg_shutdown();
-	/* Drop the published source window so a reinit cannot size a tap off the
-	 * previous graph's geometry. */
-	venc_jpeg_set_gray_source(0, 0, 0, 0);
 
 	/* Stop the IPU detection reader (joins before DisablePort(0,1), MMU-safe)
 	 * and tear down its backend.  Idempotent; no-op when detection inactive.

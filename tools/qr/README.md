@@ -1,13 +1,13 @@
 # QR scanning backend
 
-`qr_decode` is a freestanding consumer of waybeam's grayscale snapshot
-endpoint. It reads a binary P5 PGM, identifies and decodes a QR symbol, checks
+`qr_decode` is a freestanding consumer of waybeam's snapshot endpoint. It
+reads a JPEG (or a binary P5 PGM), identifies and decodes a QR symbol, checks
 the minimal Waybeam transport envelope, and prints the 16-character payload.
 It does not interpret, authorize, persist, or execute that payload.
 
-The waybeam process remains responsible only for the grayscale snapshot
-endpoint, `GET /api/v1/snapshot.pgm` (and its `?crop=` / `?maxDim=` geometry
-parameters).
+The waybeam process remains responsible only for the snapshot endpoint,
+`GET /api/v1/snapshot.jpg` (the raw-PGM endpoint was retired in 0.60.0 — its
+per-request scaler tap could wedge the SoC).
 Pairing, commands, boot scheduling, and service integration belong to a later
 standalone shell/action work package.
 
@@ -15,13 +15,13 @@ standalone shell/action work package.
 
 | File | Role |
 |---|---|
-| `qr_decode.c` | Freestanding PGM decoder and scan-pass orchestration. |
+| `qr_decode.c` | Freestanding JPEG/PGM decoder and scan-pass orchestration. |
 | `waybeam_qr_format.c` | Minimal Version-1/Q transport-envelope validation. |
 | `quirc/` | Vendored quirc library plus required outer-frame identification. |
 | `generate_qr.py` | Creates valid bounded SVG, PNG, or PGM markers. |
 | `qr_watch.sh` | Standalone polling helper; prints valid envelopes and performs no action. |
 | `tests/test_qr_marker.c` | Deterministic host perspective corpus and envelope tests. |
-| `tests/test_qr_cli.sh` | Decoder CLI, PGM hardening, and fixture regression tests. |
+| `tests/test_qr_cli.sh` | Decoder CLI, loader hardening, and fixture regression tests. |
 
 ## Minimal format
 
@@ -80,18 +80,12 @@ Render every module with integer scaling and no interpolation. The compressed
 edge still needs real sensor resolution: use roughly 3 px/module as a lab
 minimum and 4 px/module as a real-camera target.
 
-`snapshot.pgm` serves the full scaler input window of the active sensor mode,
-so those px/module budgets are spent against the sensor's own resolution rather
-than the main stream's — a 2592-wide mode reaches roughly twice the distance a
-1280-wide capture does for the same marker. Append `?maxDim=<px>` to the
-endpoint when a smaller, cheaper frame is enough.
-
-To spend fewer bytes *without* spending px/module, pass `?crop=50` instead:
-the centre 50% of each dimension at full source resolution, a quarter of the
-area. It also drops the frame edge, where a fisheye's barrel distortion
-is worst and the outer-frame corner mapping is least reliable — so on a wide
-lens it is usually the more reliable capture as well as the cheaper one. The
-marker has to be nearer the centre of frame.
+`snapshot.jpg` is sized by the `snapshot.width`/`snapshot.height` config
+(default: inherit the main stream), so those px/module budgets are spent
+against the MJPEG channel's resolution — set the channel larger when markers
+must decode from further away. JPEG q80 luma decodes markers reliably;
+`qr_decode` extracts the luma plane directly and its own tiling passes cover
+small codes anywhere in the frame.
 
 ## Generate a marker
 
@@ -236,10 +230,9 @@ completion.
 ## Standalone use
 
 ```bash
-curl -s 'http://127.0.0.1/api/v1/snapshot.pgm?crop=50' | qr_decode
-curl -s http://127.0.0.1/api/v1/snapshot.pgm | qr_decode   # whole frame
-qr_decode --raw capture.pgm
-qr_decode --stats capture.pgm
+curl -s http://127.0.0.1/api/v1/snapshot.jpg | qr_decode
+qr_decode --raw capture.jpg
+qr_decode --stats capture.pgm   # PGM input still supported (bench corpora)
 ```
 
 For polling without action dispatch:
@@ -250,24 +243,13 @@ qr_watch.sh -c
 qr_watch.sh -c -v
 ```
 
-`snapshot.enabled` must be true. `qr_watch.sh` defaults to
-`snapshot.pgm?crop=50`: full pixels-per-module over a quarter of the bytes and
-decode time, clear of the fisheye-distorted frame edge. The trade is field of
-view — the code has to be nearer frame centre. Use `-e` to choose otherwise:
-
-```bash
-# whole field of view at full sensor detail (largest, slowest)
-qr_watch.sh -c -e http://127.0.0.1/api/v1/snapshot.pgm
-
-# whole field of view, downscaled — cheap, but costs px/module
-qr_watch.sh -c -e 'http://127.0.0.1/api/v1/snapshot.pgm?maxDim=1280'
-```
+`snapshot.enabled` must be true. `qr_watch.sh` polls
+`GET /api/v1/snapshot.jpg`; use `-e` to point it elsewhere.
 
 The decode timings in the section above were measured on a 1280×720 capture;
 cost scales with the pixel count the endpoint returns.
 
-`qr_watch.sh` reports HTTP `409` when the
-scaler tap is occupied and `503` when snapshots are disabled. It exits after
+`qr_watch.sh` reports HTTP `503` when snapshots are disabled. It exits after
 the first decode by default; `-c` streams decoded envelopes continuously.
 The default stress cadence starts the next capture as soon as the preceding
 capture and decode return, while keeping capture starts at least 0.5 seconds

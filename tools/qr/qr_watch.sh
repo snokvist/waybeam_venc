@@ -1,8 +1,8 @@
 #!/bin/sh
-# qr_watch.sh — poll the waybeam grayscale snapshot and decode QR codes.
+# qr_watch.sh — poll the waybeam JPEG snapshot and decode QR codes.
 #
 # This standalone helper has no boot window or action dispatch. It grabs
-# GET /api/v1/snapshot.pgm?crop=50 and runs qr_decode over it. The next capture
+# GET /api/v1/snapshot.jpg and runs qr_decode over it. The next capture
 # starts as soon as the previous capture/decode returns, subject to a
 # 0.5-second minimum between capture starts. Valid minimal envelopes go to
 # stdout and every status line goes to stderr, so it is safe to capture:
@@ -13,36 +13,32 @@
 # Use one-shot to read a single code; use continuous to leave a scanner running
 # while you present codes, tune focus, or check how reliably one decodes.
 #
-# The default asks for the centre 50% (?crop=50): it keeps full
-# pixels-per-module (the limit on QR decoding) over a quarter of the bytes and
-# decode time, and it drops the frame edge, where a fisheye distorts most and
-# the outer-frame corner mapping is least reliable. The code has to be nearer
-# frame centre. Present codes out at the edges? Take the whole field of view:
-#
-#   qr_watch.sh -e http://127.0.0.1/api/v1/snapshot.pgm
+# Capture resolution follows the snapshot.width/height config (default: the
+# main stream) — QR range scales with pixels per module, so size the MJPEG
+# channel up if codes must decode from further away.
 #
 # Exit: 0 payload decoded (on stdout) | 1 no decode within the try limit
 #       2 setup or usage error.  Continuous mode exits 0 if it decoded at least
 #       once, and only stops on the try limit or ctrl-c.
 #
 # Env overrides (flags win): QR_INTERVAL_S QR_MAX_TRIES QR_ENDPOINT
-#                            QR_CONTINUOUS QR_STATS QR_DECODE_BIN QR_TMP_PGM
+#                            QR_CONTINUOUS QR_STATS QR_DECODE_BIN QR_TMP_IMG
 
 set -u
 
 INTERVAL_S="${QR_INTERVAL_S:-0.5}"
 MIN_INTERVAL_CS=50
 MAX_TRIES="${QR_MAX_TRIES:-0}"          # 0 = no limit
-ENDPOINT="${QR_ENDPOINT:-http://127.0.0.1/api/v1/snapshot.pgm?crop=50}"
+ENDPOINT="${QR_ENDPOINT:-http://127.0.0.1/api/v1/snapshot.jpg}"
 CONTINUOUS="${QR_CONTINUOUS:-0}"        # 1 = keep scanning past the first hit
 STATS="${QR_STATS:-0}"                  # 1 = show qr_decode stage diagnostics
-TMP_PGM="${QR_TMP_PGM:-}"
+TMP_IMG="${QR_TMP_IMG:-}"
 TMP_OWNED=0
 
 log() { echo "[qr-watch] $*" >&2; }
 cleanup() {
 	if [ "$TMP_OWNED" = "1" ]; then
-		rm -f "$TMP_PGM"
+		rm -f "$TMP_IMG"
 	fi
 }
 
@@ -132,11 +128,7 @@ usage: qr_watch.sh [-cv] [-i SECONDS] [-n TRIES] [-e URL]
   -i  minimum seconds between snapshot starts (default $INTERVAL_S,
       values below 0.5 are clamped to 0.5)
   -n  stop after this many snapshots (default ${MAX_TRIES}, 0 = no limit)
-  -e  snapshot endpoint; default
-        $ENDPOINT
-      whose ?crop=50 takes the centre 50% — full detail at a quarter of
-      the cost, clear of the fisheye-distorted frame edge.  For the whole
-      field of view drop the parameter: .../api/v1/snapshot.pgm
+  -e  snapshot endpoint (default $ENDPOINT)
 
 Payloads go to stdout, status to stderr.
 EOF
@@ -159,8 +151,8 @@ shift $((OPTIND - 1))
 [ "$STATS" = "0" ] || [ "$STATS" = "1" ] ||
 	{ log "QR_STATS must be 0 or 1 (got '$STATS')"; exit 2; }
 
-if [ -z "$TMP_PGM" ]; then
-	TMP_PGM="$(mktemp /tmp/qr_watch.XXXXXX)" ||
+if [ -z "$TMP_IMG" ]; then
+	TMP_IMG="$(mktemp /tmp/qr_watch.XXXXXX)" ||
 		{ log "cannot create temporary snapshot file"; exit 2; }
 	TMP_OWNED=1
 fi
@@ -195,17 +187,16 @@ while :; do
 	try=$((try + 1))
 
 	# Keep the body on an HTTP error so the reason is visible rather than
-	# looking like an empty frame: 409 = the scaler tap this capture needs
-	# is owned by stab framing or NPU detection, 503 = snapshot disabled.
-	code="$(curl -sS -m 5 -o "$TMP_PGM" -w '%{http_code}' "$ENDPOINT" 2>/dev/null)"
+	# looking like an empty frame: 503 = snapshot disabled.
+	code="$(curl -sS -m 5 -o "$TMP_IMG" -w '%{http_code}' "$ENDPOINT" 2>/dev/null)"
 
 	if [ "$code" = "200" ]; then
 		if [ "$STATS" = "1" ]; then
 			# Keep the image first: current decoders accept options in either
 			# order, while the legacy decoder treats argv[1] as the filename.
-			payload="$("$QR_DECODE" "$TMP_PGM" --stats)"
+			payload="$("$QR_DECODE" "$TMP_IMG" --stats)"
 		else
-			payload="$("$QR_DECODE" "$TMP_PGM")"
+			payload="$("$QR_DECODE" "$TMP_IMG")"
 		fi
 		decode_rc=$?
 		if [ "$decode_rc" -eq 0 ] && [ -n "$payload" ]; then
@@ -222,7 +213,7 @@ while :; do
 			exit 2
 		fi
 	elif [ -n "$code" ] && [ "$code" != "000" ]; then
-		log "try $try: HTTP $code — $(head -c 200 "$TMP_PGM" 2>/dev/null)"
+		log "try $try: HTTP $code — $(head -c 200 "$TMP_IMG" 2>/dev/null)"
 	else
 		log "try $try: no response from $ENDPOINT"
 	fi

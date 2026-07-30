@@ -1,109 +1,47 @@
 # History
 
-## [0.61.0] - 2026-07-30
-
-`GET /api/v1/snapshot.pgm` gains `?crop=<pct>`: capture only the centre
-percentage of each linear dimension (a quarter of the area at `crop=50`) at
-full source resolution.
-
-- **Cropping is the right lever for QR, not scaling.** `?maxDim=` buys bytes by
-  throwing away pixels-per-module, which is the one thing QR decoding is
-  actually limited by. A crop keeps every pixel it covers, so it is 4x cheaper
-  in bytes *and* decode time at **no** loss of module resolution — the cost is
-  field of view. On the imx335 2592x1944 mode: bare `snapshot.pgm` is 2592x1458
-  / 3.6 MiB at full detail, `?maxDim=1280` is 0.9 MiB at *half* detail, and
-  `?crop=50` is 1296x728 / 0.9 MiB at **full** detail.
-- **It also fixes fisheye.** The discarded region is the frame edge, where
-  barrel distortion is worst and where the decoder's projective corner mapping
-  off the marker's outer frame is least reliable. On a wide lens the cropped
-  capture is usually the more *decodable* one, not just the cheaper one.
-- **A parameter on the existing route, not a second route.** `crop_pct` is a
-  general 0..100 knob internally, so a fixed `snapshot-center.pgm` route would
-  only have *hidden* the geometry, not removed it — while costing a second
-  handler, a second contract section and its own tests. One route, one handler,
-  one query parser; `?crop=` and `?maxDim=` compose, crop first then scale.
-  Nothing lands in the JSON config: the right geometry is a property of the
-  consumer, not of the device.
-- **Star6E: the crop is sticky, so teardown restores it.** The tap crop goes
-  through `MI_VPE_SetPortCrop` on port1 (after `EnablePort`, matching
-  `star6e_framing_stab.c`), and the NPU detector programs only `SetPortMode` —
-  it assumes a full frame. A rect left behind would silently run a later
-  inference on a centre crop, so every exit path restores the full window,
-  under the same discipline as the user-depth reset. Maruko needs none of this:
-  its `fnSetPortConfig` carries the crop per request and the detector writes its
-  own.
-- **Request parameters are now a struct** (`VencJpegGrayReq`: `crop_pct`,
-  `max_dim`, `timeout_ms`) instead of positional `uint32_t`s. Three adjacent
-  integers threaded through two backends and a weak stub is an easy
-  transposition to make and a hard one to see. The frame budget defaults once,
-  in `venc_jpeg_capture_gray()`, so no backend carries its own copy of 1500 ms.
-- Crop geometry is a shared host-tested function, `venc_jpeg_gray_center_rect()`
-  — one implementation for both coordinate domains (Star6E's rect is relative to
-  the VPE channel input, Maruko's to the published ISP-plane window), covering
-  the even-alignment both scalers require, pass-through at pct 0/100, and the
-  2 px floor.
-- **The BSP-refusal fallback is shared too.** `venc_jpeg_gray_tap_geoms()`
-  returns the candidate geometries to try — the preferred one, plus the 1280 px
-  safe size only when the preferred one is big enough to be refused. Both
-  backends had carried their own copy of that policy; now they only make their
-  own SDK call per candidate, and the policy is unit-tested rather than
-  device-only.
-- **`qr_watch.sh` now defaults to `snapshot.pgm?crop=50`.** Scanning is what the
-  watcher is for, and on the wide lenses these cameras carry the cropped
-  capture is both the cheaper and the more decodable one — making the operator
-  opt in to that would have been backwards. `-e` (or `QR_ENDPOINT`) still
-  selects the whole field of view; the usage text and README name both.
-
 ## [0.60.0] - 2026-07-30
 
-`GET /api/v1/snapshot.pgm` now captures at the active sensor mode's resolution
-instead of defaulting to 1280 px, and the snapshot subsystem finally has a
-WebUI card.
+QR scanning moves to `GET /api/v1/snapshot.jpg`; `GET /api/v1/snapshot.pgm`
+(added 0.59.0) is **retired** and answers 404.  Contract 0.16.0.
 
-- **Root cause of the 1280 default.** The grayscale tap derived its geometry
-  from the *configured snapshot size* — which inherits the main stream, not the
-  sensor — and then capped the long side at a hardcoded `GRAY_TAP_MAX_DIM`
-  (1280 px) in both backends. On the standard 1920x1080-over-2592x1944 setup
-  that produced a 1280x720 PGM: 2x fewer pixels per QR module than the sensor
-  can actually deliver, and QR decoding is limited by pixels per module, so it
-  halved the usable marker distance. Nothing about the tap required 1280.
-- **The tap now sizes itself from the scaler input window** — the frame the
-  active sensor mode delivers after precrop, i.e. the largest luma frame
-  obtainable without upscaling (`2592x1458` for the case above). The pipeline
-  publishes that window on both backends through the renamed
-  `venc_jpeg_set_gray_source()` hook (was `venc_jpeg_set_gray_crop()`, Maruko
-  only — Star6E now implements it too and stops guessing from the MJPEG config).
-  `snapshot.width`/`snapshot.height` keep sizing the MJPEG channel only.
-- **New `?maxDim=<px>` query parameter** caps the long side for a single
-  request (aspect-preserved, never upscales), because a full-resolution capture
-  is a real cost: a 4K mode means an ~8 MB response and that much luma copied
-  per request. Chosen over a persisted config field deliberately — the right
-  size is a property of the consumer (boot pairing wants range, a continuous
-  watcher wants cadence), not of the device, and it keeps the append-only
-  `VencConfig` layout untouched. Junk values answer `400` (`bad_max_dim`)
-  rather than silently capturing full-res.
-- **Graceful degrade instead of a hard failure.** The vendor per-port output
-  limits are undocumented, so if the scaler refuses the full-window request
-  each backend retries once at a 1280 px long side and logs `capped to <w>x<h>
-  (BSP refused the full window)`. Boot-time QR pairing depends on this endpoint
-  answering; a silent 500 there would be worse than a smaller frame.
-- **Geometry math is now one shared, tested function** —
-  `venc_jpeg_gray_tap_dims()` in `venc_jpeg.c`, replacing the duplicated
-  `gray_tap_dims()` in `star6e_jpeg.c` and `maruko_jpeg.c`. It is host-linked,
-  so the alignment rules (width 16-aligned for the SCL stride, height even for
-  NV12), the no-upscale rule and the floor are covered by unit tests instead of
-  only by device runs. Both backends also drop the now-unused `g_snap_w/h`.
-- **WebUI: new "Snapshot" card.** The whole `snapshot.*` section was API-only —
-  neither snapshot endpoint could be enabled or tuned from the dashboard at
-  all. `snapshot.enabled`, `quality`, `width` and `height` now carry `FIELD_UI`
-  metadata, so the group renders from `/api/v1/capabilities` with no
-  `dashboard.html` edit or webui-blob rebuild. Tooltips state which fields
-  affect `.jpg` versus `.pgm`.
-- `make verify` clean on both backends; host tests **2245/0** (+8 tap-geometry
-  cases). **Not yet device-verified** — no bench was reachable from the build
-  environment. The full-resolution `MI_VPE_SetPortMode` / SCL `SetPortConfig`
-  request and the ~8 MB allocation path are the two things to watch on the
-  first Star6E/Maruko run.
+- **Why: the PGM path could kill the SoC.**  It captured through a
+  short-lived VPE port1 / SCL port3 tap programmed and torn down per request.
+  Device stress-testing on the Star6E bench showed the teardown can race an
+  in-flight MHAL buffer — `MI_VPE_IMPL_DisablePort ... mhal not return
+  buffer` — after which the whole VPE input FIFO jams
+  (`MI_SYS_IMPL_EnsureInputPortFifoEmpty ... no response in 1000ms!`
+  repeating) and the box ends in a kernel panic-reboot or a hard hang
+  needing a power cycle.  Two wedges in ~560 stressed captures; the race
+  window scales with frame size.  The race is kernel-side — userspace can
+  only stop rolling the dice.
+- **The MJPEG channel has no such cycle.**  It is created once at pipeline
+  start, stays bound, and pulse-encodes per capture (StartRecvPic →
+  GetStream → StopRecvPic) — the same path `snapshot.jpg` has always used.
+  Rapid back-to-back captures are safe, verified by re-running the same
+  kill suite against it.
+- **`qr_decode` now reads JPEG natively** (and still reads P5 PGM, sniffed
+  from the first two bytes; both work from a file or stdin).  Decode is the
+  vendored public-domain `stb_image` (`tools/qr/stb/`, JPEG-only build,
+  luma extracted directly).  The loader slurps bounded input to memory
+  first, so stdin JPEG works without seeking.
+- **`qr_decode` is built -O3 instead of -Os** — 1.66x faster end-to-end on
+  the Star6E bench (1265 ms vs 2206 ms on a 3.6 MB frame, best of 3) for
+  +24 KB of binary.  Decode latency is what the tool is judged on.
+- **VPE port1 / SCL port3 go back to stab framing and NPU detection
+  exclusively.**  The snapshot arbiter claim, the sticky `SetPortCrop`
+  restore discipline, the BSP-refusal fallback and the tap geometry helpers
+  are all deleted (~600 lines across both backends).  The 409
+  `snapshot_gray_busy` and 400 `bad_crop`/`bad_max_dim` error codes are gone.
+- **QR capture resolution now follows `snapshot.width`/`snapshot.height`**
+  (0 = inherit the main stream).  Size the MJPEG channel up when markers
+  must decode from further away — QR range scales with pixels per module.
+- **WebUI: new "Snapshot" card.**  `snapshot.enabled`, `quality`, `width`
+  and `height` carry `FIELD_UI` metadata, so the group renders from
+  `/api/v1/capabilities` with no dashboard edit; the section was API-only
+  before.
+- `qr_watch.sh` polls `snapshot.jpg`; `QR_TMP_PGM` env override renamed
+  `QR_TMP_IMG`.
 
 ## [0.59.0] - 2026-07-26
 
