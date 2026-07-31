@@ -115,6 +115,48 @@ windows that decode in process, and a decode cascade now shared with the
   build at `-O3` inside the otherwise `-Os` daemon (1.66x on Cortex-A7), for
   44 KB of text. Star6E only; Maruko has no luma tap and does not link it.
 
+- **Scanning no longer starves the video pipeline.** A window that finds its
+  marker decodes on the first frame in ~85 ms and closes, which is what every
+  scan during development did. A window with *nothing to find* ran back-to-back
+  431 ms cascades for its whole budget, and on this 2-core part that measured
+  60 fps -> **23 fps** with the CPU pegged at 100%: only the encoder thread is
+  `SCHED_FIFO`, so the ISP, AWB and frame-shm threads lose to a decoder that
+  never yields. The scan thread now runs at `nice 10` and holds a duty cycle —
+  after each attempt it idles for as long as that attempt took, keeping
+  scanning under half a core at any geometry. The idle is an interruptible cond
+  wait, so `/api/v1/qr/stop` does not wait it out. Measured after: 60 fps at 55%
+  CPU through a 25 s no-decode window.
+
+  Explicitly *not* fixed by holding port1 open continuously: that addresses none
+  of the cascade CPU, and adds ~186 MB/s of SCL write traffic and 8-9 CPU points
+  for the whole run while locking detect and stab out of port1 permanently.
+
+- **Both edges of the port cycle are now rate-limited.** The port lifecycle
+  itself is cheap — instrumented, `SetPortMode` 0 ms, `EnablePort` 0 ms,
+  `SetChnOutputPortDepth` 0 ms either way, `DisablePort` 33-53 ms — but the
+  *rate* is what matters. Two hard kernel panics on the bench (`panic=20`
+  auto-reboot) came from `/api/v1/qr/scan` followed immediately by
+  `/api/v1/qr/stop`, which disables a port that only just came up while the SCL
+  still has buffers in flight: the #205 `snapshot.pgm` failure exactly.
+
+  This corrected an over-claim. The 200/200 and 100/100 cycle soaks behind
+  "window-scoped cycling is safe" had every window closing *naturally*, on
+  decode or deadline, after reaching steady state. An operator-triggered close
+  of a brand-new port was never exercised, and it is the dangerous case.
+
+  So `LT_REOPEN_COOLDOWN_MS` (500 ms) floors the interval between opens, and
+  `LT_MIN_WINDOW_MS` (750 ms) floors how long the port stays up once enabled.
+  Every early exit — `/qr/stop`, the decode-triggered close, the out-of-memory
+  exit — pulls the deadline in to that instant rather than to zero, so `/qr/stop`
+  requests a close rather than forcing one while still blocking until port1 is
+  actually free. Cost: a window that decodes in 85 ms holds port1 for 750 ms
+  instead of ~200 ms.
+
+  Device soak after the fix: **130 scan-then-immediate-stop cycles**, 30 natural
+  closes, 60 extends and 25 concurrent stop/scan/status races — 245 port
+  operations, zero wedge signatures, zero reboots, daemon pid unchanged
+  throughout.
+
 - **A tap that cannot deliver is refused instead of squatting on port1.**
   `MI_VPE_SetPortMode` and `MI_VPE_EnablePort` both return success for
   geometries the SCL will not in fact drive — measured, a 160x90 port enables

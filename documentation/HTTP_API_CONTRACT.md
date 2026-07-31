@@ -1462,8 +1462,16 @@ Response `200`:
 
 ### `GET /api/v1/qr/stop`
 
-End the current window now and hand port1 back.  Blocks until the port is
+End the current window and hand port1 back.  Blocks until the port is actually
 released, so port1 is free on return.  Idempotent.
+
+This *requests* a close rather than forcing one.  The port is held for a minimum
+of 750 ms after it comes up, because disabling one that only just opened —
+while the SCL still has buffers in flight — panics the kernel (the same failure
+that retired `/api/v1/snapshot.pgm`).  A stop issued against a window older than
+that returns immediately; against a brand-new one it waits out the remainder.
+A further 500 ms floor applies between two opens.  Together these cap the
+port-cycle rate no matter how fast a client loops.
 
 Note the path: **not** `/api/v1/qr/scan/stop`.  The router matches on prefix and
 accepts a `/` continuation, so a nested path would be swallowed by the
