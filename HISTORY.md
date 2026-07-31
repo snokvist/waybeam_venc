@@ -1,5 +1,26 @@
 # History
 
+## [0.61.1] - 2026-07-31
+
+Build fix: a version bump now actually reaches the binary.
+
+- **`VERSION` is a prerequisite of every object** (`Makefile`) — `COMMON_CFLAGS`
+  bakes the file's contents in as `-DVENC_VERSION`, but nothing depended on the
+  file. `-MMD -MP` cannot cover it: `VERSION` is not a header, so the compiler
+  never sees it and no `.d` file lists it. An incremental `make build` after a
+  bump therefore recompiled nothing, and the binary went on reporting the
+  previous release through `/api/v1/version` and the mDNS beacon — the two
+  places a fleet is identified from. Only a `make clean` picked the new string
+  up, which is precisely what release builds skip when they are in a hurry.
+
+  Reproduced before the fix: bump `VERSION`, `make build`, and the old string is
+  still the only one in the binary. After: the bump rebuilds and the new string
+  is the only one present.
+
+  The prerequisite goes on the pattern rule rather than on the two current
+  consumers (`src/venc_api.c`, `src/mdns_beacon.c`) — a third consumer would
+  otherwise go stale silently, and the cost is one full rebuild per release.
+
 ## [0.61.0] - 2026-07-31
 
 Inline QR scanning on Star6E: an overlay-free luma tap on VPE port1, scan
