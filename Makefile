@@ -232,7 +232,7 @@ $(IPU_PROBE_TARGET): $(IPU_PROBE_SRC) include/star6e_ipu.h include/detect_dequan
 # quirc (ISC) is vendored under tools/qr/quirc/; stb_image (public domain,
 # JPEG-only build) under tools/qr/stb/. Cross-compiled for the target.
 QR_DECODE_TARGET := $(OUT_DIR)/qr_decode
-QR_DECODE_SRC    := tools/qr/qr_decode.c tools/qr/waybeam_qr_format.c \
+QR_DECODE_SRC    := tools/qr/qr_decode.c src/qr_scan.c tools/qr/waybeam_qr_format.c \
                     tools/qr/quirc/quirc.c \
                     tools/qr/quirc/decode.c tools/qr/quirc/identify.c \
                     tools/qr/quirc/version_db.c
@@ -254,9 +254,9 @@ QR_GC_LDFLAGS    := -Wl,--gc-sections
 qr-decode: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
 qr-decode: $(QR_DECODE_TARGET)
 
-$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h tools/qr/stb/stb_image.h
+$(QR_DECODE_TARGET): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h tools/qr/stb/stb_image.h include/qr_scan.h
 	@mkdir -p $(@D)
-	$(CC) $(QR_OPT_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) $(QR_GC_LDFLAGS) -lm -lrt -o $@
+	$(CC) $(QR_OPT_CFLAGS) $(SOC_CFLAGS) $(QR_MATH_CFLAGS) -s -Wall -Wextra -std=c99 -D_GNU_SOURCE -Iinclude -Itools/qr -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) $(QR_GC_LDFLAGS) -lm -lrt -o $@
 
 stage: build
 	@if [ -n "$(DRV)" ] || [ -n "$(DRV_EXTRA)" ]; then mkdir -p $(OUT_DIR)/lib; fi
@@ -288,7 +288,8 @@ print-config:
 
 HOST_CC      := cc
 HOST_CFLAGS  := -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE \
-                -Iinclude -Ilib -Itests
+                -Iinclude -Ilib -Itests -Itools/qr -Itools/qr/quirc \
+                $(QR_MATH_CFLAGS)
 TEST_RUNNER  := tests/test_runner
 TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_venc_api.c tests/test_venc_httpd.c \
@@ -321,10 +322,14 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_detect_dequant.c \
                 tests/test_detect_wire.c \
                 tests/test_star6e_vpe_ports.c \
-                tests/test_maruko_scl_ports.c
+                tests/test_maruko_scl_ports.c \
+                tests/test_qr_scan.c
 # Production sources compiled into the test binary (pure-logic modules only).
 # sensor_select.c is included here; its MI_SNR_* deps are stubbed in test_sensor_select.c.
-TEST_LIB_SRCS := src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
+TEST_LIB_SRCS := src/qr_scan.c tools/qr/waybeam_qr_format.c \
+	tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
+	tools/qr/quirc/identify.c tools/qr/quirc/version_db.c \
+	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
 
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h include/venc_shm_throttle.h
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
@@ -363,9 +368,9 @@ qr-test-host: $(QR_TEST_RUNNER)
 
 $(QR_HOST_DECODE): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h \
 		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h \
-		   tools/qr/stb/stb_image.h
+		   tools/qr/stb/stb_image.h include/qr_scan.h
 	$(HOST_CC) $(QR_OPT_CFLAGS) -Wall -Wextra -std=c99 -D_GNU_SOURCE \
-		$(QR_MATH_CFLAGS) -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) \
+		$(QR_MATH_CFLAGS) -Iinclude -Itools/qr -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) \
 		$(QR_GC_LDFLAGS) -lm -lrt -o $@
 
 qr-test-cli: $(QR_HOST_DECODE)
