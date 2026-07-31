@@ -209,6 +209,11 @@ int  venc_api_get_vpe_taps(char *buf, size_t buf_size);
 typedef struct {
 	int active;
 	uint64_t bytes_written;
+	/* Wall time since the active recorder started, CLOCK_MONOTONIC. Only
+	 * the recorder knows when it started, and a consumer polling status
+	 * cannot reconstruct it without missing everything before its first
+	 * poll (or losing the count across its own restart). 0 when idle. */
+	uint64_t elapsed_ms;
 	uint32_t frames_written;
 	uint32_t segments;
 	char path[256];

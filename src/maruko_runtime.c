@@ -47,6 +47,7 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 			&out->bytes_written, &out->frames_written,
 			&out->segments, NULL, NULL);
 		snprintf(out->path, sizeof(out->path), "%s", ts->path);
+		out->elapsed_ms = star6e_recorder_elapsed_ms(&ts->start_time);
 		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
 	} else if (star6e_recorder_is_active(rec)) {
 		const char *path = "";
@@ -56,6 +57,7 @@ static void maruko_record_status_callback(VencRecordStatus *out)
 			&out->frames_written, &path, NULL);
 		out->segments = 1;  /* HEVC recorder has no rotation */
 		snprintf(out->path, sizeof(out->path), "%s", path);
+		out->elapsed_ms = star6e_recorder_elapsed_ms(&rec->start_time);
 		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
 	} else {
 		const char *reason = "manual";
