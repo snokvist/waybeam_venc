@@ -2591,6 +2591,9 @@ static int handle_qr_tap_pgm(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 503, "tap_disabled",
 			"luma tap not running (qr.tap_enabled off, VPE port1 "
 			"held by stab/detect, or pipeline not running)");
+	if (rc == -EBUSY)
+		return httpd_send_error(fd, 409, "scan_decoding",
+			"a QR cascade is reading the latch; retry shortly");
 	if (rc == -ETIMEDOUT)
 		return httpd_send_error(fd, 504, "tap_timeout",
 			"timed out waiting for a frame from the VPE port1 tap");
@@ -2655,10 +2658,14 @@ static int handle_qr_scan_stop(int fd, const HttpRequest *req, void *ctx)
 		"{\"ok\":true,\"data\":{\"scanning\":false}}");
 }
 
-/* GET /api/v1/qr/status — poll a running scan without disturbing it. */
+/* GET /api/v1/qr/status — poll a running scan without disturbing it.
+ *
+ * The decode block survives the window closing and is cleared only by the next
+ * /qr/scan, so a client polling at 1 Hz still sees the payload from a window
+ * that both found its code and shut itself down between two polls. */
 static int handle_qr_status(int fd, const HttpRequest *req, void *ctx)
 {
-	char buf[320];
+	char buf[512];
 	Star6eLumaTapStatus st;
 
 	(void)req; (void)ctx;
@@ -2666,11 +2673,17 @@ static int handle_qr_status(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{\"armed\":%s,\"scanning\":%s,"
 		"\"window_ms\":%u,\"remaining_ms\":%lld,\"capture\":\"%ux%u\","
-		"\"frames\":%llu,\"grabs\":%llu,\"port1_owner\":\"%s\"}}",
+		"\"frames\":%llu,\"grabs\":%llu,\"port1_owner\":\"%s\","
+		"\"decode\":{\"attempts\":%u,\"decoded\":%s,\"payload\":\"%s\","
+		"\"stage\":\"%s\",\"decode_ms\":%llu,\"last_ms\":%llu}}}",
 		st.armed ? "true" : "false", st.scanning ? "true" : "false",
 		st.window_ms, (long long)st.remaining_ms, st.width, st.height,
 		(unsigned long long)st.frames, (unsigned long long)st.grabs,
-		st.port1_owner);
+		st.port1_owner,
+		st.attempts, st.decoded ? "true" : "false", st.payload,
+		st.stage,
+		(unsigned long long)(st.decode_us / 1000),
+		(unsigned long long)(st.last_us / 1000));
 	return httpd_send_json(fd, 200, buf);
 }
 #endif

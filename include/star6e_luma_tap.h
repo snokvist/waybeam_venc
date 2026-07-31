@@ -66,6 +66,11 @@ int star6e_luma_tap_scan(uint32_t window_ms);
  * Idempotent. */
 void star6e_luma_tap_scan_stop(void);
 
+/* Payload is a Waybeam transport envelope: exactly 16 characters from the QR
+ * alphanumeric alphabet (0-9 A-Z and " $%*+-./:").  Nothing in that set needs
+ * JSON escaping, which is why /api/v1/qr/status can embed it directly. */
+#define STAR6E_QR_PAYLOAD_MAX 32
+
 typedef struct {
 	int      armed;        /* qr.tap_enabled and pipeline up            */
 	int      scanning;     /* a window is open                          */
@@ -75,6 +80,16 @@ typedef struct {
 	uint64_t frames;       /* frames drained this window                */
 	uint64_t grabs;        /* frames actually copied out this window    */
 	char     port1_owner[24]; /* "" when free                           */
+
+	/* Decode result.  Retained after the window closes and cleared only by
+	 * the next scan, so a client that polls once per second still sees the
+	 * payload from a window that ended between polls. */
+	uint32_t attempts;     /* cascades run this window                  */
+	int      decoded;      /* a payload was accepted                    */
+	char     payload[STAR6E_QR_PAYLOAD_MAX];
+	char     stage[32];    /* cascade stage that won, e.g. "blur/full"  */
+	uint64_t decode_us;    /* duration of the winning cascade           */
+	uint64_t last_us;      /* duration of the most recent cascade       */
 } Star6eLumaTapStatus;
 
 /* Snapshot the tap state for /api/v1/qr/status.  Safe from any thread. */

@@ -30,6 +30,7 @@
  */
 
 #include "star6e_luma_tap.h"
+#include "qr_scan.h"
 #include "star6e.h"
 #include "star6e_vpe_ports.h"
 #include "timing.h"
@@ -128,6 +129,12 @@ static struct {
 	int             grab_pending;
 	int             latch_valid;
 	uint8_t        *latch;           /* w*h, tightly packed, stride removed */
+	/* Set while the supervisor is running a cascade over the latch.  The
+	 * reader keeps DRAINING (that is never optional) but stops overwriting
+	 * the latch, and /qr/tap.pgm reports busy rather than handing out a
+	 * frame that is being mutated.  Cheaper than a second W*H buffer, and
+	 * the decode is what the window is for. */
+	int             decoding;
 
 	lt_get_fd_fn   get_fd;
 	lt_close_fd_fn close_fd;
@@ -154,6 +161,15 @@ static struct {
 	uint64_t        deadline_us;      /* CLOCK_MONOTONIC */
 	uint32_t        window_ms;
 	uint64_t        frames, grabs;    /* per-window counters */
+
+	/* Decode result, guarded by ctl_lock.  Reset at the start of each
+	 * window and retained after it closes. */
+	uint32_t        attempts;
+	int             decoded;
+	char            payload[STAR6E_QR_PAYLOAD_MAX];
+	char            stage[32];
+	uint64_t        decode_us;
+	uint64_t        last_us;
 } g = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 	.cond = PTHREAD_COND_INITIALIZER,
@@ -270,7 +286,7 @@ static void *lt_reader_main(void *arg)
 		g.frames++;
 
 		pthread_mutex_lock(&g.lock);
-		want = g.grab_pending;
+		want = g.grab_pending && !g.decoding;
 		pthread_mutex_unlock(&g.lock);
 
 		if (want) {
@@ -427,35 +443,179 @@ fail:
 	return -EIO;
 }
 
-/* Supervisor: owns the port for exactly one scan window.  Waits in short slices
- * and re-checks a CLOCK_MONOTONIC deadline rather than sleeping to an absolute
+/* True once the window's budget is spent.  /qr/stop expresses itself by moving
+ * the deadline to 0, so there is no separate stop flag to keep in step. */
+static int lt_expired(void)
+{
+	int done;
+
+	pthread_mutex_lock(&g.ctl_lock);
+	done = wb_monotonic_us() >= g.deadline_us;
+	pthread_mutex_unlock(&g.ctl_lock);
+	return done;
+}
+
+/* Handed to the cascade so it unwinds at the next region boundary when the
+ * window ends.  Without this the window could only be honoured between whole
+ * attempts — up to ~1.5 s late at 1080x1080, which makes /qr/stop look hung. */
+static int lt_scan_abort(void *user)
+{
+	(void)user;
+	return lt_expired();
+}
+
+/* Wait for the reader to place a fresh frame in the latch.  Returns 0 on
+ * success.  The reader only latches when a grab is pending, so this is also
+ * what paces capture to the decoder: one frame per attempt, not one per
+ * vsync. */
+static int lt_await_frame(uint32_t timeout_ms)
+{
+	struct timespec deadline;
+	int rc = 0;
+
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += (time_t)(timeout_ms / 1000u);
+	deadline.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
+	if (deadline.tv_nsec >= 1000000000L) {
+		deadline.tv_sec += 1;
+		deadline.tv_nsec -= 1000000000L;
+	}
+
+	pthread_mutex_lock(&g.lock);
+	g.latch_valid = 0;
+	g.grab_pending = 1;
+	while (!g.latch_valid && g.running) {
+		if (pthread_cond_timedwait(&g.cond, &g.lock, &deadline) != 0)
+			break;
+	}
+	if (!g.latch_valid)
+		rc = g.running ? -ETIMEDOUT : -ENODEV;
+	else
+		g.decoding = 1;   /* freeze the latch for the cascade */
+	g.grab_pending = 0;
+	pthread_mutex_unlock(&g.lock);
+	return rc;
+}
+
+/* Supervisor: owns the port for exactly one scan window, and drives the decode.
+ *
+ * One thread does both deliberately.  The port lifecycle rule -- only ever
+ * opened and closed here -- is what removes the whole concurrency race class
+ * that retired snapshot.pgm, and a separate decode thread would need a second
+ * handshake with this one for no gain.
+ *
+ * Waits are against a CLOCK_MONOTONIC deadline rather than an absolute
  * wall-clock time, so a clock step cannot strand an open window. */
 static void *lt_super_main(void *arg)
 {
+	QrScanCtx *ctx;
+
 	(void)arg;
 
-	for (;;) {
-		struct timespec ts;
-		uint64_t now;
+	ctx = qr_scan_ctx_new();
+	if (!ctx)
+		fprintf(stderr, "[luma-tap] qr context alloc failed — window "
+			"will capture but not decode\n");
+	else
+		qr_scan_set_abort(ctx, lt_scan_abort, NULL);
+
+	while (!lt_expired()) {
+		QrScanResult res;
+		QrScanStats stats;
+		uint64_t started;
+		int ok;
+
+		if (!ctx) {
+			/* No decoder: fall back to holding the window open so
+			 * /qr/tap.pgm still works, rather than closing a window
+			 * the caller asked for. */
+			struct timespec ts;
+
+			pthread_mutex_lock(&g.ctl_lock);
+			clock_gettime(CLOCK_REALTIME, &ts);
+			ts.tv_nsec += 200 * 1000000L;
+			if (ts.tv_nsec >= 1000000000L) {
+				ts.tv_sec += 1;
+				ts.tv_nsec -= 1000000000L;
+			}
+			pthread_cond_timedwait(&g.ctl_cond, &g.ctl_lock, &ts);
+			pthread_mutex_unlock(&g.ctl_lock);
+			continue;
+		}
+
+		if (lt_await_frame(500) != 0)
+			continue;   /* re-tests the deadline at the top */
+
+		memset(&res, 0, sizeof(res));
+		memset(&stats, 0, sizeof(stats));
+		started = wb_monotonic_us();
+		ok = qr_scan_image(ctx, g.latch, (int)g.w, (int)g.h, 0,
+				   &res, &stats);
+
+		pthread_mutex_lock(&g.lock);
+		g.decoding = 0;
+		pthread_mutex_unlock(&g.lock);
 
 		pthread_mutex_lock(&g.ctl_lock);
-		now = wb_monotonic_us();
-		if (now >= g.deadline_us) {
+		g.attempts++;
+		g.last_us = wb_monotonic_us() - started;
+		if (ok) {
+			size_t n = res.payload_len;
+
+			if (n >= sizeof(g.payload))
+				n = sizeof(g.payload) - 1;
+			/* The envelope already restricts this to the QR
+			 * alphanumeric set, but scrub anyway: the payload is
+			 * whatever someone held in front of the camera, and it
+			 * is about to be pasted into JSON. */
+			for (size_t i = 0; i < n; i++) {
+				unsigned char c = res.payload[i];
+
+				g.payload[i] = (c >= 0x20 && c < 0x7F &&
+						c != '"' && c != '\\')
+					? (char)c : '?';
+			}
+			g.payload[n] = '\0';
+			snprintf(g.stage, sizeof(g.stage), "%s",
+				 stats.success_stage);
+			g.decode_us = g.last_us;
+			g.decoded = 1;
+			/* A window exists to find one code.  Ending it here
+			 * hands port1 back to detect/stab seconds earlier than
+			 * waiting out the budget would. */
+			g.deadline_us = 0;
+		}
+		pthread_mutex_unlock(&g.ctl_lock);
+
+		if (ok) {
+			fprintf(stderr, "[luma-tap] decoded \"%s\" at stage=%s "
+				"in %llu ms (attempt %u)\n", g.payload, g.stage,
+				(unsigned long long)(g.decode_us / 1000),
+				g.attempts);
+			break;
+		}
+		if (stats.fatal_error) {
+			/* An allocation failure at this geometry will repeat on
+			 * every attempt, and it fails FAST — continuing would
+			 * spin the remaining budget instead of scanning.  End
+			 * the window and hand port1 back. */
+			fprintf(stderr, "[luma-tap] decode out of memory at "
+				"%ux%u — ending window\n", g.w, g.h);
+			pthread_mutex_lock(&g.ctl_lock);
+			g.deadline_us = 0;
 			pthread_mutex_unlock(&g.ctl_lock);
 			break;
 		}
-		/* 200 ms slices: an extend is picked up promptly via the signal,
-		 * and the deadline is honoured within a slice even if a signal is
-		 * missed. */
-		clock_gettime(CLOCK_REALTIME, &ts);
-		ts.tv_nsec += 200 * 1000000L;
-		if (ts.tv_nsec >= 1000000000L) {
-			ts.tv_sec += 1;
-			ts.tv_nsec -= 1000000000L;
-		}
-		pthread_cond_timedwait(&g.ctl_cond, &g.ctl_lock, &ts);
-		pthread_mutex_unlock(&g.ctl_lock);
 	}
+
+	if (ctx)
+		qr_scan_ctx_free(ctx);
+
+	/* Clear before the port goes away: lt_port_close() frees the latch, and
+	 * a stale `decoding` would wedge the next window's reader. */
+	pthread_mutex_lock(&g.lock);
+	g.decoding = 0;
+	pthread_mutex_unlock(&g.lock);
 
 	lt_port_close();
 
@@ -499,6 +659,12 @@ int star6e_luma_tap_scan(uint32_t window_ms)
 
 	g.frames = 0;
 	g.grabs = 0;
+	g.attempts = 0;
+	g.decoded = 0;
+	g.payload[0] = '\0';
+	g.stage[0] = '\0';
+	g.decode_us = 0;
+	g.last_us = 0;
 	g.window_ms = window_ms;
 	g.deadline_us = wb_monotonic_us() + (uint64_t)window_ms * 1000;
 	g.super_running = 1;
@@ -549,6 +715,12 @@ void star6e_luma_tap_status(Star6eLumaTapStatus *out)
 	now = wb_monotonic_us();
 	out->remaining_ms = (g.super_running && g.deadline_us > now)
 		? (int64_t)((g.deadline_us - now) / 1000) : 0;
+	out->attempts = g.attempts;
+	out->decoded = g.decoded;
+	snprintf(out->payload, sizeof(out->payload), "%s", g.payload);
+	snprintf(out->stage, sizeof(out->stage), "%s", g.stage);
+	out->decode_us = g.decode_us;
+	out->last_us = g.last_us;
 	pthread_mutex_unlock(&g.ctl_lock);
 
 	out->width = g.w ? g.w : (g.cfg_w < g.cfg_h ? g.cfg_w : g.cfg_h);
@@ -675,6 +847,17 @@ int star6e_luma_tap_grab_pgm(uint8_t **out_buf, size_t *out_len,
 
 	/* One outstanding grab at a time: the latch is single-buffered. */
 	pthread_mutex_lock(&g.api_lock);
+
+	/* A cascade owns the latch for its duration.  Refusing here is better
+	 * than blocking an httpd worker for a second and a half, or handing
+	 * back a frame the reader is free to overwrite. */
+	pthread_mutex_lock(&g.lock);
+	if (g.decoding) {
+		pthread_mutex_unlock(&g.lock);
+		pthread_mutex_unlock(&g.api_lock);
+		return -EBUSY;
+	}
+	pthread_mutex_unlock(&g.lock);
 
 	clock_gettime(CLOCK_REALTIME, &deadline);
 	deadline.tv_sec += (time_t)(timeout_ms / 1000u);

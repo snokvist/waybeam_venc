@@ -41,6 +41,11 @@ VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # LDFLAGS only (it's a link-time strip flag; not valid during -c).
 COMMON_CFLAGS := -Os -Iinclude -Ilib -include include/ssc338q_compat.h -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c lib/cJSON.c
+# QR scan cascade, shared verbatim with tools/qr/qr_decode.  Compiled at -O3
+# (see QR_OBJ_CFLAGS below); the rest of the daemon is -Os.
+QR_SRC := src/qr_scan.c tools/qr/waybeam_qr_format.c tools/qr/quirc/quirc.c \
+          tools/qr/quirc/decode.c tools/qr/quirc/identify.c \
+          tools/qr/quirc/version_db.c
 HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c src/maruko_scl_ports.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_luma_tap.c src/star6e_awb.c
@@ -87,7 +92,7 @@ BUILD_TESTS := 0
 TOOLCHAIN_TARGET := toolchain-maruko
 else ifeq ($(SOC_BUILD),star6e)
 CC := $(STAR6E_CC)
-SRC := src/main.c src/backend_star6e.c src/star6e_mi.c $(STAR6E_ONLY_SRC) $(RECORDER_SRC) $(HELPER_SRC) $(CONFIG_SRC)
+SRC := src/main.c src/backend_star6e.c src/star6e_mi.c $(STAR6E_ONLY_SRC) $(RECORDER_SRC) $(HELPER_SRC) $(CONFIG_SRC) $(QR_SRC)
 DRV :=
 DRV_EXTRA :=
 SOC_CFLAGS := -mfpu=neon-vfpv4 -mfloat-abi=hard -ftree-vectorize
@@ -171,8 +176,10 @@ check:
 		test -d "$(DRV_EXTRA)" || { echo "Extra library dir missing: $(DRV_EXTRA)"; exit 1; }; \
 	fi
 
+# QR include paths are added unconditionally: they are harmless for the other
+# sources and $(SRC) carries the cascade on Star6E.
 lint: $(TOOLCHAIN_TARGET) check
-	$(CC) $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
+	$(CC) $(CFLAGS) -Itools/qr -Itools/qr/quirc $(QR_MATH_CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-old-style-declaration -fsyntax-only $(SRC)
 
 # Pattern rule — compile any source under src/, lib/, or vendor/ into
 # the mirrored layout under $(OBJ_DIR)/.  Header dependencies are
@@ -181,6 +188,16 @@ lint: $(TOOLCHAIN_TARGET) check
 $(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# The QR cascade is the one place in the daemon where -Os is the wrong call.
+# Decode latency decides whether a scan window lands a code inside the
+# operator's patience; the identify/transform stages are float-heavy inner
+# loops that -O3 unrolls and vectorizes well on Cortex-A7 + NEON.  Measured on
+# the Star6E bench: -O3 is 1.66x faster than -Os (1265 ms vs 2206 ms on a
+# 3.6 MB frame) for a couple of tens of KB.  Trailing -O wins over the -Os in
+# COMMON_CFLAGS.
+QR_OBJS := $(addprefix $(OBJ_DIR)/,$(QR_SRC:.c=.o))
+$(QR_OBJS): CFLAGS += -O3 -Itools/qr -Itools/qr/quirc $(QR_MATH_CFLAGS)
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) $(OBJS) $(if $(DRV),-L$(DRV),) $(if $(DRV_EXTRA),-L$(DRV_EXTRA),) $(if $(DRV),-Ltools,) $(BASE_LIBS) $(SOC_LIBS) -o $@
