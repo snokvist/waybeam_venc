@@ -42,7 +42,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/select.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -55,6 +57,18 @@
 #define LT_FIRST_FRAME_MS 1000u
 #define LT_WINDOW_MS_MIN 1000u
 #define LT_WINDOW_MS_MAX 60000u
+/* Cascade duty cycle.  After each attempt the supervisor idles for as long as
+ * that attempt took, so scanning never occupies more than half of one core.
+ *
+ * This is not a nicety.  Measured on the 2-core Star6E: back-to-back cascades
+ * at 1080x1080 peg the CPU at 100% and drag the encoder from 60 fps to 23 --
+ * the pipeline's ISP, AWB and frame-shm threads are ordinary SCHED_OTHER and
+ * lose to a decoder that never yields.  (Only the encoder thread is SCHED_FIFO,
+ * so it alone survives.)  A window with a marker in view is unaffected either
+ * way: it decodes on the first frame and closes. */
+#define LT_DUTY_CYCLE_NUM 1u   /* idle = busy * NUM/DEN                    */
+#define LT_DUTY_CYCLE_DEN 1u
+#define LT_PACE_MAX_MS    1000u
 /* Refuse a tap whose luma plane alone would dominate a 64-128 MB target. */
 #define LT_MAX_PIXELS (8u * 1024u * 1024u)
 
@@ -535,6 +549,31 @@ static int lt_await_frame(uint32_t timeout_ms)
 	return rc;
 }
 
+/* Idle for `ms`, waking early if the window ends.  Used to hold the cascade to
+ * its duty cycle without making /qr/stop wait it out. */
+static void lt_pace(uint32_t ms)
+{
+	struct timespec ts;
+
+	if (ms == 0)
+		return;
+	if (ms > LT_PACE_MAX_MS)
+		ms = LT_PACE_MAX_MS;
+
+	pthread_mutex_lock(&g.ctl_lock);
+	if (wb_monotonic_us() < g.deadline_us) {
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_sec += (time_t)(ms / 1000u);
+		ts.tv_nsec += (long)(ms % 1000u) * 1000000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_sec += 1;
+			ts.tv_nsec -= 1000000000L;
+		}
+		pthread_cond_timedwait(&g.ctl_cond, &g.ctl_lock, &ts);
+	}
+	pthread_mutex_unlock(&g.ctl_lock);
+}
+
 /* Supervisor: owns the port for exactly one scan window, and drives the decode.
  *
  * One thread does both deliberately.  The port lifecycle rule -- only ever
@@ -549,6 +588,15 @@ static void *lt_super_main(void *arg)
 	QrScanCtx *ctx;
 
 	(void)arg;
+
+	/* Scanning is best-effort work behind a live video pipeline: it must
+	 * lose every scheduling contest with the ISP, AWB and frame-shm threads,
+	 * which are ordinary SCHED_OTHER and would otherwise be starved by a
+	 * decoder that runs flat out.  Per-thread nice (Linux extends
+	 * PRIO_PROCESS to a tid) rather than a policy change, so this stays a
+	 * hint and can never deadlock the pipeline waiting on us. */
+	if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10) != 0)
+		fprintf(stderr, "[luma-tap] could not lower scan thread priority\n");
 
 	ctx = qr_scan_ctx_new();
 	if (!ctx)
@@ -632,6 +680,13 @@ static void *lt_super_main(void *arg)
 				g.attempts);
 			break;
 		}
+		/* Hold the duty cycle.  Idling for as long as the attempt took
+		 * keeps scanning under half a core whatever the geometry: an
+		 * 85 ms decode barely pauses, a 431 ms full cascade at
+		 * 1080x1080 pauses 431 ms. */
+		lt_pace((uint32_t)((g.last_us / 1000) *
+			LT_DUTY_CYCLE_NUM / LT_DUTY_CYCLE_DEN));
+
 		if (stats.fatal_error) {
 			/* An allocation failure at this geometry will repeat on
 			 * every attempt, and it fails FAST — continuing would
