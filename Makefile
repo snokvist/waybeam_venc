@@ -186,7 +186,15 @@ lint: $(TOOLCHAIN_TARGET) check
 # the mirrored layout under $(OBJ_DIR)/.  Header dependencies are
 # captured by -MMD -MP in COMMON_CFLAGS; the resulting .d files are
 # -include'd below.
-$(OBJ_DIR)/%.o: %.c
+#
+# VERSION is a prerequisite because COMMON_CFLAGS bakes its contents in as
+# -DVENC_VERSION, and no .d file can track that — VERSION is not a header, so
+# the compiler never sees it.  Without this a version bump rebuilds nothing and
+# the binary keeps reporting the previous release over /api/v1/version and the
+# mDNS beacon.  Listing it here rather than on just the two current consumers
+# costs a full rebuild once per release and cannot go stale when a third one
+# appears.
+$(OBJ_DIR)/%.o: %.c VERSION
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
