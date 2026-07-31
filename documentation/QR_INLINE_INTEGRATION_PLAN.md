@@ -2,8 +2,8 @@
 
 Status: **Phase 1 (spec)**. No code has been written. This document answers
 "should we inline the QR decoder, and what would it take", specifies the capture
-policy for the scan window, designs boot autoscan and its OSD coordination, and
-lists the simplifications the decoder needs before it runs inside the daemon.
+policy for the scan window, specifies boot autoscan, and lists the
+simplifications the decoder needs before it runs inside the daemon.
 
 ## 1. Verdict
 
@@ -69,10 +69,9 @@ is not the argument.**
 4. **Lifecycle correctness.** The scan window cannot outlive the pipeline,
    cannot run while the pipeline is down, and cannot be left running by a
    forgotten `ctrl-c`.
-5. **Capture policy and OSD coordination become possible at all.** Overriding
-   quality for the duration of a scan (§6) and ordering a boot scan ahead of OSD
-   attach (§7) both require something that knows a scan is in progress. A forked
-   CLI does not.
+5. **Capture policy becomes possible at all.** Overriding quality for the
+   duration of a scan and restoring it afterwards (§6) requires something that
+   knows a scan is in progress. A forked CLI does not.
 
 ### What it costs
 
@@ -314,93 +313,36 @@ image. Invisible at q80; q90 at full resolution means more bytes and more splits
 Fix: treat `curPacks > MAX_PACKS` as `-EIO` with a log line. Small, independent
 of the QR work, worth doing in the same PR.
 
-## 7. Boot autoscan and OSD coordination
+## 7. Boot autoscan
 
-### The OSD does occlude snapshots on Star6E
+`qr.bootScan` opens one scan window as the pipeline finishes bring-up, so a
+marker can be read without anyone calling the API. It reuses the same worker,
+deadline, capture policy, and result state as a manual scan — the only
+differences are what signals the window (`venc_qr_boot_scan()` from the
+backend's bring-up path) and which budget it uses (`qr.bootWindowMs`).
 
-`debug_osd` is an `MI_RGN` region attached at `RGN_MODID_VPE, dev 0, chn 0,
-port 0` (`debug_osd.c:435-440`) — **the same VPE port0 the JPEG channel binds
-to**. The pipeline comment states it outright: *"it composites on VPE port0"*
-(`star6e_pipeline.c:2280`). So with `debug.showOsd` on, OSD pixels are burned
-into every snapshot, and a marker underneath the text will not decode.
+`qr.bootWindowMs` is kept separate from `qr.windowMs` deliberately: a boot scan
+is unattended and happens once, so it can afford a longer budget than a manual
+scan someone is waiting on.
 
-**Maruko is likely already clear.** Its OSD attaches at `RGN_MODID_SCL, dev 0,
-chn 0, port 0` (`debug_osd.c:795-798`) while the JPEG channel taps SCL port
-**1**. Different output port, so port 1 should carry no OSD. Verify
-(experiment H) before relying on it.
+Nothing else is coordinated. **By explicit decision, this plan adds no code that
+detects, inspects, defers, hides, or otherwise reasons about the OSD.** No
+deferred region creation, no visibility toggle, no occlusion check, no
+OSD-dependent ordering constraint on where the boot hook lands.
 
-An external `waybeam_hub` OSD composites at the SCL stage, downstream of the
-Star6E VPE port0 tap, so it should not appear in snapshots either — and the
-pipeline comment notes it and `debug_osd` are mutually exclusive anyway (single
-global RGN device). Also verify.
+### Known limitation — documented, not handled
 
-Note `debug.showOsd` defaults to **false**, so this only bites users who turned
-it on.
+For the record, and for whoever places markers rather than for the code:
+`debug_osd` composites on Star6E VPE port0 (`debug_osd.c:435-440`; the pipeline
+comment at `star6e_pipeline.c:2280` says so outright) — the same port the JPEG
+channel taps. So with `debug.showOsd` on, OSD pixels appear in snapshots and a
+marker under the text will not decode. `debug.showOsd` defaults to **false**.
+Maruko attaches at SCL port 0 while the snapshot taps port 1, so it is likely
+unaffected. The region is full-frame but only text pixels are opaque (I4
+palette, pixel alpha), so in practice this is a marker-placement question.
 
-### There is no show/hide today
-
-`include/debug_osd.h` exposes creation and `debug_osd_destroy()` — nothing else.
-`debug.show_osd` is `MUT_RESTART` (`venc_api.c:615`) and the OSD is created only
-if the flag is set at pipeline configure (`star6e_pipeline.c:2286`). So today the
-only way to remove the OSD is a full pipeline reinit.
-
-And detaching is not free. `debug_osd.c:140-148` documents a hard-won hazard:
-
-> the detach removes the region from the VPE compositor's list, but a frame
-> already mid-composite can still be reading the RGN canvas; freeing it
-> immediately races that read → MMU read-fault … that storms to a HW watchdog
-> reset on rapid respawn
-
-That is between `DetachFromChn` and `Destroy`, so a pure `show = 0` re-attach
-may well be safe — but "may well be" is not something to assume on a path that
-has already produced watchdog resets.
-
-### Recommended design: order the boot scan ahead of OSD attach
-
-`venc_jpeg_init()` runs at `star6e_pipeline.c:2161`; `debug_osd_create()` runs at
-`star6e_pipeline.c:2286`. The OSD is the later of the two, so the boot scan slots
-in between them **by ordering alone — no attach/detach, no RGN hazard**:
-
-```
-pipeline configure
-  … VPE→VENC bind, venc_jpeg_init() …
-  → boot scan window opens (runs until decode or qr.bootWindowMs expires)
-  → debug_osd_create()   [deferred until the boot scan finishes]
-  … stream …
-```
-
-The visible cost is that a device with `debug.showOsd` on has no OSD for the
-first few seconds. That is self-explanatory and reversible; a pipeline reinit to
-toggle the OSD is not.
-
-**Open question to settle first (experiment I):** frames must actually be
-flowing for the scan to capture anything. If the sensor is not yet producing at
-line 2161, the boot scan cannot run synchronously inside `configure()` and must
-instead be a post-bring-up step with OSD creation gated on its completion — same
-ordering, slightly more plumbing (a `venc_qr_boot_pending()` check before
-`debug_osd_create()`). Determine which before writing the code.
-
-### Runtime scans with the OSD on stay occluded
-
-The ordering trick only helps at boot. A `/api/v1/qr/scan` on a running device
-with `debug.showOsd` on still sees OSD pixels. Options, in order of preference:
-
-1. **Document it and place the marker clear of the text.** The region is
-   full-frame but only text pixels are opaque (I4 palette, pixel alpha), so this
-   is a placement problem, not a fundamental one. Zero code.
-2. **Add `debug_osd_set_visible()`** via a `show = 0` re-attach (not
-   detach/destroy), toggled around the scan window. Needs experiment J to
-   confirm it is safe on a live pipeline. **Follow-up, not this PR.**
-
-Recommend shipping 1 and treating 2 as a separate change gated on its own device
-test — the RGN lifecycle is not somewhere to speculate.
-
-### Config for boot autoscan
-
-Two more fields on the `qr` section (§8): `qr.bootScan` and `qr.bootWindowMs`.
-Keeping the boot window separate from `qr.windowMs` matters — boot is the one
-time the device is guaranteed OSD-free and pointed at whatever the operator is
-holding, so it may want a different (likely longer) budget than a manual scan.
+That paragraph belongs in `tools/qr/README.md`. It is not a behaviour, a check,
+or a code path.
 
 ## 8. Proposed config surface
 
@@ -412,7 +354,7 @@ they follow §6.
 | `qr.enabled` | `qr.enabled` | bool | `true` | live | hard gate; inert until a scan starts, but a locked-down build needs an off switch |
 | `qr.windowMs` | `qr.window_ms` | uint | `15000` | live | manual scan timer; clamp 1000–60000. 15 s not 12 s because §4's attempt count drops with resolution |
 | `qr.intervalMs` | `qr.interval_ms` | uint | `500` | live | minimum ms between capture starts — the CPU duty-cycle knob; clamp 100–5000, mirroring `qr_watch.sh`'s 0.5 s floor |
-| `qr.bootScan` | `qr.boot_scan` | bool | `false` | restart | run a scan window during pipeline bring-up, ahead of OSD attach (§7) |
+| `qr.bootScan` | `qr.boot_scan` | bool | `false` | restart | run one scan window as the pipeline finishes bring-up (§7) |
 | `qr.bootWindowMs` | `qr.boot_window_ms` | uint | `15000` | restart | boot window budget; same clamp. Separate from `windowMs` — see §7 |
 
 The first three are read at window start, so they are `MUT_LIVE`. The two boot
@@ -623,7 +565,6 @@ bounded, and `qr.intervalMs` is the knob to back it off. **Confirm on-device
 | Heap at high-resolution modes (14.7 MB at 1440p) | **high** — raised by the no-downscale rule | **unmeasured**; experiments D and G before merge; `QR_SCAN_MAX_PIXELS` refusal as the backstop |
 | >8-pack JPEG silently truncated (§6) | med | return `-EIO` instead of truncating; more likely at q90 |
 | `dstFps` 20 raises idle CPU | med | experiment C; static value, back off if it costs |
-| Boot scan delays OSD attach | med | only affects `debug.showOsd` users; bounded by `qr.bootWindowMs` |
 | stb_image fault takes down video | med | input is our own VENC JPEG, not network data; ceiling in 11.8; optionally fuzz `stbi_load_from_memory` on host |
 | Scan window starves the encoder | med | `SCHED_OTHER` vs the encoder's `SCHED_FIFO`; `qr.intervalMs`; on-device confirmation |
 | Removing `snapshot.width`/`height` breaks a deployed config | low | confirm non-functional first (experiment A); keep parsing and ignore, or remove with a `HISTORY.md` note |
@@ -637,7 +578,7 @@ bounded, and `qr.intervalMs` is the knob to back it off. **Confirm on-device
 | 2 | Simplifications 11.1–11.9 | same three suites, same counts; this is a refactor, not a tuning change |
 | 3 | Config section `qr.*` across all five layers | `make test` (`test_save_layout_byte_equal`), `make verify` |
 | 4 | `src/venc_qr.c` state machine, capture policy, two endpoints | `make lint`, `make verify` (both backends) |
-| 5 | Boot autoscan + OSD ordering (§7) | `make verify`; on-device boot with `debug.showOsd` on and off |
+| 5 | Boot autoscan hook (§7) | `make verify`; on-device boot with `qr.bootScan` on |
 | 6 | `MAX_PACKS` truncation → `-EIO`; `dstFps` 5 → 20 (both backends) | `make verify`; exercise at q90 on device |
 | 7 | Makefile wiring + per-object `-O2`; measure `-Os`/`-O2`/`-O3` on target | binary size delta; decode time on the saved hard 720p capture |
 
@@ -652,9 +593,7 @@ Device experiments, once the above builds:
 | E | `scripts/waybeam_thread_watch.sh` across a full window while streaming | confirms the ~168/200 CPU projection and that the encoder does not drop frames |
 | F | Live scan against the phone fixture (`tools/qr/test-images/phone.html`) | end-to-end: `/qr/scan` → `/qr/recent` returns `found` |
 | G | Full-cascade miss timing at 1080p and 1440p | §4's attempt-count table is projected from 720p; confirm or revise `qr.windowMs` |
-| H | Maruko: snapshot with `debug.showOsd` on — is the OSD present? | confirms the SCL port0-vs-port1 reasoning in §7 |
-| I | Star6E: are frames flowing at `star6e_pipeline.c:2161`? | decides whether the boot scan can run inside `configure()` or needs a post-bring-up hook |
-| J | *(follow-up only)* `show = 0` re-attach on a live pipeline, repeated | gates `debug_osd_set_visible()`; the RGN detach hazard is documented and real |
+| H | Boot with `qr.bootScan` on: does the window capture real frames? | the boot hook must land somewhere the sensor is already producing, or every attempt times out |
 
 Then `scripts/star6e_direct_deploy.sh cycle`, `HTTP_API_CONTRACT.md` 0.17.0,
 `tools/qr/README.md`, `VERSION`, `HISTORY.md`, `make pre-pr`.
@@ -669,8 +608,9 @@ work" — per the Scope Control rule in AGENTS.md.
 - **Payload interpretation.** `P`/`C` transport types stay opaque. Pairing,
   commands, and action dispatch remain outside the binary, exactly as
   `tools/qr/README.md` states today.
-- **`debug_osd_set_visible()`.** Wanted for runtime scans with the OSD on (§7),
-  but gated on experiment J. Follow-up change.
+- **Anything OSD-aware.** Explicitly excluded by decision (§7): no detection, no
+  visibility toggle, no deferred region creation, no occlusion check, no
+  OSD-dependent ordering. The occlusion is a documented placement caveat only.
 - **Hardware downscale on Maruko.** SCL port 1 is dedicated and *could* be
   programmed independently of the main stream. Now moot for QR — we never
   downscale — but it would let `snapshot.width`/`height` actually mean something
