@@ -3153,6 +3153,7 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		"\"path\":\"%s\","
 		"\"frames\":%u,"
 		"\"bytes\":%llu,"
+		"\"elapsed_ms\":%llu,"
 		"\"segments\":%u,"
 		"\"stop_reason\":\"%s\""
 		"}}",
@@ -3161,6 +3162,7 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 		st.path,
 		st.frames_written,
 		(unsigned long long)st.bytes_written,
+		(unsigned long long)st.elapsed_ms,
 		st.segments,
 		st.stop_reason);
 	return httpd_send_json(fd, 200, buf);

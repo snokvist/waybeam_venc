@@ -505,6 +505,7 @@ static void record_status_callback(VencRecordStatus *out)
 			&out->bytes_written, &out->frames_written,
 			&out->segments, NULL, NULL);
 		snprintf(out->path, sizeof(out->path), "%s", ps->ts_recorder.path);
+		out->elapsed_ms = star6e_recorder_elapsed_ms(&ps->ts_recorder.start_time);
 		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
 	} else if (star6e_recorder_is_active(&ps->recorder)) {
 		out->active = 1;
@@ -513,6 +514,7 @@ static void record_status_callback(VencRecordStatus *out)
 			&out->bytes_written, &out->frames_written,
 			NULL, NULL);
 		snprintf(out->path, sizeof(out->path), "%s", ps->recorder.path);
+		out->elapsed_ms = star6e_recorder_elapsed_ms(&ps->recorder.start_time);
 		snprintf(out->stop_reason, sizeof(out->stop_reason), "none");
 	} else {
 		/* Check both recorders for last stop reason */
