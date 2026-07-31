@@ -44,11 +44,29 @@ inline QR scanning. Capture only — no decoding, no scan-window state machine.
   skipped with a log line when `video0.framing=stab` or `detect.enabled` holds
   port1.
 
-- **`GET /api/v1/qr/tap{.pgm,/open,/close}`** — `/open` claims port1 for a scan
-  window (`409 port1_busy` when stab or detect holds it), `.pgm` returns one
-  frame as a P5 PGM (self-describing dimensions, stride removed; `503` with no
-  window open, `504` on no frame), `/close` releases it. Debug-grade
-  instrumentation for validating the tap, Star6E only.
+- **Scan windows with self-closure.** `GET /api/v1/qr/scan[?ms=N]` opens a
+  window (`409 port1_busy` when stab or detect holds port1 — reported
+  immediately, never queued); a supervisor thread closes it when the deadline
+  expires, so a client that dies mid-scan cannot strand the port. Re-scanning
+  while a window is open only **extends the deadline** and never touches port
+  state, which is what keeps repeated scans from re-introducing the
+  Enable/Disable cycling that wedged snapshot.pgm. `GET /api/v1/qr/stop` ends a
+  window early; `GET /api/v1/qr/status` polls one without disturbing it
+  (`scanning`, `remaining_ms`, `frames`, `grabs`, `port1_owner`).
+  `GET /api/v1/qr/tap.pgm` returns one frame as a P5 PGM (self-describing
+  dimensions, stride removed; `503` with no window open, `504` on no frame).
+
+  The supervisor is the **only** thread that opens or closes the port, so no SDK
+  port call is ever concurrent. It waits in 200 ms slices against a
+  `CLOCK_MONOTONIC` deadline rather than sleeping to an absolute wall-clock
+  time, so a clock step cannot strand an open window.
+
+  `qr.windowMs` (default 15000, clamped 1000–60000) is the default budget,
+  `MUT_LIVE` since it is read when a window opens.
+
+  Note `/api/v1/qr/stop`, not `/qr/scan/stop`: the HTTP router matches on prefix
+  and accepts a `/` continuation, so a nested path is swallowed by the
+  `/qr/scan` route.
 
 - **`snapshot.width` / `snapshot.height` tooltips corrected**
   (`src/venc_api.c`) — they described these as sizing the QR capture, which is

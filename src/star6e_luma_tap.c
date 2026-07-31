@@ -32,6 +32,7 @@
 #include "star6e_luma_tap.h"
 #include "star6e.h"
 #include "star6e_vpe_ports.h"
+#include "timing.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -47,6 +48,8 @@
 #define LT_OWNER      "qr"
 #define LT_PORT       1
 #define LT_MAX_DIM    4096u
+#define LT_WINDOW_MS_MIN 1000u
+#define LT_WINDOW_MS_MAX 60000u
 /* Refuse a tap whose luma plane alone would dominate a 64-128 MB target. */
 #define LT_MAX_PIXELS (8u * 1024u * 1024u)
 
@@ -137,11 +140,32 @@ static struct {
 	 * later without a VencConfig in hand. */
 	int      cfg_enabled;
 	uint32_t cfg_w, cfg_h;
+	uint32_t cfg_window_ms;
+
+	/* Scan-window supervisor.  This thread is the ONLY one that opens or
+	 * closes the port, so no SDK port call is ever concurrent.  `ctl_lock`
+	 * guards the deadline and the supervisor flags; it is deliberately a
+	 * different lock from `lock` (the latch handshake) so a slow grab cannot
+	 * delay a window ending. */
+	pthread_t       super;
+	pthread_mutex_t ctl_lock;
+	pthread_cond_t  ctl_cond;
+	int             super_running;
+	uint64_t        deadline_us;      /* CLOCK_MONOTONIC */
+	uint32_t        window_ms;
+	uint64_t        frames, grabs;    /* per-window counters */
 } g = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 	.cond = PTHREAD_COND_INITIALIZER,
 	.api_lock = PTHREAD_MUTEX_INITIALIZER,
+	.ctl_lock = PTHREAD_MUTEX_INITIALIZER,
+	.ctl_cond = PTHREAD_COND_INITIALIZER,
 };
+
+/* Port lifecycle, called ONLY from the supervisor thread or from scan()/stop()
+ * under g.ctl_lock — never concurrently. */
+static int  lt_port_open(void);
+static void lt_port_close(void);
 
 static int lt_load_sys_symbols(void)
 {
@@ -243,12 +267,15 @@ static void *lt_reader_main(void *arg)
 			continue;
 		}
 
+		g.frames++;
+
 		pthread_mutex_lock(&g.lock);
 		want = g.grab_pending;
 		pthread_mutex_unlock(&g.lock);
 
 		if (want) {
 			int rc = lt_latch_frame(&buf.stFrameData);
+			g.grabs++;
 			pthread_mutex_lock(&g.lock);
 			g.grab_pending = 0;
 			g.latch_valid = (rc == 0);
@@ -305,12 +332,13 @@ void star6e_luma_tap_configure(const VencConfig *cfg, uint32_t main_w,
 	}
 	g.cfg_w = w;
 	g.cfg_h = h;
+	g.cfg_window_ms = cfg->qr.window_ms;
 	g.cfg_enabled = 1;
 	fprintf(stderr, "[luma-tap] armed: port %ux%u, centre square %u "
 		"(opens per scan window)\n", w, h, w < h ? w : h);
 }
 
-int star6e_luma_tap_open(void)
+static int lt_port_open(void)
 {
 	MI_VPE_PortAttr_t port;
 	MI_S32 ret;
@@ -399,14 +427,147 @@ fail:
 	return -EIO;
 }
 
-/* Compat shim: configure + open in one call (pipeline-lifetime tap). */
+/* Supervisor: owns the port for exactly one scan window.  Waits in short slices
+ * and re-checks a CLOCK_MONOTONIC deadline rather than sleeping to an absolute
+ * wall-clock time, so a clock step cannot strand an open window. */
+static void *lt_super_main(void *arg)
+{
+	(void)arg;
+
+	for (;;) {
+		struct timespec ts;
+		uint64_t now;
+
+		pthread_mutex_lock(&g.ctl_lock);
+		now = wb_monotonic_us();
+		if (now >= g.deadline_us) {
+			pthread_mutex_unlock(&g.ctl_lock);
+			break;
+		}
+		/* 200 ms slices: an extend is picked up promptly via the signal,
+		 * and the deadline is honoured within a slice even if a signal is
+		 * missed. */
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += 200 * 1000000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_sec += 1;
+			ts.tv_nsec -= 1000000000L;
+		}
+		pthread_cond_timedwait(&g.ctl_cond, &g.ctl_lock, &ts);
+		pthread_mutex_unlock(&g.ctl_lock);
+	}
+
+	lt_port_close();
+
+	pthread_mutex_lock(&g.ctl_lock);
+	g.super_running = 0;
+	pthread_cond_broadcast(&g.ctl_cond);
+	pthread_mutex_unlock(&g.ctl_lock);
+	return NULL;
+}
+
+int star6e_luma_tap_scan(uint32_t window_ms)
+{
+	int rc = 0;
+
+	if (!g.cfg_enabled)
+		return -ENODEV;
+	if (window_ms == 0)
+		window_ms = g.cfg_window_ms;
+	if (window_ms < LT_WINDOW_MS_MIN) window_ms = LT_WINDOW_MS_MIN;
+	if (window_ms > LT_WINDOW_MS_MAX) window_ms = LT_WINDOW_MS_MAX;
+
+	pthread_mutex_lock(&g.ctl_lock);
+
+	if (g.super_running) {
+		/* Extend only.  Deliberately no port work: re-opening per scan
+		 * request is what wedged snapshot.pgm. */
+		g.deadline_us = wb_monotonic_us() + (uint64_t)window_ms * 1000;
+		g.window_ms = window_ms;
+		pthread_cond_broadcast(&g.ctl_cond);
+		pthread_mutex_unlock(&g.ctl_lock);
+		return 0;
+	}
+
+	/* Open on the caller's thread before the supervisor exists so the caller
+	 * gets the real error (409/503) instead of a window that dies silently. */
+	rc = lt_port_open();
+	if (rc != 0) {
+		pthread_mutex_unlock(&g.ctl_lock);
+		return rc;
+	}
+
+	g.frames = 0;
+	g.grabs = 0;
+	g.window_ms = window_ms;
+	g.deadline_us = wb_monotonic_us() + (uint64_t)window_ms * 1000;
+	g.super_running = 1;
+	if (pthread_create(&g.super, NULL, lt_super_main, NULL) != 0) {
+		g.super_running = 0;
+		pthread_mutex_unlock(&g.ctl_lock);
+		fprintf(stderr, "[luma-tap] supervisor spawn failed\n");
+		lt_port_close();
+		return -EIO;
+	}
+	pthread_detach(g.super);
+	pthread_mutex_unlock(&g.ctl_lock);
+	fprintf(stderr, "[luma-tap] scan window %u ms open\n", window_ms);
+	return 0;
+}
+
+void star6e_luma_tap_scan_stop(void)
+{
+	pthread_mutex_lock(&g.ctl_lock);
+	if (!g.super_running) {
+		pthread_mutex_unlock(&g.ctl_lock);
+		/* No supervisor: close directly in case a window failed to spawn
+		 * one after opening the port. */
+		lt_port_close();
+		return;
+	}
+	g.deadline_us = 0;
+	pthread_cond_broadcast(&g.ctl_cond);
+	/* The supervisor is detached, so wait on the flag rather than joining —
+	 * on return the port is closed and port1 is free. */
+	while (g.super_running)
+		pthread_cond_wait(&g.ctl_cond, &g.ctl_lock);
+	pthread_mutex_unlock(&g.ctl_lock);
+}
+
+void star6e_luma_tap_status(Star6eLumaTapStatus *out)
+{
+	uint64_t now;
+
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	out->armed = g.cfg_enabled;
+
+	pthread_mutex_lock(&g.ctl_lock);
+	out->scanning = g.super_running;
+	out->window_ms = g.window_ms;
+	now = wb_monotonic_us();
+	out->remaining_ms = (g.super_running && g.deadline_us > now)
+		? (int64_t)((g.deadline_us - now) / 1000) : 0;
+	pthread_mutex_unlock(&g.ctl_lock);
+
+	out->width = g.w ? g.w : (g.cfg_w < g.cfg_h ? g.cfg_w : g.cfg_h);
+	out->height = g.h ? g.h : out->width;
+	out->frames = g.frames;
+	out->grabs = g.grabs;
+	star6e_vpe_port1_owner_copy(out->port1_owner,
+		sizeof(out->port1_owner));
+}
+
+/* Compat shim: configure + open a window for the pipeline lifetime.  Retained
+ * only for host tests; the pipeline arms and lets scans drive the port. */
 int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
 	uint32_t main_h)
 {
 	star6e_luma_tap_configure(cfg, main_w, main_h);
 	if (!g.cfg_enabled)
 		return 0;
-	return star6e_luma_tap_open() == 0 ? 0 : -1;
+	return lt_port_open() == 0 ? 0 : -1;
 }
 
 /* Drain whatever the port still holds, from the CLOSING thread, after the
@@ -443,7 +604,7 @@ static void lt_drain_quiescent(void)
  * the reader and JOIN it first — the loop tests reader_run at the top, so the
  * thread can only exit outside a GetBuf/PutBuf pair — then drain, then depth
  * reset, then disable. */
-void star6e_luma_tap_close(void)
+static void lt_port_close(void)
 {
 	if (!g.running && !g.port_enabled && !g.claimed)
 		return;
@@ -480,9 +641,10 @@ void star6e_luma_tap_close(void)
 
 void star6e_luma_tap_stop(void)
 {
-	/* Pipeline teardown: same dismantling as a live close, plus disarm so a
-	 * later open() cannot resurrect the tap against a torn-down graph. */
-	star6e_luma_tap_close();
+	/* Pipeline teardown: end any open window (which closes the port on the
+	 * supervisor thread and waits for it), then disarm so a later scan
+	 * cannot resurrect the tap against a torn-down graph. */
+	star6e_luma_tap_scan_stop();
 	g.cfg_enabled = 0;
 	g.cfg_w = g.cfg_h = 0;
 }

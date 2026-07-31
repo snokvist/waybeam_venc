@@ -135,6 +135,7 @@
   "qr": {
     "tapEnabled": false,
     "tapWidth": 0,
-    "tapHeight": 0
+    "tapHeight": 0,
+    "windowMs": 15000
   }
 }

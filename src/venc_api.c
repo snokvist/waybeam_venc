@@ -509,6 +509,12 @@ static const FieldUi ui_qr_tap_width = {
 	"Width of the port1 luma tap. 0 = inherit the main stream. A VPE port is "
 	"a real scaler, so this genuinely changes capture resolution."
 };
+static const FieldUi ui_qr_window_ms = {
+	"QR", "Scan window (ms)", "number", 1000, 60000, 500, NULL,
+	"How long a /api/v1/qr/scan holds VPE port1 before the supervisor closes "
+	"it and hands the port back to stab/detect. Re-scanning while a window is "
+	"open only extends the deadline; it never re-opens the port."
+};
 static const FieldUi ui_qr_tap_height = {
 	"QR", "Tap height", "number", 0, 4096, 2, NULL,
 	"Height of the port1 luma tap. 0 = inherit the main stream."
@@ -672,6 +678,8 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(qr, tap_enabled, FT_BOOL, MUT_RESTART, &ui_qr_tap_enabled),
 	FIELD_UI(qr, tap_width,   FT_UINT, MUT_RESTART, &ui_qr_tap_width),
 	FIELD_UI(qr, tap_height,  FT_UINT, MUT_RESTART, &ui_qr_tap_height),
+	/* Live: read when a window opens, so a change takes effect next scan. */
+	FIELD_UI(qr, window_ms,   FT_UINT, MUT_LIVE,    &ui_qr_window_ms),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -762,6 +770,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "qr.tapEnabled", "qr.tap_enabled" },
 	{ "qr.tapWidth", "qr.tap_width" },
 	{ "qr.tapHeight", "qr.tap_height" },
+	{ "qr.windowMs", "qr.window_ms" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -2599,15 +2608,22 @@ static int handle_qr_tap_pgm(int fd, const HttpRequest *req, void *ctx)
 #endif
 
 #if HAVE_BACKEND_STAR6E
-/* GET /api/v1/qr/tap/open — claim VPE port1 and enable the luma tap for a scan
- * window.  GET /api/v1/qr/tap/close — release it back to stab/detect.  Split
- * out so the port is held only while a scan is actually running. */
-static int handle_qr_tap_open(int fd, const HttpRequest *req, void *ctx)
+/* GET /api/v1/qr/scan[?ms=N] — open a scan window on VPE port1, or extend the
+ * one already running.  The port is closed automatically by the supervisor when
+ * the window expires, so a client that dies mid-scan cannot strand it. */
+static int handle_qr_scan(int fd, const HttpRequest *req, void *ctx)
 {
+	char buf[192];
+	Star6eLumaTapStatus st;
+	char msbuf[16];
+	uint32_t ms = 0;
 	int rc;
 
-	(void)req; (void)ctx;
-	rc = star6e_luma_tap_open();
+	(void)ctx;
+	if (req && httpd_query_param(req, "ms", msbuf, sizeof(msbuf)) == 0)
+		ms = (uint32_t)strtoul(msbuf, NULL, 10);
+
+	rc = star6e_luma_tap_scan(ms);
 	if (rc == -ENODEV)
 		return httpd_send_error(fd, 503, "tap_disabled",
 			"luma tap not armed (qr.tap_enabled off or pipeline "
@@ -2616,18 +2632,46 @@ static int handle_qr_tap_open(int fd, const HttpRequest *req, void *ctx)
 		return httpd_send_error(fd, 409, "port1_busy",
 			"VPE port1 is held by stab or detect");
 	if (rc != 0)
-		return httpd_send_error(fd, 500, "tap_open_failed",
+		return httpd_send_error(fd, 500, "scan_failed",
 			"could not program the VPE port1 tap");
-	return httpd_send_json(fd, 200,
-		"{\"ok\":true,\"data\":{\"open\":true}}");
+
+	star6e_luma_tap_status(&st);
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"scanning\":true,\"window_ms\":%u,"
+		"\"remaining_ms\":%lld,\"capture\":\"%ux%u\"}}",
+		st.window_ms, (long long)st.remaining_ms, st.width, st.height);
+	return httpd_send_json(fd, 200, buf);
 }
 
-static int handle_qr_tap_close(int fd, const HttpRequest *req, void *ctx)
+/* GET /api/v1/qr/stop — end the window now and hand port1 back.  Deliberately
+ * NOT /qr/scan/stop: the router matches on prefix and accepts a '/'
+ * continuation (venc_httpd.c), so a nested path would be swallowed by the
+ * /qr/scan route unless registration order happened to save it. */
+static int handle_qr_scan_stop(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
-	star6e_luma_tap_close();
+	star6e_luma_tap_scan_stop();
 	return httpd_send_json(fd, 200,
-		"{\"ok\":true,\"data\":{\"open\":false}}");
+		"{\"ok\":true,\"data\":{\"scanning\":false}}");
+}
+
+/* GET /api/v1/qr/status — poll a running scan without disturbing it. */
+static int handle_qr_status(int fd, const HttpRequest *req, void *ctx)
+{
+	char buf[320];
+	Star6eLumaTapStatus st;
+
+	(void)req; (void)ctx;
+	star6e_luma_tap_status(&st);
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"armed\":%s,\"scanning\":%s,"
+		"\"window_ms\":%u,\"remaining_ms\":%lld,\"capture\":\"%ux%u\","
+		"\"frames\":%llu,\"grabs\":%llu,\"port1_owner\":\"%s\"}}",
+		st.armed ? "true" : "false", st.scanning ? "true" : "false",
+		st.window_ms, (long long)st.remaining_ms, st.width, st.height,
+		(unsigned long long)st.frames, (unsigned long long)st.grabs,
+		st.port1_owner);
+	return httpd_send_json(fd, 200, buf);
 }
 #endif
 
@@ -3766,8 +3810,9 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
 #if HAVE_BACKEND_STAR6E
 	r |= venc_httpd_route("GET", "/api/v1/qr/tap.pgm",   handle_qr_tap_pgm, NULL);
-	r |= venc_httpd_route("GET", "/api/v1/qr/tap/open",  handle_qr_tap_open, NULL);
-	r |= venc_httpd_route("GET", "/api/v1/qr/tap/close", handle_qr_tap_close, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/qr/scan",      handle_qr_scan, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/qr/stop",      handle_qr_scan_stop, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/qr/status",    handle_qr_status, NULL);
 #endif
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);

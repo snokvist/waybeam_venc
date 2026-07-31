@@ -246,6 +246,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->qr.tap_enabled = false;
 	cfg->qr.tap_width   = 0;   /* 0 -> inherit main stream */
 	cfg->qr.tap_height  = 0;
+	cfg->qr.window_ms   = 15000;
 }
 
 /* ── Load from JSON file ─────────────────────────────────────────────── */
@@ -911,6 +912,8 @@ int venc_config_load(const char *path, VencConfig *cfg)
 				"tapWidth", (int)cfg->qr.tap_width);
 			cfg->qr.tap_height = (uint32_t)json_get_int(obj,
 				"tapHeight", (int)cfg->qr.tap_height);
+			cfg->qr.window_ms = (uint32_t)json_get_int(obj,
+				"windowMs", (int)cfg->qr.window_ms);
 		}
 	}
 
@@ -1465,7 +1468,8 @@ static void render_qr(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_section_open(p, 1, "qr");
 	pp_field_bool(p, 2, "tapEnabled", cfg->qr.tap_enabled,       0);
 	pp_field_int(p,  2, "tapWidth",   (int)cfg->qr.tap_width,    0);
-	pp_field_int(p,  2, "tapHeight",  (int)cfg->qr.tap_height,   1);
+	pp_field_int(p,  2, "tapHeight",  (int)cfg->qr.tap_height,   0);
+	pp_field_int(p,  2, "windowMs",   (int)cfg->qr.window_ms,    1);
 	pp_section_close(p, 1, is_last);
 }
 
@@ -1718,6 +1722,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(qr, "tapEnabled", cfg->qr.tap_enabled);
 		cJSON_AddNumberToObject(qr, "tapWidth", cfg->qr.tap_width);
 		cJSON_AddNumberToObject(qr, "tapHeight", cfg->qr.tap_height);
+		cJSON_AddNumberToObject(qr, "windowMs", cfg->qr.window_ms);
 	}
 
 	return root;

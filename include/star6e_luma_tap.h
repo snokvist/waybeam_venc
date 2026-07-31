@@ -48,17 +48,37 @@ int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
 void star6e_luma_tap_configure(const VencConfig *cfg, uint32_t main_w,
 	uint32_t main_h);
 
-/* Open the tap for a scan window: claim port1, program geometry, enable, spawn
- * the reader.  Returns 0, -EBUSY when port1 is held by stab/detect, -ENODEV
- * when disabled or unconfigured, -EIO on SDK refusal.  Idempotent. */
-int star6e_luma_tap_open(void);
+/* Start a scan window of `window_ms` (0 = the configured qr.windowMs), or
+ * EXTEND the one already running.  Extending never touches port state — it only
+ * moves the deadline — so repeated scan requests are cheap and cannot
+ * re-introduce the Enable/Disable cycling that wedged snapshot.pgm.
+ *
+ * Returns 0, -EBUSY when port1 is held by stab/detect (reported immediately,
+ * never queued), -ENODEV when unarmed, -EIO on SDK refusal.
+ *
+ * Safe from any thread.  The port itself is only ever opened and closed by the
+ * supervisor thread this spawns, so no SDK port call is ever made concurrently
+ * from two threads. */
+int star6e_luma_tap_scan(uint32_t window_ms);
 
-/* Close the tap and hand port1 back, with the ENCODER STILL RUNNING.  Ordering
- * differs from pipeline teardown and is the risky path: stop the reader and
- * join it, then drain any buffers the port still holds, and only then reset the
- * depth and disable.  Disabling with buffers queued is what races an in-flight
- * mhal buffer.  Idempotent. */
-void star6e_luma_tap_close(void);
+/* End the current window early.  Blocks until the supervisor has closed the
+ * port and released port1, so a caller can rely on port1 being free on return.
+ * Idempotent. */
+void star6e_luma_tap_scan_stop(void);
+
+typedef struct {
+	int      armed;        /* qr.tap_enabled and pipeline up            */
+	int      scanning;     /* a window is open                          */
+	uint32_t width, height;/* latch (centre-square) geometry            */
+	uint32_t window_ms;    /* budget of the current/last window         */
+	int64_t  remaining_ms; /* <=0 when not scanning                     */
+	uint64_t frames;       /* frames drained this window                */
+	uint64_t grabs;        /* frames actually copied out this window    */
+	char     port1_owner[24]; /* "" when free                           */
+} Star6eLumaTapStatus;
+
+/* Snapshot the tap state for /api/v1/qr/status.  Safe from any thread. */
+void star6e_luma_tap_status(Star6eLumaTapStatus *out);
 
 /* Stop the tap and hand port1 back: park the reader outside the GetBuf/PutBuf
  * window, join it, reset the output depth, disable the port, release the claim.

@@ -345,6 +345,10 @@ typedef struct {
 	uint32_t tap_height;   /* 0 → inherit the main stream.  Independent
 	                          of port0: unlike the MJPEG snapshot
 	                          channel, a VPE port really does scale.    */
+	uint32_t window_ms;    /* scan-window budget; clamped 1000..60000.
+	                          The port is held only this long, then the
+	                          supervisor closes it and port1 goes back
+	                          to stab/detect.                           */
 } VencConfigQr;
 
 /* ── Top-level config ────────────────────────────────────────────────── */
