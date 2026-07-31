@@ -109,13 +109,12 @@ static struct {
 	int              port_enabled;
 	int              claimed;
 	MI_SYS_ChnPort_t port;           /* {VPE,0,0,1}                         */
-	uint32_t         w, h;           /* tap geometry actually programmed    */
+	uint32_t         port_w, port_h; /* geometry programmed on the port     */
+	uint32_t         w, h;           /* latch geometry = centre square      */
 
 	pthread_t             reader;
 	int                   reader_started;
 	volatile sig_atomic_t reader_run;
-	volatile int          pause;
-	volatile int          parked;
 
 	/* Grab handshake.  `lock` guards grab_pending/latch_valid and publishes
 	 * the latch; `api_lock` serializes concurrent HTTP callers so only one
@@ -133,6 +132,11 @@ static struct {
 	lt_put_buf_fn  put_buf;
 	lt_mmap_fn     mmap_fn;
 	lt_munmap_fn   munmap_fn;
+
+	/* Settings captured at pipeline bring-up so open() can program the port
+	 * later without a VencConfig in hand. */
+	int      cfg_enabled;
+	uint32_t cfg_w, cfg_h;
 } g = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 	.cond = PTHREAD_COND_INITIALIZER,
@@ -167,30 +171,37 @@ static int lt_load_sys_symbols(void)
 static int lt_latch_frame(const LtFrameData_t *fr)
 {
 	uint32_t stride = fr->u32Stride[0] ? fr->u32Stride[0] : fr->u16Width;
-	uint32_t rows = fr->u16Height;
-	uint32_t cols = fr->u16Width;
+	uint32_t fw = fr->u16Width, fh = fr->u16Height;
+	uint32_t side = g.w;            /* latch is square: g.w == g.h */
+	uint32_t x0, y0;
 	MI_U64 phy = fr->phyAddr[0];
 	void *vir = NULL;
 
-	/* The programmed geometry is what the latch was sized for; a frame that
-	 * disagrees is copied only up to the smaller of the two. */
-	if (rows > g.h) rows = g.h;
-	if (cols > g.w) cols = g.w;
-	if (!phy || !rows || !cols)
+	if (!phy || fw == 0 || fh == 0 || side == 0)
 		return -EIO;
+	/* A frame smaller than the latch (shouldn't happen) is clamped rather
+	 * than trusted. */
+	if (side > fw) side = fw;
+	if (side > fh) side = fh;
+
+	/* Centre crop.  The SCL scales but does not crop, so taking the square
+	 * here is what keeps the aspect undistorted — and it drops the outer
+	 * frame where the fisheye is worst and where a marker never sits. */
+	x0 = (fw - side) / 2;
+	y0 = (fh - side) / 2;
 
 	/* Map non-cached (flag 0) so reads see the latest DMA without an
 	 * explicit invalidate.  The source is never written. */
-	if (g.mmap_fn(phy, stride * fr->u16Height, &vir, 0) != 0 || !vir)
+	if (g.mmap_fn(phy, stride * fh, &vir, 0) != 0 || !vir)
 		return -EIO;
 
 	{
 		const uint8_t *src = (const uint8_t *)vir;
-		for (uint32_t row = 0; row < rows; ++row)
+		for (uint32_t row = 0; row < side; ++row)
 			memcpy(g.latch + (size_t)row * g.w,
-			       src + (size_t)row * stride, cols);
+			       src + (size_t)(y0 + row) * stride + x0, side);
 	}
-	g.munmap_fn(vir, stride * fr->u16Height);
+	g.munmap_fn(vir, stride * fh);
 	return 0;
 }
 
@@ -206,15 +217,6 @@ static void *lt_reader_main(void *arg)
 		LtBufInfo_t buf;
 		LtBufHandle_t handle = 0;
 		int want;
-
-		/* Quiesce handshake: park outside GetBuf/PutBuf so stop() can
-		 * DisablePort without racing the drain. */
-		if (g.pause) {
-			g.parked = 1;
-			usleep(2000);
-			continue;
-		}
-		g.parked = 0;
 
 		if (fd >= 0) {
 			fd_set rfds;
@@ -280,17 +282,14 @@ static void lt_port_teardown(void)
 	g.port_enabled = 0;
 }
 
-int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
+void star6e_luma_tap_configure(const VencConfig *cfg, uint32_t main_w,
 	uint32_t main_h)
 {
-	MI_VPE_PortAttr_t port;
-	MI_S32 ret;
 	uint32_t w, h;
 
+	g.cfg_enabled = 0;
 	if (!cfg || !cfg->qr.tap_enabled)
-		return 0;
-	if (g.running)
-		return 0;
+		return;
 
 	w = cfg->qr.tap_width ? cfg->qr.tap_width : main_w;
 	h = cfg->qr.tap_height ? cfg->qr.tap_height : main_h;
@@ -302,15 +301,31 @@ int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
 	    (uint64_t)w * h > LT_MAX_PIXELS) {
 		fprintf(stderr, "[luma-tap] refusing geometry %ux%u\n",
 			cfg->qr.tap_width, cfg->qr.tap_height);
-		return -1;
+		return;
 	}
+	g.cfg_w = w;
+	g.cfg_h = h;
+	g.cfg_enabled = 1;
+	fprintf(stderr, "[luma-tap] armed: port %ux%u, centre square %u "
+		"(opens per scan window)\n", w, h, w < h ? w : h);
+}
 
-	/* Lowest-priority claimant: stab and detect have already had their turn
-	 * by the time the pipeline calls us, and losing is non-fatal. */
+int star6e_luma_tap_open(void)
+{
+	MI_VPE_PortAttr_t port;
+	MI_S32 ret;
+	uint32_t w = g.cfg_w, h = g.cfg_h;
+
+	if (!g.cfg_enabled)
+		return -ENODEV;
+	if (g.running)
+		return 0;
+
+	/* Lowest-priority claimant: a scan window cannot evict stab or detect. */
 	if (star6e_vpe_port1_claim(LT_OWNER) != 0) {
-		fprintf(stderr, "[luma-tap] skipped — VPE port1 held by '%s'\n",
-			star6e_vpe_port1_owner());
-		return -1;
+		fprintf(stderr, "[luma-tap] open refused — VPE port1 held by "
+			"'%s'\n", star6e_vpe_port1_owner());
+		return -EBUSY;
 	}
 	g.claimed = 1;
 
@@ -318,10 +333,18 @@ int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
 		fprintf(stderr, "[luma-tap] MI_SYS symbols unavailable\n");
 		goto fail;
 	}
+	g.port_w = w;
+	g.port_h = h;
+	/* Latch is the CENTRE SQUARE of the port output.  The SCL scales but does
+	 * not crop, so the square has to be taken during the copy — which also
+	 * discards the outer frame where fisheye distortion is worst and where a
+	 * marker never sits.  See lt_latch_frame(). */
+	g.w = g.h = (w < h) ? w : h;
 
-	g.latch = malloc((size_t)w * h);
+	g.latch = malloc((size_t)g.w * g.h);
 	if (!g.latch) {
-		fprintf(stderr, "[luma-tap] latch alloc %ux%u failed\n", w, h);
+		fprintf(stderr, "[luma-tap] latch alloc %ux%u failed\n",
+			g.w, g.h);
 		goto fail;
 	}
 
@@ -351,12 +374,8 @@ int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
 	/* Unbound output port needs a user frame queue or GetBuf sees 0 frames. */
 	MI_SYS_SetChnOutputPortDepth(&g.port, 2, 4);
 
-	g.w = w;
-	g.h = h;
 	g.grab_pending = 0;
 	g.latch_valid = 0;
-	g.pause = 0;
-	g.parked = 0;
 	g.reader_run = 1;
 	if (pthread_create(&g.reader, NULL, lt_reader_main, NULL) != 0) {
 		fprintf(stderr, "[luma-tap] reader thread spawn failed\n");
@@ -365,7 +384,8 @@ int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
 	}
 	g.reader_started = 1;
 	g.running = 1;
-	fprintf(stderr, "[luma-tap] VPE port1 tap up at %ux%u\n", w, h);
+	fprintf(stderr, "[luma-tap] VPE port1 tap up: port %ux%u, square %ux%u\n",
+		w, h, g.w, g.h);
 	return 0;
 
 fail:
@@ -376,27 +396,62 @@ fail:
 		star6e_vpe_port1_release(LT_OWNER);
 		g.claimed = 0;
 	}
-	return -1;
+	return -EIO;
 }
 
-void star6e_luma_tap_stop(void)
+/* Compat shim: configure + open in one call (pipeline-lifetime tap). */
+int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
+	uint32_t main_h)
 {
-	/* Refuse new grabs before anything is dismantled; in-flight ones are
-	 * released by the broadcast below and re-check g.running. */
+	star6e_luma_tap_configure(cfg, main_w, main_h);
+	if (!g.cfg_enabled)
+		return 0;
+	return star6e_luma_tap_open() == 0 ? 0 : -1;
+}
+
+/* Drain whatever the port still holds, from the CLOSING thread, after the
+ * reader has been joined.  Disabling a port that still has queued buffers is
+ * what races an in-flight mhal buffer — the failure that retired snapshot.pgm.
+ * Bounded so a misbehaving port cannot spin here forever. */
+static void lt_drain_quiescent(void)
+{
+	int empty_polls = 0, drained = 0;
+
+	if (!g.port_enabled || !g.get_buf || !g.put_buf)
+		return;
+	/* Two consecutive empty GetBufs, or 64 buffers, whichever comes first. */
+	while (empty_polls < 2 && drained < 64) {
+		LtBufInfo_t buf;
+		LtBufHandle_t handle = 0;
+
+		memset(&buf, 0, sizeof(buf));
+		if (g.get_buf(&g.port, &buf, &handle) != 0) {
+			empty_polls++;
+			usleep(2000);
+			continue;
+		}
+		empty_polls = 0;
+		drained++;
+		g.put_buf(handle);
+	}
+	if (drained)
+		fprintf(stderr, "[luma-tap] drained %d buffered frame(s) before "
+			"disable\n", drained);
+}
+
+/* Live close: the encoder keeps running, so this is the risky ordering.  Stop
+ * the reader and JOIN it first — the loop tests reader_run at the top, so the
+ * thread can only exit outside a GetBuf/PutBuf pair — then drain, then depth
+ * reset, then disable. */
+void star6e_luma_tap_close(void)
+{
+	if (!g.running && !g.port_enabled && !g.claimed)
+		return;
+
 	g.running = 0;
 
 	if (g.reader_started) {
-		int spins;
-
-		/* Park the reader outside its GetBuf/PutBuf window before the
-		 * port goes away.  select() bounds a cycle at 50 ms, so this
-		 * settles well inside the budget; the join is what actually
-		 * guarantees it, the park just makes it prompt. */
-		g.pause = 1;
-		for (spins = 0; spins < 100 && !g.parked; ++spins)
-			usleep(2000);
 		g.reader_run = 0;
-		/* Release anyone blocked in grab() so the join cannot stall. */
 		pthread_mutex_lock(&g.lock);
 		g.grab_pending = 0;
 		g.latch_valid = 0;
@@ -406,10 +461,9 @@ void star6e_luma_tap_stop(void)
 		g.reader_started = 0;
 	}
 
+	lt_drain_quiescent();
 	lt_port_teardown();
 
-	/* Under the lock: a grab that woke on the broadcast may still be inside
-	 * its memcpy out of the latch. */
 	pthread_mutex_lock(&g.lock);
 	free(g.latch);
 	g.latch = NULL;
@@ -421,6 +475,16 @@ void star6e_luma_tap_stop(void)
 		g.claimed = 0;
 	}
 	g.w = g.h = 0;
+	g.port_w = g.port_h = 0;
+}
+
+void star6e_luma_tap_stop(void)
+{
+	/* Pipeline teardown: same dismantling as a live close, plus disarm so a
+	 * later open() cannot resurrect the tap against a torn-down graph. */
+	star6e_luma_tap_close();
+	g.cfg_enabled = 0;
+	g.cfg_w = g.cfg_h = 0;
 }
 
 int star6e_luma_tap_running(void)

@@ -37,14 +37,33 @@ proven.
 
 ## Design decisions
 
-**Enable once per pipeline run; never cycle per request.** This is the whole
-lesson of the `snapshot.pgm` retirement (#205). That code ran
-`SetPortMode → EnablePort → SetDepth → GetBuf → PutBuf → SetDepth(0,0) →
-DisablePort` on *every HTTP request*, and the `DisablePort` half raced an
-in-flight mhal buffer: 2 hard wedges in ~560 stressed captures, kernel-side, not
-fixable from userspace. The port here is programmed in `configure_graph` and
-released only in `teardown_graph`. A capture request sets a flag; it never
-touches port state.
+**Never cycle the port per request — but do scope it to a scan window.** The
+`snapshot.pgm` retirement (#205) ran `SetPortMode → EnablePort → SetDepth →
+GetBuf → PutBuf → SetDepth(0,0) → DisablePort` on *every HTTP request*, and the
+`DisablePort` half raced an in-flight mhal buffer: 2 hard wedges in ~560 stressed
+captures, kernel-side, not fixable from userspace.
+
+The first cut of this module avoided that by holding the port for the whole
+pipeline run. Measured on device, that is too expensive to keep: an always-on
+1080p60 tap adds ~186 MB/s of SCL write traffic to shared DDR and cost 8-9
+points of aggregate CPU while completely idle (45% → 54%, three samples each),
+and it holds port1 against stab and detect for the entire run for no benefit
+when nobody is scanning.
+
+So the port is claimed and enabled for the duration of a **scan window** and
+released at its end — orders of magnitude fewer Enable/Disable cycles than
+per-request, but not zero. Bring-up only *arms* the tap
+(`star6e_luma_tap_configure`); `star6e_luma_tap_open()` / `_close()` bracket a
+window. Whether this is safe is an empirical question, not an argued one — see
+Verification.
+
+**A live close is not pipeline teardown.** Releasing the port while the encoder
+keeps running is the risky ordering. `_close()` stops the reader and JOINs it
+(the loop tests its run flag at the top, so it can only exit outside a
+GetBuf/PutBuf pair), then **drains the port to quiescent** from the closing
+thread, and only then resets depth and disables. Disabling while buffers are
+still queued is precisely what races an in-flight mhal buffer. Pipeline teardown
+(`_stop()`) is the same sequence plus disarming.
 
 **The reader drains every frame; the consumer never does.** An
 enabled-but-undrained port is dangerous on this BSP — the i6e port2 probe
@@ -53,11 +72,11 @@ stalled port0 with no consumer attached. The reader thread bounces every frame
 grab is pending. A future QR decode of ~1.5 s therefore never sits between
 `GetBuf` and `PutBuf`.
 
-**Teardown order is load-bearing:** park the reader outside the GetBuf/PutBuf
-window → join → `SetChnOutputPortDepth(0,0)` → `DisablePort` → release the
-arbiter claim. Leaving the depth registered wedges the *next* process with a
-fence that never completes. Every path that enabled the port — including
-failure unwinds — exits through one teardown function.
+**Teardown order is load-bearing:** stop the reader → join → drain to quiescent
+→ `SetChnOutputPortDepth(0,0)` → `DisablePort` → release the arbiter claim.
+Leaving the depth registered wedges the *next* process with a fence that never
+completes. Every path that enabled the port — including failure unwinds — exits
+through one teardown function.
 
 **QR is the lowest-priority port1 claimant.** Stab and detect are unchanged.
 `star6e_vpe_port1_claim("qr")` runs *after* both have had their turn, and a
@@ -84,10 +103,10 @@ rect poisons a later detect run. The tap uses full-frame scaling only.
 ## Files
 
 ```
-include/star6e_luma_tap.h   NEW  start/stop/grab API
+include/star6e_luma_tap.h   NEW  configure/open/close/grab API
 src/star6e_luma_tap.c       NEW  port setup, reader thread, Y copy, PGM pack
-src/star6e_pipeline.c       wire start after detect, stop in teardown_graph
-src/venc_api.c              GET /api/v1/qr/tap.pgm + 3 config fields
+src/star6e_pipeline.c       arm at bring-up, stop in teardown_graph
+src/venc_api.c              GET /api/v1/qr/tap{.pgm,/open,/close} + 3 fields
 src/venc_config.c           defaults, load_qr, to_json, render_qr
 include/venc_config.h       VencConfigQr (trailing member — ABI append-only)
 config/waybeam.default.json qr section
@@ -102,20 +121,21 @@ Makefile                    STAR6E_ONLY_SRC += src/star6e_luma_tap.c
 | `qr.tapWidth` | `qr.tap_width` | uint | `0` (inherit) | restart |
 | `qr.tapHeight` | `qr.tap_height` | uint | `0` (inherit) | restart |
 
-All `MUT_RESTART`: the port is programmed at graph configure time, and making
-them live would mean reprogramming a live port — the thing this design exists to
-avoid. Fields carry `FIELD_UI` descriptors so the WebUI builds controls from
+All `MUT_RESTART`: geometry is captured when the graph is configured, so a live
+change would disagree with an open window. Fields carry `FIELD_UI` descriptors so the WebUI builds controls from
 `/api/v1/capabilities` with no `SECTIONS[]` edit and no `make webui` rebuild.
 
 ## Endpoint
 
-`GET /api/v1/qr/tap.pgm` → `image/x-portable-graymap`, one P5 frame at tap
-geometry. `503 tap_disabled` when the tap is not running (disabled, port1 held
-by stab/detect, or pipeline down); `504 tap_timeout` when no frame arrives
-within the grab deadline.
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/qr/tap/open` | claim port1 and enable the tap for a scan window. `409 port1_busy` when stab or detect holds it; `503 tap_disabled` when unarmed |
+| `GET /api/v1/qr/tap.pgm` | one P5 frame at tap geometry. `503 tap_disabled` when no window is open; `504 tap_timeout` when no frame arrives |
+| `GET /api/v1/qr/tap/close` | release port1 back to stab/detect |
 
-Debug-grade and Star6E-only by construction. It is the experiment instrument,
-not a product surface.
+Debug-grade and Star6E-only by construction. These are the experiment
+instrument; the shipping surface is a scan-window API that brackets open/close
+around a deadline rather than exposing them raw.
 
 ## Verification
 
@@ -130,9 +150,15 @@ not a product surface.
   - **Geometry** — set `qr.tapWidth`/`Height` below the main stream and confirm
     the PGM header reports the requested size, i.e. the resolution knob the JPEG
     path cannot offer.
-  - **Stress** — ~500 grabs against the persistently-enabled tap, checking for
-    `EnsureInputPortFifoEmpty` / MMU faults in `dmesg` and confirming the encoder
-    never drops frames. Captures, not port cycles: the point is that the port is
-    enabled once and the count exercises the *grab* path.
+  - **Grab stress** — captures against an open tap, checking for
+    `EnsureInputPortFifoEmpty` / MMU faults in `dmesg`. Done: 300/300 grabs
+    byte-exact, 0 wedge signatures, no leak (`MemAvailable` 43.9 → 42.1 MB).
+    Note decode rate is NOT a tap metric when the marker is handheld — it
+    measures presentation. Judge on HTTP failures and `dmesg` only.
+  - **Cycle stress — the gating one.** open → grab → close repeatedly *with the
+    encoder live*, counting CYCLES not captures. This is the direct analogue of
+    what wedged `snapshot.pgm` (~2 per 560 cycles), and it is what decides
+    whether window-scoping is viable at all. If it wedges, the choice collapses
+    to hold-the-port-forever or do not ship QR alongside detect.
   - **Lifecycle** — pipeline restart and SIGHUP reinit with the tap enabled,
     confirming clean teardown and no stale-fence wedge in the successor.

@@ -6,10 +6,28 @@ Overlay-free luma tap on VPE port1 (Star6E), as the capture foundation for
 inline QR scanning. Capture only — no decoding, no scan-window state machine.
 
 - **`qr.tapEnabled` / `qr.tapWidth` / `qr.tapHeight`** (`src/star6e_luma_tap.c`)
-  — a read-only NV12 tap on VPE port1 with its own geometry, drained
-  continuously by a dedicated reader thread. Off by default. `0` dimensions
-  inherit the main stream. Unlike the MJPEG snapshot channel, a VPE port is a
-  real scaler, so these genuinely change capture resolution.
+  — a read-only NV12 tap on VPE port1 with its own geometry, drained by a
+  dedicated reader thread for the duration of a scan window. Off by default.
+  `0` dimensions inherit the main stream. Unlike the MJPEG snapshot channel, a
+  VPE port is a real scaler, so these genuinely change capture resolution.
+
+  **Window-scoped, not pipeline-lifetime.** Bring-up only *arms* the tap;
+  `/qr/tap/open` claims and enables port1, `/qr/tap/close` releases it back to
+  stab/detect. Holding it for the whole run was measured too expensive: an
+  always-on 1080p60 tap adds ~186 MB/s of SCL write traffic to shared DDR and
+  cost 8-9 points of aggregate CPU while completely idle (45% → 54%). Device
+  result for the cycling this introduces: **200/200 open/grab/close cycles with
+  the encoder live, zero wedge signatures** — against snapshot.pgm's ~1 per 280.
+  A live close stops and joins the reader, then **drains the port to quiescent**
+  before resetting depth and disabling; disabling with buffers still queued is
+  what races an in-flight mhal buffer.
+
+  **The latch is the centre square** of the port output (1080×1080 from a
+  1920×1080 stream), cropped during the copy. Done in software on purpose:
+  `MI_VPE_SetPortCrop` is sticky on i6e and a leftover rect poisons a later
+  detect run. The SCL scales but does not crop, so asking the port for a square
+  directly would squash the aspect. Drops the outer frame where fisheye is
+  worst, and cuts the latch from 2.07 MB to 1.17 MB.
 
   Why it exists: MI_RGN composites **per scaler output port**, and every
   overlay producer targets port0 — `debug_osd` here, `osd_render` in
@@ -26,9 +44,10 @@ inline QR scanning. Capture only — no decoding, no scan-window state machine.
   skipped with a log line when `video0.framing=stab` or `detect.enabled` holds
   port1.
 
-- **`GET /api/v1/qr/tap.pgm`** — one frame of the tap as a P5 PGM
-  (self-describing dimensions, stride removed). `503 tap_disabled` when the tap
-  is not running, `504 tap_timeout` when no frame arrives. Debug-grade
+- **`GET /api/v1/qr/tap{.pgm,/open,/close}`** — `/open` claims port1 for a scan
+  window (`409 port1_busy` when stab or detect holds it), `.pgm` returns one
+  frame as a P5 PGM (self-describing dimensions, stride removed; `503` with no
+  window open, `504` on no frame), `/close` releases it. Debug-grade
   instrumentation for validating the tap, Star6E only.
 
 - **`snapshot.width` / `snapshot.height` tooltips corrected**

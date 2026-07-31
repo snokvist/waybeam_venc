@@ -2141,11 +2141,12 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	if (vcfg->detect.enabled)
 		(void)star6e_pipeline_detect_start(state, vcfg);
 
-	/* Overlay-free luma tap on VPE port1.  Lowest-priority claimant: stab
-	 * (above) and detect (just now) have already had their turn, and a
-	 * refusal is logged and non-fatal — /api/v1/qr/tap.pgm then answers 503.
-	 * Enabled ONCE here and released only in teardown; never per request. */
-	(void)star6e_luma_tap_start(vcfg, state->image_width,
+	/* Arm the overlay-free luma tap on VPE port1.  This does NOT open the
+	 * port: an always-on tap costs ~186 MB/s of SCL write bandwidth at
+	 * 1080p60 and holds port1 against stab/detect for the whole run, all for
+	 * nothing when no scan is in progress.  The port is claimed and enabled
+	 * only for the duration of a scan window, and never per request. */
+	star6e_luma_tap_configure(vcfg, state->image_width,
 		state->image_height);
 
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the

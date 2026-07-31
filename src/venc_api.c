@@ -2598,6 +2598,39 @@ static int handle_qr_tap_pgm(int fd, const HttpRequest *req, void *ctx)
 }
 #endif
 
+#if HAVE_BACKEND_STAR6E
+/* GET /api/v1/qr/tap/open — claim VPE port1 and enable the luma tap for a scan
+ * window.  GET /api/v1/qr/tap/close — release it back to stab/detect.  Split
+ * out so the port is held only while a scan is actually running. */
+static int handle_qr_tap_open(int fd, const HttpRequest *req, void *ctx)
+{
+	int rc;
+
+	(void)req; (void)ctx;
+	rc = star6e_luma_tap_open();
+	if (rc == -ENODEV)
+		return httpd_send_error(fd, 503, "tap_disabled",
+			"luma tap not armed (qr.tap_enabled off or pipeline "
+			"not running)");
+	if (rc == -EBUSY)
+		return httpd_send_error(fd, 409, "port1_busy",
+			"VPE port1 is held by stab or detect");
+	if (rc != 0)
+		return httpd_send_error(fd, 500, "tap_open_failed",
+			"could not program the VPE port1 tap");
+	return httpd_send_json(fd, 200,
+		"{\"ok\":true,\"data\":{\"open\":true}}");
+}
+
+static int handle_qr_tap_close(int fd, const HttpRequest *req, void *ctx)
+{
+	(void)req; (void)ctx;
+	star6e_luma_tap_close();
+	return httpd_send_json(fd, 200,
+		"{\"ok\":true,\"data\":{\"open\":false}}");
+}
+#endif
+
 static int handle_version(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
@@ -3733,6 +3766,8 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
 #if HAVE_BACKEND_STAR6E
 	r |= venc_httpd_route("GET", "/api/v1/qr/tap.pgm",   handle_qr_tap_pgm, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/qr/tap/open",  handle_qr_tap_open, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/qr/tap/close", handle_qr_tap_close, NULL);
 #endif
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);

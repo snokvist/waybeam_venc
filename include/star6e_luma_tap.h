@@ -40,6 +40,26 @@
 int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
 	uint32_t main_h);
 
+/* Remember the tap settings without touching the port.  Called at pipeline
+ * bring-up so a later open() knows its geometry.  The port is NOT claimed and
+ * NOT enabled here: an always-on tap costs ~186 MB/s of SCL write bandwidth at
+ * 1080p60 and holds port1 against detect/stab for the whole run, for nothing
+ * when no scan is in progress. */
+void star6e_luma_tap_configure(const VencConfig *cfg, uint32_t main_w,
+	uint32_t main_h);
+
+/* Open the tap for a scan window: claim port1, program geometry, enable, spawn
+ * the reader.  Returns 0, -EBUSY when port1 is held by stab/detect, -ENODEV
+ * when disabled or unconfigured, -EIO on SDK refusal.  Idempotent. */
+int star6e_luma_tap_open(void);
+
+/* Close the tap and hand port1 back, with the ENCODER STILL RUNNING.  Ordering
+ * differs from pipeline teardown and is the risky path: stop the reader and
+ * join it, then drain any buffers the port still holds, and only then reset the
+ * depth and disable.  Disabling with buffers queued is what races an in-flight
+ * mhal buffer.  Idempotent. */
+void star6e_luma_tap_close(void);
+
 /* Stop the tap and hand port1 back: park the reader outside the GetBuf/PutBuf
  * window, join it, reset the output depth, disable the port, release the claim.
  * Idempotent; safe when start() was never called or failed.  Must run BEFORE
