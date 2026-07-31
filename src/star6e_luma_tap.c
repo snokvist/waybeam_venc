@@ -49,6 +49,10 @@
 #define LT_OWNER      "qr"
 #define LT_PORT       1
 #define LT_MAX_DIM    4096u
+/* How long a freshly enabled port gets to deliver its first frame before we
+ * conclude the SCL will not drive that geometry.  Generous: it is only ever
+ * waited out on the failure path, and a healthy port answers in one frame. */
+#define LT_FIRST_FRAME_MS 1000u
 #define LT_WINDOW_MS_MIN 1000u
 #define LT_WINDOW_MS_MAX 60000u
 /* Refuse a tap whose luma plane alone would dominate a 64-128 MB target. */
@@ -420,6 +424,7 @@ static int lt_port_open(void)
 
 	g.grab_pending = 0;
 	g.latch_valid = 0;
+	g.frames = 0;   /* the first-frame probe below counts from here */
 	g.reader_run = 1;
 	if (pthread_create(&g.reader, NULL, lt_reader_main, NULL) != 0) {
 		fprintf(stderr, "[luma-tap] reader thread spawn failed\n");
@@ -428,6 +433,39 @@ static int lt_port_open(void)
 	}
 	g.reader_started = 1;
 	g.running = 1;
+
+	/* Prove the port actually produces before reporting the window open.
+	 *
+	 * MI_VPE_SetPortMode and EnablePort both return success for geometries
+	 * the SCL will not in fact drive -- measured: a 160x90 port claims
+	 * port1, enables cleanly, and then delivers ZERO frames forever.  The
+	 * scan window looked healthy, /qr/tap.pgm timed out, and detect and
+	 * stab were locked out of port1 for the whole window for nothing.
+	 *
+	 * Deliberately a frame probe rather than a geometry rule: the SDK's real
+	 * constraint is not documented and cannot be derived safely (the working
+	 * 1920x1080 is not 16-aligned in height, so the obvious rule is wrong).
+	 * Watching for a frame catches every cause -- too small, misaligned, or
+	 * whatever else -- and costs one frame time on the success path. */
+	{
+		unsigned waited = 0;
+
+		while (g.frames == 0 && waited < LT_FIRST_FRAME_MS) {
+			usleep(10000);
+			waited += 10;
+		}
+		if (g.frames == 0) {
+			fprintf(stderr, "[luma-tap] VPE port1 %ux%u enabled but "
+				"produced no frame in %u ms — geometry not "
+				"driveable by the SCL; releasing port1\n",
+				w, h, LT_FIRST_FRAME_MS);
+			/* Full teardown: the reader is running, so the fail
+			 * label's shorter sequence is not enough. */
+			lt_port_close();
+			return -EIO;
+		}
+	}
+
 	fprintf(stderr, "[luma-tap] VPE port1 tap up: port %ux%u, square %ux%u\n",
 		w, h, g.w, g.h);
 	return 0;

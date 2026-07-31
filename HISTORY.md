@@ -2,8 +2,9 @@
 
 ## [0.61.0] - 2026-07-31
 
-Overlay-free luma tap on VPE port1 (Star6E), as the capture foundation for
-inline QR scanning. Capture only — no decoding, no scan-window state machine.
+Inline QR scanning on Star6E: an overlay-free luma tap on VPE port1, scan
+windows that decode in process, and a decode cascade now shared with the
+`qr_decode` CLI instead of duplicated.
 
 - **`qr.tapEnabled` / `qr.tapWidth` / `qr.tapHeight`** (`src/star6e_luma_tap.c`)
   — a read-only NV12 tap on VPE port1 with its own geometry, drained by a
@@ -67,6 +68,62 @@ inline QR scanning. Capture only — no decoding, no scan-window state machine.
   Note `/api/v1/qr/stop`, not `/qr/scan/stop`: the HTTP router matches on prefix
   and accepts a `/` continuation, so a nested path is swallowed by the
   `/qr/scan` route.
+
+- **The decode cascade is now shared code** (`src/qr_scan.c`,
+  `include/qr_scan.h`) — extracted from `tools/qr/qr_decode.c` and linked by
+  both the CLI and the daemon. A second copy would drift silently, and a
+  drifted decoder does not crash, it just quietly stops pairing. Stage order,
+  thresholds and outer-frame gating are unchanged. Image loading stays in the
+  CLI: it is the only part needing stb_image, and the daemon feeds the cascade
+  luma it already holds.
+
+  **Peak heap 5.04x -> 3.30x W*H**, measured with a live-heap interposer on a
+  1080x1080 exhaustive decode (5741 KB -> 3756 KB). The old peak held five live
+  W*H buffers at the lens-blur stage. Now the 3x3 box blur runs **in place**
+  behind a two-row ring of saved originals (bit-identical to the allocating
+  form), one scratch arena is reused across blur/lens/lens-blur/inversion with
+  the quarter-size half-scale slot behind it, and the blur is recomputed after
+  the lens stage rather than held across it — one extra ~30 ms pass on the
+  deep-failure path for a whole W*H.
+
+  The cascade also takes an abort callback, checked at every region boundary.
+  Without it the finest granularity a scan window has is one whole attempt.
+
+- **Windows decode in process** (`src/star6e_luma_tap.c`). The supervisor
+  thread drives the cascade as well as the port — one thread deliberately,
+  because "only the supervisor ever opens or closes port1" is what removes the
+  concurrency race class that retired snapshot.pgm. Each pass takes a fresh
+  frame, runs the cascade over the latch, and publishes the result. **A decode
+  ends the window early**: the point of a window is to find one code, and
+  finishing hands port1 back to detect/stab seconds sooner.
+
+  No second frame buffer. A `decoding` flag freezes the latch for the cascade's
+  duration: the reader keeps draining — that is never optional — but stops
+  overwriting, and `/api/v1/qr/tap.pgm` answers `409` rather than blocking an
+  httpd worker or handing back a frame being mutated.
+
+  `/api/v1/qr/status` grows a `decode` block: `attempts`, `decoded`, `payload`,
+  the winning `stage`, and both the winning and most recent cascade durations.
+  It survives the window closing and is cleared only by the next `/qr/scan`, so
+  a client polling at 1 Hz still sees the payload from a window that found its
+  code and shut down between two polls.
+
+  Measured on the Star6E bench (imx335, 1080x1080 centre square): a marker in
+  view decodes on the **first frame of the first attempt in 73-88 ms** (mean 81
+  ms over 100 windows). Worst case — no code present, full cascade — is 431 ms
+  at 1080x1080, 238 ms at 720x720, 117 ms at 540x540. The cascade and quirc
+  build at `-O3` inside the otherwise `-Os` daemon (1.66x on Cortex-A7), for
+  44 KB of text. Star6E only; Maruko has no luma tap and does not link it.
+
+- **A tap that cannot deliver is refused instead of squatting on port1.**
+  `MI_VPE_SetPortMode` and `MI_VPE_EnablePort` both return success for
+  geometries the SCL will not in fact drive — measured, a 160x90 port enables
+  cleanly and then delivers zero frames forever, while holding port1 against
+  detect and stab for the whole window. `lt_port_open()` now waits up to 1 s
+  for a first frame and tears down if none arrives, so `/api/v1/qr/scan`
+  answers an error immediately. Deliberately a frame probe rather than a
+  geometry rule: the SDK's real constraint is undocumented and the obvious
+  guess is wrong (the working 1920x1080 is not 16-aligned in height).
 
 - **`snapshot.width` / `snapshot.height` tooltips corrected**
   (`src/venc_api.c`) — they described these as sizing the QR capture, which is

@@ -1,8 +1,8 @@
-# VPE port1 luma tap — plan
+# VPE port1 luma tap + inline QR scanning
 
-Status: **Phase 1 (spec) for an experimental branch.** This is the capture-side
-foundation for inline QR scanning, and the vehicle for the device experiments
-that decide whether the tap is viable at all.
+Status: **Built and device-verified** on the Star6E bench (imx335, 1080x1080
+centre square). The tap is the capture side; `src/qr_scan.c` is the decode
+side, shared with the `qr_decode` CLI. Results are in "Device results" below.
 
 ## Why this exists
 
@@ -27,13 +27,33 @@ approach on three counts:
 
 ## What this branch adds
 
-A read-only luma tap on VPE port1: its own geometry, NV12, drained
-continuously by a dedicated reader thread, with the Y plane copied out only on
-request. Plus a debug endpoint that returns that copy as a P5 PGM so the tap can
-be inspected from a workstation.
+A read-only luma tap on VPE port1: its own geometry, NV12, drained by a
+dedicated reader thread for the duration of a scan window, with the Y plane
+copied out only on request. A scan-window state machine whose supervisor thread
+both owns the port and runs the decode. And the decode cascade itself, extracted
+from `tools/qr/qr_decode.c` into `src/qr_scan.c` so the CLI and the daemon can
+never drift apart.
 
-No QR decoding. No scan-window state machine. Those follow once the tap is
-proven.
+## Device results
+
+Bench: Star6E, imx335, 1920x1080 main stream, 1080x1080 tap centre square,
+marker held in frame.
+
+| | |
+|---|---|
+| decode, marker in view | **73-88 ms**, mean 81 ms over 100 windows, first frame of the first attempt, stage `sharp/full/refine` |
+| worst case (no code, full cascade) | 431 ms @1080x1080, 238 ms @720x720, 117 ms @540x540 |
+| peak cascade heap | 3.30x W*H (was 5.04x) |
+| 100 open/decode/close cycles | 0 HTTP failures, 0 stuck windows, 0 kernel wedge signatures |
+| daemon RSS across 100 cycles | 5968 -> 6088 KB (noise) |
+| port1 arbitration | detect holds -> scan `409`; detect off -> qr claims -> stop -> detect reclaims |
+| SIGHUP mid-cycle | clean reinit, port not stranded |
+| MUT_RESTART reinit mid-window | clean, port not stranded |
+
+The 1.5 s per-attempt figure carried over from the MJPEG path was wrong by an
+order of magnitude for the common case: that estimate was a full cascade at
+1920x1080 through a JPEG round trip, and a marker actually in view wins at the
+very first stage on a cropped square.
 
 ## Design decisions
 
@@ -161,4 +181,12 @@ around a deadline rather than exposing them raw.
     whether window-scoping is viable at all. If it wedges, the choice collapses
     to hold-the-port-forever or do not ship QR alongside detect.
   - **Lifecycle** — pipeline restart and SIGHUP reinit with the tap enabled,
-    confirming clean teardown and no stale-fence wedge in the successor.
+    confirming clean teardown and no stale-fence wedge in the successor. Done:
+    both verified with a window open, port never stranded.
+  - **A port that enables but does not deliver.** `MI_VPE_SetPortMode` and
+    `MI_VPE_EnablePort` both succeed for geometries the SCL will not drive —
+    measured, 160x90 enables cleanly and then produces zero frames forever while
+    holding port1 against detect and stab. `lt_port_open()` waits up to 1 s for
+    a first frame and tears down if none arrives. Deliberately a frame probe and
+    not a geometry rule: the SDK constraint is undocumented and the obvious
+    guess is wrong, since the working 1920x1080 is not 16-aligned in height.
