@@ -69,6 +69,38 @@
 #define LT_DUTY_CYCLE_NUM 1u   /* idle = busy * NUM/DEN                    */
 #define LT_DUTY_CYCLE_DEN 1u
 #define LT_PACE_MAX_MS    1000u
+/* Floor on the interval between two port opens.
+ *
+ * Cycling port1 per scan window is safe at human cadence -- 200/200 and 100/100
+ * open/close cycles about a second apart, encoder live, zero wedge signatures.
+ * It is NOT safe without a floor: a client looping /api/v1/qr/scan drives
+ * open/close every ~150 ms (a window that finds its marker closes in ~85 ms),
+ * and that is the regime that retired /api/v1/snapshot.pgm in #205 --
+ * MI_VPE_DisablePort racing an in-flight mhal buffer, jamming the VPE input
+ * FIFO, kernel-side and unrecoverable from userspace.  A bench box hung hard
+ * under exactly that loop.
+ *
+ * So the daemon, not the client, owns the cycle rate.  500 ms still allows two
+ * scans a second, far beyond any real use. */
+#define LT_REOPEN_COOLDOWN_MS 500u
+/* Floor on how long the port stays open once enabled.
+ *
+ * The reopen cooldown gates the OPEN edge.  This gates the CLOSE edge, and that
+ * is the one that actually panics the kernel: MI_VPE_DisablePort landing on a
+ * port that only just came up, while the SCL still has buffers in flight,
+ * jams the VPE input FIFO -- the #205 snapshot.pgm failure.  A bench box took a
+ * hard kernel panic (panic=20 auto-reboot) under a loop of
+ * /api/v1/qr/scan immediately followed by /api/v1/qr/stop, which closes a
+ * ~200 ms-old port over and over.
+ *
+ * Every open/close soak that ever came back clean -- 200/200 and 100/100 -- let
+ * windows close NATURALLY, on decode or on deadline, having been open long
+ * enough to reach steady state.  That is the safe regime, and this constant is
+ * what makes every close land in it, including an operator-triggered one.
+ *
+ * /qr/stop therefore requests a close rather than forcing one: it pulls the
+ * deadline in to the earliest safe instant and waits. */
+#define LT_MIN_WINDOW_MS 750u
 /* Refuse a tap whose luma plane alone would dominate a 64-128 MB target. */
 #define LT_MAX_PIXELS (8u * 1024u * 1024u)
 
@@ -153,6 +185,10 @@ static struct {
 	 * frame that is being mutated.  Cheaper than a second W*H buffer, and
 	 * the decode is what the window is for. */
 	int             decoding;
+	/* When the port was last released.  Guarded by `lock`, not `ctl_lock`:
+	 * lt_port_close() runs both with and without ctl_lock held depending on
+	 * the path, so ctl_lock could not be taken there without deadlocking. */
+	uint64_t        last_close_us;
 
 	lt_get_fd_fn   get_fd;
 	lt_close_fd_fn close_fd;
@@ -177,6 +213,7 @@ static struct {
 	pthread_cond_t  ctl_cond;
 	int             super_running;
 	uint64_t        deadline_us;      /* CLOCK_MONOTONIC */
+	uint64_t        open_us;          /* when the port came up */
 	uint32_t        window_ms;
 	uint64_t        frames, grabs;    /* per-window counters */
 
@@ -447,6 +484,7 @@ static int lt_port_open(void)
 	}
 	g.reader_started = 1;
 	g.running = 1;
+	g.open_us = wb_monotonic_us();
 
 	/* Prove the port actually produces before reporting the window open.
 	 *
@@ -493,6 +531,14 @@ fail:
 		g.claimed = 0;
 	}
 	return -EIO;
+}
+
+/* The earliest instant at which the port may be disabled.  See
+ * LT_MIN_WINDOW_MS: closing a port that only just came up is what panics the
+ * kernel, so no caller gets to shorten a window past this. */
+static uint64_t lt_min_close_us(void)
+{
+	return g.open_us + (uint64_t)LT_MIN_WINDOW_MS * 1000;
 }
 
 /* True once the window's budget is spent.  /qr/stop expresses itself by moving
@@ -668,8 +714,9 @@ static void *lt_super_main(void *arg)
 			g.decoded = 1;
 			/* A window exists to find one code.  Ending it here
 			 * hands port1 back to detect/stab seconds earlier than
-			 * waiting out the budget would. */
-			g.deadline_us = 0;
+			 * waiting out the budget would -- but never before the
+			 * port has been up long enough to close safely. */
+			g.deadline_us = lt_min_close_us();
 		}
 		pthread_mutex_unlock(&g.ctl_lock);
 
@@ -680,13 +727,6 @@ static void *lt_super_main(void *arg)
 				g.attempts);
 			break;
 		}
-		/* Hold the duty cycle.  Idling for as long as the attempt took
-		 * keeps scanning under half a core whatever the geometry: an
-		 * 85 ms decode barely pauses, a 431 ms full cascade at
-		 * 1080x1080 pauses 431 ms. */
-		lt_pace((uint32_t)((g.last_us / 1000) *
-			LT_DUTY_CYCLE_NUM / LT_DUTY_CYCLE_DEN));
-
 		if (stats.fatal_error) {
 			/* An allocation failure at this geometry will repeat on
 			 * every attempt, and it fails FAST — continuing would
@@ -695,10 +735,17 @@ static void *lt_super_main(void *arg)
 			fprintf(stderr, "[luma-tap] decode out of memory at "
 				"%ux%u — ending window\n", g.w, g.h);
 			pthread_mutex_lock(&g.ctl_lock);
-			g.deadline_us = 0;
+			g.deadline_us = lt_min_close_us();
 			pthread_mutex_unlock(&g.ctl_lock);
 			break;
 		}
+
+		/* Hold the duty cycle.  Idling for as long as the attempt took
+		 * keeps scanning under half a core whatever the geometry: an
+		 * 85 ms decode barely pauses, a 431 ms full cascade at
+		 * 1080x1080 pauses 431 ms. */
+		lt_pace((uint32_t)((g.last_us / 1000) *
+			LT_DUTY_CYCLE_NUM / LT_DUTY_CYCLE_DEN));
 	}
 
 	if (ctx)
@@ -729,6 +776,29 @@ int star6e_luma_tap_scan(uint32_t window_ms)
 		window_ms = g.cfg_window_ms;
 	if (window_ms < LT_WINDOW_MS_MIN) window_ms = LT_WINDOW_MS_MIN;
 	if (window_ms > LT_WINDOW_MS_MAX) window_ms = LT_WINDOW_MS_MAX;
+
+	/* Rate-limit port cycling.  This is the one guard between a
+	 * scan-in-a-loop client and the kernel VPE wedge -- see
+	 * LT_REOPEN_COOLDOWN_MS.  Done BEFORE ctl_lock is taken: sleeping while
+	 * holding it would stall /qr/status and /qr/stop for the cooldown.
+	 *
+	 * Racing an extend here is harmless: the worst outcome is a needless
+	 * sleep, after which the locked section below takes the extend path. */
+	{
+		uint64_t last;
+
+		pthread_mutex_lock(&g.lock);
+		last = g.last_close_us;
+		pthread_mutex_unlock(&g.lock);
+
+		if (last && !g.running) {
+			uint64_t since = wb_monotonic_us() - last;
+			uint64_t need = (uint64_t)LT_REOPEN_COOLDOWN_MS * 1000;
+
+			if (since < need)
+				usleep((useconds_t)(need - since));
+		}
+	}
 
 	pthread_mutex_lock(&g.ctl_lock);
 
@@ -784,7 +854,11 @@ void star6e_luma_tap_scan_stop(void)
 		lt_port_close();
 		return;
 	}
-	g.deadline_us = 0;
+	/* Pull the deadline in to the earliest SAFE instant, not to zero: a
+	 * close that lands on a just-opened port panics the kernel.  In the
+	 * common case the window is already older than the floor and this is an
+	 * immediate stop. */
+	g.deadline_us = lt_min_close_us();
 	pthread_cond_broadcast(&g.ctl_cond);
 	/* The supervisor is detached, so wait on the flag rather than joining —
 	 * on return the port is closed and port1 is free. */
@@ -894,6 +968,7 @@ static void lt_port_close(void)
 	free(g.latch);
 	g.latch = NULL;
 	g.latch_valid = 0;
+	g.last_close_us = wb_monotonic_us();
 	pthread_mutex_unlock(&g.lock);
 
 	if (g.claimed) {
