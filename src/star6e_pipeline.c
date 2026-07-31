@@ -2,6 +2,7 @@
 #include "star6e_framing.h"
 #include "star6e_ipu_yolo.h"
 #include "star6e_vpe_ports.h"
+#include "star6e_luma_tap.h"
 #include "star6e_awb.h"
 #include "star6e_framing_host.h"
 #if HAVE_FRAMING_STAB
@@ -2140,6 +2141,13 @@ static int bind_and_finalize_pipeline(Star6ePipelineState *state,
 	if (vcfg->detect.enabled)
 		(void)star6e_pipeline_detect_start(state, vcfg);
 
+	/* Overlay-free luma tap on VPE port1.  Lowest-priority claimant: stab
+	 * (above) and detect (just now) have already had their turn, and a
+	 * refusal is logged and non-fatal — /api/v1/qr/tap.pgm then answers 503.
+	 * Enabled ONCE here and released only in teardown; never per request. */
+	(void)star6e_luma_tap_start(vcfg, state->image_width,
+		state->image_height);
+
 	/* Bring up the JPEG snapshot subsystem on the same VPE source port the
 	 * main channel just bound to.  Failure is non-fatal — /api/v1/snapshot.jpg
 	 * just serves 503 if init fails.  Config from venc.json snapshot.*
@@ -2432,6 +2440,10 @@ void star6e_pipeline_stop(Star6ePipelineState *state)
 	 * Detect and framing are mutually exclusive, so at most one of these
 	 * two blocks does work. */
 	star6e_ipu_yolo_stop(state);
+
+	/* Stop the port1 luma tap: parks + joins its reader before DisablePort,
+	 * same MMU-safety rule as the detect tap.  Idempotent. */
+	star6e_luma_tap_stop();
 
 	/* Stop the stabilization detector thread: park the detector, disable the
 	 * tiny port1 tap, and join the thread; port0 stays a normal VPE→VENC bind

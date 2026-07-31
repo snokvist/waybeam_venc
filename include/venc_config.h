@@ -332,6 +332,21 @@ typedef struct {
 	                          0 = VisDrone-10, 1 = SAR person.           */
 } VencConfigDetect;
 
+/* QR-oriented luma tap (Star6E only).  A read-only NV12 tap on VPE port1,
+ * enabled once per pipeline run, whose luma plane is free of the MI_RGN
+ * overlays that debug_osd and waybeam-hub's osd_render composite onto port0.
+ * Mutually exclusive with video0.framing=stab and detect.enabled, which claim
+ * the same single second-scaler output; this tap is the lowest-priority
+ * claimant and is skipped when either holds port1.  Lives in its own TRAILING
+ * VencConfig member — the config ABI is append-only. */
+typedef struct {
+	bool     tap_enabled;  /* program + enable the port1 luma tap        */
+	uint32_t tap_width;    /* 0 → inherit the main stream                */
+	uint32_t tap_height;   /* 0 → inherit the main stream.  Independent
+	                          of port0: unlike the MJPEG snapshot
+	                          channel, a VPE port really does scale.    */
+} VencConfigQr;
+
 /* ── Top-level config ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -350,6 +365,7 @@ typedef struct {
 	VencConfigDebug debug;
 	VencConfigAttitude attitude;  /* trailing — ABI append-only */
 	VencConfigDetect detect;      /* trailing — ABI append-only */
+	VencConfigQr qr;              /* trailing — ABI append-only */
 } VencConfig;
 
 typedef enum {

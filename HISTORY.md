@@ -1,5 +1,43 @@
 # History
 
+## [0.61.0] - 2026-07-31
+
+Overlay-free luma tap on VPE port1 (Star6E), as the capture foundation for
+inline QR scanning. Capture only — no decoding, no scan-window state machine.
+
+- **`qr.tapEnabled` / `qr.tapWidth` / `qr.tapHeight`** (`src/star6e_luma_tap.c`)
+  — a read-only NV12 tap on VPE port1 with its own geometry, drained
+  continuously by a dedicated reader thread. Off by default. `0` dimensions
+  inherit the main stream. Unlike the MJPEG snapshot channel, a VPE port is a
+  real scaler, so these genuinely change capture resolution.
+
+  Why it exists: MI_RGN composites **per scaler output port**, and every
+  overlay producer targets port0 — `debug_osd` here, `osd_render` in
+  waybeam-hub. The MJPEG snapshot channel is a port0 1:N consumer, so every
+  snapshot carries whatever HUD is running, over anything a QR marker might
+  occupy. Measured on a bench craft: the hub HUD lands dead centre of frame
+  with `debug.showOsd` false. port1 is a separate scaler output and is clean.
+
+  The port is programmed and enabled **once per pipeline run** and released
+  only at teardown; a capture never touches port state. This is the lesson of
+  the retired `/api/v1/snapshot.pgm` (0.60.0), which cycled Enable/Disable per
+  HTTP request — `DisablePort` races an in-flight mhal buffer and jams the VPE
+  input FIFO, about twice per 560 stressed captures. Lowest-priority claimant:
+  skipped with a log line when `video0.framing=stab` or `detect.enabled` holds
+  port1.
+
+- **`GET /api/v1/qr/tap.pgm`** — one frame of the tap as a P5 PGM
+  (self-describing dimensions, stride removed). `503 tap_disabled` when the tap
+  is not running, `504 tap_timeout` when no frame arrives. Debug-grade
+  instrumentation for validating the tap, Star6E only.
+
+- **`snapshot.width` / `snapshot.height` tooltips corrected**
+  (`src/venc_api.c`) — they described these as sizing the QR capture, which is
+  false in both directions. They set the VENC channel's *maximum* encodable
+  resolution and VENC has no scaler: measured, a value below the main stream
+  makes every frame fail `_MI_VENC_ValidateResolution` and `/snapshot.jpg`
+  answers `504` permanently, while a value above it changes nothing.
+
 ## [0.60.2] - 2026-07-30
 
 Star6E IMX335 driver gets the same power-on fix as Maruko's in 0.60.1.

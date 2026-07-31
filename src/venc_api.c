@@ -7,6 +7,7 @@
 #include "pipeline_common.h"
 #if HAVE_BACKEND_STAR6E
 #include "star6e_pipeline.h"
+#include "star6e_luma_tap.h"
 #endif
 #if HAVE_BACKEND_MARUKO
 #include "maruko_pipeline.h"
@@ -24,6 +25,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -486,13 +488,30 @@ static const FieldUi ui_snapshot_quality = {
 };
 static const FieldUi ui_snapshot_width = {
 	"Snapshot", "JPEG width", "number", 0, 8192, 16, NULL,
-	"Width of the MJPEG snapshot channel. 0 = inherit the main stream. This "
-	"is also the QR capture resolution — QR range scales with pixels per "
-	"module."
+	"Max encodable width of the MJPEG snapshot channel — NOT a scaler. "
+	"0 = inherit the main stream, which is the only safe value: VENC has no "
+	"scaler, so a value below the main stream makes every frame fail "
+	"validation and the endpoint answers 504 forever."
 };
 static const FieldUi ui_snapshot_height = {
 	"Snapshot", "JPEG height", "number", 0, 8192, 2, NULL,
-	"Height of the MJPEG snapshot channel. 0 = inherit the main stream."
+	"Max encodable height of the MJPEG snapshot channel. 0 = inherit the "
+	"main stream; see the width field."
+};
+static const FieldUi ui_qr_tap_enabled = {
+	"QR", "Luma tap", "toggle", 0, 0, 0, NULL,
+	"Enable the overlay-free NV12 luma tap on VPE port1 (Star6E). Unlike the "
+	"MJPEG snapshot, this carries no OSD pixels. Requires port1 to be free: "
+	"turn off video0.framing=stab and detect.enabled first."
+};
+static const FieldUi ui_qr_tap_width = {
+	"QR", "Tap width", "number", 0, 4096, 16, NULL,
+	"Width of the port1 luma tap. 0 = inherit the main stream. A VPE port is "
+	"a real scaler, so this genuinely changes capture resolution."
+};
+static const FieldUi ui_qr_tap_height = {
+	"QR", "Tap height", "number", 0, 4096, 2, NULL,
+	"Height of the port1 luma tap. 0 = inherit the main stream."
 };
 
 static const FieldDesc g_fields[] = {
@@ -647,6 +666,12 @@ static const FieldDesc g_fields[] = {
 	FIELD(detect, firmware_path,  FT_STRING, MUT_RESTART),
 	FIELD(detect, infer_interval, FT_INT,    MUT_RESTART),
 	FIELD(detect, osd,            FT_BOOL,   MUT_RESTART),
+	/* MUT_RESTART throughout: the tap port is programmed at graph configure
+	 * time, and reprogramming a live port is exactly what this design exists
+	 * to avoid (see documentation/QR_LUMA_TAP_PLAN.md). */
+	FIELD_UI(qr, tap_enabled, FT_BOOL, MUT_RESTART, &ui_qr_tap_enabled),
+	FIELD_UI(qr, tap_width,   FT_UINT, MUT_RESTART, &ui_qr_tap_width),
+	FIELD_UI(qr, tap_height,  FT_UINT, MUT_RESTART, &ui_qr_tap_height),
 };
 
 #define FIELD_COUNT (sizeof(g_fields) / sizeof(g_fields[0]))
@@ -734,6 +759,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "detect.netWidth", "detect.net_width" },
 	{ "detect.netHeight", "detect.net_height" },
 	{ "detect.modelId", "detect.model_id" },
+	{ "qr.tapEnabled", "qr.tap_enabled" },
+	{ "qr.tapWidth", "qr.tap_width" },
+	{ "qr.tapHeight", "qr.tap_height" },
 };
 
 static const char *canonicalize_field_key(const char *key)
@@ -2536,6 +2564,40 @@ static int process_set_query(const char *query, int persist, int *status_code,
 
 /* ── Route handlers ──────────────────────────────────────────────────── */
 
+#if HAVE_BACKEND_STAR6E
+/* GET /api/v1/qr/tap.pgm — one frame of the overlay-free VPE port1 luma tap as
+ * a P5 PGM.  Debug-grade instrumentation for validating the tap (OSD-freedom,
+ * geometry, stability); the port itself is enabled at pipeline bring-up and is
+ * NOT touched here — this only asks the reader thread to copy a frame out. */
+static int handle_qr_tap_pgm(int fd, const HttpRequest *req, void *ctx)
+{
+	uint8_t *buf = NULL;
+	size_t   len = 0;
+	int rc;
+
+	(void)req; (void)ctx;
+
+	rc = star6e_luma_tap_grab_pgm(&buf, &len, 1000);
+	if (rc == -ENODEV)
+		return httpd_send_error(fd, 503, "tap_disabled",
+			"luma tap not running (qr.tap_enabled off, VPE port1 "
+			"held by stab/detect, or pipeline not running)");
+	if (rc == -ETIMEDOUT)
+		return httpd_send_error(fd, 504, "tap_timeout",
+			"timed out waiting for a frame from the VPE port1 tap");
+	if (rc != 0 || !buf || len == 0) {
+		star6e_luma_tap_free(buf);
+		return httpd_send_error(fd, 500, "tap_failed",
+			"luma tap capture failed");
+	}
+
+	rc = httpd_send_binary(fd, 200, "image/x-portable-graymap", buf,
+		(int)len);
+	star6e_luma_tap_free(buf);
+	return rc;
+}
+#endif
+
 static int handle_version(int fd, const HttpRequest *req, void *ctx)
 {
 	(void)req; (void)ctx;
@@ -3669,6 +3731,9 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	pthread_mutex_unlock(&g_cfg_mutex);
 
 	r |= venc_httpd_route("GET", "/api/v1/snapshot.jpg", handle_snapshot_jpeg, NULL);
+#if HAVE_BACKEND_STAR6E
+	r |= venc_httpd_route("GET", "/api/v1/qr/tap.pgm",   handle_qr_tap_pgm, NULL);
+#endif
 	r |= venc_httpd_route("GET", "/api/v1/version",      handle_version, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config",       handle_config, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/config.json",  handle_config, NULL);
