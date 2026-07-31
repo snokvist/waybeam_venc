@@ -116,7 +116,7 @@ LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
-        qr-decode qr-test-host qr-test-cli qr-test-extended webui webui-check
+        qr-decode qr-test-host qr-test-cli qr-test-extended qr-test-phone webui webui-check
 
 help:
 	@echo "Targets:"
@@ -127,6 +127,7 @@ help:
 	@echo "  make qr-test-host Run the deterministic QR perspective corpus"
 	@echo "  make qr-test-cli Run decoder CLI and image loader regressions"
 	@echo "  make qr-test-extended Run the extended QR skew/defocus series"
+	@echo "  make qr-test-phone Validate the phone.html marker generator"
 	@echo "  make lint SOC_BUILD=maruko"
 	@echo "  make stage       Build and stage runtime bundle in out/"
 	@echo "  make test        Run host-native unit tests"
@@ -395,6 +396,25 @@ qr-test-cli: $(QR_HOST_DECODE)
 
 qr-test-extended: $(QR_TEST_RUNNER)
 	./$(QR_TEST_RUNNER) --extended
+
+# Validate the marker encoder embedded in tools/qr/test-images/phone.html.
+# Not part of `verify`: it needs node plus the generator's Python deps, which
+# a build host is not required to have.  It SKIPS loudly rather than passing
+# quietly when they are missing.  PYTHON=/path/to/venv/bin/python if the
+# distro python refuses to install qrcode (PEP 668).
+PYTHON ?= python3
+# One shell: each recipe line gets its own, so an early `exit 0` in a guard
+# line would only end that line and make would run the test anyway.
+qr-test-phone: $(QR_HOST_DECODE)
+	@if ! command -v node >/dev/null 2>&1; then \
+		echo "SKIP qr-test-phone: node not installed"; \
+	elif ! $(PYTHON) -c "import qrcode" >/dev/null 2>&1; then \
+		echo "SKIP qr-test-phone: $(PYTHON) lacks 'qrcode'"; \
+		echo "  python3 -m venv .venv && .venv/bin/pip install -r tools/qr/requirements-generator.txt"; \
+		echo "  make qr-test-phone PYTHON=.venv/bin/python"; \
+	else \
+		PYTHON=$(PYTHON) node tests/test_qr_phone.js; \
+	fi
 
 toolchain:
 	@if [ ! -x "$(CC_BIN)" ]; then \

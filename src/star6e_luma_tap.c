@@ -533,14 +533,6 @@ fail:
 	return -EIO;
 }
 
-/* The earliest instant at which the port may be disabled.  See
- * LT_MIN_WINDOW_MS: closing a port that only just came up is what panics the
- * kernel, so no caller gets to shorten a window past this. */
-static uint64_t lt_min_close_us(void)
-{
-	return g.open_us + (uint64_t)LT_MIN_WINDOW_MS * 1000;
-}
-
 /* True once the window's budget is spent.  /qr/stop expresses itself by moving
  * the deadline to 0, so there is no separate stop flag to keep in step. */
 static int lt_expired(void)
@@ -714,9 +706,9 @@ static void *lt_super_main(void *arg)
 			g.decoded = 1;
 			/* A window exists to find one code.  Ending it here
 			 * hands port1 back to detect/stab seconds earlier than
-			 * waiting out the budget would -- but never before the
-			 * port has been up long enough to close safely. */
-			g.deadline_us = lt_min_close_us();
+			 * waiting out the budget would.  lt_port_close() holds
+			 * the port for its minimum lifetime regardless. */
+			g.deadline_us = 0;
 		}
 		pthread_mutex_unlock(&g.ctl_lock);
 
@@ -735,7 +727,7 @@ static void *lt_super_main(void *arg)
 			fprintf(stderr, "[luma-tap] decode out of memory at "
 				"%ux%u — ending window\n", g.w, g.h);
 			pthread_mutex_lock(&g.ctl_lock);
-			g.deadline_us = lt_min_close_us();
+			g.deadline_us = 0;
 			pthread_mutex_unlock(&g.ctl_lock);
 			break;
 		}
@@ -854,11 +846,10 @@ void star6e_luma_tap_scan_stop(void)
 		lt_port_close();
 		return;
 	}
-	/* Pull the deadline in to the earliest SAFE instant, not to zero: a
-	 * close that lands on a just-opened port panics the kernel.  In the
-	 * common case the window is already older than the floor and this is an
-	 * immediate stop. */
-	g.deadline_us = lt_min_close_us();
+	/* Ending the window is just moving the deadline; lt_port_close() is what
+	 * holds the port for its minimum lifetime, so a stop against a
+	 * brand-new window blocks there rather than closing early. */
+	g.deadline_us = 0;
 	pthread_cond_broadcast(&g.ctl_cond);
 	/* The supervisor is detached, so wait on the flag rather than joining —
 	 * on return the port is closed and port1 is free. */
@@ -896,17 +887,6 @@ void star6e_luma_tap_status(Star6eLumaTapStatus *out)
 	out->grabs = g.grabs;
 	star6e_vpe_port1_owner_copy(out->port1_owner,
 		sizeof(out->port1_owner));
-}
-
-/* Compat shim: configure + open a window for the pipeline lifetime.  Retained
- * only for host tests; the pipeline arms and lets scans drive the port. */
-int star6e_luma_tap_start(const VencConfig *cfg, uint32_t main_w,
-	uint32_t main_h)
-{
-	star6e_luma_tap_configure(cfg, main_w, main_h);
-	if (!g.cfg_enabled)
-		return 0;
-	return lt_port_open() == 0 ? 0 : -1;
 }
 
 /* Drain whatever the port still holds, from the CLOSING thread, after the
@@ -947,6 +927,28 @@ static void lt_port_close(void)
 {
 	if (!g.running && !g.port_enabled && !g.claimed)
 		return;
+
+	/* Never disable a port that only just came up.  MI_VPE_DisablePort
+	 * landing on an in-flight mhal buffer jams the VPE input FIFO (#205);
+	 * two bench boxes took hard kernel panics from exactly that, via
+	 * /api/v1/qr/scan followed immediately by /api/v1/qr/stop.
+	 *
+	 * The wait lives here, at the single choke point every close path
+	 * funnels through -- deadline, /qr/stop, decode-triggered early close,
+	 * out-of-memory exit, failure unwind -- so no caller can bypass it.  An
+	 * earlier version floored the deadline instead, which the decode path
+	 * silently skipped by breaking out of the supervisor loop.
+	 *
+	 * It also has to come BEFORE the reader is parked: the port must keep
+	 * being drained while we wait, or the wait itself creates the
+	 * enabled-but-undrained state that is dangerous on this BSP. */
+	if (g.port_enabled) {
+		uint64_t now = wb_monotonic_us();
+		uint64_t safe = g.open_us + (uint64_t)LT_MIN_WINDOW_MS * 1000;
+
+		if (g.open_us && now < safe)
+			usleep((useconds_t)(safe - now));
+	}
 
 	g.running = 0;
 

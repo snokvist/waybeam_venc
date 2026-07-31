@@ -157,6 +157,25 @@ windows that decode in process, and a decode cascade now shared with the
   operations, zero wedge signatures, zero reboots, daemon pid unchanged
   throughout.
 
+- **`tools/qr/test-images/phone.html` generates markers.** It was a viewer for
+  one checked-in SVG; it now carries a Version-1/Q alphanumeric QR encoder and
+  the 33x33 outer-frame wrapper inline, so a phone with no network can render
+  any valid payload — typed or from a **Random** button — plus tiny and inverted
+  presets alongside the existing sizes and 35-degree tilt.
+
+  Inline because the page has to work off a memory card, and validated so that
+  cannot rot: `make qr-test-phone` extracts the encoder from between sentinel
+  comments and, for ten payloads spanning both legal prefixes and the whole
+  alphanumeric set, asserts the wrapper is byte-identical to
+  `tools/qr/generate_qr.py` and that every rendered marker decodes back through
+  the same cascade the craft runs, at two scales. 51 assertions.
+
+  The data mask is deliberately *not* required to match the Python generator:
+  all eight masks are valid, and python-qrcode scores them slightly differently
+  from ISO 18004, so the two disagree on about two thirds of payloads while both
+  being correct. Where the masks do agree the matrices are identical to the
+  module, and the test asserts exactly that.
+
 - **A tap that cannot deliver is refused instead of squatting on port1.**
   `MI_VPE_SetPortMode` and `MI_VPE_EnablePort` both return success for
   geometries the SCL will not in fact drive — measured, a 160x90 port enables
