@@ -54,6 +54,9 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
   disabled by default, ready for telemetry/sidecar consumers
 - Intra-refresh (GDR-style rolling stripe) for fast loss recovery on FPV links
 - Scene-change-triggered IDR (Star6E) for clean stream join under packet loss
+- Inline QR scanning (Star6E): overlay-free VPE port1 luma tap + in-process
+  decode cascade, so a craft reads a pairing marker itself without a
+  workstation in the loop
 
 ## Build
 
@@ -1254,6 +1257,159 @@ ffplay recording.ts                 # play directly
 
 See `documentation/SD_CARD_RECORDING.md` for the full guide including
 performance benchmarks, limitations, and architecture details.
+
+## QR Scanning (Star6E)
+
+A craft can read a QR marker itself. A scan window opens an **overlay-free**
+capture tap on VPE port1, decodes each frame in process, and closes when it
+finds a code or its budget runs out.
+
+Overlay-free is the point. MI_RGN composites **per scaler output port**, and
+every overlay producer targets port0 — `debug_osd` here, `osd_render` in
+waybeam-hub. The MJPEG snapshot channel is a port0 1:N consumer, so
+`/api/v1/snapshot.jpg` carries whatever HUD is running, right over the middle of
+the frame where a marker sits. port1 is a separate scaler output and is clean.
+
+### Enable it
+
+```bash
+# Off by default. Restart-required (the geometry is captured at graph build).
+curl "http://<device-ip>/api/v1/set?qr.tapEnabled=true"
+```
+
+| Field | Default | Mut. | Meaning |
+|---|---|---|---|
+| `qr.tapEnabled` | `false` | restart | arm the tap |
+| `qr.tapWidth` / `qr.tapHeight` | `0` | restart | tap geometry; `0` inherits the main stream |
+| `qr.windowMs` | `15000` | live | default scan budget, clamped 1000–60000 |
+
+The capture is the **centre square** of the tap output — 1920×1080 gives a
+1080×1080 scan area. Cropping in software rather than asking the port for a
+square is deliberate: the SCL scales but does not crop, so a square port would
+squash the aspect, and `MI_VPE_SetPortCrop` is sticky on i6e and would poison a
+later detect run.
+
+### A marker to test with
+
+<img src="tools/qr/test-images/bounded-P23456789ABCDEFG.png" alt="Waybeam test marker, payload P23456789ABCDEFG" width="260">
+
+Point the camera at this and a scan returns `P23456789ABCDEFG`. The file is
+`tools/qr/test-images/bounded-P23456789ABCDEFG.png` (1230×1230, binary-clean);
+an SVG vector master and a compact `.pgm` regression fixture sit beside it.
+
+**This is not a plain QR code, and a plain QR code will not decode.** The
+scanner requires a continuous **33×33 Waybeam outer-frame profile** wrapped
+around a Version-1/Q symbol, and it uses that frame's geometry to derive the
+projective transform directly — which is what lets it find a small marker in a
+large frame without an unbounded finder scan. Standards-only finder discovery is
+never entered without an accepted outer frame. Payloads are further restricted
+to exactly 16 characters from the QR alphanumeric alphabet, starting `P` or `C`.
+
+For a hand-held optical test, open **`tools/qr/test-images/phone.html`** on a
+phone. It is self-contained — no network, no sibling assets — and **generates
+markers itself**: type a payload and it renders live, or hit **Random**. Presets
+cover large / medium / small / tiny and 35 degrees, with an **Invert** toggle for
+the light-on-dark case. Physically tilting the phone is a better test than a
+pre-warped image, because it exercises the real camera projective transform.
+
+Or generate a file:
+
+```bash
+python3 -m pip install -r tools/qr/requirements-generator.txt
+python3 tools/qr/generate_qr.py C0FFEE1234567890 mymarker.png --scale 30
+```
+
+The page's encoder is checked against that generator and against the real decode
+cascade by `make qr-test-phone`, so what a phone shows is what the craft reads.
+
+### Scan
+
+```bash
+# Open a window (or extend the one already running)
+curl "http://<device-ip>/api/v1/qr/scan?ms=10000"
+
+# Poll it
+curl "http://<device-ip>/api/v1/qr/status"
+
+# End it early
+curl "http://<device-ip>/api/v1/qr/stop"
+```
+
+`/qr/status` carries the result:
+
+```json
+{"armed": true, "scanning": false, "window_ms": 10000, "remaining_ms": 0,
+ "capture": "1080x1080", "frames": 3, "grabs": 1, "port1_owner": "",
+ "decode": {"attempts": 1, "decoded": true, "payload": "P23456789ABCDEFG",
+            "stage": "sharp/full/refine", "decode_ms": 84, "last_ms": 84}}
+```
+
+The `decode` block survives the window closing and is cleared only by the next
+`/qr/scan`, so a client polling at 1 Hz still sees a payload from a window that
+found its code and shut down between two polls.
+
+`decode.stage` says which cascade stage won and is the cheapest capture-quality
+signal you have: `sharp/full` means a clean frame, anything later (`blur`,
+`half`, `lens`, `tile`, `inverted`) means the decoder had to work for it.
+
+### What it costs
+
+Measured on a Star6E bench (imx335, 1080×1080 scan area):
+
+| | |
+|---|---|
+| marker in view | decodes on the **first frame of the first attempt, 73–88 ms** |
+| nothing to find | full cascade 431 ms @1080², 238 ms @720², 117 ms @540² |
+| encoder impact during a full-budget window | **none — 60 fps held**, CPU 25% → 55% |
+
+Scanning runs at `nice 10` and holds a duty cycle: after each attempt it idles
+for as long as that attempt took. Without that, back-to-back cascades pegged
+both cores and dragged the encoder from 60 fps to 23 — only the encoder thread
+is `SCHED_FIFO`, so the ISP, AWB and frame-shm threads lose to a decoder that
+never yields.
+
+### Port contention
+
+port1 is single-owner and shared with framing-stab and NPU detect, so a scan is
+**mutually exclusive** with both:
+
+```bash
+curl "http://<device-ip>/api/v1/qr/scan"
+# {"ok":false,"error":{"code":"port1_busy","message":"VPE port1 is held by stab or detect"}}
+```
+
+QR is the lowest-priority claimant and never evicts them — turn `framing` or
+`detect.enabled` off to free the port. `port1_owner` in `/qr/status` tells you
+who holds it.
+
+### Debug capture
+
+```bash
+# One frame of the tap as a P5 PGM — geometry, exposure, OSD-freedom checks
+curl "http://<device-ip>/api/v1/qr/tap.pgm" -o tap.pgm
+
+# Decode it on a workstation with the same cascade the daemon runs
+make qr-decode SOC_BUILD=star6e     # or build for host: tests/qr_decode_host
+./out/star6e/qr_decode --stats tap.pgm
+```
+
+Only valid while a window is open (`503` otherwise), and `409` while a cascade
+owns the latch.
+
+### Notes for integrators
+
+- **Scan rate is floored by the daemon, not the client.** Cycling VPE port1 too
+  fast wedges the kernel — `MI_VPE_DisablePort` racing an in-flight mhal buffer
+  jams the VPE input FIFO. So there is a 500 ms minimum between opens and a
+  750 ms minimum time the port stays up. A window that decodes in 85 ms still
+  holds port1 for 750 ms before handing it back. Do not try to beat this with a
+  tighter poll loop; you will just block.
+- **A window self-closes.** A client that dies mid-scan cannot strand port1.
+- **Re-scanning while a window is open only extends the deadline** and never
+  touches port state.
+- Payloads are Waybeam transport envelopes: exactly 16 characters from the QR
+  alphanumeric alphabet. `--raw` on the CLI relaxes that for bench work; the
+  daemon always enforces it.
 
 ## RTP Timing Sidecar
 

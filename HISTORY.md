@@ -1,5 +1,198 @@
 # History
 
+## [0.61.0] - 2026-07-31
+
+Inline QR scanning on Star6E: an overlay-free luma tap on VPE port1, scan
+windows that decode in process, and a decode cascade now shared with the
+`qr_decode` CLI instead of duplicated.
+
+- **`qr.tapEnabled` / `qr.tapWidth` / `qr.tapHeight`** (`src/star6e_luma_tap.c`)
+  — a read-only NV12 tap on VPE port1 with its own geometry, drained by a
+  dedicated reader thread for the duration of a scan window. Off by default.
+  `0` dimensions inherit the main stream. Unlike the MJPEG snapshot channel, a
+  VPE port is a real scaler, so these genuinely change capture resolution.
+
+  **Window-scoped, not pipeline-lifetime.** Bring-up only *arms* the tap;
+  `/qr/tap/open` claims and enables port1, `/qr/tap/close` releases it back to
+  stab/detect. Holding it for the whole run was measured too expensive: an
+  always-on 1080p60 tap adds ~186 MB/s of SCL write traffic to shared DDR and
+  cost 8-9 points of aggregate CPU while completely idle (45% → 54%). Device
+  result for the cycling this introduces: **200/200 open/grab/close cycles with
+  the encoder live, zero wedge signatures** — against snapshot.pgm's ~1 per 280.
+  A live close stops and joins the reader, then **drains the port to quiescent**
+  before resetting depth and disabling; disabling with buffers still queued is
+  what races an in-flight mhal buffer.
+
+  **The latch is the centre square** of the port output (1080×1080 from a
+  1920×1080 stream), cropped during the copy. Done in software on purpose:
+  `MI_VPE_SetPortCrop` is sticky on i6e and a leftover rect poisons a later
+  detect run. The SCL scales but does not crop, so asking the port for a square
+  directly would squash the aspect. Drops the outer frame where fisheye is
+  worst, and cuts the latch from 2.07 MB to 1.17 MB.
+
+  Why it exists: MI_RGN composites **per scaler output port**, and every
+  overlay producer targets port0 — `debug_osd` here, `osd_render` in
+  waybeam-hub. The MJPEG snapshot channel is a port0 1:N consumer, so every
+  snapshot carries whatever HUD is running, over anything a QR marker might
+  occupy. Measured on a bench craft: the hub HUD lands dead centre of frame
+  with `debug.showOsd` false. port1 is a separate scaler output and is clean.
+
+  The port is programmed and enabled **once per pipeline run** and released
+  only at teardown; a capture never touches port state. This is the lesson of
+  the retired `/api/v1/snapshot.pgm` (0.60.0), which cycled Enable/Disable per
+  HTTP request — `DisablePort` races an in-flight mhal buffer and jams the VPE
+  input FIFO, about twice per 560 stressed captures. Lowest-priority claimant:
+  skipped with a log line when `video0.framing=stab` or `detect.enabled` holds
+  port1.
+
+- **Scan windows with self-closure.** `GET /api/v1/qr/scan[?ms=N]` opens a
+  window (`409 port1_busy` when stab or detect holds port1 — reported
+  immediately, never queued); a supervisor thread closes it when the deadline
+  expires, so a client that dies mid-scan cannot strand the port. Re-scanning
+  while a window is open only **extends the deadline** and never touches port
+  state, which is what keeps repeated scans from re-introducing the
+  Enable/Disable cycling that wedged snapshot.pgm. `GET /api/v1/qr/stop` ends a
+  window early; `GET /api/v1/qr/status` polls one without disturbing it
+  (`scanning`, `remaining_ms`, `frames`, `grabs`, `port1_owner`).
+  `GET /api/v1/qr/tap.pgm` returns one frame as a P5 PGM (self-describing
+  dimensions, stride removed; `503` with no window open, `504` on no frame).
+
+  The supervisor is the **only** thread that opens or closes the port, so no SDK
+  port call is ever concurrent. It waits in 200 ms slices against a
+  `CLOCK_MONOTONIC` deadline rather than sleeping to an absolute wall-clock
+  time, so a clock step cannot strand an open window.
+
+  `qr.windowMs` (default 15000, clamped 1000–60000) is the default budget,
+  `MUT_LIVE` since it is read when a window opens.
+
+  Note `/api/v1/qr/stop`, not `/qr/scan/stop`: the HTTP router matches on prefix
+  and accepts a `/` continuation, so a nested path is swallowed by the
+  `/qr/scan` route.
+
+- **The decode cascade is now shared code** (`src/qr_scan.c`,
+  `include/qr_scan.h`) — extracted from `tools/qr/qr_decode.c` and linked by
+  both the CLI and the daemon. A second copy would drift silently, and a
+  drifted decoder does not crash, it just quietly stops pairing. Stage order,
+  thresholds and outer-frame gating are unchanged. Image loading stays in the
+  CLI: it is the only part needing stb_image, and the daemon feeds the cascade
+  luma it already holds.
+
+  **Peak heap 5.04x -> 3.30x W*H**, measured with a live-heap interposer on a
+  1080x1080 exhaustive decode (5741 KB -> 3756 KB). The old peak held five live
+  W*H buffers at the lens-blur stage. Now the 3x3 box blur runs **in place**
+  behind a two-row ring of saved originals (bit-identical to the allocating
+  form), one scratch arena is reused across blur/lens/lens-blur/inversion with
+  the quarter-size half-scale slot behind it, and the blur is recomputed after
+  the lens stage rather than held across it — one extra ~30 ms pass on the
+  deep-failure path for a whole W*H.
+
+  The cascade also takes an abort callback, checked at every region boundary.
+  Without it the finest granularity a scan window has is one whole attempt.
+
+- **Windows decode in process** (`src/star6e_luma_tap.c`). The supervisor
+  thread drives the cascade as well as the port — one thread deliberately,
+  because "only the supervisor ever opens or closes port1" is what removes the
+  concurrency race class that retired snapshot.pgm. Each pass takes a fresh
+  frame, runs the cascade over the latch, and publishes the result. **A decode
+  ends the window early**: the point of a window is to find one code, and
+  finishing hands port1 back to detect/stab seconds sooner.
+
+  No second frame buffer. A `decoding` flag freezes the latch for the cascade's
+  duration: the reader keeps draining — that is never optional — but stops
+  overwriting, and `/api/v1/qr/tap.pgm` answers `409` rather than blocking an
+  httpd worker or handing back a frame being mutated.
+
+  `/api/v1/qr/status` grows a `decode` block: `attempts`, `decoded`, `payload`,
+  the winning `stage`, and both the winning and most recent cascade durations.
+  It survives the window closing and is cleared only by the next `/qr/scan`, so
+  a client polling at 1 Hz still sees the payload from a window that found its
+  code and shut down between two polls.
+
+  Measured on the Star6E bench (imx335, 1080x1080 centre square): a marker in
+  view decodes on the **first frame of the first attempt in 73-88 ms** (mean 81
+  ms over 100 windows). Worst case — no code present, full cascade — is 431 ms
+  at 1080x1080, 238 ms at 720x720, 117 ms at 540x540. The cascade and quirc
+  build at `-O3` inside the otherwise `-Os` daemon (1.66x on Cortex-A7), for
+  44 KB of text. Star6E only; Maruko has no luma tap and does not link it.
+
+- **Scanning no longer starves the video pipeline.** A window that finds its
+  marker decodes on the first frame in ~85 ms and closes, which is what every
+  scan during development did. A window with *nothing to find* ran back-to-back
+  431 ms cascades for its whole budget, and on this 2-core part that measured
+  60 fps -> **23 fps** with the CPU pegged at 100%: only the encoder thread is
+  `SCHED_FIFO`, so the ISP, AWB and frame-shm threads lose to a decoder that
+  never yields. The scan thread now runs at `nice 10` and holds a duty cycle —
+  after each attempt it idles for as long as that attempt took, keeping
+  scanning under half a core at any geometry. The idle is an interruptible cond
+  wait, so `/api/v1/qr/stop` does not wait it out. Measured after: 60 fps at 55%
+  CPU through a 25 s no-decode window.
+
+  Explicitly *not* fixed by holding port1 open continuously: that addresses none
+  of the cascade CPU, and adds ~186 MB/s of SCL write traffic and 8-9 CPU points
+  for the whole run while locking detect and stab out of port1 permanently.
+
+- **Both edges of the port cycle are now rate-limited.** The port lifecycle
+  itself is cheap — instrumented, `SetPortMode` 0 ms, `EnablePort` 0 ms,
+  `SetChnOutputPortDepth` 0 ms either way, `DisablePort` 33-53 ms — but the
+  *rate* is what matters. Two hard kernel panics on the bench (`panic=20`
+  auto-reboot) came from `/api/v1/qr/scan` followed immediately by
+  `/api/v1/qr/stop`, which disables a port that only just came up while the SCL
+  still has buffers in flight: the #205 `snapshot.pgm` failure exactly.
+
+  This corrected an over-claim. The 200/200 and 100/100 cycle soaks behind
+  "window-scoped cycling is safe" had every window closing *naturally*, on
+  decode or deadline, after reaching steady state. An operator-triggered close
+  of a brand-new port was never exercised, and it is the dangerous case.
+
+  So `LT_REOPEN_COOLDOWN_MS` (500 ms) floors the interval between opens, and
+  `LT_MIN_WINDOW_MS` (750 ms) floors how long the port stays up once enabled.
+  Every early exit — `/qr/stop`, the decode-triggered close, the out-of-memory
+  exit — pulls the deadline in to that instant rather than to zero, so `/qr/stop`
+  requests a close rather than forcing one while still blocking until port1 is
+  actually free. Cost: a window that decodes in 85 ms holds port1 for 750 ms
+  instead of ~200 ms.
+
+  Device soak after the fix: **130 scan-then-immediate-stop cycles**, 30 natural
+  closes, 60 extends and 25 concurrent stop/scan/status races — 245 port
+  operations, zero wedge signatures, zero reboots, daemon pid unchanged
+  throughout.
+
+- **`tools/qr/test-images/phone.html` generates markers.** It was a viewer for
+  one checked-in SVG; it now carries a Version-1/Q alphanumeric QR encoder and
+  the 33x33 outer-frame wrapper inline, so a phone with no network can render
+  any valid payload — typed or from a **Random** button — plus tiny and inverted
+  presets alongside the existing sizes and 35-degree tilt.
+
+  Inline because the page has to work off a memory card, and validated so that
+  cannot rot: `make qr-test-phone` extracts the encoder from between sentinel
+  comments and, for ten payloads spanning both legal prefixes and the whole
+  alphanumeric set, asserts the wrapper is byte-identical to
+  `tools/qr/generate_qr.py` and that every rendered marker decodes back through
+  the same cascade the craft runs, at two scales. 51 assertions.
+
+  The data mask is deliberately *not* required to match the Python generator:
+  all eight masks are valid, and python-qrcode scores them slightly differently
+  from ISO 18004, so the two disagree on about two thirds of payloads while both
+  being correct. Where the masks do agree the matrices are identical to the
+  module, and the test asserts exactly that.
+
+- **A tap that cannot deliver is refused instead of squatting on port1.**
+  `MI_VPE_SetPortMode` and `MI_VPE_EnablePort` both return success for
+  geometries the SCL will not in fact drive — measured, a 160x90 port enables
+  cleanly and then delivers zero frames forever, while holding port1 against
+  detect and stab for the whole window. `lt_port_open()` now waits up to 1 s
+  for a first frame and tears down if none arrives, so `/api/v1/qr/scan`
+  answers an error immediately. Deliberately a frame probe rather than a
+  geometry rule: the SDK's real constraint is undocumented and the obvious
+  guess is wrong (the working 1920x1080 is not 16-aligned in height).
+
+- **`snapshot.width` / `snapshot.height` tooltips corrected**
+  (`src/venc_api.c`) — they described these as sizing the QR capture, which is
+  false in both directions. They set the VENC channel's *maximum* encodable
+  resolution and VENC has no scaler: measured, a value below the main stream
+  makes every frame fail `_MI_VENC_ValidateResolution` and `/snapshot.jpg`
+  answers `504` permanently, while a value above it changes nothing.
+
 ## [0.60.2] - 2026-07-30
 
 Star6E IMX335 driver gets the same power-on fix as Maruko's in 0.60.1.

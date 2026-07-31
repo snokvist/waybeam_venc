@@ -1418,6 +1418,119 @@ driver enumerates so callers can show an "available modes" UI.
 Error `500 modes_failed` — `MI_SNR_QueryResCount` failed (e.g. sensor
 driver not loaded yet during a brief startup window).
 
+## QR Scanning (Star6E only)
+
+An overlay-free NV12 luma tap on VPE **port1** feeds an in-process QR decode
+cascade.  port1 exists because MI_RGN composites **per scaler output port** and
+every overlay producer targets port0 — `debug_osd` here, `osd_render` in
+waybeam-hub — so the MJPEG snapshot channel (a port0 1:N consumer) carries
+whatever HUD is running over anything a marker might occupy.
+
+Gated on `qr.tapEnabled`.  port1 is single-owner and shared with framing-stab
+and NPU detect, so a scan is **mutually exclusive** with both: whoever holds it
+wins, and QR is the lowest-priority claimant.
+
+### `GET /api/v1/qr/scan[?ms=N]`
+
+Open a scan window, or **extend** the one already running.  `ms` defaults to
+`qr.windowMs`, clamped to 1000–60000.
+
+A supervisor thread owns the window: it opens port1, decodes each fresh frame
+until the deadline, and closes the port on the way out — so a client that dies
+mid-scan cannot strand port1.  **A successful decode ends the window early**;
+the point of a window is to find one code.
+
+Extending never touches port state.  That matters: re-opening port1 per request
+is what wedged the retired `/api/v1/snapshot.pgm`.
+
+```bash
+curl "http://<device-ip>/api/v1/qr/scan?ms=10000"
+```
+
+Response `200`:
+```json
+{"ok": true, "data": {"scanning": true, "window_ms": 10000,
+                      "remaining_ms": 9999, "capture": "1080x1080"}}
+```
+
+- `409 port1_busy` — framing-stab or NPU detect holds port1.  Reported
+  immediately, never queued.
+- `503 tap_disabled` — `qr.tapEnabled` is off, or the pipeline is not running.
+- `500 scan_failed` — the SCL would not drive the configured geometry.  The
+  port is enabled and then verified to deliver a frame within 1 s; if it does
+  not, port1 is released rather than held for a window that can never capture.
+
+### `GET /api/v1/qr/stop`
+
+End the current window and hand port1 back.  Blocks until the port is actually
+released, so port1 is free on return.  Idempotent.
+
+This *requests* a close rather than forcing one.  The port is held for a minimum
+of 750 ms after it comes up, because disabling one that only just opened —
+while the SCL still has buffers in flight — panics the kernel (the same failure
+that retired `/api/v1/snapshot.pgm`).  A stop issued against a window older than
+that returns immediately; against a brand-new one it waits out the remainder.
+A further 500 ms floor applies between two opens.  Together these cap the
+port-cycle rate no matter how fast a client loops.
+
+Note the path: **not** `/api/v1/qr/scan/stop`.  The router matches on prefix and
+accepts a `/` continuation, so a nested path would be swallowed by the
+`/qr/scan` route.
+
+### `GET /api/v1/qr/status`
+
+Poll a window without disturbing it.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "armed": true,
+    "scanning": false,
+    "window_ms": 15000,
+    "remaining_ms": 0,
+    "capture": "1080x1080",
+    "frames": 3,
+    "grabs": 1,
+    "port1_owner": "",
+    "decode": {
+      "attempts": 1,
+      "decoded": true,
+      "payload": "P23456789ABCDEFG",
+      "stage": "sharp/full/refine",
+      "decode_ms": 84,
+      "last_ms": 84
+    }
+  }
+}
+```
+
+- `frames` / `grabs` — buffers drained, and buffers actually copied out, this
+  window.  Reset when a window opens, not when one is extended.
+- `port1_owner` — `""`, `"qr"`, `"stab"` or `"detect"`.
+- `decode.stage` — which cascade stage won, e.g. `sharp/full`, `blur/full`,
+  `lens/full/refine`.  Useful for judging capture quality: anything past
+  `sharp` means the frame needed help.
+- The `decode` block **survives the window closing** and is cleared only by the
+  next `/qr/scan`, so a client polling at 1 Hz still sees the payload from a
+  window that found its code and shut down between two polls.
+
+`payload` is a Waybeam transport envelope: exactly 16 characters from the QR
+alphanumeric alphabet (`0-9 A-Z` and `` $%*+-./:``).  Nothing in that set needs
+JSON escaping; anything outside it is scrubbed to `?` before serialization.
+
+### `GET /api/v1/qr/tap.pgm`
+
+One frame of the tap as a binary P5 PGM (self-describing dimensions, stride
+removed).  Debug instrumentation for validating capture — geometry,
+OSD-freedom, exposure — not part of the scanning flow.
+
+- `503 tap_disabled` — no window is open.
+- `504 tap_timeout` — no frame arrived.
+- `409 scan_decoding` — a cascade currently owns the latch.  The latch is
+  single-buffered; refusing beats blocking an httpd worker or returning a frame
+  that is being overwritten.
+
 ## SIGHUP Pipeline Reinit
 
 In addition to the `/api/v1/restart` endpoint, the pipeline can be reinited by sending
