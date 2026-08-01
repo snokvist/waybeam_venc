@@ -36,6 +36,8 @@
     "qpDelta": -4,
     "maxIBytes": 0,
     "maxPBytes": 0,
+    "minQp": 0,
+    "maxQp": 0,
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
     "resilience": "off",

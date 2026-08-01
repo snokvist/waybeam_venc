@@ -378,6 +378,60 @@ static int apply_qp_delta(int delta)
 	return 0;
 }
 
+/* Driver-default QP bounds, captured on the first Get before any write so
+ * a later 0 can restore them. The channel's rate mode is fixed for the
+ * process lifetime (reinit is fork+exec), so one capture is enough. */
+static struct {
+	int      captured;
+	uint32_t min_qp;
+	uint32_t max_qp;
+} g_qp_defaults;
+
+static int apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
+{
+	MI_VENC_ChnAttr_t attr = {0};
+	MI_VENC_RcParam_t param = {0};
+	uint32_t *pmin, *pmax;
+
+	if (min_qp == 0 && max_qp == 0 && !g_qp_defaults.captured)
+		return 0;   /* never written — driver defaults already in force */
+	if (MI_VENC_GetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
+		return -1;
+	if (MI_VENC_GetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+
+	/* Only the modes that carry QP bounds are handled; FIXQP has no rate
+	 * controller to bound. */
+	switch (attr.rate.mode) {
+	case I6_VENC_RATEMODE_H265CBR:
+		pmin = &param.stParamH265Cbr.u32MinQp;
+		pmax = &param.stParamH265Cbr.u32MaxQp;
+		break;
+	case I6_VENC_RATEMODE_H264CBR:
+		pmin = &param.stParamH264Cbr.u32MinQp;
+		pmax = &param.stParamH264Cbr.u32MaxQp;
+		break;
+	default:
+		return -1;
+	}
+
+	if (!g_qp_defaults.captured) {
+		g_qp_defaults.min_qp = *pmin;
+		g_qp_defaults.max_qp = *pmax;
+		g_qp_defaults.captured = 1;
+	}
+	/* 0 restores the captured driver default so bounds can be cleared
+	 * live, not just overridden. */
+	*pmin = min_qp ? min_qp : g_qp_defaults.min_qp;
+	*pmax = max_qp ? max_qp : g_qp_defaults.max_qp;
+
+	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
+		return -1;
+	printf("> qpBounds changed: min=%u max=%u (0 = driver default %u/%u)\n",
+		min_qp, max_qp, g_qp_defaults.min_qp, g_qp_defaults.max_qp);
+	return 0;
+}
+
 static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
 {
 	MI_VENC_ChnAttr_t attr = {0};
@@ -1689,6 +1743,7 @@ static int attitude_calibrate_level(float *roll_deg, float *pitch_deg)
 
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
+	.apply_qp_bounds = apply_qp_bounds,
 	.apply_fps = apply_fps,
 	.apply_gop = apply_gop,
 	.apply_qp_delta = apply_qp_delta,
