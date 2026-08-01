@@ -1,5 +1,26 @@
 # History
 
+## [0.62.0] - 2026-08-01
+
+RC QP bounds exposed as live controls (star6e).
+
+- **`video0.minQp` / `video0.maxQp`** (MUT_LIVE, 0 = driver default) write
+  `u32MinQp`/`u32MaxQp` in the CBR RcParam via a new `apply_qp_bounds()`
+  callback. Unlike the frame-size caps (`u32MaxISize`/`u32MaxPSize` — verified
+  no-op on star6e: 100/100 frames over a 4000 B cap at full target rate), the
+  QP bounds are honoured instantly by the SDK rate controller: `minQp=35`
+  collapses an on-target 10.3 Mbps stream to 1%.
+- Driver-default bounds are captured on the first write so clearing a bound
+  back to 0 restores the default live instead of latching the last value.
+- Validation rejects QP values > 51 and `minQp > maxQp` (the SDK accepts the
+  inversion silently and then misbehaves).
+- Maruko returns 501 for the new group (callback not implemented).
+
+Investigation context: the chronic CBR undershoot turned out to be
+`fpv.noiseLevel` (VPE 3DNR) — level 1 yields 33-42% of target on a static
+scene, level 0 yields 101-104%. No code change needed (shipped default is
+already 0); these QP levers are the follow-on granular control.
+
 ## [0.61.1] - 2026-07-31
 
 Build fix: a version bump now actually reaches the binary.

@@ -456,6 +456,14 @@ static const FieldUi ui_shm_throttle = {
 /* UI descriptors for the per-frame size caps (0.45.0).  Rendered as a
  * "Frame size caps" group purely from capabilities — the caps were API-only
  * until now (no static SECTIONS rows). */
+static const FieldUi ui_min_qp = {
+	"Video", "Min QP", "number", 0, 51, 1, NULL,
+	"RC QP floor. 0 = leave the SDK default. Raising the floor caps quality and saves bitrate; LOWERING it lets CBR actually spend its budget on a simple scene instead of undershooting the target. Applied live."
+};
+static const FieldUi ui_max_qp = {
+	"Video", "Max QP", "number", 0, 51, 1, NULL,
+	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
+};
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
@@ -550,6 +558,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
 	FIELD_UI(video0, max_i_bytes,  FT_UINT,   MUT_LIVE, &ui_max_i_bytes),
 	FIELD_UI(video0, max_p_bytes,  FT_UINT,   MUT_LIVE, &ui_max_p_bytes),
+	FIELD_UI(video0, min_qp,       FT_UINT,   MUT_LIVE, &ui_min_qp),
+	FIELD_UI(video0, max_qp,       FT_UINT,   MUT_LIVE, &ui_max_qp),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
@@ -712,6 +722,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.gopSize", "video0.gop_size" },
 	{ "video0.qpDelta", "video0.qp_delta" },
 	{ "video0.maxIBytes", "video0.max_i_bytes" },
+	{ "video0.minQp", "video0.min_qp" },
+	{ "video0.maxQp", "video0.max_qp" },
 	{ "video0.maxPBytes", "video0.max_p_bytes" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
@@ -1112,6 +1124,18 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_holdoff == 0 &&
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
+	if (strcmp(key, "video0.min_qp") == 0 || strcmp(key, "video0.max_qp") == 0) {
+		/* H.264/H.265 QP range; the SDK accepts min > max without
+		 * complaint and then behaves erratically (device-observed),
+		 * so reject the combination here. 0 = driver default. */
+		if (cfg->video0.min_qp > 51)
+			return "video0.min_qp must be 0..51";
+		if (cfg->video0.max_qp > 51)
+			return "video0.max_qp must be 0..51";
+		if (cfg->video0.min_qp > 0 && cfg->video0.max_qp > 0 &&
+		    cfg->video0.min_qp > cfg->video0.max_qp)
+			return "video0.min_qp must not exceed max_qp";
+	}
 	if (strcmp(key, "snapshot.quality") == 0) {
 		/* JPEG q-factor range.  Backend clamps internally too, but
 		 * the validator gives a clean error response instead of a
@@ -1312,6 +1336,7 @@ typedef enum {
 	LIVE_GROUP_SNAPSHOT_QUALITY,
 	LIVE_GROUP_PAUSE_STAB,
 	LIVE_GROUP_MAX_FRAME_SIZE,
+	LIVE_GROUP_QP_BOUNDS,
 	LIVE_GROUP_DETECT,
 	LIVE_GROUP_SHM_THROTTLE,
 	LIVE_GROUP_COUNT
@@ -1494,6 +1519,9 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 	if (strcmp(canonical_key, "video0.max_i_bytes") == 0 ||
 	    strcmp(canonical_key, "video0.max_p_bytes") == 0)
 		return LIVE_GROUP_MAX_FRAME_SIZE;
+	if (strcmp(canonical_key, "video0.min_qp") == 0 ||
+	    strcmp(canonical_key, "video0.max_qp") == 0)
+		return LIVE_GROUP_QP_BOUNDS;
 	if (strcmp(canonical_key, "detect.enabled") == 0 ||
 	    strcmp(canonical_key, "detect.model_path") == 0 ||
 	    strcmp(canonical_key, "detect.model_id") == 0 ||
@@ -1545,6 +1573,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "video0.pauseStab";
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return "video0.maxIBytes/maxPBytes";
+	case LIVE_GROUP_QP_BOUNDS:
+		return "video0.minQp/maxQp";
 	case LIVE_GROUP_DETECT:
 		return "detect.enabled/model_path/model_id/conf_thresh/nms_iou";
 	case LIVE_GROUP_SHM_THROTTLE:
@@ -1725,6 +1755,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_pause_stab != NULL;
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size != NULL;
+	case LIVE_GROUP_QP_BOUNDS:
+		return g_cb->apply_qp_bounds != NULL;
 	case LIVE_GROUP_DETECT:
 		return g_cb->apply_detect_reload != NULL;
 	case LIVE_GROUP_SHM_THROTTLE:
@@ -1822,6 +1854,10 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		dst->video0.max_i_bytes = src->video0.max_i_bytes;
 		dst->video0.max_p_bytes = src->video0.max_p_bytes;
+		break;
+	case LIVE_GROUP_QP_BOUNDS:
+		dst->video0.min_qp = src->video0.min_qp;
+		dst->video0.max_qp = src->video0.max_qp;
 		break;
 	case LIVE_GROUP_DETECT:
 		/* Copy the whole live detector group; the backend re-reads all of
@@ -1975,6 +2011,12 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_MAX_FRAME_SIZE:
 		return g_cb->apply_max_frame_size(cfg->video0.max_i_bytes,
 			cfg->video0.max_p_bytes);
+	case LIVE_GROUP_QP_BOUNDS:
+		/* Backends without RC QP bounds leave the hook NULL. */
+		if (!g_cb->apply_qp_bounds)
+			return -2;
+		return g_cb->apply_qp_bounds(cfg->video0.min_qp,
+			cfg->video0.max_qp);
 	case LIVE_GROUP_DETECT:
 		/* cfg is already committed to g_cfg (commit_config_locked above),
 		 * so the backend reads the new model_path/model_id/conf/iou from the
