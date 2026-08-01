@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.16.1`
+- `contract_version`: `0.17.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -1364,10 +1364,10 @@ Field reference:
 
 | Field | Meaning |
 |---|---|
-| `transport` | `"shm"`, `"udp"`, `"unix"`, or `"none"` |
+| `transport` | `"shm"`, `"frame-shm"`, `"udp"`, `"unix"`, or `"none"` |
 | `fillPct` | Current fill ratio `0..100`.  For SHM, ring fill.  For UDP, kernel send-buffer fill.  For Unix, fill against the peer's datagram queue — see the note below |
-| `inPressure` | True when `fillPct >= 75` (high-water threshold); clears below `50` |
-| `transportDrops` | Lifetime drops: ring-full for SHM, congestion (`EAGAIN`) drops for UDP/Unix |
+| `inPressure` | Point-in-time HTTP snapshot: true when the current `fillPct >= 75`, false otherwise. The RTP sidecar field uses 75/50 hysteresis |
+| `transportDrops` | Lifetime drops: ring-full for SHM; unsent datagrams after `EAGAIN`/`ENOBUFS` or frame-budget exhaustion for UDP/Unix |
 | `pressureDrops` | Frames dropped by the in-process backpressure path while a sidecar probe was subscribed |
 | `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
@@ -1383,7 +1383,7 @@ is an estimate from `net.unix.max_dgram_qlen` before that.  `fillPct` may
 therefore read low until the transport has been pushed once.
 
 `transportDrops` rising on `unix://` means the consumer is not keeping up:
-a frame's packets exceeded the flush deadline and the remainder was dropped
+a frame's packets exhausted the cumulative flush budget and the remainder was dropped
 rather than stalling the encoder.  The usual cause is a shallow
 `net.unix.max_dgram_qlen` — see the `unix://` notes in the README.
 
@@ -1617,6 +1617,11 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.17.0` (additive — socket transport telemetry):
+  - The UDP/Unix response from `/api/v1/transport/status` now reports
+    `transportDrops` and `packetsSent`, matching the existing SHM field names.
+  - Unix `fillPct` is calibrated against the peer's observed full datagram
+    queue rather than the sender's `SO_SNDBUF`.
 - `0.16.1` (non-breaking):
   - `isp.keepAspect` is now **supported on Maruko** — capabilities report
     `supported:true` and `/api/v1/set` accepts it (previously rejected with

@@ -55,6 +55,18 @@ implementation issues converged at that bitrate instead.
   held an odd generation across `socket()`/`setsockopt()`/`connect()`; the
   encode thread is pinned to CPU 0 and could starve the writer it waited on.
 
+- **The 4 ms bound is truly per frame.** Large encoded frames can exceed the
+  64-datagram `sendmmsg` batch. All internal flushes now share one cumulative
+  budget; once it is spent, later packets from that already-broken frame are
+  counted and discarded without starting another timeout window.
+
+- **Target-local validation consumer.** `make unix-dgram-consumer` builds a
+  small abstract-AF_UNIX RTP sink for either backend. It reports delivered
+  bitrate, RTP gaps, marker cadence, and receive spread, and can pause reads
+  for deterministic backpressure/recovery tests. Direct-deploy helpers now
+  start the standard binary through `S95waybeam`, so its queue-depth setup is
+  exercised during a normal cycle.
+
 Tests: the existing `unix bp` case pumped 1024-byte payloads and guarded its
 high-water assertions behind `if (fill_pct >= 75)`, which is why the fill bug
 shipped — the assertions simply never ran. It now uses MTU-sized payloads and
@@ -63,8 +75,10 @@ A new `unix bound` case asserts a wedged consumer cannot hang the send path.
 Both were confirmed to fail against the pre-fix code.
 
 Handover and the on-device validation plan (V1-V10 with pass/fail criteria)
-are in `documentation/UNIX_SOCKET_HANDOVER.md`. Everything here is
-host-verified only; nothing has run on target hardware yet.
+are in `documentation/UNIX_SOCKET_HANDOVER.md`. Star6E target-local tests pass
+at 10, 15, and 20 Mbps with zero RTP gaps and transport drops; the 25 Mbps
+gate is blocked by the device-unresponsive incident recorded in
+`documentation/CRASH_LOG.md`. Maruko remains code-level only.
 
 Note: `SO_SNDBUF` is raised on both transports but is a no-op for `unix://`
 (1 MiB effective is ~455 datagrams, far above any sane qlen); it remains the

@@ -52,6 +52,9 @@ typedef struct {
 	struct sockaddr_storage dst;
 	socklen_t dst_len;
 	int connected_udp;
+	uint32_t flush_budget_us;
+	int discard_remaining;
+	int discard_as_error;
 } MarukoOutputBatch;
 
 /** Maruko output module — manages socket/SHM lifecycle and destination. */
@@ -142,6 +145,10 @@ int maruko_output_batch_enqueue(MarukoOutput *output,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len);
+
+/** Classify the errno from a failed socket send as congestion or hard error. */
+void maruko_output_account_send_failure(MarukoOutput *output, int socket_handle,
+	uint32_t packets);
 
 /** Return and reset accumulated send error count. */
 uint32_t maruko_output_drain_send_errors(MarukoOutput *output);

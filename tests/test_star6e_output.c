@@ -1360,21 +1360,43 @@ static int test_star6e_output_unix_flush_is_bounded(void)
 		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
 	CHECK("unix bound init", star6e_output_init(&output, &setup) == 0);
 
-	/* The receiver never reads, so the peer queue wedges full. Push far
-	 * more than any queue depth so the deadline is certain to be hit. */
-	started = wb_monotonic_us();
-	for (int frame = 0; frame < 4; frame++) {
-		star6e_output_begin_frame(&output);
-		for (int i = 0; i < STAR6E_OUTPUT_BATCH_MAX * 4; i++) {
-			(void)star6e_output_send_rtp_parts(&output,
-				hdr, sizeof(hdr), payload, sizeof(payload),
-				NULL, 0);
+	/* Fill the peer queue before starting the frame so the very first batch
+	 * hits congestion. This makes the per-frame budget assertion independent
+	 * of the host's configured max_dgram_qlen. */
+	{
+		int flags = fcntl(output.socket_handle, F_GETFL, 0);
+
+		(void)fcntl(output.socket_handle, F_SETFL, flags | O_NONBLOCK);
+		for (;;) {
+			ssize_t n = sendto(output.socket_handle, payload,
+				sizeof(payload), 0,
+				(const struct sockaddr *)&output.dst,
+				output.dst_len);
+			if (n < 0)
+				break;
 		}
-		(void)star6e_output_end_frame(&output);
+		(void)fcntl(output.socket_handle, F_SETFL, flags);
 	}
+
+	/* A frame can exceed the 64-message sendmmsg batch. The 4 ms budget is
+	 * cumulative across those internal flushes: after it is exhausted, all
+	 * later packets in this same frame are counted and discarded without
+	 * starting another 4 ms window. */
+	started = wb_monotonic_us();
+	star6e_output_begin_frame(&output);
+	for (int i = 0; i < STAR6E_OUTPUT_BATCH_MAX * 4; i++) {
+		(void)star6e_output_send_rtp_parts(&output,
+			hdr, sizeof(hdr), payload, sizeof(payload),
+			NULL, 0);
+	}
+	(void)star6e_output_end_frame(&output);
 	elapsed = wb_monotonic_us() - started;
 
-	CHECK("unix bound flush did not hang", elapsed < 250000);
+	CHECK("unix bound flush did not hang", elapsed < 50000);
+	CHECK("unix bound exhausted one frame budget",
+		output.batch.flush_budget_us == 0);
+	CHECK("unix bound discarded rest of frame",
+		output.batch.discard_remaining == 1);
 	CHECK("unix bound counted transport drops", output.socket_drops > 0);
 	CHECK("unix bound congestion not miscounted as error",
 		output.send_errors == 0);

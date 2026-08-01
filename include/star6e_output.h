@@ -80,6 +80,9 @@ typedef struct {
 	struct sockaddr_storage dst;
 	socklen_t dst_len;
 	int connected_udp;
+	uint32_t flush_budget_us;
+	int discard_remaining;
+	int discard_as_error;
 } Star6eOutputBatch;
 
 typedef struct {

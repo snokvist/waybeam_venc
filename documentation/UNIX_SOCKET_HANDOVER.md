@@ -4,10 +4,11 @@
 
 Branch: `claude/unix-socket-speed-limits-az62s4` · Target release: `0.63.0`
 
-Status: **host-verified only.** Every number below marked *(measured)* comes
-from a Linux 6.18 x86-64 container, not from target hardware. Nothing has run
-on a Star6E or Maruko device. On-device validation is the purpose of this
-document.
+Status: **partial Star6E device verification.** The root-cause measurements
+below marked *(measured)* came from a Linux 6.18 x86-64 container. The
+target-local gates completed on SSC338Q through 20 Mbps; the 25 Mbps gate is
+blocked by the device-unresponsive incident recorded in `CRASH_LOG.md`.
+Maruko remains code-level only.
 
 ---
 
@@ -74,7 +75,7 @@ flag, and no counter — only unexplained encoder timing jitter.
 
 **This is deliberate and is the key deployment fact.**
 
-`init.d/S95waybeam` raises `net.unix.max_dgram_qlen` to 256 in `start()`,
+`init.d/S95waybeam` raises `net.unix.max_dgram_qlen` to at least 256 in `start()`,
 before launching the daemon. It is a system-wide sysctl, applied by the init
 script that ships in this repo and installs to `/etc/init.d/S95waybeam` (see
 `scripts/star6e_direct_deploy.sh:11`).
@@ -111,7 +112,9 @@ venc only *warns*, in two places:
 - `SO_SNDTIMEO` = 2 ms on `unix://` sockets (`src/output_socket.c`), bounding
   a single `sendmsg`.
 - `STAR6E_OUTPUT_FLUSH_BUDGET_US` / `MARUKO_OUTPUT_FLUSH_BUDGET_US` = 4000,
-  a per-frame deadline in the batch flush.
+  a cumulative per-frame send budget for batched RTP, shared by every internal
+  64-packet `sendmmsg` flush. Once exhausted, the rest of that encoded frame is
+  counted and discarded without opening a fresh deadline.
 
 Both are required: `sendmmsg()` applies `SO_SNDTIMEO` **per message**, so the
 timeout alone still let a 64-packet batch accumulate to 5.6 ms *(measured)*.
@@ -193,6 +196,32 @@ they never executed.
 
 Hardware: Star6E first (per AGENTS.md backend policy), then Maruko.
 Deploy: `scripts/star6e_direct_deploy.sh` / `scripts/maruko_direct_deploy.sh`.
+Both helpers now start the standard `/usr/bin/waybeam` through
+`/etc/init.d/S95waybeam`, so the queue-depth setup is part of a normal cycle.
+
+Build the target-local receiver with `make unix-dgram-consumer
+SOC_BUILD=<backend>` and deploy `out/<backend>/unix_dgram_consumer` to `/tmp`.
+It binds a Linux abstract datagram name and reports delivered bitrate, RTP
+sequence gaps, marker-frame cadence, and maximum first-to-last receive spread.
+The receive spread is a same-host proxy; the exact
+`last_pkt_send_us - frame_ready_us` value still requires sidecar correlation.
+
+### Results — 2026-08-01, SSC338Q / IMX335 (`192.168.2.232`)
+
+V1 passed with `net.unix.max_dgram_qlen=1024`; `S95waybeam` starts before
+`S96waybeam-link`. At 60 fps and 1400-byte payloads, the target-local consumer
+reported:
+
+| Configured | Delivered | RTP gaps | Transport drops | Max frame interval | Max receive spread | Result |
+|---:|---:|---:|---:|---:|---:|---|
+| 10 Mbps | 10.054 Mbps | 0 | 0 | 17.454 ms | 0.359 ms | PASS |
+| 15 Mbps | 15.176 Mbps | 0 | 0 | 17.309 ms | 0.546 ms | PASS |
+| 20 Mbps | 20.250 Mbps | 0 | 0 | 17.477 ms | 0.687 ms | PASS |
+| 25 Mbps | — | — | 0 before retry | — | — | BLOCKED — craft became unreachable during retry |
+
+The 25 Mbps incident stopped the run before V5–V10. See
+`documentation/CRASH_LOG.md`; do not resume until the craft is
+human-confirmed recovered and the saved production config is restored.
 
 ### V1 — Baseline: the sysctl is actually applied
 
@@ -201,7 +230,7 @@ Deploy: `scripts/star6e_direct_deploy.sh` / `scripts/maruko_direct_deploy.sh`.
 cat /proc/sys/net/unix/max_dgram_qlen
 ```
 
-**Pass:** `256`.
+**Pass:** `256` or greater.
 **Fail:** `10` → `raise_unix_dgram_qlen()` did not run or `/proc` is not
 writable. Check the boot log for the `net.unix.max_dgram_qlen 10 -> 256` line.
 
@@ -272,7 +301,8 @@ value from the calibration log line.
 
 `SIGSTOP` the consumer for ~5 s while streaming at 15 Mbps.
 
-**Pass:** venc keeps encoding; log shows `transportDrops` rising; no
+**Pass:** venc keeps encoding; repeated `/api/v1/transport/status` snapshots
+show `transportDrops` rising; no
 `MI_VENC_GetStream` timeout errors; the stream recovers on `SIGCONT` without a
 venc restart.
 **Fail:** `GetStream` errors, watchdog restart, or capture-side frame loss →
@@ -343,11 +373,18 @@ Repeat V1, V4, V5, V6 on Maruko.
    compile-time. If V6 shows the platform needs different values, they should
    probably stay compile-time rather than becoming config surface.
 
+7. **Compact stream mode has only the per-send timeout.** The cumulative 4 ms
+   frame budget applies to the production batched RTP path. Compact mode is
+   protected from an unbounded individual send by `SO_SNDTIMEO`, but a frame
+   split into many compact datagrams can still spend multiple timeout windows.
+   Add a compact-frame budget only if that legacy mode must be supported over
+   `unix://`; it is not exercised by V4–V10.
+
 ---
 
 ## 7. Rollback
 
-Single commit on `claude/unix-socket-speed-limits-az62s4`. The init.d change
-is independently revertible and is the highest-value part — if the code
-changes need backing out, **keep the `max_dgram_qlen` raise**, since it alone
-resolves the dominant symptom.
+The PR is intentionally split into reviewable commits. The init.d change is
+independently revertible and is the highest-value part — if the code changes
+need backing out, **keep the `max_dgram_qlen` raise**, since it alone resolves
+the dominant symptom.

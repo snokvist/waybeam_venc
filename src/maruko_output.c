@@ -10,6 +10,19 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+void maruko_output_account_send_failure(MarukoOutput *output, int socket_handle,
+	uint32_t packets)
+{
+	if (!output)
+		return;
+	if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+		output_socket_note_saturation(socket_handle, &output->send_queue);
+		output->socket_drops += packets;
+	} else {
+		output->send_errors += packets;
+	}
+}
+
 int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	int requested_connected_udp)
 {
@@ -239,11 +252,21 @@ static int maruko_batch_flush(MarukoOutput *output)
 {
 	MarukoOutputBatch *b = &output->batch;
 	size_t sent_total = 0;
+	uint64_t started;
 	uint64_t deadline;
+	uint64_t elapsed;
 	int fd;
 
 	if (b->count == 0)
 		return 0;
+	if (b->discard_remaining || b->flush_budget_us == 0) {
+		if (b->discard_as_error)
+			output->send_errors += (uint32_t)b->count;
+		else
+			output->socket_drops += (uint32_t)b->count;
+		b->count = 0;
+		return 0;
+	}
 
 	/* Use the batch-snapshotted socket — output->socket_handle can be
 	 * mutated by a concurrent apply_server() on the HTTP thread between
@@ -251,11 +274,14 @@ static int maruko_batch_flush(MarukoOutput *output)
 	fd = b->socket_handle;
 	if (fd < 0) {
 		output->send_errors += (uint32_t)b->count;
+		b->discard_remaining = 1;
+		b->discard_as_error = 1;
 		b->count = 0;
 		return 0;
 	}
 
-	deadline = wb_monotonic_us() + MARUKO_OUTPUT_FLUSH_BUDGET_US;
+	started = wb_monotonic_us();
+	deadline = started + b->flush_budget_us;
 
 	while (sent_total < b->count) {
 		int n = sendmmsg(fd, b->msgs + sent_total,
@@ -275,6 +301,7 @@ static int maruko_batch_flush(MarukoOutput *output)
 					continue;
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
+				b->discard_remaining = 1;
 				break;
 			}
 			if (errno == ENOBUFS) {
@@ -285,15 +312,20 @@ static int maruko_batch_flush(MarukoOutput *output)
 				 * as congestion and move on. */
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
+				b->discard_remaining = 1;
 				break;
 			}
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		if (n == 0) {
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		sent_total += (size_t)n;
@@ -302,12 +334,20 @@ static int maruko_batch_flush(MarukoOutput *output)
 			if (wb_monotonic_us() >= deadline) {
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
+				b->discard_remaining = 1;
 				break;
 			}
 		}
 	}
 
 	output->socket_writes += (uint32_t)sent_total;
+	elapsed = wb_monotonic_us() - started;
+	if (elapsed >= b->flush_budget_us) {
+		b->flush_budget_us = 0;
+		b->discard_remaining = 1;
+	} else {
+		b->flush_budget_us -= (uint32_t)elapsed;
+	}
 	b->count = 0;
 	return (int)sent_total;
 }
@@ -322,6 +362,9 @@ void maruko_output_begin_frame(MarukoOutput *output)
 	b = &output->batch;
 	b->count = 0;
 	b->active = 0;
+	b->flush_budget_us = MARUKO_OUTPUT_FLUSH_BUDGET_US;
+	b->discard_remaining = 0;
+	b->discard_as_error = 0;
 
 	/* SHM output is not batched — skip the snapshot entirely. */
 	if (output->ring)
@@ -383,9 +426,24 @@ int maruko_output_batch_enqueue(MarukoOutput *output,
 	scratch_len = header_len + payload1_len;
 	if (scratch_len > MARUKO_OUTPUT_BATCH_SLOT_SCRATCH)
 		return -1;
+	if (b->discard_remaining) {
+		if (b->discard_as_error)
+			output->send_errors++;
+		else
+			output->socket_drops++;
+		return 0;
+	}
 
-	if (b->count >= MARUKO_OUTPUT_BATCH_MAX)
+	if (b->count >= MARUKO_OUTPUT_BATCH_MAX) {
 		maruko_batch_flush(output);
+		if (b->discard_remaining) {
+			if (b->discard_as_error)
+				output->send_errors++;
+			else
+				output->socket_drops++;
+			return 0;
+		}
+	}
 
 	slot = b->count;
 	iov = &b->iov[slot * 2];

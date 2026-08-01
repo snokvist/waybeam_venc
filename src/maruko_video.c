@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/uio.h>
 
 /* MARUKO_REFTYPE_ENHANCE_P_NOTFORREF (=5) is defined in maruko_video.h. */
 
@@ -23,9 +22,6 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 {
 	const MarukoRtpWriteContext *ctx = opaque;
 	MarukoOutput *output;
-	struct iovec vec[3];
-	struct msghdr msg;
-	int iovcnt;
 
 	if (!ctx || !header || !payload1 || header_len == 0 || payload1_len == 0)
 		return -1;
@@ -60,36 +56,14 @@ static int maruko_rtp_write(const uint8_t *header, size_t header_len,
 
 	/* Fallback: either batch inactive or packet too big for scratch —
 	 * send immediately via sendmsg(). */
-	if (output->socket_handle < 0)
-		return -1;
-	if (!output->connected_udp && output->dst_len == 0)
-		return -1;
-
-	vec[0].iov_base = (void *)header;
-	vec[0].iov_len = header_len;
-	vec[1].iov_base = (void *)payload1;
-	vec[1].iov_len = payload1_len;
-	iovcnt = 2;
-	if (payload2 && payload2_len > 0) {
-		vec[2].iov_base = (void *)payload2;
-		vec[2].iov_len = payload2_len;
-		iovcnt = 3;
-	}
-
-	memset(&msg, 0, sizeof(msg));
-	if (output->connected_udp) {
-		msg.msg_name = NULL;
-		msg.msg_namelen = 0;
-	} else {
-		msg.msg_name = (void *)&output->dst;
-		msg.msg_namelen = output->dst_len;
-	}
-	msg.msg_iov = vec;
-	msg.msg_iovlen = iovcnt;
-	if (sendmsg(output->socket_handle, &msg, 0) < 0) {
-		output->send_errors++;
+	if (output_socket_send_parts(output->socket_handle, &output->dst,
+	    output->dst_len, output->connected_udp,
+	    header, header_len, payload1, payload1_len,
+	    payload2, payload2_len) != 0) {
+		maruko_output_account_send_failure(output, output->socket_handle, 1);
 		return -1;
 	}
+	output->socket_writes++;
 	return 0;
 }
 

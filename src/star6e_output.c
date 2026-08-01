@@ -406,11 +406,21 @@ static int star6e_batch_flush(Star6eOutput *output)
 {
 	Star6eOutputBatch *b = &output->batch;
 	size_t sent_total = 0;
+	uint64_t started;
 	uint64_t deadline;
+	uint64_t elapsed;
 	int fd;
 
 	if (b->count == 0)
 		return 0;
+	if (b->discard_remaining || b->flush_budget_us == 0) {
+		if (b->discard_as_error)
+			output->send_errors += (uint32_t)b->count;
+		else
+			output->socket_drops += (uint32_t)b->count;
+		b->count = 0;
+		return 0;
+	}
 
 	/* Use the batch-snapshotted socket — output->socket_handle can be
 	 * mutated by a concurrent apply_server() on the HTTP thread between
@@ -418,11 +428,14 @@ static int star6e_batch_flush(Star6eOutput *output)
 	fd = b->socket_handle;
 	if (fd < 0) {
 		output->send_errors += (uint32_t)b->count;
+		b->discard_remaining = 1;
+		b->discard_as_error = 1;
 		b->count = 0;
 		return 0;
 	}
 
-	deadline = wb_monotonic_us() + STAR6E_OUTPUT_FLUSH_BUDGET_US;
+	started = wb_monotonic_us();
+	deadline = started + b->flush_budget_us;
 
 	while (sent_total < b->count) {
 		int n = sendmmsg(fd, b->msgs + sent_total,
@@ -442,6 +455,7 @@ static int star6e_batch_flush(Star6eOutput *output)
 					continue;
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
+				b->discard_remaining = 1;
 				break;
 			}
 			if (errno == ENOBUFS) {
@@ -452,12 +466,15 @@ static int star6e_batch_flush(Star6eOutput *output)
 				 * as congestion and move on. */
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
+				b->discard_remaining = 1;
 				break;
 			}
 			/* Permanent error on the next unsent message:
 			 * account remaining as drops and bail. */
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		if (n == 0) {
@@ -465,6 +482,8 @@ static int star6e_batch_flush(Star6eOutput *output)
 			 * but treat as permanent to avoid a spin. */
 			output->send_errors +=
 				(uint32_t)(b->count - sent_total);
+			b->discard_remaining = 1;
+			b->discard_as_error = 1;
 			break;
 		}
 		sent_total += (size_t)n;
@@ -475,12 +494,20 @@ static int star6e_batch_flush(Star6eOutput *output)
 			if (wb_monotonic_us() >= deadline) {
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
+				b->discard_remaining = 1;
 				break;
 			}
 		}
 	}
 
 	output->socket_writes += (uint32_t)sent_total;
+	elapsed = wb_monotonic_us() - started;
+	if (elapsed >= b->flush_budget_us) {
+		b->flush_budget_us = 0;
+		b->discard_remaining = 1;
+	} else {
+		b->flush_budget_us -= (uint32_t)elapsed;
+	}
 	b->count = 0;
 	return (int)sent_total;
 }
@@ -495,6 +522,9 @@ void star6e_output_begin_frame(Star6eOutput *output)
 	b = &output->batch;
 	b->count = 0;
 	b->active = 0;
+	b->flush_budget_us = STAR6E_OUTPUT_FLUSH_BUDGET_US;
+	b->discard_remaining = 0;
+	b->discard_as_error = 0;
 
 	/* SHM output is not batched — skip the snapshot entirely. */
 	if (output->ring)
@@ -564,9 +594,24 @@ static int star6e_batch_enqueue(Star6eOutput *output,
 
 	if (scratch_len > STAR6E_OUTPUT_BATCH_SLOT_SCRATCH)
 		return -1;
+	if (b->discard_remaining) {
+		if (b->discard_as_error)
+			output->send_errors++;
+		else
+			output->socket_drops++;
+		return 0;
+	}
 
-	if (b->count >= STAR6E_OUTPUT_BATCH_MAX)
+	if (b->count >= STAR6E_OUTPUT_BATCH_MAX) {
 		star6e_batch_flush(output);
+		if (b->discard_remaining) {
+			if (b->discard_as_error)
+				output->send_errors++;
+			else
+				output->socket_drops++;
+			return 0;
+		}
+	}
 
 	slot = b->count;
 	iov = &b->iov[slot * 2];
