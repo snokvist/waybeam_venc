@@ -1,4 +1,5 @@
 #include "star6e_output.h"
+#include "timing.h"
 
 #include "output_socket.h"
 #include "test_helpers.h"
@@ -1246,11 +1247,14 @@ static int test_star6e_output_unix_backpressure(void)
 	star6e_output_observe_pressure(&output);
 	CHECK("unix bp empty in_pressure", output.in_pressure == 0);
 
-	/* Stuff the queue.  No receiver read → bytes accumulate against the
-	 * sender's SO_SNDBUF accounting.  Stop on first short write or a
-	 * fixed cap so the test never hangs. */
+	/* Stuff the queue with MTU-sized RTP payloads — the size that
+	 * actually ships — until the kernel refuses.  A saturated queue must
+	 * be reported as saturated: the earlier 4096-byte per-skb truesize
+	 * estimate over-counted 1400-byte datagrams by ~1.8x and capped the
+	 * reportable fill at 61 %, so a fully blocked socket never crossed
+	 * the 75 % high-water mark and unix:// backpressure never fired. */
 	{
-		char payload[1024];
+		char payload[1400];
 		int sent = 0;
 		int flags;
 
@@ -1267,33 +1271,115 @@ static int test_star6e_output_unix_backpressure(void)
 		}
 		CHECK("unix bp pumped some packets", sent > 0);
 		(void)fcntl(output.socket_handle, F_SETFL, flags);
+		/* The refusal above is the calibration event the send path
+		 * uses in production. */
+		output_socket_note_saturation(output.socket_handle,
+			&output.send_queue);
 	}
 
-	/* Now SIOCOUTQ should report a non-trivial fill_pct.  Observe and
-	 * check the in_pressure / pressure_drops bookkeeping. */
+	/* A saturated queue must read as saturated and must trip pressure —
+	 * unconditionally, not "if it happens to reach 75". */
 	{
 		uint8_t fill_pct = 0;
 		int got_fill = output_socket_get_fill_pct(
 			output.socket_handle,
-			output.send_buf_capacity, &fill_pct);
+			&output.send_queue, &fill_pct);
 		CHECK("unix bp fill_pct readable", got_fill == 0);
-		CHECK("unix bp fill_pct above lo", fill_pct >= 50);
 		CHECK("unix bp sndbuf capacity captured",
-			output.send_buf_capacity > 0);
+			output.send_queue.sndbuf_capacity > 0);
+		CHECK("unix bp capacity calibrated",
+			output.send_queue.unix_capacity > 0);
+		CHECK("unix bp saturated reads >= high water",
+			fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT);
 
 		star6e_output_observe_pressure(&output);
-		/* When fill_pct ≥ 75 (the hardcoded high-water mark in
-		 * venc_ring.h), observation must flip in_pressure on and
-		 * cache the value. */
-		if (fill_pct >= 75) {
-			CHECK("unix bp entered pressure",
-				output.in_pressure == 1);
-			CHECK("unix bp drop counted",
-				output.pressure_drops > 0);
-			CHECK("unix bp cached fill",
-				output.last_fill_pct >= 75);
-		}
+		CHECK("unix bp entered pressure", output.in_pressure == 1);
+		CHECK("unix bp drop counted", output.pressure_drops > 0);
+		CHECK("unix bp cached fill",
+			output.last_fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT);
 	}
+
+	/* Draining the receiver must release the pressure flag — proves the
+	 * calibrated denominator tracks both directions, not just a value
+	 * pinned at 100. */
+	{
+		char sink[2048];
+		uint8_t fill_pct = 100;
+
+		while (recv(recv_fd, sink, sizeof(sink), MSG_DONTWAIT) > 0)
+			;
+		CHECK("unix bp drained fill readable",
+			output_socket_get_fill_pct(output.socket_handle,
+				&output.send_queue, &fill_pct) == 0);
+		CHECK("unix bp drained below low water",
+			fill_pct < VENC_PRESSURE_LOW_WATER_PCT);
+		star6e_output_observe_pressure(&output);
+		CHECK("unix bp left pressure", output.in_pressure == 0);
+	}
+
+	star6e_output_teardown(&output);
+	if (recv_fd >= 0)
+		close(recv_fd);
+	return failures;
+}
+
+/* A wedged unix:// consumer must not stall the encode thread.
+ *
+ * These sends run between MI_VENC_GetStream and MI_VENC_ReleaseStream, so
+ * an unbounded block holds a VENC output slot and cascades into dropped
+ * capture frames.  Before SO_SNDTIMEO + the per-frame flush deadline, a
+ * consumer that stopped reading blocked the producer indefinitely.
+ *
+ * The bound asserted here is deliberately loose (250 ms for a frame that
+ * should take ~4 ms) so the test cannot flake on a loaded CI box while
+ * still failing outright if the bound is ever removed. */
+static int test_star6e_output_unix_flush_is_bounded(void)
+{
+	char abstract_name[64];
+	char uri[80];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	int recv_fd = -1;
+	int failures = 0;
+	uint64_t started;
+	uint64_t elapsed;
+	uint8_t hdr[12];
+	uint8_t payload[1400];
+
+	memset(hdr, 0, sizeof(hdr));
+	hdr[0] = 0x80;
+	memset(payload, 'Z', sizeof(payload));
+
+	snprintf(abstract_name, sizeof(abstract_name),
+		"test_unix_bound_%ld", (long)getpid());
+	recv_fd = create_unix_receiver(abstract_name);
+	CHECK("unix bound recv socket", recv_fd >= 0);
+
+	snprintf(uri, sizeof(uri), "unix://%s", abstract_name);
+	CHECK("unix bound prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	CHECK("unix bound init", star6e_output_init(&output, &setup) == 0);
+
+	/* The receiver never reads, so the peer queue wedges full. Push far
+	 * more than any queue depth so the deadline is certain to be hit. */
+	started = wb_monotonic_us();
+	for (int frame = 0; frame < 4; frame++) {
+		star6e_output_begin_frame(&output);
+		for (int i = 0; i < STAR6E_OUTPUT_BATCH_MAX * 4; i++) {
+			(void)star6e_output_send_rtp_parts(&output,
+				hdr, sizeof(hdr), payload, sizeof(payload),
+				NULL, 0);
+		}
+		(void)star6e_output_end_frame(&output);
+	}
+	elapsed = wb_monotonic_us() - started;
+
+	CHECK("unix bound flush did not hang", elapsed < 250000);
+	CHECK("unix bound counted transport drops", output.socket_drops > 0);
+	CHECK("unix bound congestion not miscounted as error",
+		output.send_errors == 0);
+	CHECK("unix bound calibrated capacity",
+		output.send_queue.unix_capacity > 0);
 
 	star6e_output_teardown(&output);
 	if (recv_fd >= 0)
@@ -1390,6 +1476,7 @@ int test_star6e_output(void)
 	failures += test_audio_target_cache_hit_stable();
 	failures += test_star6e_output_backpressure_hysteresis();
 	failures += test_star6e_output_unix_backpressure();
+	failures += test_star6e_output_unix_flush_is_bounded();
 	failures += test_star6e_output_always_sends_under_pressure();
 	return failures;
 }

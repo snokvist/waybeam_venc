@@ -1348,7 +1348,9 @@ Response `200` (UDP/Unix kernel-buffer fill_pct):
     "transport": "udp",
     "fillPct": 4,
     "inPressure": false,
-    "pressureDrops": 0
+    "pressureDrops": 0,
+    "transportDrops": 0,
+    "packetsSent": 184523
   }
 }
 ```
@@ -1363,15 +1365,27 @@ Field reference:
 | Field | Meaning |
 |---|---|
 | `transport` | `"shm"`, `"udp"`, `"unix"`, or `"none"` |
-| `fillPct` | Current fill ratio `0..100`.  For SHM, ring fill; for UDP/Unix, kernel send-buffer fill |
-| `inPressure` | True when `fillPct >= 70` (high-water threshold) |
-| `transportDrops` | (SHM only) Lifetime ring-full drops |
+| `fillPct` | Current fill ratio `0..100`.  For SHM, ring fill.  For UDP, kernel send-buffer fill.  For Unix, fill against the peer's datagram queue — see the note below |
+| `inPressure` | True when `fillPct >= 75` (high-water threshold); clears below `50` |
+| `transportDrops` | Lifetime drops: ring-full for SHM, congestion (`EAGAIN`) drops for UDP/Unix |
 | `pressureDrops` | Frames dropped by the in-process backpressure path while a sidecar probe was subscribed |
-| `packetsSent` | (SHM only) Lifetime writes accepted by the ring |
+| `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
 | `throttlePermille` | (frame-shm only) Ring-fill bitrate clamp, `1000` = unclamped, `250` = floor.  A **clamp, not a veto** — `video0.bitrate` in `/api/v1/config` is never modified, so an external rate controller's writes all still succeed |
 | `effectiveBitrateKbps` | (frame-shm only) `video0.bitrate` scaled by `throttlePermille`; what the encoder is actually programmed to |
+
+On `unix://`, `fillPct` is measured against the *peer's* datagram queue,
+which is the limit that actually blocks a sender — not the local
+`SO_SNDBUF`.  The producer cannot read the peer's queue depth, so the
+denominator is calibrated from the first send that saturates the queue and
+is an estimate from `net.unix.max_dgram_qlen` before that.  `fillPct` may
+therefore read low until the transport has been pushed once.
+
+`transportDrops` rising on `unix://` means the consumer is not keeping up:
+a frame's packets exceeded the flush deadline and the remainder was dropped
+rather than stalling the encoder.  The usual cause is a shallow
+`net.unix.max_dgram_qlen` — see the `unix://` notes in the README.
 
 A `throttlePermille` below `1000` means the consumer is not draining the ring
 fast enough for the configured bitrate.  Pinned at `250` the clamp has spent

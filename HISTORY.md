@@ -1,5 +1,71 @@
 # History
 
+## [0.63.0] - 2026-08-01
+
+`unix://` output no longer stalls the encoder, and its backpressure
+telemetry now actually works.
+
+Investigation started from streams misbehaving at and above 15 Mbps on
+`unix://` with 1500-MTU RTP. AF_UNIX itself is not the limit — the same
+send pattern measures 7.6 Gbps with a consumer that keeps up. Three
+implementation issues converged at that bitrate instead.
+
+- **`net.unix.max_dgram_qlen` is the real ceiling.** An AF_UNIX datagram
+  sender blocks on the *receiver's* queue depth, which the kernel snapshots
+  from this sysctl when the receiving socket is created. The default of 10
+  datagrams is ~7 ms of buffer at 15 Mbps with 1400-byte payloads, while a
+  single 60 fps frame is ~23 packets — so every frame overran the queue and
+  the encode thread blocked mid-flush. Measured saturation: 11 in-flight
+  datagrams. `init.d/S95waybeam` now raises it to 256 (~180 ms) at boot,
+  before any consumer starts; raising it later cannot help a socket that
+  already exists. venc warns on stderr when it finds a shallower value.
+
+- **The blocking send sat inside the `GetStream`→`ReleaseStream` window**
+  on the pinned encode thread, so a descheduled consumer held a VENC output
+  slot and cascaded into dropped capture frames — measured at up to 74 ms
+  for one `sendmmsg` burst, unbounded against a wedged consumer. Sends now
+  carry `SO_SNDTIMEO` (2 ms), and the batch flush carries a 4 ms per-frame
+  deadline. Both are needed: `sendmmsg()` applies `SO_SNDTIMEO` per message,
+  so the timeout alone still let a 64-packet batch run past a frame period.
+
+  Non-blocking sockets were evaluated and rejected: at the default qlen they
+  dropped 54% of packets, far worse than the stall. Bounded blocking keeps
+  zero drops whenever the queue is adequately sized.
+
+- **The backpressure trigger was mathematically unable to fire on
+  `unix://`.** The per-skb truesize estimate was 4096 bytes; a 1400-byte RTP
+  datagram measures 2304, so a fully blocked socket read as 61% fill against
+  a 75% high-water mark and `inPressure` never set. Worse, the denominator
+  was derived from the sender's live view of the sysctl, which is not what
+  the receiver captured — with the sysctl raised after the consumer started,
+  a 100%-blocked socket reported **2%**. The denominator is now calibrated
+  from the queue's actual saturation point, observed the first time a send
+  blocks, which is exact and immune to the sysctl skew. The estimate is only
+  a bootstrap.
+
+- **Socket transports now report drops.** `transportDrops` / `packetsSent`
+  were hardcoded to 0 for `udp://` and `unix://`, so a consumer that could
+  not keep up produced no observable signal anywhere — no `EAGAIN` (blocking),
+  no pressure flag, no counter. Congestion drops and successful sends are
+  counted and surfaced through the sidecar trailer and
+  `GET /api/v1/transport/status`. Congestion (`EAGAIN`) is counted separately
+  from real errors.
+
+- **Seqlock spin yields.** `begin_frame()` busy-spun while `apply_server()`
+  held an odd generation across `socket()`/`setsockopt()`/`connect()`; the
+  encode thread is pinned to CPU 0 and could starve the writer it waited on.
+
+Tests: the existing `unix bp` case pumped 1024-byte payloads and guarded its
+high-water assertions behind `if (fill_pct >= 75)`, which is why the fill bug
+shipped — the assertions simply never ran. It now uses MTU-sized payloads and
+asserts unconditionally, plus a drain-side assertion that pressure clears.
+A new `unix bound` case asserts a wedged consumer cannot hang the send path.
+Both were confirmed to fail against the pre-fix code.
+
+Note: `SO_SNDBUF` is raised on both transports but is a no-op for `unix://`
+(1 MiB effective is ~455 datagrams, far above any sane qlen); it remains the
+binding limit for `udp://` only.
+
 ## [0.62.0] - 2026-08-01
 
 RC QP bounds exposed as live controls (star6e).

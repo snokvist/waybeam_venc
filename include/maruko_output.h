@@ -1,6 +1,7 @@
 #ifndef MARUKO_OUTPUT_H
 #define MARUKO_OUTPUT_H
 
+#include "output_socket.h"
 #include "venc_config.h"
 #include "venc_frame_ring.h"
 #include "venc_ring.h"
@@ -20,6 +21,10 @@
  * 12 (RTP) + 4000 = 4012 bytes; rounded up to 4096 for slack and
  * alignment. Sized for jumbo-frame links such as the Realtek 3993 MTU. */
 #define MARUKO_OUTPUT_BATCH_SLOT_SCRATCH 4096
+
+/* Wall-clock ceiling on flushing one frame's batch.  Mirrors
+ * STAR6E_OUTPUT_FLUSH_BUDGET_US; see the rationale there. */
+#define MARUKO_OUTPUT_FLUSH_BUDGET_US 4000
 
 /* Per-frame sendmmsg batch. We own `scratch[slot]` containing
  * [RTP header || payload1] concatenated — both the header (built on the
@@ -66,7 +71,11 @@ typedef struct {
 	int connected_udp;           /* actual kernel state — set by configure() */
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
-	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
+	OutputSocketQueue send_queue; /* SO_SNDBUF + learned unix:// capacity */
+	/* Lifetime socket-transport counters, producer-thread only.  Mirror
+	 * of Star6eOutput; see the docstring there. */
+	uint32_t socket_drops;
+	uint32_t socket_writes;
 	MarukoOutputBatch batch;
 	/* Transport-pressure observation cache.  Mirrors Star6eOutput; see
 	 * the docstring there.  Populated once per frame by

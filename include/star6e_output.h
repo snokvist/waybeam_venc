@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 
+#include "output_socket.h"
 #include "rtp_packetizer.h"
 #include "star6e.h"
 #include "venc_config.h"
@@ -23,6 +24,19 @@
  * 12 (RTP) + 4000 = 4012 bytes; rounded up to 4096 for slack and
  * alignment. Sized for jumbo-frame links such as the Realtek 3993 MTU. */
 #define STAR6E_OUTPUT_BATCH_SLOT_SCRATCH 4096
+
+/* Wall-clock ceiling on flushing one frame's batch.
+ *
+ * SO_SNDTIMEO bounds a single unix:// sendmsg, but sendmmsg() applies that
+ * timeout per message, so a 64-packet batch against a stalled consumer can
+ * still accumulate far past a frame period.  This deadline bounds the whole
+ * frame: once it passes, the remaining packets are dropped and counted as
+ * transport drops rather than stalling the encode thread further.
+ *
+ * 4 ms sits under a 120 fps frame period (8.3 ms).  With an adequately
+ * sized max_dgram_qlen it is never reached — a healthy 15 Mbps frame
+ * flushes in ~150 us. */
+#define STAR6E_OUTPUT_FLUSH_BUDGET_US 4000
 
 typedef enum {
 	STAR6E_STREAM_MODE_COMPACT = 0,
@@ -80,7 +94,13 @@ typedef struct {
 	venc_frame_ring_t *frame_ring;
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
-	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
+	OutputSocketQueue send_queue; /* SO_SNDBUF + learned unix:// capacity */
+	/* Lifetime socket-transport counters, producer-thread only.  Mirrored
+	 * into last_full_drops / last_writes at observation time so the sidecar
+	 * trailer reports transport_drops / packets_sent for udp:// and unix://
+	 * the same way it already does for the SHM rings. */
+	uint32_t socket_drops;
+	uint32_t socket_writes;
 	Star6eOutputBatch batch;
 	/* Last clamp factor published by the frame-shm ring-fill throttle
 	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
@@ -101,11 +121,12 @@ typedef struct {
 	 * RELAXED off-thread; naturally aligned on ARMv7 so single-load
 	 * atomic in practice.
 	 *
-	 * SHM-only fields (last_full_drops / last_writes / last_oversize_drops)
-	 * carry the lifetime ring counters cached at observation time so the
-	 * sidecar trailer can report transport_drops / packets_sent without a
-	 * second venc_ring_get_fill().  For socket transports those counters
-	 * are not yet tracked (left 0). */
+	 * last_full_drops / last_writes / last_oversize_drops carry the
+	 * lifetime counters cached at observation time so the sidecar trailer
+	 * can report transport_drops / packets_sent without a second
+	 * venc_ring_get_fill().  Sourced from the ring for shm:// and
+	 * frame-shm://, and from socket_drops / socket_writes for udp:// and
+	 * unix:// (which have no oversize concept, so that one stays 0). */
 	int in_pressure;
 	uint32_t pressure_drops;
 	uint8_t last_fill_pct;
