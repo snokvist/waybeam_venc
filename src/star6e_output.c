@@ -41,6 +41,22 @@ static void star6e_write_be32(uint8_t *data, uint32_t value)
 	data[3] = (uint8_t)(value & 0xff);
 }
 
+/* Classify a failed send.  Congestion — the peer's datagram queue stayed
+ * full for the whole SO_SNDTIMEO window, or the device queue is full — is a
+ * transport drop, not a fault, and the EAGAIN case also calibrates the
+ * unix:// fill denominator.  Everything else is a real error.  Reads the
+ * errno set by the failed send, so call it immediately after. */
+static void star6e_account_send_failure(Star6eOutput *output, int fd,
+	uint32_t packets)
+{
+	if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+		output_socket_note_saturation(fd, &output->send_queue);
+		output->socket_drops += packets;
+	} else {
+		output->send_errors += packets;
+	}
+}
+
 static int resolve_shared_audio_target(const Star6eAudioOutput *audio_output,
 	Star6eAudioSendTarget *target)
 {
@@ -414,12 +430,26 @@ static int star6e_batch_flush(Star6eOutput *output)
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK ||
-			    errno == ENOBUFS) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/* unix:// only — udp:// carries no send
+				 * timeout and so never reports EAGAIN.  Each
+				 * retry has already cost a SO_SNDTIMEO sleep
+				 * in the kernel, so looping to the deadline
+				 * costs ~2 iterations, not a busy-spin. */
 				output_socket_note_saturation(fd,
 					&output->send_queue);
 				if (wb_monotonic_us() < deadline)
 					continue;
+				output->socket_drops +=
+					(uint32_t)(b->count - sent_total);
+				break;
+			}
+			if (errno == ENOBUFS) {
+				/* Device/qdisc queue full, typically udp:// on
+				 * a congested link.  Returned immediately with
+				 * no sleep, so retrying here would spin the
+				 * encode thread for the whole budget.  Count
+				 * as congestion and move on. */
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
 				break;
@@ -607,14 +637,7 @@ int star6e_output_send_rtp_parts(Star6eOutput *output,
 	    output->dst_len, output->connected_udp,
 	    header, header_len, payload1, payload1_len,
 	    payload2, payload2_len) != 0) {
-		if (errno == EAGAIN || errno == EWOULDBLOCK ||
-		    errno == ENOBUFS) {
-			output_socket_note_saturation(output->socket_handle,
-				&output->send_queue);
-			output->socket_drops++;
-		} else {
-			output->send_errors++;
-		}
+		star6e_account_send_failure(output, output->socket_handle, 1);
 		return -1;
 	}
 	output->socket_writes++;
@@ -645,9 +668,11 @@ int star6e_output_send_compact_packet(Star6eOutput *output,
 			(const struct sockaddr *)&output->dst, output->dst_len);
 
 		if (sent < 0) {
-			output->send_errors++;
+			star6e_account_send_failure(output,
+				output->socket_handle, 1);
 			return -1;
 		}
+		output->socket_writes++;
 		return 0;
 	}
 
@@ -689,9 +714,11 @@ int star6e_output_send_compact_packet(Star6eOutput *output,
 		msg.msg_iov = vec;
 		msg.msg_iovlen = 2;
 		if (sendmsg(output->socket_handle, &msg, 0) < 0) {
-			output->send_errors++;
+			star6e_account_send_failure(output,
+				output->socket_handle, 1);
 			return -1;
 		}
+		output->socket_writes++;
 		offset += fragment_size;
 	}
 

@@ -27,10 +27,13 @@
  * `sndbuf_capacity` is the kernel-reported SO_SNDBUF captured once at
  * socket open.  `unix_capacity` is the observed unix:// saturation point
  * in SIOCOUTQ bytes, learned the first time a send blocks or fails with
- * EAGAIN; 0 until that happens.  See output_socket_note_saturation(). */
+ * EAGAIN; 0 until that happens.  See output_socket_note_saturation().
+ * `logged_capacity` keeps the one-shot calibration log to one line per
+ * socket. */
 typedef struct {
 	int sndbuf_capacity;
 	int unix_capacity;
+	int logged_capacity;
 } OutputSocketQueue;
 
 /** Fill a sockaddr_storage from a parsed udp:// or unix:// destination. */

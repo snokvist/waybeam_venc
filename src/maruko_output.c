@@ -263,12 +263,26 @@ static int maruko_batch_flush(MarukoOutput *output)
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK ||
-			    errno == ENOBUFS) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/* unix:// only — udp:// carries no send
+				 * timeout and so never reports EAGAIN.  Each
+				 * retry has already cost a SO_SNDTIMEO sleep
+				 * in the kernel, so looping to the deadline
+				 * costs ~2 iterations, not a busy-spin. */
 				output_socket_note_saturation(fd,
 					&output->send_queue);
 				if (wb_monotonic_us() < deadline)
 					continue;
+				output->socket_drops +=
+					(uint32_t)(b->count - sent_total);
+				break;
+			}
+			if (errno == ENOBUFS) {
+				/* Device/qdisc queue full, typically udp:// on
+				 * a congested link.  Returned immediately with
+				 * no sleep, so retrying here would spin the
+				 * encode thread for the whole budget.  Count
+				 * as congestion and move on. */
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
 				break;

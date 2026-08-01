@@ -392,8 +392,28 @@ void output_socket_note_saturation(int socket_handle, OutputSocketQueue *queue)
 		return;
 	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
 		return;
-	if (queued > queue->unix_capacity)
-		queue->unix_capacity = queued;
+	if (queued <= queue->unix_capacity)
+		return;
+	queue->unix_capacity = queued;
+
+	/* First calibration reveals the peer's real queue depth, which is the
+	 * only way to catch a consumer that was started before max_dgram_qlen
+	 * was raised: the sysctl reads healthy, but that consumer's socket
+	 * kept the shallow depth it was created with, so the startup warning
+	 * stays silent.  Log once, on the cold path. */
+	if (!queue->logged_capacity) {
+		int dgrams = queued / UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
+
+		queue->logged_capacity = 1;
+		if (dgrams < OUTPUT_SOCKET_UNIX_QLEN_RECOMMENDED / 2) {
+			fprintf(stderr,
+				"[output_socket] WARNING: unix:// peer queue holds only "
+				"~%d datagrams (%d B) — the consumer was started before "
+				"net.unix.max_dgram_qlen was raised (it now reads %d). "
+				"Restart the consumer to pick up the deeper queue.\n",
+				dgrams, queued, read_unix_max_dgram_qlen());
+		}
+	}
 }
 
 int output_socket_get_fill_pct(int socket_handle,

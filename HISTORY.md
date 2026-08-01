@@ -62,6 +62,10 @@ asserts unconditionally, plus a drain-side assertion that pressure clears.
 A new `unix bound` case asserts a wedged consumer cannot hang the send path.
 Both were confirmed to fail against the pre-fix code.
 
+Handover and the on-device validation plan (V1-V10 with pass/fail criteria)
+are in `documentation/UNIX_SOCKET_HANDOVER.md`. Everything here is
+host-verified only; nothing has run on target hardware yet.
+
 Note: `SO_SNDBUF` is raised on both transports but is a no-op for `unix://`
 (1 MiB effective is ~455 datagrams, far above any sane qlen); it remains the
 binding limit for `udp://` only.
