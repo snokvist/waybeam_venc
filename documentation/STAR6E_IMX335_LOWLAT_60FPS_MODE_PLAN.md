@@ -1,128 +1,104 @@
-# Star6E IMX335 low-latency 60 fps sensor mode — plan and direction
+# Star6E IMX335 low-latency 60 fps sensor mode — Step 0 verdict
 
-Status: **PLAN ONLY — no implementation yet.** Draft PR opened to park the
-direction; pick up when scheduled.
+Status: **CLOSED — MEASURED NEGATIVE for the fast-scan mode; verified
+alternative recommended.** Step 0 (measure before designing) was executed on
+.232 (SSC338Q, IMX335, in-tree `sensor_imx335_star6e.ko`, venc v0.62.0,
+2026-08-01) and killed the original proposal before any register table was
+written. This document records the measurements, the delivery-timing model
+they establish, and the config-only path that actually lowers latency with
+retained FOV.
 
-## Motivation
+## Original proposal (for the record)
 
-Bench measurements on .232 (SSC338Q, IMX335 mode 1 = 2560x1920@60, encode
-1280x720@60 H265 CBR, 2026-08-01) put glass-to-encoded latency at ~30 ms:
+Add a driver mode that scans fast (HMAX=275) and stretches VMAX so 60 fps is
+met with long blanking — deliver the finished frame to the ISP earlier
+within each 16.7 ms period. Predicted readout: 8.2 ms (5M60) → ~5.3 ms
+(2560x1440 fast-scan).
 
-- Sidecar `frame_ready_us - capture_us` ≈ 30 ms (shown as "encode" in the
-  hub Pipeline tab — a label misnomer; it is capture -> encoded-frame-dequeued).
-- VENC driver's own pipeline-delay counters
-  (`/proc/mi_modules/mi_venc/mi_venc0`, chn0 pass0): frame arrives at VENC
-  input at avg **16.7 ms** after its PTS reference; encode itself takes
-  **~3.7 ms** (input 16.7 -> dequeue 20.4 ms avg).
-- Everything downstream of encode (packetise + hand-off to waybeam-link's
-  frame-SHM ring) is sub-ms.
+## Step 0 measurements
 
-So the latency budget is entirely sensor/ISP-side: exposure + readout +
-frame-boundary hand-offs dominate; encode is a small tail. The encoder path
-cannot be tightened further — slice/ring low-delay encode is fused off in
-the i6e MHE core (`SupportRing=0`, root-caused in
-`REALTIME_PIPELINE_INVESTIGATION.md`; every VPE->VENC leg is FRAMEBASE and
-must wait for a complete frame).
+Per-mode scan timing computed from the driver tables
+(line_time = HMAX / 74.448 MHz):
 
-The remaining lever is **sensor scan timing**: readout time is set by the
-mode's line clock (HMAX) and active row count, not by the encode fps. A mode
-that scans fast and idles in vertical blanking delivers the finished frame
-to the ISP earlier within each 16.7 ms period.
+| mode | geometry | VMAX | HMAX | line time | readout (active rows) |
+|---|---|---|---|---|---|
+| 0 | 2560x1920@30 | 4125 | 600 | 8.06 µs | ~15.7 ms |
+| 1 | 2560x1920@60 | 3936 | 314 | 4.218 µs | ~8.2 ms |
+| 2 | 2560x1440@90 | 3016 | 275 | 3.694 µs | ~5.0 ms (~5.3 ms paced to 60) |
 
-## Direction
+VENC arrival = `OnPreProcessInputTask` avg from
+`/proc/mi_modules/mi_venc/mi_venc0` (delta from the frame's PTS reference to
+its arrival at the encoder input), measured in three states:
 
-Add a driver mode (or modes) to `drivers/sensor_imx335_star6e.c` that runs
-the sensor at the **fastest line rate its geometry/MIPI budget allows** and
-stretches **VMAX** so the frame rate lands at 60 fps:
+| state | readout | capture period | measured arrival |
+|---|---|---|---|
+| mode 1 @60/60 | 8.2 ms | 16.67 ms | **16.72 ms** |
+| mode 2 @90/90 | 5.0 ms | 11.11 ms | **11.20 ms** |
+| mode 2 paced to 60 (**= the proposed fast-scan mode, exactly**) | 5.3 ms | 16.67 ms | **16.74 ms** |
 
-```
-frame period (16.7 ms) = VMAX x line_time        (fixed, 60 fps)
-readout time           = active_rows x line_time (what we minimise)
-```
+The third row is the punchline: the driver's `set_fps` already implements
+VMAX-stretch pacing (fixed HMAX=275, blanking extended), so "mode 2 at
+fps 60" IS the proposed fast-scan-60 configuration — and it delivers
+**zero** improvement over mode 1.
 
-The existing fast modes already prove the scan rates: mode 3 (2176x1224)
-sustains 100 fps and mode 4 (1920x1080) sustains 120 fps on this ISP. A
-"low-latency 60" variant of either keeps that scan speed and doubles the
-blanking. Instantaneous line rate (what the ISP FIFO sees) is identical to
-the proven high-fps mode; the average pixel load *halves*, so the I6E ISP
-throughput ceiling (~2.66 MPix @100 fps, see `STAR6E_IMX335_MODES.md`) is
-comfortably respected.
+Exposure probe: sweeping `isp.shutterMaxUs` 16 666 → 4 000 µs (AE followed,
+confirmed via `/api/v1/ae`) moved the arrival numbers not at all;
+independently confirmed via `shutterRule180` on/off.
 
-Candidate lineup additions (names illustrative):
+## Delivery-timing model (established)
 
-| candidate | geometry | scan timing from | est. readout | note |
-|---|---|---|---|---|
-| `1080p60_fastscan` | 1920x1080 | mode 4 (120 fps) | ~8.3 ms or less | biggest win, biggest crop |
-| `2176x1224_60_fastscan` | 2176x1224 | mode 3 (100 fps) | ~10 ms or less | milder crop, still large win |
+- **PTS is stamped at capture/frame start**, upstream of exposure — no
+  shutter setting can ever appear in `capture → frame_ready` metrics.
+  (Shorter exposure still reduces real photon staleness — the image content
+  is up to ~½ exposure old at PTS — it is just invisible to the counters.
+  At the dim bench scene AE ran the full 16.7 ms frame period.)
+- **Frame delivery to the encoder is VSYNC-quantized: arrival ≈ exactly one
+  capture period after PTS, regardless of readout time.** The completed
+  frame is handed downstream at the next frame boundary, not at readout-end.
+  Measured residual over the period: +50–90 µs.
+- Encode itself is ~3.7 ms (arrival → `DequeueInputTask`), packetise/ship
+  sub-ms. Consequence: **capture→ready has a hard floor of 1/capture_fps.
+  The only lever is capture rate.**
+- 90-capture → 60-encode hybrid (FRC drop at the VENC input port): mean
+  arrival ~14 ms with an alternating 0/5.6 ms pacing beat — a ~2.7 ms mean
+  win with added jitter, below this plan's 4 ms bar. Not worth a venc
+  feature (sensor-fps decoupling) on its own.
 
-Full-FOV 2560x1920 fast-scan is likely **not** available: the 5M@60 mode
-already runs near the sensor's MIPI/line-rate budget, so shortening readout
-requires reading fewer rows (crop). Confirm in step 0 rather than assume.
+## What actually works — recommendation
 
-## Step 0 — measure before designing (MANDATORY)
+**`sensor.mode=2` (2560x1440@90) with `video0.fps=90`.**
 
-The 16.7 ms figure above is the VENC-input arrival time, **not** proven to
-be pure readout. The bring-up notes record `HMAX=275` / `line_period
-3694 ns` for the crop modes, which implies active readout of 1944 rows could
-be as low as ~7.2 ms in the *current* 5M60 mode — in which case the observed
-16.7 ms is dominated by exposure overlap + frame-boundary hand-off, and a
-fast-scan mode would win less than the naive estimate. Before writing any
-register table:
+- **FOV is retained exactly.** The craft encodes 1280x720 with
+  `image.keepAspect=true`, whose precrop of mode 1 is the centered
+  full-width 2560x1440 window — the same sensor region mode 2 reads
+  natively (`active_precrop {0,240,2560,1440}` observed live). Nothing the
+  viewer sees changes except cadence.
+- capture→ready drops 16.7 → **11.2 ms flat** (−5.5 ms, no jitter), and the
+  60→90 Hz cadence cuts mean display wait by a further ~2.8 ms — roughly
+  **−8 ms glass-to-glass**.
+- ISP pixel load per frame *drops* vs mode 1 (3.69 vs 4.9 MPix); total
+  332 MPix/s at 90 fps was device-verified sustained in bring-up and
+  re-verified in this session's soak.
+- 3-minute soak at 90/90 on .232: encode 89.95–89.99 fps sustained, zero
+  new VENC drops, arrival 11.15–11.26 ms, CBR 100–104 % of the
+  10 303 kbps target at `fpv.noiseLevel=0`.
 
-1. Compute actual per-mode `line_time = HMAX / INCK` and
-   `readout = active_rows x line_time` from the existing tables in
-   `sensor_imx335_star6e.c` (VMAX regs 0x3030-32, HMAX regs 0x3034-35).
-2. Pin down what the SigmaStar PTS is stamped at (exposure start vs VIF
-   frame-done) — it defines what `capture_us` and the VENC proc deltas
-   actually measure. Empirical probe: sweep `isp.maxShutter` (e.g. 10 ms ->
-   2 ms) and watch whether VENC `OnPreProcessInputTask` avg moves 1:1.
-3. From (1)+(2), predict the gain per candidate mode. Only proceed if the
-   predicted glass-to-encoded win is >= ~4 ms; otherwise close this plan
-   with the measurement as the documented negative result.
+Adopting it is an **operating-mode decision, not a venc change**: on the
+craft waybeam-link owns fps/resolution via its mode catalog, so this lands
+as a new/edited mode file (and the ground catalog + `catalog_fingerprint`
+must follow — waybeam-link §11.7 index-drift trap applies).
 
-## Validation plan (when implemented)
+Secondary guidance: keep an exposure cap (`isp.shutterMaxUs` or
+`shutterRule180`) for photon staleness; do not expect it to move any
+pipeline metric.
 
-- `/proc/mi_modules/mi_vif/mi_vif0` FPS column = 60 sustained, 0 drops
-  (extractor recipe in `STAR6E_IMX335_MODES.md`).
-- VENC proc `OnPreProcessInputTask`/`DequeueInputTask` averages drop by the
-  predicted readout delta.
-- Sidecar `capture -> ready` (hub Pipeline tab "encode" row) drops to match.
-- CBR sanity at the new mode: bitrate holds target at `fpv.noiseLevel=0`
-  (guard against mode-dependent RC surprises).
-- Reinit/SIGHUP cycling x3 healthy; AE converges (longer blanking raises the
-  max integration time, so shutter caps still fit — verify, don't assume).
+## Non-goals / closed questions
 
-## Known traps (from the bring-up, all bit us before)
-
-- **Mode-count shrink/growth gotcha:** venc persists `sensor.mode` by index
-  in `/etc/waybeam.json`; a persisted index outside the new table makes venc
-  exit at boot with no video. Append new modes at the END of the lineup, and
-  check the fps-ordered convention still holds (catalog is fps-sorted).
-- **Enum wedge:** a bad mode/geometry can wedge the sensor enumeration and
-  needs a device power-cycle, not a reboot. Bench on .13 or .201, never on
-  the flying craft first.
-- Window-crop geometry must follow the byte-exact formula recorded in
-  `STAR6E_IMX335_MODES.md` (HTRIM/HNUM/AREA3/HMAX relations) — deviations
-  produced unstable VIF rates (2048x1152@100 case).
-- Setting `sensor.mode` triggers venc's own reinit — do not also call
-  restart (collides `paused`).
-
-## Non-goals
-
-- No change to the VPE->VENC bind (FRAMEBASE is the only mode this silicon
-  supports — settled, do not re-litigate).
-- No IMX415 variant in this pass (same technique applies later if the
-  IMX335 result is good).
-- No attempt at full-FOV fast-scan unless step 0 shows the 5M60 line rate
-  has headroom.
-
-## Related
-
-- `documentation/STAR6E_IMX335_MODES.md` — mode lineup, ISP ceiling, crop
-  geometry formulas, measurement recipes.
-- `documentation/REALTIME_PIPELINE_INVESTIGATION.md` — why slice-level low
-  delay is closed on i6e.
-- 2026-08-01 latency budget session: exposure (<=10 ms shutter cap) +
-  readout + encode 3.7 ms ≈ the observed 30 ms; no queueing found anywhere
-  (VENC input arrives one frame period after PTS; the two `venc_rec_*`
-  buffers are DPB reference frames, not input caching).
+- Fast-scan + blanking-stretch driver modes: **closed, measured zero-gain**
+  (this document). Do not re-propose without evidence the VSYNC
+  quantization changed (new SDK/mhal).
+- VPE→VENC bind: FRAMEBASE is the only mode on i6e
+  (`REALTIME_PIPELINE_INVESTIGATION.md`) — settled separately.
+- Delivering at sensor EOF instead of next SOF would recover ~11 ms at
+  60 fps, but the hand-off point is VIF/mhal behaviour, not sensor-driver
+  behaviour — out of reach without vendor changes.
