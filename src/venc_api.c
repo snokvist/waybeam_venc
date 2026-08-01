@@ -1124,6 +1124,18 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_holdoff == 0 &&
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
+	if (strcmp(key, "video0.min_qp") == 0 || strcmp(key, "video0.max_qp") == 0) {
+		/* H.264/H.265 QP range; the SDK accepts min > max without
+		 * complaint and then behaves erratically (device-observed),
+		 * so reject the combination here. 0 = driver default. */
+		if (cfg->video0.min_qp > 51)
+			return "video0.min_qp must be 0..51";
+		if (cfg->video0.max_qp > 51)
+			return "video0.max_qp must be 0..51";
+		if (cfg->video0.min_qp > 0 && cfg->video0.max_qp > 0 &&
+		    cfg->video0.min_qp > cfg->video0.max_qp)
+			return "video0.min_qp must not exceed max_qp";
+	}
 	if (strcmp(key, "snapshot.quality") == 0) {
 		/* JPEG q-factor range.  Backend clamps internally too, but
 		 * the validator gives a clean error response instead of a
