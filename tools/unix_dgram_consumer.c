@@ -23,6 +23,7 @@ typedef struct {
 	uint64_t bytes;
 	uint64_t frames;
 	uint64_t sequence_gaps;
+	uint64_t payload_type_packets[128];
 	uint64_t first_packet_us;
 	uint64_t last_packet_us;
 	uint64_t frame_first_us;
@@ -119,6 +120,7 @@ static void observe_rtp(ConsumerStats *stats, const uint8_t *packet,
 
 	if (packet_size < 12 || (packet[0] >> 6) != 2)
 		return;
+	stats->payload_type_packets[packet[1] & 0x7fu]++;
 
 	sequence = read_be16(packet + 2);
 	timestamp = read_be32(packet + 4);
@@ -166,11 +168,20 @@ static void print_summary(const char *name, const ConsumerStats *stats,
 		"\"bytes\":%" PRIu64 ",\"bitrate_bps\":%" PRIu64 ","
 		"\"frames\":%" PRIu64 ",\"sequence_gaps\":%" PRIu64 ","
 		"\"max_frame_spread_us\":%" PRIu64 ","
-		"\"max_marker_gap_us\":%" PRIu64 ",\"stall_ms\":%u}\n",
+		"\"max_marker_gap_us\":%" PRIu64 ",\"stall_ms\":%u,"
+		"\"payload_type_packets\":{",
 		stats->packets > 0 ? "success" : "empty", name,
 		duration_us / 1000u, stats->packets, stats->bytes, bitrate_bps,
 		stats->frames, stats->sequence_gaps, stats->max_frame_spread_us,
 		stats->max_marker_gap_us, stall_ms);
+	for (unsigned payload_type = 0, first = 1; payload_type < 128; ++payload_type) {
+		if (stats->payload_type_packets[payload_type] == 0)
+			continue;
+		printf("%s\"%u\":%" PRIu64, first ? "" : ",", payload_type,
+			stats->payload_type_packets[payload_type]);
+		first = 0;
+	}
+	printf("}}\n");
 }
 
 static void usage(const char *argv0)

@@ -62,10 +62,11 @@ implementation issues converged at that bitrate instead.
 
 - **Target-local validation consumer.** `make unix-dgram-consumer` builds a
   small abstract-AF_UNIX RTP sink for either backend. It reports delivered
-  bitrate, RTP gaps, marker cadence, and receive spread, and can pause reads
-  for deterministic backpressure/recovery tests. Direct-deploy helpers now
-  start the standard binary through `S95waybeam`, so its queue-depth setup is
-  exercised during a normal cycle.
+  bitrate, RTP gaps, marker cadence, receive spread, and per-payload-type
+  packet counts, and can pause reads for deterministic backpressure/recovery
+  and shared-socket audio tests. Direct-deploy helpers now start the standard
+  binary through `S95waybeam`, so its queue-depth setup is exercised during a
+  normal cycle.
 
 Tests: the existing `unix bp` case pumped 1024-byte payloads and guarded its
 high-water assertions behind `if (fill_pct >= 75)`, which is why the fill bug
@@ -75,10 +76,12 @@ A new `unix bound` case asserts a wedged consumer cannot hang the send path.
 Both were confirmed to fail against the pre-fix code.
 
 Handover and the on-device validation plan (V1-V10 with pass/fail criteria)
-are in `documentation/UNIX_SOCKET_HANDOVER.md`. Star6E target-local tests pass
-at 10, 15, and 20 Mbps with zero RTP gaps and transport drops; the 25 Mbps
-gate is blocked by the device-unresponsive incident recorded in
-`documentation/CRASH_LOG.md`. Maruko remains code-level only.
+are in `documentation/UNIX_SOCKET_HANDOVER.md`. Star6E V1–V9 are confirmed on
+device: 10/15/20/25 Mbps at 60 fps and 25 Mbps at 120 fps, deterministic
+backpressure/recovery, UDP/SHM regression, live Unix↔UDP redirect, and
+shared-socket Opus. The earlier device-unresponsive incident did not recur
+after a human power cycle. Maruko V10 remains code-level only because no
+Maruko target was available.
 
 Note: `SO_SNDBUF` is raised on both transports but is a no-op for `unix://`
 (1 MiB effective is ~455 datagrams, far above any sane qlen); it remains the

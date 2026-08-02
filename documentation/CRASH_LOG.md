@@ -55,6 +55,19 @@ attached to `venc_frame`. Post-boot dmesg did contain MI/CMDQ trigger-timeout
 warnings, so no further PR #214 device gates were attempted. The user then
 rebooted the craft and removed it from this validation session.
 
+**Follow-up — 2026-08-02:** after another user-confirmed reboot, the remaining
+Star6E V2 and V4–V9 gates completed without the connectivity failure
+recurring. The craft sustained 25 Mbps at both 60 and 120 fps, including an
+authoritative 0.888 ms maximum sender-side Unix frame spread at 120 fps. A
+five-second wedged-consumer test reached 100% queue fill and recovered without
+encoder or watchdog errors. Repeated live redirect and UDP/SHM/audio tests
+also passed. The incident's root cause remains unknown; the successful rerun
+shows it is not a reproducible consequence of the 25 Mbps Unix workload.
+Production was restored byte-for-byte afterward, both services were started
+normally, and the frame-SHM counter advanced from 2,275 to 2,576 with no new
+drops. Current dmesg had MI teardown warnings from the repeated controlled
+restart cycles but no timeout, hung-task, oops, panic, or call-trace entry.
+
 ## 2026-05-21 — Teardown fd-cleanup cherry-pick from PR #122/#123
 
 **Scope:** the SoC/MI-independent teardown fixes extracted from the DIS

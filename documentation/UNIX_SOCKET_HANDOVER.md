@@ -1,14 +1,15 @@
 # `unix://` Transport Fix — Handover & On-Device Validation Plan
 
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 
 Branch: `claude/unix-socket-speed-limits-az62s4` · Target release: `0.63.0`
 
-Status: **partial Star6E device verification.** The root-cause measurements
-below marked *(measured)* came from a Linux 6.18 x86-64 container. The
-target-local gates completed on SSC338Q through 20 Mbps; the 25 Mbps gate is
-blocked by the device-unresponsive incident recorded in `CRASH_LOG.md`.
-Maruko remains code-level only.
+Status: **Star6E V1–V9 confirmed on device.** The root-cause measurements
+below marked *(measured)* came from a Linux 6.18 x86-64 container. The full
+Star6E matrix completed on SSC338Q, including 25 Mbps at 60 and 120 fps,
+backpressure recovery, UDP/SHM regression, live redirect, and shared-socket
+audio. Maruko V10 remains code-level only because no Maruko target was
+available.
 
 ---
 
@@ -176,7 +177,7 @@ and could starve the writer it was waiting on. Now `sched_yield()`.
 ## 4. Host verification already done
 
 - `make lint` — clean
-- `make test` / `make test-werror` — 2312 pass, 0 fail
+- `make test` / `make test-werror` — 2314 pass, 0 fail
 - `make test-asan`, `make test-tsan` — clean
 - `make build SOC_BUILD=star6e`, `SOC_BUILD=maruko` — both clean
 
@@ -202,26 +203,60 @@ Both helpers now start the standard `/usr/bin/waybeam` through
 Build the target-local receiver with `make unix-dgram-consumer
 SOC_BUILD=<backend>` and deploy `out/<backend>/unix_dgram_consumer` to `/tmp`.
 It binds a Linux abstract datagram name and reports delivered bitrate, RTP
-sequence gaps, marker-frame cadence, and maximum first-to-last receive spread.
+sequence gaps, marker-frame cadence, maximum first-to-last receive spread, and
+packet counts by RTP payload type (used to verify shared-socket audio).
 The receive spread is a same-host proxy; the exact
 `last_pkt_send_us - frame_ready_us` value still requires sidecar correlation.
 
-### Results — 2026-08-01, SSC338Q / IMX335 (`192.168.2.232`)
+### Results — 2026-08-01/02, SSC338Q / IMX335 (`192.168.2.232`)
 
-V1 passed with `net.unix.max_dgram_qlen=1024`; `S95waybeam` starts before
-`S96waybeam-link`. At 60 fps and 1400-byte payloads, the target-local consumer
-reported:
+V1 passed with `net.unix.max_dgram_qlen=1024` in the first run and 256 in the
+completion run; `S95waybeam` starts before `S96waybeam-link`. At 1400-byte
+payloads, the target-local consumer reported:
 
-| Configured | Delivered | RTP gaps | Transport drops | Max frame interval | Max receive spread | Result |
+| Configured | Delivered | RTP gaps | Transport-drop delta | Max cadence interval | Max send/receive spread | Result |
 |---:|---:|---:|---:|---:|---:|---|
 | 10 Mbps | 10.054 Mbps | 0 | 0 | 17.454 ms | 0.359 ms | PASS |
 | 15 Mbps | 15.176 Mbps | 0 | 0 | 17.309 ms | 0.546 ms | PASS |
 | 20 Mbps | 20.250 Mbps | 0 | 0 | 17.477 ms | 0.687 ms | PASS |
-| 25 Mbps | — | — | 0 before retry | — | — | BLOCKED — craft became unreachable during retry |
+| 25 Mbps / 60 fps | 25.063 Mbps | 0 | 0 | 18.005 ms | 1.035 ms receive | PASS |
+| 25 Mbps / 120 fps | 25.340 Mbps | 0 | 0 | 10.817 ms sender | 0.888 ms sender | PASS |
 
-The 25 Mbps incident stopped the run before V5–V10. See
-`documentation/CRASH_LOG.md`; do not resume until the craft is
-human-confirmed recovered and the saved production config is restored.
+The earlier 25 Mbps device-unresponsive incident did not recur after the human
+power cycle; see `documentation/CRASH_LOG.md`. Authoritative sidecar sampling
+at 120 fps covered 1,072 frames (P95/P99 send spread 227/520 µs). The
+pre-existing `transportDrops=27` value did not change during that run.
+
+V2 passed: with qlen deliberately set to 10 and init bypassed, the startup
+warning appeared exactly once. V3 passed: the consumer starts after S95 and no
+shallow-peer warning appeared under saturation.
+
+V5/V6 passed with a five-second stall at 15 Mbps: fill reached 100%,
+`inPressure` asserted, `transportDrops` increased by 2,705, then fill returned
+to 0% and pressure cleared. Encoding and delivery recovered without a venc
+restart, `MI_VENC_GetStream` errors, or watchdog activity.
+
+V7 passed at 25 Mbps. UDP delivered 25.030 Mbps at 59.93 fps with zero RTP
+gaps or new drops; sidecar maximum send spread was 1.313 ms. SHM sustained
+24.6–25.5 Mbps in steady state with zero new ring drops and no encoder errors.
+On this APFPV-mode craft S95 intentionally rewrites `shm://` to loopback UDP,
+so the SHM-only run used the standard binary directly after explicitly
+applying the qlen sysctl; no bootloader or init configuration was changed.
+
+V8 passed using the implemented live endpoint (`GET /api/v1/live/set`): Unix
+delivered before and after a Unix → UDP → Unix switch, the UDP phase delivered
+15.240 Mbps with zero gaps, and all phases reported zero drops.
+
+V9 passed with `audioPort=0`: across a five-second shared-socket stall the
+consumer received 16,243 H.265 packets (PT 97) and 840 Opus packets (PT 98),
+matching the expected Opus cadence over the 17 non-stalled seconds. Audio and
+video both recovered. Audio EAGAIN remains intentionally absent from
+`transportDrops`, as documented in §6.
+
+V10 was not run: the documented Maruko targets were unreachable. After all
+Star6E tests, the byte-identical saved production config was restored,
+`S95waybeam` and `S96waybeam-link` were started normally, and the frame-SHM
+counter advanced from 2,275 to 2,576 with zero additional drops.
 
 ### V1 — Baseline: the sysctl is actually applied
 
@@ -321,8 +356,8 @@ review, and this is the check that would have caught it.
 
 ### V8 — Live redirect still works
 
-`PUT /api/v1/config` switching `outgoing.server` between `udp://` and
-`unix://` while streaming.
+`GET /api/v1/live/set?outgoing.server=...` switching `outgoing.server` between
+`udp://` and `unix://` while streaming.
 
 **Pass:** switch takes effect, no crash, no stall, counters reset sanely, the
 calibration warning may re-fire once per new socket (expected).
