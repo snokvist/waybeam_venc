@@ -24,7 +24,7 @@ void maruko_output_account_send_failure(MarukoOutput *output, int socket_handle,
 }
 
 int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
-	int requested_connected_udp)
+	int requested_connected_udp, int allow_unix_encoder_stall)
 {
 	if (!output)
 		return -1;
@@ -38,6 +38,7 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->requested_connected_udp = requested_connected_udp ? 1 : 0;
 	output->connected_udp = 0;
+	output->allow_unix_encoder_stall = allow_unix_encoder_stall ? 1 : 0;
 	output->send_errors = 0;
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	output->socket_drops = 0;
@@ -47,7 +48,8 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, uri,
-	    output->requested_connected_udp, &output->connected_udp) != 0)
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0)
 		return -1;
 	(void)output_socket_capture_capacity(output->socket_handle,
 		&output->send_queue);
@@ -69,6 +71,7 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->requested_connected_udp = 0;
 	output->connected_udp = 0;
+	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	output->socket_drops = 0;
@@ -106,6 +109,7 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->requested_connected_udp = 0;
 	output->connected_udp = 0;
+	output->allow_unix_encoder_stall = 0;
 	output->send_errors = 0;
 	memset(&output->send_queue, 0, sizeof(output->send_queue));
 	output->socket_drops = 0;
@@ -218,7 +222,8 @@ int maruko_output_apply_server(MarukoOutput *output, const char *uri)
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* odd = writing */
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &parsed,
-	    output->requested_connected_udp, &output->connected_udp) != 0) {
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0) {
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
@@ -259,7 +264,7 @@ static int maruko_batch_flush(MarukoOutput *output)
 
 	if (b->count == 0)
 		return 0;
-	if (b->discard_remaining || b->flush_budget_us == 0) {
+	if (b->discard_remaining) {
 		if (b->discard_as_error)
 			output->send_errors += (uint32_t)b->count;
 		else
@@ -280,8 +285,12 @@ static int maruko_batch_flush(MarukoOutput *output)
 		return 0;
 	}
 
-	started = wb_monotonic_us();
-	deadline = started + b->flush_budget_us;
+	started = 0;
+	deadline = 0;
+	if (!b->allow_unix_encoder_stall) {
+		started = wb_monotonic_us();
+		deadline = started + b->flush_budget_us;
+	}
 
 	while (sent_total < b->count) {
 		int n = sendmmsg(fd, b->msgs + sent_total,
@@ -297,6 +306,8 @@ static int maruko_batch_flush(MarukoOutput *output)
 				 * costs ~2 iterations, not a busy-spin. */
 				output_socket_note_saturation(fd,
 					&output->send_queue);
+				if (b->allow_unix_encoder_stall)
+					continue;
 				if (wb_monotonic_us() < deadline)
 					continue;
 				output->socket_drops +=
@@ -331,6 +342,8 @@ static int maruko_batch_flush(MarukoOutput *output)
 		sent_total += (size_t)n;
 		if (sent_total < b->count) {
 			output_socket_note_saturation(fd, &output->send_queue);
+			if (b->allow_unix_encoder_stall)
+				continue;
 			if (wb_monotonic_us() >= deadline) {
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
@@ -341,12 +354,14 @@ static int maruko_batch_flush(MarukoOutput *output)
 	}
 
 	output->socket_writes += (uint32_t)sent_total;
-	elapsed = wb_monotonic_us() - started;
-	if (elapsed >= b->flush_budget_us) {
-		b->flush_budget_us = 0;
-		b->discard_remaining = 1;
-	} else {
-		b->flush_budget_us -= (uint32_t)elapsed;
+	if (!b->allow_unix_encoder_stall) {
+		elapsed = wb_monotonic_us() - started;
+		if (elapsed >= b->flush_budget_us) {
+			b->flush_budget_us = 0;
+			b->discard_remaining = 1;
+		} else {
+			b->flush_budget_us -= (uint32_t)elapsed;
+		}
 	}
 	b->count = 0;
 	return (int)sent_total;
@@ -386,6 +401,9 @@ void maruko_output_begin_frame(MarukoOutput *output)
 		b->dst = output->dst;
 		b->dst_len = output->dst_len;
 		b->connected_udp = output->connected_udp;
+		b->allow_unix_encoder_stall =
+			(output->transport == VENC_OUTPUT_URI_UNIX) &&
+			output->allow_unix_encoder_stall;
 		gen_after = __atomic_load_n(&output->transport_gen,
 			__ATOMIC_ACQUIRE);
 		if (gen_before == gen_after)
@@ -497,6 +515,7 @@ void maruko_output_teardown(MarukoOutput *output)
 	memset(&output->dst, 0, sizeof(output->dst));
 	output->dst_len = 0;
 	output->transport = VENC_OUTPUT_URI_UDP;
+	output->allow_unix_encoder_stall = 0;
 	output->batch.active = 0;
 	output->batch.count = 0;
 	output->batch.socket_handle = -1;

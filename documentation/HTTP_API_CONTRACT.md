@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.17.0`
+- `contract_version`: `0.18.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -106,7 +106,7 @@ Response `200`:
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
-      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false },
+      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
       "debug": { "showOsd": false }
@@ -167,6 +167,7 @@ Response `200`:
       "outgoing.server": { "mutability": "live", "supported": true },
       "outgoing.stream_mode": { "mutability": "restart_required", "supported": true },
       "outgoing.connected_udp": { "mutability": "restart_required", "supported": true },
+      "outgoing.allow_unix_encoder_stall": { "mutability": "restart_required", "supported": true },
       "discovery.enabled": { "mutability": "restart_required", "supported": true },
       "discovery.service_type": { "mutability": "restart_required", "supported": true },
       "discovery.name": { "mutability": "restart_required", "supported": true },
@@ -565,6 +566,7 @@ curl "http://<device-ip>/api/v1/set?outgoing.maxPayloadSize=4000"
 # Restart-only
 curl "http://<device-ip>/api/v1/set?outgoing.stream_mode=compact"
 curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
+curl "http://<device-ip>/api/v1/set?outgoing.allowUnixEncoderStall=true"
 ```
 
 - `outgoing.stream_mode`: `"rtp"` (default) or `"compact"`. Determines packetization format.
@@ -581,6 +583,14 @@ curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
 - `outgoing.connected_udp`: When `true`, calls `connect()` on the UDP socket so the kernel
   returns ICMP port-unreachable errors via `sendmsg()`. Useful for detecting that a receiver
   is down. Default `false` (fire-and-forget).
+- `outgoing.allow_unix_encoder_stall`: Restart-required boolean, default `false`.
+  When `false`, `unix://` sends use the 2 ms socket timeout and cumulative
+  approximately 4 ms RTP frame budget; sustained pressure drops the unsent
+  remainder of the frame so the encoder stays live. When `true`, those two
+  bounds are disabled for `unix://` only: a full consumer queue blocks the
+  encoder output thread until the consumer resumes, preserving the legacy
+  behavior. UDP, `shm://`, and `frame-shm://` are unaffected. The 256-datagram
+  queue recommendation remains active in both modes.
 
 ### Live FPS Control — Behavior Details
 
@@ -1382,10 +1392,14 @@ denominator is calibrated from the first send that saturates the queue and
 is an estimate from `net.unix.max_dgram_qlen` before that.  `fillPct` may
 therefore read low until the transport has been pushed once.
 
-`transportDrops` rising on `unix://` means the consumer is not keeping up:
-a frame's packets exhausted the cumulative flush budget and the remainder was dropped
-rather than stalling the encoder.  The usual cause is a shallow
-`net.unix.max_dgram_qlen` — see the `unix://` notes in the README.
+With `outgoing.allowUnixEncoderStall=false`, `transportDrops` rising on
+`unix://` means the consumer is not keeping up: a frame's packets exhausted
+the cumulative flush budget and the remainder was dropped rather than
+stalling the encoder. With the compatibility option enabled, ordinary queue
+pressure blocks instead and does not increment `transportDrops`; status reads
+may show a full queue while the consumer is paused. The usual cause of
+unexpected pressure is a shallow `net.unix.max_dgram_qlen` — see the
+`unix://` notes in the README.
 
 A `throttlePermille` below `1000` means the consumer is not draining the ring
 fast enough for the configured bitrate.  Pinned at `250` the clamp has spent
@@ -1617,6 +1631,10 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.18.0` (additive — Unix encoder-stall compatibility):
+  - Added restart-required `outgoing.allow_unix_encoder_stall` with camelCase
+    alias `outgoing.allowUnixEncoderStall`. Default `false` retains bounded
+    send/drop behavior; `true` restores blocking `unix://` sends.
 - `0.17.0` (additive — socket transport telemetry):
   - The UDP/Unix response from `/api/v1/transport/status` now reports
     `transportDrops` and `packetsSent`, matching the existing SHM field names.

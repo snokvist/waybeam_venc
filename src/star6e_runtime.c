@@ -909,13 +909,17 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			Star6eOutputSetup ds_setup;
 			if (star6e_output_prepare(&ds_setup, ps->dual->server,
 			    vcfg->outgoing.stream_mode,
-			    vcfg->outgoing.connected_udp) == 0 &&
-			    star6e_output_init(&ps->dual->output, &ds_setup) == 0) {
-				star6e_video_init(&ps->dual->video, vcfg,
-					ps->sensor.mode.maxFps,
-					&ps->dual->output);
-				printf("> Dual-stream: ch1 → %s\n",
-					ps->dual->server);
+			    vcfg->outgoing.connected_udp) == 0) {
+				ds_setup.allow_unix_encoder_stall =
+					vcfg->outgoing.allow_unix_encoder_stall ? 1 : 0;
+				if (star6e_output_init(&ps->dual->output,
+				    &ds_setup) == 0) {
+					star6e_video_init(&ps->dual->video, vcfg,
+						ps->sensor.mode.maxFps,
+						&ps->dual->output);
+					printf("> Dual-stream: ch1 → %s\n",
+						ps->dual->server);
+				}
 			}
 		}
 

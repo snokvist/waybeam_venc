@@ -1335,6 +1335,30 @@ static int test_framing_preset_restart(void)
 	return failures;
 }
 
+static int test_allow_unix_encoder_stall_restart(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	int status = 0;
+	char response[1024];
+
+	venc_config_defaults(&cfg);
+	CHECK("unix stall default false",
+		cfg.outgoing.allow_unix_encoder_stall == false);
+	CHECK("unix stall restart rc",
+		apply_set_query_http(&cfg, "maruko", NULL,
+			"outgoing.allowUnixEncoderStall=true", &status, response,
+			sizeof(response)) == 0);
+	CHECK("unix stall restart status", status == 200);
+	CHECK("unix stall restart cfg",
+		cfg.outgoing.allow_unix_encoder_stall == true);
+	CHECK("unix stall restart response",
+		strstr(response, "\"reinit_pending\":true") != NULL);
+	venc_api_clear_reinit();
+
+	return failures;
+}
+
 static int test_live_set_isp_bin_dispatches_callback(void)
 {
 	int failures = 0;
@@ -1720,6 +1744,7 @@ int test_venc_api(void)
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();
 	failures += test_framing_preset_restart();
+	failures += test_allow_unix_encoder_stall_restart();
 	failures += test_live_set_isp_bin_dispatches_callback();
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();

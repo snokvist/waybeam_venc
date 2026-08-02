@@ -1,10 +1,10 @@
 # `unix://` Transport Fix — Handover & On-Device Validation Plan
 
-<!-- version: 1.2.0 -->
+<!-- version: 1.3.0 -->
 
 Branch: `claude/unix-socket-speed-limits-az62s4` · Target release: `0.63.0`
 
-Status: **Star6E V1–V9 and Maruko V10 confirmed on device.** The root-cause measurements
+Status: **Star6E V1–V9 and Maruko V10–V11 confirmed on device.** The root-cause measurements
 below marked *(measured)* came from a Linux 6.18 x86-64 container. The full
 Star6E matrix completed on SSC338Q, including 25 Mbps at 60 and 120 fps,
 backpressure recovery, UDP/SHM regression, live redirect, and shared-socket
@@ -268,6 +268,19 @@ then returned to 0% fill and recovered without a stream or watchdog error.
 The target's original 0.60.1 binary, init script, and UDP configuration were
 restored byte-for-byte afterward and verified healthy.
 
+V11 verified `outgoing.allowUnixEncoderStall` on the same Maruko target at
+15 Mbps / 60 fps. With the default `false`, a four-second consumer pause
+produced 4,254 transport drops and then recovered normally. With the option
+enabled through `/api/v1/set`, a six-second pause held queue fill at 100%; two
+status samples two seconds apart both showed `packetsSent=5784` and
+`transportDrops=0`. After the consumer resumed, `packetsSent` advanced to
+8,678. The consumer received 14,285 packets with zero RTP sequence gaps and a
+6.016-second maximum marker gap, directly confirming stall-then-resume rather
+than packet loss. Live FPS returned to 60, the process stayed healthy, and no
+GetStream, watchdog, kernel fault, oops, or panic appeared. The original
+0.60.1 binary, init script, config, and qlen were restored; all three file
+hashes matched the pre-test backups byte-for-byte.
+
 ### V1 — Baseline: the sysctl is actually applied
 
 ```sh
@@ -414,9 +427,11 @@ Repeat V1, V4, V5, V6 on Maruko.
    consumer restart (an unconnected `sendto` re-resolves the abstract name;
    a connected socket would need explicit `ECONNREFUSED` recovery).
 
-6. **Deadline/timeout constants are not configurable.** 2 ms / 4 ms are
-   compile-time. If V6 shows the platform needs different values, they should
-   probably stay compile-time rather than becoming config surface.
+6. **The timeout values remain compile-time, but blocking is selectable.**
+   `outgoing.allowUnixEncoderStall=true` disables both the 2 ms Unix send
+   timeout and cumulative RTP frame budget for `unix://`, restoring the legacy
+   behavior for transmission chains that intentionally use encoder blocking
+   as flow control. The default remains bounded (`false`).
 
 7. **Compact stream mode has only the per-send timeout.** The cumulative 4 ms
    frame budget applies to the production batched RTP path. Compact mode is

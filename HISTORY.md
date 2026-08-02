@@ -5,6 +5,12 @@
 `unix://` output no longer stalls the encoder, and its backpressure
 telemetry now actually works.
 
+For compatibility with transmission chains that intentionally used the old
+blocking behavior as flow control, `outgoing.allowUnixEncoderStall` can now
+restore it explicitly. It defaults to `false` and requires a restart. When
+enabled, only `unix://` skips the 2 ms socket timeout and cumulative RTP frame
+budget; UDP, SHM, and frame-shm behavior is unchanged.
+
 Investigation started from streams misbehaving at and above 15 Mbps on
 `unix://` with 1500-MTU RTP. AF_UNIX itself is not the limit — the same
 send pattern measures 7.6 Gbps with a consumer that keeps up. Three

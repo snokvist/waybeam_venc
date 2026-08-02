@@ -47,6 +47,7 @@ typedef struct {
 	Star6eStreamMode stream_mode;
 	VencOutputUri uri;
 	int requested_connected_udp;
+	int allow_unix_encoder_stall;
 	int has_server;
 } Star6eOutputSetup;
 
@@ -80,6 +81,7 @@ typedef struct {
 	struct sockaddr_storage dst;
 	socklen_t dst_len;
 	int connected_udp;
+	int allow_unix_encoder_stall;
 	uint32_t flush_budget_us;
 	int discard_remaining;
 	int discard_as_error;
@@ -93,6 +95,7 @@ typedef struct {
 	socklen_t dst_len;
 	int connected_udp;
 	int requested_connected_udp;
+	int allow_unix_encoder_stall;
 	venc_ring_t *ring;
 	venc_frame_ring_t *frame_ring;
 	uint32_t send_errors;

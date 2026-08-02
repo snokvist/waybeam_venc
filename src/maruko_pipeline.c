@@ -2756,7 +2756,8 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 			return -1;
 	} else {
 		if (maruko_output_init(&ctx->output, &ctx->cfg.output_uri,
-		    ctx->cfg.connected_udp) != 0)
+		    ctx->cfg.connected_udp,
+		    ctx->cfg.allow_unix_encoder_stall) != 0)
 			return -1;
 	}
 
@@ -3218,7 +3219,8 @@ int maruko_pipeline_start_dual(MarukoBackendContext *ctx,
 		VencOutputUri uri;
 		if (venc_config_parse_output_uri(d->server, &uri) == 0) {
 			if (maruko_output_init(&d->output, &uri,
-				ctx->cfg.connected_udp) == 0) {
+				ctx->cfg.connected_udp,
+				ctx->cfg.allow_unix_encoder_stall) == 0) {
 				maruko_video_init_rtp_state(&d->rtp_state,
 					ctx->cfg.rc_codec, sensor_fps);
 				printf("> [maruko][dual] dual-stream chn=%d ->"

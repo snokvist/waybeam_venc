@@ -253,7 +253,8 @@ omitted fields keep their compiled-in defaults.
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400,
-    "connectedUdp": true, "audioPort": 5601, "sidecarPort": 5602
+    "connectedUdp": true, "allowUnixEncoderStall": false,
+    "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv":      {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
@@ -989,6 +990,7 @@ Notes:
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
+| `outgoing.allow_unix_encoder_stall` | bool | restart | Preserve blocking `unix://` behavior when the consumer queue fills. Default `false`: bounded wait then drop the rest of the frame |
 | `outgoing.audio_port` | int32 | restart | `>0` = dedicated audio port; `0` = shared video destination; `<0` (e.g. `-1`) = record-only (audio captured + recorded but never streamed). With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
 

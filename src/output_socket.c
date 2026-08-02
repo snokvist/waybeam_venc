@@ -62,7 +62,8 @@ static int fill_unix_destination(const char *name,
  * the backend output modules. */
 #define OUTPUT_SOCKET_UNIX_SNDTIMEO_MS 2
 
-static int open_socket(int *socket_handle, VencOutputUriType type)
+static int open_socket(int *socket_handle, VencOutputUriType type,
+	int allow_unix_encoder_stall)
 {
 	int domain;
 	int sndbuf;
@@ -96,7 +97,10 @@ static int open_socket(int *socket_handle, VencOutputUriType type)
 			"(keeping kernel default)\n", sndbuf, strerror(errno));
 	}
 
-	if (domain == AF_UNIX) {
+	if (domain == AF_UNIX && allow_unix_encoder_stall) {
+		fprintf(stderr, "[output_socket] WARNING: unix:// encoder-stall "
+			"compatibility enabled; a blocked consumer can stall capture\n");
+	} else if (domain == AF_UNIX) {
 		struct timeval tv;
 
 		tv.tv_sec = 0;
@@ -107,8 +111,9 @@ static int open_socket(int *socket_handle, VencOutputUriType type)
 				"(sends may block the encode loop)\n",
 				strerror(errno));
 		}
-		(void)output_socket_warn_dgram_qlen();
 	}
+	if (domain == AF_UNIX)
+		(void)output_socket_warn_dgram_qlen();
 
 	return 0;
 }
@@ -175,7 +180,7 @@ int output_socket_fill_destination(const VencOutputUri *uri,
 int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 	socklen_t *dst_len, VencOutputUriType *transport,
 	const VencOutputUri *uri, int requested_connected_udp,
-	int *connected_udp)
+	int allow_unix_encoder_stall, int *connected_udp)
 {
 	int want_connected;
 
@@ -188,7 +193,8 @@ int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 
 	if (*socket_handle < 0 || *transport != uri->type) {
 		close_socket_if_open(socket_handle);
-		if (open_socket(socket_handle, uri->type) != 0)
+		if (open_socket(socket_handle, uri->type,
+		    allow_unix_encoder_stall) != 0)
 			return -1;
 		*transport = uri->type;
 	}

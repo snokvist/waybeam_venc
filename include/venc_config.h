@@ -220,6 +220,7 @@ typedef struct {
 	char stream_mode[16];               /* "rtp" or "compact" */
 	uint16_t max_payload_size;
 	bool connected_udp;             /* connect() socket (skip per-packet routing) */
+	bool allow_unix_encoder_stall;   /* preserve blocking unix:// send semantics */
 	int32_t audio_port;                 /* <0  = record-only: audio is captured and
 	                                     *       recorded but NEVER streamed (no UDP send)
 	                                     *  0   = same as video port — AVOID: mixing

@@ -230,6 +230,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 
 	output->stream_mode = setup->stream_mode;
 	output->requested_connected_udp = setup->requested_connected_udp;
+	output->allow_unix_encoder_stall = setup->allow_unix_encoder_stall;
 	if (!setup->has_server)
 		return 0;
 
@@ -273,7 +274,8 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &setup->uri,
-	    output->requested_connected_udp, &output->connected_udp) != 0)
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0)
 		return -1;
 	(void)output_socket_capture_capacity(output->socket_handle,
 		&output->send_queue);
@@ -413,7 +415,7 @@ static int star6e_batch_flush(Star6eOutput *output)
 
 	if (b->count == 0)
 		return 0;
-	if (b->discard_remaining || b->flush_budget_us == 0) {
+	if (b->discard_remaining) {
 		if (b->discard_as_error)
 			output->send_errors += (uint32_t)b->count;
 		else
@@ -434,8 +436,12 @@ static int star6e_batch_flush(Star6eOutput *output)
 		return 0;
 	}
 
-	started = wb_monotonic_us();
-	deadline = started + b->flush_budget_us;
+	started = 0;
+	deadline = 0;
+	if (!b->allow_unix_encoder_stall) {
+		started = wb_monotonic_us();
+		deadline = started + b->flush_budget_us;
+	}
 
 	while (sent_total < b->count) {
 		int n = sendmmsg(fd, b->msgs + sent_total,
@@ -451,6 +457,8 @@ static int star6e_batch_flush(Star6eOutput *output)
 				 * costs ~2 iterations, not a busy-spin. */
 				output_socket_note_saturation(fd,
 					&output->send_queue);
+				if (b->allow_unix_encoder_stall)
+					continue;
 				if (wb_monotonic_us() < deadline)
 					continue;
 				output->socket_drops +=
@@ -491,6 +499,8 @@ static int star6e_batch_flush(Star6eOutput *output)
 		 * capacity reading for the unix:// fill denominator. */
 		if (sent_total < b->count) {
 			output_socket_note_saturation(fd, &output->send_queue);
+			if (b->allow_unix_encoder_stall)
+				continue;
 			if (wb_monotonic_us() >= deadline) {
 				output->socket_drops +=
 					(uint32_t)(b->count - sent_total);
@@ -501,12 +511,14 @@ static int star6e_batch_flush(Star6eOutput *output)
 	}
 
 	output->socket_writes += (uint32_t)sent_total;
-	elapsed = wb_monotonic_us() - started;
-	if (elapsed >= b->flush_budget_us) {
-		b->flush_budget_us = 0;
-		b->discard_remaining = 1;
-	} else {
-		b->flush_budget_us -= (uint32_t)elapsed;
+	if (!b->allow_unix_encoder_stall) {
+		elapsed = wb_monotonic_us() - started;
+		if (elapsed >= b->flush_budget_us) {
+			b->flush_budget_us = 0;
+			b->discard_remaining = 1;
+		} else {
+			b->flush_budget_us -= (uint32_t)elapsed;
+		}
 	}
 	b->count = 0;
 	return (int)sent_total;
@@ -550,6 +562,9 @@ void star6e_output_begin_frame(Star6eOutput *output)
 		b->dst = output->dst;
 		b->dst_len = output->dst_len;
 		b->connected_udp = output->connected_udp;
+		b->allow_unix_encoder_stall =
+			(output->transport == VENC_OUTPUT_URI_UNIX) &&
+			output->allow_unix_encoder_stall;
 		gen_after = __atomic_load_n(&output->transport_gen,
 			__ATOMIC_ACQUIRE);
 		if (gen_before == gen_after)
@@ -980,7 +995,8 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* odd = writing */
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &parsed,
-	    output->requested_connected_udp, &output->connected_udp) != 0) {
+	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    &output->connected_udp) != 0) {
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
 	}
@@ -1012,6 +1028,7 @@ void star6e_output_teardown(Star6eOutput *output)
 	output->dst_len = 0;
 	output->connected_udp = 0;
 	output->requested_connected_udp = 0;
+	output->allow_unix_encoder_stall = 0;
 	output->transport = VENC_OUTPUT_URI_UDP;
 }
 

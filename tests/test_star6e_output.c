@@ -6,6 +6,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,6 +14,32 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+typedef struct {
+	int socket_handle;
+	int stop;
+	uint32_t packets_read;
+} UnixDrainThread;
+
+static void *delayed_unix_drain(void *opaque)
+{
+	UnixDrainThread *drain = opaque;
+	uint8_t packet[2048];
+
+	usleep(20000);
+	while (!__atomic_load_n(&drain->stop, __ATOMIC_ACQUIRE)) {
+		ssize_t n;
+
+		do {
+			n = recv(drain->socket_handle, packet, sizeof(packet),
+				MSG_DONTWAIT);
+			if (n > 0)
+				drain->packets_read++;
+		} while (n > 0);
+		usleep(1000);
+	}
+	return NULL;
+}
 
 static int create_udp_receiver(uint16_t *port)
 {
@@ -1359,6 +1386,16 @@ static int test_star6e_output_unix_flush_is_bounded(void)
 	CHECK("unix bound prepare",
 		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
 	CHECK("unix bound init", star6e_output_init(&output, &setup) == 0);
+	{
+		struct timeval timeout = {0};
+		socklen_t timeout_len = sizeof(timeout);
+
+		CHECK("unix bound timeout readable",
+			getsockopt(output.socket_handle, SOL_SOCKET, SO_SNDTIMEO,
+				&timeout, &timeout_len) == 0);
+		CHECK("unix bound timeout enabled",
+			timeout.tv_sec != 0 || timeout.tv_usec != 0);
+	}
 
 	/* Fill the peer queue before starting the frame so the very first batch
 	 * hits congestion. This makes the per-frame budget assertion independent
@@ -1406,6 +1443,96 @@ static int test_star6e_output_unix_flush_is_bounded(void)
 	star6e_output_teardown(&output);
 	if (recv_fd >= 0)
 		close(recv_fd);
+	return failures;
+}
+
+/* Compatibility mode deliberately restores the old blocking contract: a
+ * full unix:// peer queue holds the producer until the consumer resumes.
+ * The delayed drain proves that the send actually waits, then completes the
+ * entire frame without converting queue pressure into transport drops. */
+static int test_star6e_output_unix_stall_mode_resumes_without_drops(void)
+{
+	char abstract_name[64];
+	char uri[80];
+	Star6eOutputSetup setup;
+	Star6eOutput output;
+	UnixDrainThread drain = {0};
+	pthread_t drain_thread;
+	int recv_fd = -1;
+	int failures = 0;
+	int thread_rc;
+	uint64_t started;
+	uint64_t elapsed;
+	uint8_t hdr[12] = {0};
+	uint8_t payload[1400];
+
+	hdr[0] = 0x80;
+	memset(payload, 'S', sizeof(payload));
+	snprintf(abstract_name, sizeof(abstract_name),
+		"test_unix_stall_%ld", (long)getpid());
+	recv_fd = create_unix_receiver(abstract_name);
+	CHECK("unix stall recv socket", recv_fd >= 0);
+
+	snprintf(uri, sizeof(uri), "unix://%s", abstract_name);
+	CHECK("unix stall prepare",
+		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
+	setup.allow_unix_encoder_stall = 1;
+	CHECK("unix stall init", star6e_output_init(&output, &setup) == 0);
+	{
+		struct timeval timeout = { .tv_sec = 1, .tv_usec = 1 };
+		socklen_t timeout_len = sizeof(timeout);
+
+		CHECK("unix stall timeout readable",
+			getsockopt(output.socket_handle, SOL_SOCKET, SO_SNDTIMEO,
+				&timeout, &timeout_len) == 0);
+		CHECK("unix stall timeout disabled",
+			timeout.tv_sec == 0 && timeout.tv_usec == 0);
+	}
+
+	/* Saturate the queue before sending the test frame. */
+	{
+		int flags = fcntl(output.socket_handle, F_GETFL, 0);
+
+		(void)fcntl(output.socket_handle, F_SETFL, flags | O_NONBLOCK);
+		while (sendto(output.socket_handle, payload, sizeof(payload), 0,
+		    (const struct sockaddr *)&output.dst, output.dst_len) > 0)
+			;
+		(void)fcntl(output.socket_handle, F_SETFL, flags);
+	}
+
+	drain.socket_handle = recv_fd;
+	thread_rc = pthread_create(&drain_thread, NULL, delayed_unix_drain, &drain);
+	CHECK("unix stall drain thread", thread_rc == 0);
+	if (thread_rc != 0) {
+		star6e_output_teardown(&output);
+		close(recv_fd);
+		return failures;
+	}
+
+	started = wb_monotonic_us();
+	star6e_output_begin_frame(&output);
+	for (int i = 0; i < STAR6E_OUTPUT_BATCH_MAX * 4; i++) {
+		(void)star6e_output_send_rtp_parts(&output,
+			hdr, sizeof(hdr), payload, sizeof(payload), NULL, 0);
+	}
+	(void)star6e_output_end_frame(&output);
+	elapsed = wb_monotonic_us() - started;
+	__atomic_store_n(&drain.stop, 1, __ATOMIC_RELEASE);
+	pthread_join(drain_thread, NULL);
+
+	CHECK("unix stall waited for consumer", elapsed >= 10000);
+	CHECK("unix stall resumed promptly", elapsed < 1000000);
+	CHECK("unix stall batch policy selected",
+		output.batch.allow_unix_encoder_stall == 1);
+	CHECK("unix stall frame kept", output.batch.discard_remaining == 0);
+	CHECK("unix stall no transport drops", output.socket_drops == 0);
+	CHECK("unix stall no send errors", output.send_errors == 0);
+	CHECK("unix stall sent whole frame",
+		output.socket_writes == STAR6E_OUTPUT_BATCH_MAX * 4);
+	CHECK("unix stall consumer drained", drain.packets_read > 0);
+
+	star6e_output_teardown(&output);
+	close(recv_fd);
 	return failures;
 }
 
@@ -1499,6 +1626,7 @@ int test_star6e_output(void)
 	failures += test_star6e_output_backpressure_hysteresis();
 	failures += test_star6e_output_unix_backpressure();
 	failures += test_star6e_output_unix_flush_is_bounded();
+	failures += test_star6e_output_unix_stall_mode_resumes_without_drops();
 	failures += test_star6e_output_always_sends_under_pressure();
 	return failures;
 }

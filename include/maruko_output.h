@@ -52,6 +52,7 @@ typedef struct {
 	struct sockaddr_storage dst;
 	socklen_t dst_len;
 	int connected_udp;
+	int allow_unix_encoder_stall;
 	uint32_t flush_budget_us;
 	int discard_remaining;
 	int discard_as_error;
@@ -72,6 +73,7 @@ typedef struct {
 	uint16_t throttle_permille;
 	int requested_connected_udp; /* user preference, persisted for apply_server */
 	int connected_udp;           /* actual kernel state — set by configure() */
+	int allow_unix_encoder_stall; /* unix:// blocking compatibility mode */
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
 	OutputSocketQueue send_queue; /* SO_SNDBUF + learned unix:// capacity */
@@ -98,7 +100,7 @@ typedef struct {
 
 /** Initialize UDP or Unix socket output from a parsed URI. */
 int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
-	int requested_connected_udp);
+	int requested_connected_udp, int allow_unix_encoder_stall);
 
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name);
