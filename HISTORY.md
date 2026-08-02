@@ -80,8 +80,9 @@ are in `documentation/UNIX_SOCKET_HANDOVER.md`. Star6E V1–V9 are confirmed on
 device: 10/15/20/25 Mbps at 60 fps and 25 Mbps at 120 fps, deterministic
 backpressure/recovery, UDP/SHM regression, live Unix↔UDP redirect, and
 shared-socket Opus. The earlier device-unresponsive incident did not recur
-after a human power cycle. Maruko V10 remains code-level only because no
-Maruko target was available.
+after a human power cycle. Maruko V10 is also confirmed on SSC378QE / IMX335:
+10/15/20/25 Mbps at 60 fps, 25 Mbps at 120 fps, and deterministic
+backpressure/recovery all passed with zero steady-state gaps or drops.
 
 Note: `SO_SNDBUF` is raised on both transports but is a no-op for `unix://`
 (1 MiB effective is ~455 datagrams, far above any sane qlen); it remains the

@@ -1,15 +1,15 @@
 # `unix://` Transport Fix — Handover & On-Device Validation Plan
 
-<!-- version: 1.1.0 -->
+<!-- version: 1.2.0 -->
 
 Branch: `claude/unix-socket-speed-limits-az62s4` · Target release: `0.63.0`
 
-Status: **Star6E V1–V9 confirmed on device.** The root-cause measurements
+Status: **Star6E V1–V9 and Maruko V10 confirmed on device.** The root-cause measurements
 below marked *(measured)* came from a Linux 6.18 x86-64 container. The full
 Star6E matrix completed on SSC338Q, including 25 Mbps at 60 and 120 fps,
 backpressure recovery, UDP/SHM regression, live redirect, and shared-socket
-audio. Maruko V10 remains code-level only because no Maruko target was
-available.
+audio. Maruko parity completed on SSC378QE at 10–25 Mbps and 60/120 fps,
+including deterministic backpressure recovery.
 
 ---
 
@@ -253,10 +253,20 @@ matching the expected Opus cadence over the 17 non-stalled seconds. Audio and
 video both recovered. Audio EAGAIN remains intentionally absent from
 `transportDrops`, as documented in §6.
 
-V10 was not run: the documented Maruko targets were unreachable. After all
-Star6E tests, the byte-identical saved production config was restored,
+After all Star6E tests, the byte-identical saved production config was restored,
 `S95waybeam` and `S96waybeam-link` were started normally, and the frame-SHM
 counter advanced from 2,275 to 2,576 with zero additional drops.
+
+V10 passed on 2026-08-02 using SSC378QE / IMX335 (`192.168.2.233`). V1 raised
+qlen from 10 to 256 before daemon start. At 60 fps the consumer delivered
+10.327, 15.468, 20.455, and 25.765 Mbps with zero RTP gaps and zero transport
+drops at every rate. At 25 Mbps / 120 fps it delivered 25.125 Mbps with zero
+gaps/drops. Authoritative sidecar maximum Unix send spread was 2.155 ms at
+60 fps and 3.567 ms at 120 fps, both below the 4 ms budget. A five-second
+stall at 15 Mbps reached 100% fill, asserted pressure, counted 5,445 drops,
+then returned to 0% fill and recovered without a stream or watchdog error.
+The target's original 0.60.1 binary, init script, and UDP configuration were
+restored byte-for-byte afterward and verified healthy.
 
 ### V1 — Baseline: the sysctl is actually applied
 
