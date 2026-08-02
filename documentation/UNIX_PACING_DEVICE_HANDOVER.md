@@ -1,6 +1,6 @@
 # `unix://` Paced Egress + Sojourn Throttle — Device Handover
 
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 
 Branch: `claude/waybeam-venc-bitrate-throttle-brujl3` · Version `0.64.0` ·
 Contract `0.19.0`
@@ -12,10 +12,12 @@ coincidence — the calibrated fill denominator, `OutputSocketQueue`,
 and the bounded flush are all load-bearing here. Do not try to apply this on
 top of `master`.
 
-Status: **host-soaked only. Never run on hardware. Star6E only — the Maruko
-mirror is not written.** Both knobs default off, so a deploy with no config
-change must behave exactly like 0.63.0. That is check P1 and it is the
-gate for everything else.
+Status: **partially device-verified — P1, P2 and P4 measured on Star6E at a
+single 15 Mbps / 60 fps point (§5.10, 2026-08-02). P3 and P5–P8 remain
+unrun, so the CoDel clamp has never actuated on hardware.** Star6E only —
+the Maruko mirror is not written. Both knobs default off, so a deploy with
+no config change must behave exactly like 0.63.0. That is check P1 and it is
+the gate for everything else.
 
 ---
 
@@ -96,6 +98,20 @@ Confirm `cat /proc/sys/net/unix/max_dgram_qlen` is >= 256 before anything
 else — that is #214's `S95waybeam` doing its job, and every number below
 assumes it.
 
+**Stop the external rate controller first.** On any craft running
+waybeam-link, `waybeam-link tx` writes `video0.bitrate` continuously — it is
+the single rate controller — so every check below would otherwise be
+measuring two controllers at once. It is silent in the config file: read the
+live value, not `/etc/waybeam.json`.
+
+```sh
+/etc/init.d/S96waybeam-link stop        # restart after the run
+curl -s "localhost/api/v1/get?video0.bitrate"   # must now hold still
+```
+
+Leave `waybeam_hub` running — its OSD render is realistic pipeline load and
+it does not write bitrate (`venc.bitrate_enabled=false`).
+
 ---
 
 ## 5. Checks
@@ -152,13 +168,23 @@ make the "same cost as frame-shm" claim wrong and is worth stopping for.
 
 **Pass:** `queueFrames` climbs to 8, `queueDelayUs` grows roughly
 monotonically through the stall, `queueOverflows` increases, and — the one
-that matters — **the consumer reports zero RTP sequence gaps within
-surviving frames**. Whole frames are refused at admission; no partial frame
-should ever reach the wire. Everything recovers after the stall with no
-restart.
+that matters — **no partial frame reaches the wire**. Whole frames are
+refused at admission. Everything recovers after the stall with no restart.
 
-Host reference: 233 overflows over a 4 s wedge, 0 sequence gaps, recovered
-to 950 permille.
+⚠️ **The pass criterion here originally read "zero RTP sequence gaps", and
+that is wrong on device** — see §5.10 P4. The Star6E RTP packetizer stamps
+sequence numbers *before* the frame is offered to the queue, so a refused
+frame burns its sequence numbers and the consumer correctly reports a hole.
+The host soak numbers packets after admission, which is why it reported 0.
+Zero gaps is not achievable and not desirable: the receiver *should* be told
+the frame is gone.
+
+The testable form of frame-atomic admission is **quantisation** — divide
+`sequence_gaps` by the run's mean packets-per-frame and the result must be
+an integer equal to `queueOverflows`. Packet-granular loss does not land on
+an integer. Device measurement in §5.10 uses that form.
+
+Host reference: 233 overflows over a 4 s wedge, recovered to 950 permille.
 
 ### P5 — The actual A/B: sustained slow consumer
 
@@ -221,6 +247,129 @@ Set `unixPacing=true` and `allowUnixEncoderStall=true` together, restart.
 Only if P2 moved `VENC_CODEL_TARGET_US`. It is a compile-time constant in
 `include/venc_codel.h`, so this is an edit + `make build SOC_BUILD=star6e`
 + redeploy. Update the constant's comment with the measured basis.
+
+---
+
+## 5.10 Measured — Phase A, 2026-08-02, SSC338Q / IMX335 (`192.168.2.232`)
+
+**Partial run.** P1, P2 and P4 measured at a single 15 Mbps / 60 fps /
+1920x1080 operating point. **P3, P5, P6, P7, P8 are still outstanding**, and
+so is the rest of the P1 bitrate matrix. This pass was scoped to the two
+checks on the §7 revert list plus the calibration the branch is blocked on.
+
+Build: 0.64.0, `make build SOC_BUILD=star6e`, deployed via
+`star6e_direct_deploy.sh cycle`. `max_dgram_qlen` 256. Consumer
+`/tmp/unix_dgram_consumer`, target-local.
+
+### Setup finding — the rate controller has to be stopped first
+
+`waybeam-link tx` was running and actively driving `video0.bitrate`: the
+config file read 2829 kbps while `GET /api/v1/get?video0.bitrate` returned
+**21839**. Any measurement of a bitrate clamp taken with the external rate
+controller live is measuring both controllers at once. `S96waybeam-link` was
+stopped for the whole run and restarted afterwards; `waybeam_hub` was left
+running, since its OSD render on VPE port 0 is realistic vehicle load and it
+does not write bitrate (`venc.bitrate_enabled=false`). **Add this to §4
+setup** — it is not optional, and it is invisible unless you read the live
+value rather than the config file.
+
+### P1 — regression gate, `unixPacing=false` · PASS
+
+30 s, `unix://waybeam_venc_test`:
+
+| | measured | #214 §5 reference |
+|---|---:|---:|
+| delivered | 15.361 Mbps | 15.176 Mbps |
+| RTP sequence gaps | 0 | 0 |
+| `transportDrops` delta | 0 | 0 |
+| max marker gap | 18.727 ms | 17.309 ms |
+| max frame spread | 993 us | 546 us |
+
+1802 frames / 30 s = 60.07 fps. `paced` reported `false`. Spread is higher
+than #214's row but that run did not have `waybeam_hub` OSD render on the
+pipeline; it sits inside the 1.035 ms #214 recorded at 25 Mbps. Nothing in
+the unpaced path moved.
+
+### P2 — ⚠️ calibration: healthy sojourn on ARM · PASS
+
+`unixPacing=true`, `unixThrottle=false`, healthy consumer, 60 s, status
+polled at 5 Hz (300 samples):
+
+| | ARM measured | host x86 reference |
+|---|---:|---:|
+| `queueSojournUs` avg | **283 us** | 68 us |
+| p50 | 273 us | — |
+| p95 | 392 us | — |
+| max | **815 us** | 326 us |
+| `queueDelayUs` | 0 across all 300 samples | 0 |
+| `queueFrames` max | 0 | 0 |
+| `throttlePermille` | 1000, never left | 1000 |
+
+Delivered 15.368 Mbps, 0 sequence gaps, 3605 frames / 60 s = 60.08 fps —
+i.e. **identical to the unpaced P1 run**. Pacing is invisible on a healthy
+link, which is the §7 condition.
+
+**`VENC_CODEL_TARGET_US` = 10 ms stands, and is now measured rather than
+provisional.** ARM healthy sojourn is ~4x the host figure but the worst
+sample seen (815 us) is still 12x below the target and ~35x below it on
+average. The handover's own rule — "below ~1 ms, 10 ms stands" — is met on
+the max, not merely the mean. P9 is therefore **not required**.
+
+### P4 — wedged consumer, observe-only · PASS on substance
+
+`--stall-after-ms 3000 --stall-ms 4000`, 15 s run. Queue trace at 5 Hz:
+
+```
+qf=0  delayUs=0        ovf=0     <- pre-stall, steady
+qf=6  delayUs=83705    ovf=0     <- stall begins
+qf=8  delayUs=299548   ovf=11
+qf=8  delayUs=516889   ovf=24
+...   (monotonic, +13 overflows per 200 ms = 65/s at 60 fps)
+qf=8  delayUs=3811826  ovf=222
+qf=1  delayUs=567      ovf=233   <- stall ends, one sample later
+qf=0  delayUs=0        ovf=233   <- fully recovered
+```
+
+`queueFrames` reached 8 and held, `queueDelayUs` grew monotonically to
+3.81 s, `queueOverflows` settled at **233 — the same figure as the host
+soak**, and recovery took under one 200 ms poll interval with no venc
+restart.
+
+**Frame-atomic admission holds.** The consumer reported 5398 sequence gaps,
+which is *not* a failure — see the corrected criterion in §5 P4. The
+quantisation test:
+
+| | paced | unpaced (same wedge, control run) |
+|---|---:|---:|
+| packets / frames delivered | 15478 / 668 = 23.170 pkt/frame | 15633 / 673 = 23.228 pkt/frame |
+| sequence gaps | 5398 | 4285 |
+| gaps ÷ pkt-per-frame | **232.97 frames** | **184.5 frames** |
+| `queueOverflows` | 233 | 0 (`transportDrops` 4285, packet-granular) |
+
+Paced loss lands on an integer number of whole frames and that integer is
+exactly `queueOverflows`. Unpaced loss lands on a half-frame, because the
+kernel drops individual datagrams and partial frames reach the wire. That
+difference *is* what the producer-side queue buys, and it is the first
+direct device evidence for it — the host soak's "0 gaps" was an artifact of
+its harness numbering packets after admission.
+
+### Defect found — contract version string was never bumped
+
+`documentation/HTTP_API_CONTRACT.md` and `HISTORY.md` both declare contract
+`0.19.0`, and the PR checklist claims the bump was made, but
+`src/venc_api.c` still emitted `"0.18.0"` — the running device reported
+`contract_version: 0.18.0` for a 0.64.0 build. Fixed in this commit. Any
+consumer gating on the contract version would have silently missed the new
+`transport/status` fields.
+
+### Still outstanding
+
+P1 at 10/20/25 Mbps and 25 Mbps @ 120 fps · P3 (enqueue-copy CPU) ·
+**P5 (the actual clamp A/B — `unixThrottle=true` has not been exercised on
+hardware at all)** · P6 (shared-socket audio) · P7 (live redirect) ·
+P8 (mutual exclusion). Nothing here validates the CoDel controller's
+*actuation*; it validates the queue underneath it and the target constant
+it clamps against.
 
 ---
 
