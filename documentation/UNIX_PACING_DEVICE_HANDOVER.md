@@ -1,6 +1,6 @@
 # `unix://` Paced Egress + Sojourn Throttle — Device Handover
 
-<!-- version: 1.1.0 -->
+<!-- version: 1.2.0 -->
 
 Branch: `claude/waybeam-venc-bitrate-throttle-brujl3` · Version `0.64.0` ·
 Contract `0.19.0`
@@ -12,12 +12,14 @@ coincidence — the calibrated fill denominator, `OutputSocketQueue`,
 and the bounded flush are all load-bearing here. Do not try to apply this on
 top of `master`.
 
-Status: **partially device-verified — P1, P2 and P4 measured on Star6E at a
-single 15 Mbps / 60 fps point (§5.10, 2026-08-02). P3 and P5–P8 remain
-unrun, so the CoDel clamp has never actuated on hardware.** Star6E only —
-the Maruko mirror is not written. Both knobs default off, so a deploy with
-no config change must behave exactly like 0.63.0. That is check P1 and it is
-the gate for everything else.
+Status: **device-verified on Star6E for P1–P5 (§5.10 P1/P2/P4, §5.11 P5/P3,
+both 2026-08-02, 15 Mbps / 60 fps). The clamp works: overflows down 11.6x and
+delivered frames 52 %→96 % at unchanged goodput, no CPU cost, invisible on a
+healthy link. Two open items: the AIMD tail still reaches ~300 ms every
+~4.6 s, and observe-only telemetry is broken (§5.11).** P6–P8 unrun. Star6E
+only — the Maruko mirror is not written. Both knobs default off, so a deploy
+with no config change must behave exactly like 0.63.0. That is check P1 and it
+is the gate for everything else.
 
 ---
 
@@ -71,8 +73,14 @@ programs it. That is the mode most of this plan is measured in.
 | `throttlePermille` | what the controller wants; 1000 = unclamped |
 | `effectiveBitrateKbps` | `video0.bitrate` scaled by the above |
 
-`throttlePermille` is populated even when `unixThrottle` is off — that is
-the point of observe-only.
+⚠️ **`throttlePermille` over HTTP is the *applied* clamp, not the
+controller's want** — it reads 1000 whenever `unixThrottle` is off, however
+hard the controller is demanding a clamp. Device-confirmed in §5.11: a
+permanently full queue at 194 ms average delay published `throttlePermille`
+1000 for 200/200 samples. Observe-only mode therefore publishes nothing
+useful through this endpoint; the controller's want reaches only the RTP
+sidecar. Treat every observe-only reading of this field as meaningless
+until that is fixed.
 
 Log lines worth grepping in `/tmp/waybeam.log`:
 `unix throttle pinned at floor`, `unix throttle left the floor`,
@@ -362,14 +370,134 @@ its harness numbering packets after admission.
 consumer gating on the contract version would have silently missed the new
 `transport/status` fields.
 
+### Still outstanding after Phase A
+
+P1 at 10/20/25 Mbps and 25 Mbps @ 120 fps · P6 (shared-socket audio) ·
+P7 (live redirect) · P8 (mutual exclusion). P3 and P5 are covered by
+Phase B below.
+
+---
+
+## 5.11 Measured — Phase B (P5 + P3), 2026-08-02, same device
+
+**The clamp works.** `unixThrottle=true` exercised on hardware for the first
+time. 15 Mbps configured / 60 fps / 1920x1080, consumer `--drain-kbps 8000`,
+`waybeam-link tx` stopped, status polled at 5 Hz.
+
+### ⚠️ Setup precondition discovered the hard way: the scene must be moving
+
+The first attempt produced a **false negative**. On a static scene the CBR
+encoder undershoots badly — measured **6.43–6.57 Mbps against a 15000 kbps
+target** (~13.5 KB/frame instead of ~32 KB/frame) across five runs. Production
+then sits *below* the 8000 kbps consumer cap, so there is no congestion, the
+queue stays empty and the clamp correctly never engages. Everything reads
+"pass" while testing nothing.
+
+This is easy to misread as a pacing regression, because the static window
+happened to coincide with the pacing-on runs and the bytes-per-frame appeared
+to track the flag. It does not: an A/B/A with the scene in motion gave
+**pacing on = 15.29 Mbps, 60.04 fps, 31.8 KB/frame** — full rate.
+
+**Before any congestion test, confirm the encoder is actually producing near
+`video0.bitrate` with a healthy consumer.** If it is not, you are measuring a
+static scene, not a transport. (Related: the known CBR-undershoot/3DNR
+interaction in `KNOWN_ISSUES.md`.)
+
+### P5 — the A/B, moving scene
+
+| | T1 clamp **off** (40 s) | T2 clamp **on** (60 s) |
+|---|---:|---:|
+| goodput | 8.000 Mbps | **7.930 Mbps** |
+| frames delivered | 1246 / ~2400 = **52 %** | 3456 / ~3600 = **96 %** |
+| RTP sequence gaps | 26123 | **1355** |
+| `queueOverflows` | 1149 (28.7 /s) | 149 (**2.5 /s**) |
+| `queueFrames` max | 8 (permanently full) | 8 (transient) |
+| sojourn avg | **213.7 ms** | **27.7 ms** |
+| sojourn p50 | 233.4 ms | **0.24 ms** |
+| sojourn p95 | 251.2 ms | 166.4 ms |
+| sojourn max | 266.9 ms | 299.1 ms |
+| `queueDelayUs` avg | 194.3 ms | 22.5 ms |
+| consumer max frame spread | 44.1 ms | 43.1 ms |
+| waybeam CPU | 15.6 % of one core | 15.6 % |
+
+Goodput is **unchanged** (−0.9 %), which is the required result: the clamp
+trades frame loss for rate, it does not create bandwidth. Overflows fall
+**11.6x**, delivered frames go 52 % → 96 %, and median queue latency collapses
+**970x**, from 233 ms to 240 µs.
+
+**The tail does not improve, and that is the real finding.** p95 is still
+166 ms and the maximum is 299 ms — slightly *worse* than clamp-off. Clamp-off
+is a permanently full queue at a steady ~215 ms; clamp-on is a mostly-empty
+queue punctuated by AIMD excursions of the same magnitude. Half the time the
+added latency is effectively zero; the excursions still reach ~300 ms.
+
+Oscillation, measured: `throttlePermille` was below 1000 in **250 of 300
+samples (83 %)**, reached the **250 floor**, and crossed the 1000 boundary
+**26 times in 60 s** — a full cycle every **~4.6 s**. The log shows
+`unix throttle pinned at floor` and `left the floor` **14 times each**. So the
+controller repeatedly bottoms out at 25 % and walks back up. That is the
+predicted AIMD behaviour (§5 P5) and it is where the latency tail comes from.
+If the excursion is unacceptable in flight, the levers are
+`VENC_CODEL_INTERVAL_US` (react sooner) and `VENC_CODEL_AI_STEP` (overshoot
+less) — not the target constant, which Phase A settled.
+
+### T3 — cost on a healthy link: none
+
+Clamp armed, healthy consumer, 40 s: 14.919 Mbps, 2403 frames = 60.07 fps,
+0 sequence gaps. `throttlePermille` **1000 in all 200 samples**, `queueFrames`
+max **0**, `queueDelayUs` **0** throughout, no new overflows. Sojourn avg
+**273 µs** / p95 343 / max 546 — statistically the same as Phase A's
+pacing-only baseline (283 / 392 / 815 µs). The clamp is invisible when nothing
+is wrong, which is the §7 condition.
+
+`video0.bitrate` read **15000 before and after** the whole sequence — the D1
+claim that the clamp never writes the configured bitrate holds.
+
+### P3 — enqueue-copy CPU cost: +0.3 points
+
+Healthy consumer, comparable bitrate, `waybeam` process CPU from
+`/proc/<pid>/stat` (immune to the 5 Hz poller's own fork cost; the poll rate
+was identical in every run):
+
+| | bitrate | waybeam CPU |
+|---|---:|---:|
+| pacing **off** | 15.37 Mbps | 16.0 % of one core |
+| pacing + clamp **on** | 14.92 Mbps | 16.3 % of one core |
+
+**+0.3 points**, against a ~2 point fail threshold. The "same cost as
+frame-shm's `venc_frame_ring_append()`" claim holds. Under congestion CPU did
+not move either (15.6 % in both T1 and T2).
+
+### Defect confirmed — observe-only mode publishes nothing
+
+Phase A flagged this from code reading; T1 proves it empirically. Throughout
+T1 the queue was **permanently full** — `queueFrames` 8, `queueDelayUs`
+averaging 194 ms against a 10 ms target — and HTTP `throttlePermille` read
+**1000 in all 200 samples**. The controller was certainly demanding a deep
+clamp; the field never showed it.
+
+Cause: `query_transport_status()` publishes
+`star6e_controls_output_throttle()` (`src/star6e_controls.c:1487`) — the
+*applied* value — and with `unix_throttle` off the apply is forced to
+`VENC_CODEL_FULL_PERMILLE` (`src/star6e_runtime.c:1178-1181`). The controller's
+want lives in `ps->output.throttle_permille` and reaches only the RTP sidecar
+(`src/star6e_runtime.c:1511`).
+
+So **§3's "`throttlePermille` is populated even when `unixThrottle` is off —
+that is the point of observe-only" is false over HTTP**, and the observe-only
+calibration mode the device plan is largely written around cannot be observed
+through the documented endpoint. §5 P2's "fail if `throttlePermille` ever
+leaves 1000" is likewise untestable in the mode it is specified for.
+
+Not fixed here — surfacing the controller's want over HTTP is a field-design
+call for the author (a separate key, rather than overloading `throttlePermille`
+with two different meanings depending on a config flag). §3 is annotated.
+
 ### Still outstanding
 
-P1 at 10/20/25 Mbps and 25 Mbps @ 120 fps · P3 (enqueue-copy CPU) ·
-**P5 (the actual clamp A/B — `unixThrottle=true` has not been exercised on
-hardware at all)** · P6 (shared-socket audio) · P7 (live redirect) ·
-P8 (mutual exclusion). Nothing here validates the CoDel controller's
-*actuation*; it validates the queue underneath it and the target constant
-it clamps against.
+P1 at 10/20/25 Mbps and 25 Mbps @ 120 fps · P6 (shared-socket audio) ·
+P7 (live redirect) · P8 (mutual exclusion). Compact stream mode remains out of
+scope by design.
 
 ---
 
