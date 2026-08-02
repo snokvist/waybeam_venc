@@ -60,7 +60,14 @@
 extern "C" {
 #endif
 
-#define VENC_FRAME_QUEUE_SLOTS        8u
+/* EXPERIMENT (not for merge as-is): 8 -> 4.  The worst-case added latency is
+ * queue depth divided by drain rate, not anything the controller chooses —
+ * device measurement put max sojourn at 267 ms clamp-off and 299 ms clamp-on,
+ * i.e. both are simply "queue full" (8 frames x ~32 KB / 8 Mbps = 256 ms).
+ * Halving the depth halves that ceiling and, as a side effect, drops the
+ * loop's dead time below VENC_CODEL_INTERVAL_US so the controller stops
+ * deciding on evidence that predates its last decision. */
+#define VENC_FRAME_QUEUE_SLOTS        4u
 #define VENC_FRAME_QUEUE_SLOT_BYTES   (384u * 1024u)
 
 /* Datagrams one frame may occupy.  A 384 KB frame at the smallest

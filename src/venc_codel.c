@@ -124,7 +124,14 @@ int venc_codel_tick(VencCodel *c, uint64_t now_us)
 		if (c->enabled &&
 		    c->interval_min_us != VENC_CODEL_NO_SAMPLE) {
 			c->reported_min_us = c->interval_min_us;
-			if (c->interval_min_us >= VENC_CODEL_TARGET_US)
+			/* EXPERIMENT (not for merge as-is): an overflow means
+			 * the queue was full, which means sojourn was already
+			 * far past TARGET — the two are the same event, and
+			 * charging both in one interval compounds to x0.48 and
+			 * walks straight to the floor before the first cut can
+			 * possibly be observed.  Take the harder charge only. */
+			if (c->interval_min_us >= VENC_CODEL_TARGET_US &&
+			    !c->overflow_charged)
 				set_permille(c,
 					(uint32_t)c->permille * 4u / 5u);
 			else if (c->interval_min_us <= VENC_CODEL_RECOVER_US)
