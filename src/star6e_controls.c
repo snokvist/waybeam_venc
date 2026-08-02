@@ -1578,7 +1578,14 @@ static char *query_transport_status(void)
 			"\"inPressure\":%s,"
 			"\"pressureDrops\":%u,"
 			"\"transportDrops\":%u,"
-			"\"packetsSent\":%u}}",
+			"\"packetsSent\":%u,"
+			"\"paced\":%s,"
+			"\"queueFrames\":%u,"
+			"\"queueDelayUs\":%u,"
+			"\"queueSojournUs\":%u,"
+			"\"queueOverflows\":%u,"
+			"\"throttlePermille\":%u,"
+			"\"effectiveBitrateKbps\":%u}}",
 			transport,
 			(unsigned)fill_pct,
 			in_pressure ? "true" : "false",
@@ -1586,7 +1593,18 @@ static char *query_transport_status(void)
 			(unsigned)__atomic_load_n(&ps->output.socket_drops,
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&ps->output.socket_writes,
-				__ATOMIC_RELAXED));
+				__ATOMIC_RELAXED),
+			star6e_output_is_paced(&ps->output) ? "true" : "false",
+			(unsigned)__atomic_load_n(&ps->output.queue_depth,
+				__ATOMIC_RELAXED),
+			(unsigned)__atomic_load_n(&ps->output.queue_delay_us,
+				__ATOMIC_RELAXED),
+			(unsigned)__atomic_load_n(&ps->output.queue_sojourn_us,
+				__ATOMIC_RELAXED),
+			(unsigned)__atomic_load_n(&ps->output.queue_overflows,
+				__ATOMIC_RELAXED),
+			(unsigned)permille,
+			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"

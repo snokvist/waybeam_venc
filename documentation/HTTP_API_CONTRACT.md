@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.18.0`
+- `contract_version`: `0.19.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -1631,6 +1631,24 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.19.0` (additive — Unix paced egress + sojourn throttle):
+  - Added restart-required `outgoing.unix_pacing` (alias
+    `outgoing.unixPacing`) and live `outgoing.unix_throttle` (alias
+    `outgoing.unixThrottle`), both default `false`. Pacing holds encoded
+    frames in a producer-side queue and feeds the socket one frame at a
+    time; the throttle clamps the encoder bitrate on measured queue sojourn
+    time. `unix://` in RTP mode only, and ignored when
+    `allow_unix_encoder_stall` is set (the two are mutually exclusive).
+  - The UDP/Unix response from `/api/v1/transport/status` gains `paced`,
+    `queueFrames`, `queueDelayUs`, `queueSojournUs`, `queueOverflows`,
+    `throttlePermille` and `effectiveBitrateKbps`. The last two reuse the
+    names and semantics already established by the frame-shm branch.
+    `queueDelayUs` is the controller's input (age of the oldest queued
+    frame, `0` when empty); `queueSojournUs` is the last completed frame's
+    measured queue time and is telemetry only.
+  - As with the frame-shm clamp, `video0.bitrate` in `/api/v1/config` is
+    never modified — the clamp is a multiplier, so external rate
+    controllers keep write-on-change coherence.
 - `0.18.0` (additive — Unix encoder-stall compatibility):
   - Added restart-required `outgoing.allow_unix_encoder_stall` with camelCase
     alias `outgoing.allowUnixEncoderStall`. Default `false` retains bounded

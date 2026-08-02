@@ -188,7 +188,14 @@ static void usage(const char *argv0)
 {
 	fprintf(stderr,
 		"Usage: %s [--name NAME] [--duration SEC] "
-		"[--stall-after-ms MS --stall-ms MS]\n", argv0);
+		"[--stall-after-ms MS --stall-ms MS] [--drain-kbps KBPS]\n"
+		"\n"
+		"  --stall-*     hard wedge: stop reading entirely for a while.\n"
+		"  --drain-kbps  sustained slow drain: keep reading, but no faster\n"
+		"                than KBPS.  This is the standing-backlog case a\n"
+		"                producer-side sojourn controller is actually for;\n"
+		"                a hard stall only exercises the overflow path.\n",
+		argv0);
 }
 
 int main(int argc, char **argv)
@@ -197,6 +204,9 @@ int main(int argc, char **argv)
 	uint32_t duration_sec = DEFAULT_DURATION_SEC;
 	uint32_t stall_after_ms = 0;
 	uint32_t stall_ms = 0;
+	uint32_t drain_kbps = 0;
+	uint64_t drained_bits = 0;
+	uint64_t drain_started_us = 0;
 	struct sockaddr_un addr;
 	ConsumerStats stats;
 	uint8_t *buffer = NULL;
@@ -222,6 +232,12 @@ int main(int argc, char **argv)
 			}
 		} else if (strcmp(argv[i], "--stall-ms") == 0 && i + 1 < argc) {
 			if (parse_u32(argv[++i], &stall_ms) != 0) {
+				usage(argv[0]);
+				return 2;
+			}
+		} else if (strcmp(argv[i], "--drain-kbps") == 0 && i + 1 < argc) {
+			if (parse_u32(argv[++i], &drain_kbps) != 0 ||
+			    drain_kbps == 0) {
 				usage(argv[0]);
 				return 2;
 			}
@@ -264,8 +280,9 @@ int main(int argc, char **argv)
 	memset(&stats, 0, sizeof(stats));
 	started_us = monotonic_us();
 	deadline_us = started_us + (uint64_t)duration_sec * 1000000u;
-	printf("READY @%s qlen=%d duration_sec=%u\n", name,
-		read_max_dgram_qlen(), duration_sec);
+	drain_started_us = started_us;
+	printf("READY @%s qlen=%d duration_sec=%u drain_kbps=%u\n", name,
+		read_max_dgram_qlen(), duration_sec, drain_kbps);
 
 	while (g_running) {
 		struct pollfd pfd;
@@ -306,11 +323,31 @@ int main(int argc, char **argv)
 				strerror(errno));
 			goto done;
 		}
+		/* Rate-limited drain: hold off reading whenever the bits taken
+		 * so far are ahead of the allowed schedule.  Leaving the data
+		 * in the kernel queue (rather than reading and discarding) is
+		 * the point — it is what produces standing backlog on the
+		 * sender without ever fully wedging. */
+		if (drain_kbps > 0) {
+			uint64_t elapsed_us = now_us - drain_started_us;
+			uint64_t allowed_bits =
+				(uint64_t)drain_kbps * 1000u * elapsed_us /
+				1000000u;
+
+			if (drained_bits >= allowed_bits) {
+				struct timespec nap = { 0, 1000000L };  /* 1 ms */
+				(void)nanosleep(&nap, NULL);
+				continue;
+			}
+		}
+
 		if (polled > 0 && (pfd.revents & POLLIN)) {
 			ssize_t received = recv(fd, buffer, MAX_DATAGRAM_BYTES, 0);
 
-			if (received > 0)
+			if (received > 0) {
+				drained_bits += (uint64_t)received * 8u;
 				observe_rtp(&stats, buffer, (size_t)received, monotonic_us());
+			}
 			else if (received < 0 && errno != EINTR) {
 				fprintf(stderr, "[unix_dgram_consumer] recv failed: %s\n",
 					strerror(errno));

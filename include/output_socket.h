@@ -121,6 +121,28 @@ int output_socket_get_fill_pct(int socket_handle,
  *  fill_pct at 100. */
 void output_socket_note_saturation(int socket_handle, OutputSocketQueue *queue);
 
+/* Slack, in SIOCOUTQ bytes, that still counts as "the consumer has taken
+ * the previous frame" for frame pacing (include/venc_frame_queue.h).
+ *
+ * Exact zero is the wrong test when audio shares the video socket
+ * (outgoing.audio_port = 0), because Opus datagrams enter the same queue
+ * and it may then never read zero.  Opus at 64 kbps in 20 ms frames is a
+ * ~160 B payload, ~768 B of skb truesize, so 4 KiB covers about five audio
+ * datagrams.  The smallest video frame is ~8 RTP packets, ~18 KiB of
+ * truesize, so this threshold sits 4x below anything that could be a video
+ * frame still in flight — the two cannot be confused. */
+#define OUTPUT_SOCKET_PACING_SLACK_BYTES 4096
+
+/** Bytes currently queued on @p socket_handle (SIOCOUTQ), for pacing.
+ *
+ *  Separate from output_socket_get_fill_pct() because pacing wants the raw
+ *  count against a fixed slack threshold, not a percentage of a learned
+ *  capacity: the question is "has the consumer taken the last frame", not
+ *  "how full is the queue".
+ *
+ *  Returns 0 and writes *out_bytes, or -1 on fd < 0 / ioctl failure. */
+int output_socket_queued_bytes(int socket_handle, int *out_bytes);
+
 /** Read the kernel-applied SO_SNDBUF for @p socket_handle into
  * @p queue->sndbuf_capacity and reset the learned unix:// capacity.
  * Call once after socket open / reconfigure; the kernel doesn't change

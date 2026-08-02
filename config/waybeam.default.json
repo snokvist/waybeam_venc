@@ -56,6 +56,8 @@
     "maxPayloadSize": 1400,
     "connectedUdp": true,
     "allowUnixEncoderStall": false,
+    "unixPacing": false,
+    "unixThrottle": false,
     "audioPort": 5601,
     "sidecarPort": 5602,
     "shmThrottle": true

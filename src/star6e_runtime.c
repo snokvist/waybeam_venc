@@ -26,6 +26,7 @@
 #include "venc_config.h"
 #include "venc_httpd.h"
 #include "venc_respawn.h"
+#include "venc_codel.h"
 #include "venc_shm_throttle.h"
 
 #include <ctype.h>
@@ -1129,6 +1130,69 @@ static void star6e_service_shm_throttle(Star6eOutput *output,
 			"> shm throttle left the floor, recovering\n");
 }
 
+/* unix:// sojourn-time bitrate clamp (include/venc_codel.h).  Byte-for-byte
+ * the same shape as star6e_service_shm_throttle above; the two differ only
+ * in what they measure, and keeping them structurally identical is what
+ * stops the pair drifting apart. */
+static VencCodel g_unix_codel;
+static int g_unix_codel_ready;
+static uint16_t g_unix_applied_permille = VENC_CODEL_FULL_PERMILLE;
+
+static void star6e_service_unix_codel(Star6eOutput *output, const VencConfig *vcfg)
+{
+	uint64_t now_us;
+	uint16_t want;
+	int edge;
+
+	if (!output || !vcfg)
+		return;
+	if (!star6e_output_is_paced(output)) {
+		/* Pacing is off or the transport is not unix:// — release the
+		 * clamp so a live redirect away cannot leave the encoder
+		 * pinned, and drop the state so a later paced run starts from
+		 * a fresh interval. */
+		g_unix_codel_ready = 0;
+		if (g_unix_applied_permille != VENC_CODEL_FULL_PERMILLE &&
+		    star6e_controls_set_output_throttle(
+			VENC_CODEL_FULL_PERMILLE) == 0)
+			g_unix_applied_permille = VENC_CODEL_FULL_PERMILLE;
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+	if (!g_unix_codel_ready) {
+		venc_codel_reset(&g_unix_codel, now_us);
+		g_unix_codel_ready = 1;
+	}
+
+	star6e_output_observe_queue(output, now_us);
+	venc_codel_observe(&g_unix_codel, output->queue_delay_us,
+		output->queue_overflows);
+	(void)venc_codel_tick(&g_unix_codel, now_us);
+
+	/* outgoing.unix_throttle gates the *apply*, not the controller: with
+	 * it off the law still runs and publishes what it would have done,
+	 * which is exactly the observe-only mode Phase A calibrates against
+	 * (documentation/UNIX_CODEL_PACING_PLAN.md §6). */
+	want = vcfg->outgoing.unix_throttle ?
+		venc_codel_permille(&g_unix_codel) :
+		(uint16_t)VENC_CODEL_FULL_PERMILLE;
+	if (want != g_unix_applied_permille &&
+	    star6e_controls_set_output_throttle(want) == 0)
+		g_unix_applied_permille = want;
+	output->throttle_permille = venc_codel_permille(&g_unix_codel);
+
+	edge = venc_codel_floor_edge(&g_unix_codel);
+	if (edge > 0)
+		fprintf(stderr,
+			"WARNING: unix throttle pinned at floor %u%% — the "
+			"consumer is not draining\n",
+			VENC_CODEL_FLOOR_PERMILLE / 10);
+	else if (edge < 0)
+		fprintf(stderr,
+			"> unix throttle left the floor, recovering\n");
+}
+
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter)
 {
@@ -1295,6 +1359,16 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * work (stdout printf, OSD draw) that can otherwise push send
 	 * spread past a full frame period at 120 fps. */
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
+
+	/* Paced unix:// egress: the frame just encoded is sitting in the
+	 * producer queue, not on the wire.  Push it — and anything still
+	 * backed up behind it — now that the VENC output slot is free, so a
+	 * slow consumer costs queue latency instead of held capture buffers
+	 * (UNIX_SOCKET_HANDOVER.md §1.2).  No-op when pacing is off. */
+	if (star6e_output_is_paced(&ps->output)) {
+		(void)star6e_output_drain_paced(&ps->output);
+		star6e_service_unix_codel(&ps->output, vcfg);
+	}
 
 	/* Check HTTP record control flags.
 	 *

@@ -1,10 +1,11 @@
 # `unix://` Producer-Side Frame Queue + CoDel Sojourn Throttle — Plan
 
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 
 Branch: `claude/waybeam-venc-bitrate-throttle-brujl3` · Base: PR #214
-(`claude/unix-socket-speed-limits-az62s4`, 0.63.0) · Status: **Phase 1 (spec),
-awaiting approval**
+(`claude/unix-socket-speed-limits-az62s4`, 0.63.0) · Status: **Phase A
+implemented, host-soaked (§9). Not yet run on device; Maruko mirror not
+written.**
 
 ---
 
@@ -57,12 +58,17 @@ This restores every property the frame ring has:
 - occupancy is frame-granular, so frame-size variance is divided out;
 - admission is frame-atomic — a frame is enqueued whole or refused whole;
 - the depth is a number venc chooses;
-- the kernel queue never holds more than ~one frame, so its packet-unit
+- the kernel queue never holds well over one frame, so its packet-unit
   behaviour stops being the binding constraint.
 
-**Pacing edge.** `SIOCOUTQ` returning to (near) zero is the signal that the
-consumer has taken the previous frame. This is only meaningful because #214
-established that a `unix://` socket's queue is the *consumer's* backlog.
+**Pacing edge.** The drain pushes the next frame once `SIOCOUTQ` falls below
+that frame's own byte count. Readable at all only because #214 established
+that a `unix://` socket's queue is the *consumer's* backlog.
+
+Waiting for the socket to reach *empty* instead is the obvious formulation
+and it is wrong — it throttles the drain to one frame per pipeline
+iteration, which is the production rate, so a backlog can never be retired.
+§9.1 has the measurement.
 
 ### 3.2 CoDel sojourn signal
 
@@ -152,15 +158,19 @@ precedent from #214.
 1. **The extra copy.** Today `payload2` is a zero-copy iovec into the encoder
    NAL buffer, valid only until `MI_VENC_ReleaseStream`
    (`include/star6e_output.h`). Deferring the send *requires* copying the frame
-   body — ~31 KB/frame at 15 Mbps/60 fps, ~1.9 MB/s of memcpy on a
-   CPU-constrained SoC. Must be measured against `STAR6E_CPU_PROFILE.md`
-   before Phase B. This is the single largest cost of the design.
+   body — ~31 KB/frame at 15 Mbps/60 fps, ~1.9 MB/s of memcpy. Still worth
+   measuring against `STAR6E_CPU_PROFILE.md`, but the arithmetic says it is
+   small: under 1 % of a core at any plausible memcpy rate. It is also not a
+   *new* cost in kind — `venc_frame_ring_append` already does exactly one
+   full-body memcpy per frame on the frame-shm path, at the same rates. There
+   is no zero-copy alternative: holding the VENC output buffer until the send
+   completes is what produced the 634 ms capture stall in §1.2 of the handover,
+   and `MSG_ZEROCOPY` is TCP/UDP-only, not AF_UNIX.
 
-2. **Drain must clear backlog faster than production.** One frame drained per
-   pipeline iteration while one frame is produced per iteration means backlog
-   never shrinks. The drain loop must push *while* the socket accepts and
-   budget remains — not one frame per tick. Worth stating explicitly because
-   getting it wrong yields a queue that only ever grows.
+2. **Drain must clear backlog faster than production.** RESOLVED, but only
+   after the soak caught it — see §9. One frame drained per pipeline iteration
+   while one frame is produced per iteration means backlog never shrinks, and
+   the first implementation hit exactly that.
 
 3. **Shared-socket audio perturbs the pacing edge.** With
    `outgoing.audio_port == 0`, Opus shares the video socket
@@ -198,3 +208,104 @@ precedent from #214.
 - #214's flush budget and `SO_SNDTIMEO`, which stay as the backstop. With
   pacing working they should never fire; if they do, that is a bug or a wedged
   consumer.
+
+---
+
+## 9. Phase A results — host soak
+
+Measured with `make soak-tools`: `tools/unix_pacing_soak` drives the
+production modules (`venc_frame_queue`, `venc_codel`, the `output_socket`
+pacing gate) over a real AF_UNIX socket against
+`tools/unix_dgram_consumer`. Linux 6.18 x86-64 container,
+`net.unix.max_dgram_qlen` = 256, 60 fps, 15 Mbps requested, 1400 B payload,
+IDR every 2 s at 5x the P-frame size. **Not** a substitute for on-device
+runs — no SigmaStar encoder, no ARM, no CPU contention — but every kernel
+interaction is real.
+
+### 9.1 The pacing gate was wrong, and the soak is what proved it
+
+The first implementation gated the drain on "socket essentially empty"
+(`SIOCOUTQ <= 4 KiB`). Against a healthy consumer that is fine. Against a
+slow one it is not: the socket is almost never empty, so the drain pushed
+about one frame per pipeline iteration — exactly the production rate — and
+a backlog, once formed, **never drained**. Measured: a consumer taking
+8 Mbps against a producer the clamp had already cut to 3.75 Mbps still sat
+at a standing 7-frame, ~100 ms queue indefinitely. Throughput was fine;
+latency was permanently bad. Textbook standing queue, and the clamp could
+not fix it because the problem was not the rate.
+
+This is risk #2 from §7, and it survived design review, code review and the
+unit tests. It took a real consumer and a real kernel to surface.
+
+The gate is now "socket holds less than *this frame's* bytes", so the next
+frame goes in while the previous one is still draining, the consumer never
+starves, and spare capacity actually retires the backlog. The threshold
+scales with frame size — and note it is only the *pacing* threshold; the
+control signal is still the frame queue's sojourn, still frame-granular.
+
+Healthy-path effect of the fix alone:
+
+| | before | after |
+|---|---|---|
+| sojourn max | 2099 us | **326 us** |
+| consumer max frame spread | 1975 us | **199 us** |
+
+### 9.2 Healthy consumer — pacing costs nothing
+
+601 frames at 15 Mbps/60 fps: **0 transport drops, 0 sequence gaps, 0 queue
+overflows, queue depth never exceeded 0**, clamp never left 1000. Delivered
+15.76 Mbps. The queue drains inside the same pipeline iteration that filled
+it, so pacing is invisible when nothing is wrong.
+
+Sojourn: **avg 68 us, max 326 us.**
+
+### 9.3 Slow consumer (8 Mbps) — what the clamp is worth
+
+15 s, producer asking 15 Mbps, consumer rate-limited to 8 Mbps:
+
+| | clamp off | clamp on |
+|---|---|---|
+| frames delivered | 493 / 901 (55 %) | **891 / 901 (99 %)** |
+| queue overflows | 401 | **8** |
+| sojourn avg | 209 ms | **42 ms** |
+| sojourn max | 383 ms | 234 ms |
+| delivered bitrate | 8.56 Mbps | 8.55 Mbps |
+
+Same goodput — the consumer's capacity is the consumer's capacity — but
+**50x fewer lost frames and 5x lower queue latency**. The clamp is not
+buying throughput, it is converting frame loss into rate reduction, which
+is the entire premise.
+
+The clamp oscillates (1000 -> 250 -> 1000 over several seconds). That is
+inherent to AIMD with no knowledge of the consumer's capacity: the additive
+increase must walk past the correct rate to discover where it is, exactly
+as `venc_shm_throttle` does. Whether the amplitude is acceptable is a
+tuning question for on-device Phase A, not a defect.
+
+### 9.4 Hard 4 s wedge
+
+233 overflows, recovered to 950 permille afterwards, and — the result that
+matters — **zero sequence gaps at the consumer**. Under a total wedge whole
+frames are refused at admission and no partial frame ever reaches the wire.
+Frame-atomic admission behaves as designed; a packet-granular queue would
+have truncated mid-frame instead.
+
+Nothing can save a stream from a consumer taking literally nothing, and the
+clamp does not pretend otherwise.
+
+### 9.5 What this says about TARGET_US
+
+Healthy sojourn maxes at **326 us**; congested sojourn runs 40-230 ms.
+Those are three orders of magnitude apart, so the provisional 10 ms target
+sits comfortably in the gap — ~30x above healthy, ~4x below the congested
+floor. The constant is not sensitive at this resolution, which is the
+useful finding. On-device calibration still governs, since ARM timing and
+CPU contention will move the healthy figure.
+
+### 9.6 Still to do on device
+
+- Measure the enqueue memcpy against `STAR6E_CPU_PROFILE.md` (§7.1).
+- Confirm the shared-socket audio slack (§7.3) with Opus actually running;
+  the soak has no audio on the socket.
+- Re-measure the healthy sojourn distribution on ARM and set `TARGET_US`.
+- Maruko mirror (Phase C) is not written yet.

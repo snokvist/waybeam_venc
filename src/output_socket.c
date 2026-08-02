@@ -422,6 +422,18 @@ void output_socket_note_saturation(int socket_handle, OutputSocketQueue *queue)
 	}
 }
 
+int output_socket_queued_bytes(int socket_handle, int *out_bytes)
+{
+	int queued = 0;
+
+	if (socket_handle < 0 || !out_bytes)
+		return -1;
+	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
+		return -1;
+	*out_bytes = queued < 0 ? 0 : queued;
+	return 0;
+}
+
 int output_socket_get_fill_pct(int socket_handle,
 	const OutputSocketQueue *queue, uint8_t *out_pct)
 {

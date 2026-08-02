@@ -1752,6 +1752,19 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 		return -1;
 	pconf->output_setup.allow_unix_encoder_stall =
 		vcfg->outgoing.allow_unix_encoder_stall ? 1 : 0;
+	/* Pacing and the stall compatibility mode are opposites — one exists
+	 * to never block the send path, the other to block it without bound.
+	 * Refuse the combination loudly rather than silently picking one. */
+	if (vcfg->outgoing.unix_pacing &&
+	    vcfg->outgoing.allow_unix_encoder_stall) {
+		fprintf(stderr, "WARNING: outgoing.unixPacing ignored — "
+			"allowUnixEncoderStall is set, and the two are "
+			"mutually exclusive\n");
+		pconf->output_setup.unix_pacing = 0;
+	} else {
+		pconf->output_setup.unix_pacing =
+			vcfg->outgoing.unix_pacing ? 1 : 0;
+	}
 
 	/* Auto-cap exposure to frame period so the AE shutter never exceeds
 	 * the frame period.  Without this, the AE converges on a long

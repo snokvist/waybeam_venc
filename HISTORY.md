@@ -1,5 +1,64 @@
 # History
 
+## [0.64.0] - 2026-08-02
+
+`unix://` can now hold encoded frames in venc instead of in the kernel, and
+clamp the encoder when they start standing in that queue too long. Both
+halves are opt-in and default off.
+
+**Why the frame-shm throttle could not just be pointed at `unix://`.** That
+controller counts ring slots, and a slot is one frame whatever its size.
+Intra-GOP frame size varies 10-50x, so on the kernel's datagram-counted
+queue the encoder would be injecting a large periodic disturbance into the
+signal it controls on, at GOP rate — one IDR moves fill ~56 points against
+a 256-deep queue. And venc does not own that queue: its depth is latched
+into the *consumer's* socket from `net.unix.max_dgram_qlen` when that
+socket is created.
+
+**What shipped.** `outgoing.unixPacing` (restart) holds packetized frames in
+a producer-side queue (`src/venc_frame_queue.c`, 8 slots x 384 KB, mirroring
+the frame ring) and feeds the socket one frame at a time, so backlog
+accumulates where it can be measured. `outgoing.unixThrottle` (live) adds
+`src/venc_codel.c`, which clamps the encoder on the **minimum queue sojourn
+time over a 200 ms interval** — CoDel's signal, with the existing AIMD
+multiplier as the actuator rather than CoDel's drop schedule, because
+dropping an encoded frame is the damage being avoided rather than an
+acceptable response to it. Sojourn is measured, not modelled: no link-rate
+estimate and no cooperation from the consumer. RTP mode only, and mutually
+exclusive with `allowUnixEncoderStall`.
+
+**The copy.** Enqueueing copies the frame body, because `payload2` points
+into the VENC stream buffer and is only valid until `MI_VENC_ReleaseStream`.
+That is ~1.9 MB/s at 15 Mbps/60 fps, and it is the same copy the frame-shm
+path has always done in `venc_frame_ring_append`. Holding the VENC buffer
+instead is what caused the 634 ms capture stall fixed in 0.63.0.
+
+**The bug the soak caught.** The first pacing gate waited for the socket to
+go *empty* before sending the next frame. Against a slow consumer the socket
+is almost never empty, so the drain managed one frame per pipeline iteration
+— exactly the production rate — and a backlog once formed never drained: a
+consumer taking 8 Mbps against a producer already clamped to 3.75 Mbps held
+a standing 7-frame, ~100 ms queue indefinitely. Throughput was fine and the
+unit tests were green; it took a real consumer and a real kernel to surface.
+The gate is now "socket holds less than this frame's bytes", which also cut
+healthy-path sojourn from 2099 us to 326 us.
+
+**Measured** (host soak, `make soak-tools`, qlen 256, 60 fps, 15 Mbps):
+healthy consumer — 0 drops, 0 sequence gaps, queue depth never above 0,
+sojourn avg 68 us / max 326 us. Consumer rate-limited to 8 Mbps, clamp off
+vs on — frames delivered 493/901 vs **891/901**, queue overflows 401 vs
+**8**, sojourn avg 209 ms vs **42 ms**, at identical goodput. Under a hard
+4 s wedge, whole frames are refused at admission and **zero partial frames
+reach the wire**.
+
+**Observability** — `paced`, `queueFrames`, `queueDelayUs`,
+`queueSojournUs`, `queueOverflows`, `throttlePermille` and
+`effectiveBitrateKbps` on the UDP/Unix branch of
+`/api/v1/transport/status`. Contract is now `0.19.0`.
+
+Not yet run on device, and the Maruko mirror is not written — see
+`documentation/UNIX_CODEL_PACING_PLAN.md` §9.6.
+
 ## [0.63.0] - 2026-08-01
 
 `unix://` output no longer stalls the encoder, and its backpressure

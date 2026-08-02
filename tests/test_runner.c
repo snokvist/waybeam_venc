@@ -33,6 +33,8 @@ extern int test_audio_ring(void);
 extern int test_star6e_ts_recorder(void);
 extern int test_idr_rate_limit(void);
 extern int test_venc_shm_throttle(void);
+extern int test_venc_codel(void);
+extern int test_venc_frame_queue(void);
 extern int test_backend(void);
 extern int test_debug_osd(void);
 extern int test_intra_refresh(void);
@@ -134,6 +136,12 @@ int main(void)
 
 	printf("\n--- test_venc_shm_throttle ---\n");
 	failures += test_venc_shm_throttle();
+
+	printf("\n--- test_venc_codel ---\n");
+	failures += test_venc_codel();
+
+	printf("\n--- test_venc_frame_queue ---\n");
+	failures += test_venc_frame_queue();
 
 	printf("\n--- test_backend ---\n");
 	failures += test_backend();

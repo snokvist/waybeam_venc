@@ -279,8 +279,50 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 		return -1;
 	(void)output_socket_capture_capacity(output->socket_handle,
 		&output->send_queue);
+
+	/* Paced egress: unix:// in RTP mode only.  udp:// is excluded on
+	 * purpose — its queue drains at qdisc speed, so the sojourn signal
+	 * would read ~0 whatever the link is doing and the controller could
+	 * never engage.  Compact mode is excluded because it does not use
+	 * the batch path (UNIX_SOCKET_HANDOVER.md §6). */
+	if (setup->unix_pacing &&
+	    output->transport == VENC_OUTPUT_URI_UNIX &&
+	    output->stream_mode == STAR6E_STREAM_MODE_RTP &&
+	    !output->allow_unix_encoder_stall) {
+		output->frame_queue = venc_frame_queue_create();
+		if (!output->frame_queue) {
+			fprintf(stderr, "ERROR: venc_frame_queue_create() "
+				"failed; unix:// pacing disabled\n");
+		}
+	}
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
+}
+
+int star6e_output_is_paced(const Star6eOutput *output)
+{
+	return (output && output->frame_queue) ? 1 : 0;
+}
+
+void star6e_output_observe_queue(Star6eOutput *output, uint64_t now_us)
+{
+	VencFrameQueue *q;
+
+	if (!output || !output->frame_queue)
+		return;
+	q = output->frame_queue;
+
+	/* RELAXED stores: the HTTP status thread reads these, and they are
+	 * naturally aligned advisory scalars — same treatment as the
+	 * pressure cache. */
+	__atomic_store_n(&output->queue_depth, venc_frame_queue_depth(q),
+		__ATOMIC_RELAXED);
+	__atomic_store_n(&output->queue_delay_us,
+		venc_frame_queue_delay_us(q, now_us), __ATOMIC_RELAXED);
+	__atomic_store_n(&output->queue_sojourn_us, q->last_sojourn_us,
+		__ATOMIC_RELAXED);
+	__atomic_store_n(&output->queue_overflows,
+		(uint32_t)venc_frame_queue_overflows(q), __ATOMIC_RELAXED);
 }
 
 int star6e_output_is_rtp(const Star6eOutput *output)
@@ -571,7 +613,30 @@ void star6e_output_begin_frame(Star6eOutput *output)
 			break;
 	}
 
+	/* A live redirect happened since the last frame: the queued frames
+	 * are addressed to a destination that no longer exists, so drop them
+	 * rather than dumping them into the new socket.  Done here, on the
+	 * pipeline thread, because apply_server() runs on the HTTP thread and
+	 * the queue is not synchronised.  venc_codel re-seeds off the
+	 * backwards overflow count on its own. */
+	if (output->frame_queue && b->snapshot_gen != gen_before) {
+		venc_frame_queue_reset(output->frame_queue);
+		b->snapshot_gen = gen_before;
+	}
+
 	b->active = (b->socket_handle >= 0) ? 1 : 0;
+
+	/* Open a queue slot for this frame.  A refusal is the overflow the
+	 * clamp exists to prevent: count it once, then swallow the frame's
+	 * packets as they arrive.  Dropping the *whole* frame is deliberate —
+	 * a partially queued frame is undecodable anyway, so admitting one is
+	 * strictly worse than refusing it. */
+	b->paced = (output->frame_queue && b->active) ? 1 : 0;
+	b->queue_open = 0;
+	if (b->paced) {
+		b->queue_open = (venc_frame_queue_begin(output->frame_queue,
+			wb_monotonic_us()) == 0) ? 1 : 0;
+	}
 }
 
 int star6e_output_end_frame(Star6eOutput *output)
@@ -580,9 +645,170 @@ int star6e_output_end_frame(Star6eOutput *output)
 
 	if (!output || !output->batch.active)
 		return 0;
+
+	if (output->batch.paced) {
+		/* Nothing goes to the wire here — the frame is published to
+		 * the queue and the drain pass sends it once the consumer has
+		 * taken the previous one. */
+		if (output->batch.queue_open)
+			(void)venc_frame_queue_commit(output->frame_queue);
+		else
+			venc_frame_queue_abort(output->frame_queue);
+		output->batch.queue_open = 0;
+		output->batch.active = 0;
+		return 0;
+	}
+
 	sent = star6e_batch_flush(output);
 	output->batch.active = 0;
 	return sent;
+}
+
+/* Send one queued frame, in STAR6E_OUTPUT_BATCH_MAX-packet chunks.
+ *
+ * The datagrams were assembled contiguously at enqueue time, so each is a
+ * single iovec pointing straight into queue memory — draining is zero-copy.
+ * Error handling is star6e_batch_flush's: this only builds the mmsghdrs and
+ * hands them over, so congestion classification, saturation calibration and
+ * the budget all behave exactly as on the unpaced path. */
+static int paced_send_frame(Star6eOutput *output,
+	const VencFrameQueueFrame *frame,
+	const VencFrameQueuePacket *packets, const uint8_t *base,
+	uint32_t budget_us)
+{
+	Star6eOutputBatch *b = &output->batch;
+	uint32_t i = 0;
+	int sent_total = 0;
+
+	b->discard_remaining = 0;
+	b->discard_as_error = 0;
+	b->flush_budget_us = budget_us;
+
+	while (i < frame->packet_count) {
+		uint32_t n = frame->packet_count - i;
+		uint32_t k;
+
+		if (n > STAR6E_OUTPUT_BATCH_MAX)
+			n = STAR6E_OUTPUT_BATCH_MAX;
+
+		for (k = 0; k < n; ++k) {
+			struct msghdr *hdr = &b->msgs[k].msg_hdr;
+
+			b->iov[k].iov_base =
+				(void *)(base + packets[i + k].offset);
+			b->iov[k].iov_len = packets[i + k].len;
+
+			memset(hdr, 0, sizeof(*hdr));
+			if (b->connected_udp) {
+				hdr->msg_name = NULL;
+				hdr->msg_namelen = 0;
+			} else {
+				hdr->msg_name = (void *)&b->dst;
+				hdr->msg_namelen = b->dst_len;
+			}
+			hdr->msg_iov = &b->iov[k];
+			hdr->msg_iovlen = 1;
+			b->msgs[k].msg_len = 0;
+		}
+
+		b->count = n;
+		sent_total += star6e_batch_flush(output);
+		i += n;
+
+		if (b->discard_remaining) {
+			/* star6e_batch_flush accounted the rest of *its* chunk;
+			 * the frame's remaining chunks are lost too and are not
+			 * visible to it. */
+			if (i < frame->packet_count) {
+				if (b->discard_as_error)
+					output->send_errors +=
+						frame->packet_count - i;
+				else
+					output->socket_drops +=
+						frame->packet_count - i;
+			}
+			break;
+		}
+	}
+
+	b->discard_remaining = 0;
+	b->discard_as_error = 0;
+	return sent_total;
+}
+
+int star6e_output_drain_paced(Star6eOutput *output)
+{
+	uint64_t started;
+	int frames = 0;
+	int fd;
+
+	if (!output || !output->frame_queue)
+		return 0;
+
+	/* The transport snapshot taken at begin_frame(), not the live fields:
+	 * a concurrent apply_server() must not retarget already-queued frames.
+	 * A redirect resets the queue outright (star6e_output_apply_server),
+	 * so nothing here belongs to a stale destination. */
+	fd = output->batch.socket_handle;
+	started = wb_monotonic_us();
+	for (;;) {
+		const VencFrameQueueFrame *frame;
+		const VencFrameQueuePacket *packets;
+		const uint8_t *base;
+		uint64_t elapsed;
+		uint32_t threshold;
+		int queued = 0;
+
+		if (venc_frame_queue_peek(output->frame_queue, &frame,
+		    &packets, &base) != 0)
+			break;
+
+		if (fd < 0) {
+			/* Transport went away under us — discard rather than
+			 * hold frames for a socket that will never drain. */
+			output->send_errors += frame->packet_count;
+			venc_frame_queue_pop(output->frame_queue,
+				wb_monotonic_us());
+			continue;
+		}
+
+		/* The pacing gate: keep the socket holding less than one frame,
+		 * so backlog accumulates in the frame queue where it can be
+		 * measured, not in the kernel's datagram-counted queue.
+		 *
+		 * Deliberately NOT "socket empty".  A drain that waits for
+		 * empty pushes at most one frame per pipeline iteration, which
+		 * is exactly the production rate — so a backlog, once formed,
+		 * never shrinks even when the consumer has spare capacity.
+		 * Measured: a consumer draining 8 Mbps against a producer
+		 * clamped to 3.75 Mbps still held a standing 7-frame, ~100 ms
+		 * queue indefinitely.  Allowing the next frame in while the
+		 * previous one is still draining keeps the consumer fed and
+		 * lets the spare capacity actually retire the backlog.
+		 *
+		 * The threshold is this frame's own byte count, so it scales
+		 * with frame size instead of imposing a fixed one — and note
+		 * this is only the *pacing* threshold.  The control signal
+		 * stays the frame queue's sojourn, which is still measured in
+		 * whole frames.  The slack floor covers shared-socket audio
+		 * (see OUTPUT_SOCKET_PACING_SLACK_BYTES). */
+		threshold = frame->byte_len > OUTPUT_SOCKET_PACING_SLACK_BYTES ?
+			frame->byte_len : OUTPUT_SOCKET_PACING_SLACK_BYTES;
+		if (output_socket_queued_bytes(fd, &queued) == 0 &&
+		    queued > (int)threshold)
+			break;
+
+		elapsed = wb_monotonic_us() - started;
+		if (elapsed >= STAR6E_OUTPUT_DRAIN_BUDGET_US)
+			break;
+
+		(void)paced_send_frame(output, frame, packets, base,
+			(uint32_t)(STAR6E_OUTPUT_DRAIN_BUDGET_US - elapsed));
+		venc_frame_queue_pop(output->frame_queue, wb_monotonic_us());
+		frames++;
+	}
+
+	return frames;
 }
 
 /* Queue one RTP packet into the active batch. Returns 0 on success,
@@ -606,6 +832,23 @@ static int star6e_batch_enqueue(Star6eOutput *output,
 	size_t scratch_len = header_len + payload1_len;
 	struct iovec *iov;
 	struct msghdr *hdr;
+
+	if (b->paced) {
+		/* The queue owns the bytes: header, payload1 and payload2 are
+		 * all copied, because payload2 points into the VENC stream
+		 * buffer and that is only valid until MI_VENC_ReleaseStream,
+		 * which happens long before the drain sends this. */
+		if (!b->queue_open)
+			return 0;  /* frame already counted as one overflow */
+		if (venc_frame_queue_append(output->frame_queue,
+		    header, (uint32_t)header_len,
+		    payload1, (uint32_t)payload1_len,
+		    payload2, (uint32_t)payload2_len) != 0) {
+			venc_frame_queue_abort(output->frame_queue);
+			b->queue_open = 0;
+		}
+		return 0;
+	}
 
 	if (scratch_len > STAR6E_OUTPUT_BATCH_SLOT_SCRATCH)
 		return -1;
@@ -1018,6 +1261,10 @@ void star6e_output_teardown(Star6eOutput *output)
 	if (output->frame_ring) {
 		venc_frame_ring_destroy(output->frame_ring);
 		output->frame_ring = NULL;
+	}
+	if (output->frame_queue) {
+		venc_frame_queue_destroy(output->frame_queue);
+		output->frame_queue = NULL;
 	}
 	if (output->socket_handle >= 0) {
 		close(output->socket_handle);

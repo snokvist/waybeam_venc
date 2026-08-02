@@ -231,6 +231,16 @@ typedef struct {
 	bool shm_throttle;                  /* frame-shm:// ring-fill bitrate
 	                                     * clamp (include/venc_shm_throttle.h).
 	                                     * Inert on every other transport. */
+	bool unix_pacing;                   /* unix:// producer-side frame queue
+	                                     * (include/venc_frame_queue.h): hold
+	                                     * frames here and feed the socket one
+	                                     * at a time.  RTP mode only; ignored
+	                                     * with allow_unix_encoder_stall,
+	                                     * which is its opposite. */
+	bool unix_throttle;                 /* apply the sojourn-time clamp
+	                                     * (include/venc_codel.h) on top of
+	                                     * unix_pacing.  Off = measure and
+	                                     * report only. */
 } VencConfigOutgoing;
 
 typedef struct {

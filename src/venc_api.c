@@ -445,6 +445,25 @@ static const FieldUi ui_pause_stab = {
 /* UI descriptor for outgoing.shm_throttle — the frame-shm ring-fill bitrate
  * clamp.  Data-driven so the toggle appears without a SECTIONS edit; it is
  * inert on every transport except frame-shm://. */
+/* UI descriptors for the unix:// paced-egress pair.  Data-driven like
+ * ui_shm_throttle so both toggles appear without a SECTIONS edit; both are
+ * inert on every transport except unix://. */
+static const FieldUi ui_unix_pacing = {
+	"Outgoing", "Unix frame pacing", "toggle", 0, 0, 0, NULL,
+	"unix:// only: hold encoded frames in venc and feed the socket one frame "
+	"at a time, instead of letting the kernel's datagram queue buffer them. "
+	"Makes queue latency measurable and is required by the Unix sojourn "
+	"throttle. RTP mode only; ignored when Unix encoder stall is on."
+};
+
+static const FieldUi ui_unix_throttle = {
+	"Outgoing", "Unix sojourn throttle", "toggle", 0, 0, 0, NULL,
+	"unix:// only: clamp the encoder bitrate when frames stand in the paced "
+	"queue too long, so a slow consumer never forces a frame drop (which "
+	"breaks the H.265 reference chain). Never changes video0.bitrate. "
+	"Requires Unix frame pacing; off means measure and report only."
+};
+
 static const FieldUi ui_shm_throttle = {
 	"Outgoing", "SHM ring throttle", "toggle", 0, 0, 0, NULL,
 	"frame-shm:// only: clamp the encoder bitrate when the ring backs up, so "
@@ -569,6 +588,8 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, audio_port,        FT_INT,    MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 	FIELD_UI(outgoing, shm_throttle,   FT_BOOL,   MUT_LIVE, &ui_shm_throttle),
+	FIELD_UI(outgoing, unix_pacing,    FT_BOOL,   MUT_RESTART, &ui_unix_pacing),
+	FIELD_UI(outgoing, unix_throttle,  FT_BOOL,   MUT_LIVE, &ui_unix_throttle),
 
 	/* mDNS device beacon — read at boot / re-read on SIGHUP-respawn, so
 	 * all restart-required (no live re-announce path). */
@@ -760,6 +781,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.pauseStab", "video0.pause_stab" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.shmThrottle", "outgoing.shm_throttle" },
+	{ "outgoing.unixPacing", "outgoing.unix_pacing" },
+	{ "outgoing.unixThrottle", "outgoing.unix_throttle" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.allowUnixEncoderStall", "outgoing.allow_unix_encoder_stall" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
@@ -1341,6 +1364,7 @@ typedef enum {
 	LIVE_GROUP_QP_BOUNDS,
 	LIVE_GROUP_DETECT,
 	LIVE_GROUP_SHM_THROTTLE,
+	LIVE_GROUP_UNIX_THROTTLE,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1532,6 +1556,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_DETECT;
 	if (strcmp(canonical_key, "outgoing.shm_throttle") == 0)
 		return LIVE_GROUP_SHM_THROTTLE;
+	if (strcmp(canonical_key, "outgoing.unix_throttle") == 0)
+		return LIVE_GROUP_UNIX_THROTTLE;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1581,6 +1607,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "detect.enabled/model_path/model_id/conf_thresh/nms_iou";
 	case LIVE_GROUP_SHM_THROTTLE:
 		return "outgoing.shmThrottle";
+	case LIVE_GROUP_UNIX_THROTTLE:
+		return "outgoing.unixThrottle";
 	default:
 		return "unknown";
 	}
@@ -1767,6 +1795,11 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		 * commit_config_locked() *is* the apply.  Supported on every
 		 * backend, and inert on transports other than frame-shm://. */
 		return 1;
+	case LIVE_GROUP_UNIX_THROTTLE:
+		/* Same shape as the frame-shm clamp above: no callback, the
+		 * pipeline thread reads outgoing.unix_throttle every frame.
+		 * Inert unless outgoing.unix_pacing is on. */
+		return 1;
 	default:
 		return 0;
 	}
@@ -1877,6 +1910,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_SHM_THROTTLE:
 		dst->outgoing.shm_throttle = src->outgoing.shm_throttle;
+		break;
+	case LIVE_GROUP_UNIX_THROTTLE:
+		dst->outgoing.unix_throttle = src->outgoing.unix_throttle;
 		break;
 	default:
 		break;
@@ -2025,6 +2061,7 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		 * live config when it performs the swap on the pipeline thread. */
 		return g_cb->apply_detect_reload();
 	case LIVE_GROUP_SHM_THROTTLE:
+	case LIVE_GROUP_UNIX_THROTTLE:
 		/* Committed above; the pipeline thread picks the new value up on
 		 * its next frame and releases or re-engages the clamp itself. */
 		return 0;

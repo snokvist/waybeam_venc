@@ -16,6 +16,8 @@ tools/ive_i6c_shift
 tools/ive_i6c_hwop
 
 tests/test_runner
+tests/unix_pacing_soak
+tests/unix_dgram_consumer_host
 tests/test_imu_ring
 tests/test_qr_marker
 tests/qr_decode_host

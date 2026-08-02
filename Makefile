@@ -48,7 +48,7 @@ CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c
 QR_SRC := src/qr_scan.c tools/qr/waybeam_qr_format.c tools/qr/quirc/quirc.c \
           tools/qr/quirc/decode.c tools/qr/quirc/identify.c \
           tools/qr/quirc/version_db.c
-HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
+HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/venc_codel.c src/venc_frame_queue.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c src/maruko_scl_ports.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_luma_tap.c src/star6e_awb.c
 # Image-stabilization framing module (Star6E).  STAB=1 (default) compiles it
@@ -229,6 +229,19 @@ $(UNIX_CONSUMER_TARGET): $(UNIX_CONSUMER_SRC)
 	@mkdir -p $(@D)
 	$(CC) -Os -s -Wall -Wextra -Werror -std=c99 -D_GNU_SOURCE -o $@ $<
 
+# Host soak harness for paced unix:// egress.  Host-native (needs a real
+# kernel and a cooperating consumer), so it is built with HOST_CC and is not
+# part of the device image or the unit-test runner.
+.PHONY: soak-tools
+soak-tools: tests/unix_pacing_soak tests/unix_dgram_consumer_host
+
+tests/unix_pacing_soak: tools/unix_pacing_soak.c src/venc_frame_queue.c \
+		src/venc_codel.c src/output_socket.c
+	$(HOST_CC) $(HOST_CFLAGS) $^ -o $@
+
+tests/unix_dgram_consumer_host: tools/unix_dgram_consumer.c
+	$(HOST_CC) $(HOST_CFLAGS) $< -o $@
+
 # json_cli — vendored from waybeam-hub (tools/json_cli/{json_cli.c,jsmn.h}).
 # Cross-compiled with the SOC's toolchain so the same binary that runs venc
 # can also read/patch /etc/venc.json on the target.
@@ -348,6 +361,8 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_star6e_ts_recorder.c \
                 tests/test_idr_rate_limit.c \
                 tests/test_venc_shm_throttle.c \
+                tests/test_venc_codel.c \
+                tests/test_venc_frame_queue.c \
                 tests/test_backend.c \
                 tests/test_debug_osd.c \
                 tests/test_intra_refresh.c \
@@ -367,9 +382,9 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
 TEST_LIB_SRCS := src/qr_scan.c tools/qr/waybeam_qr_format.c \
 	tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
 	tools/qr/quirc/identify.c tools/qr/quirc/version_db.c \
-	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
+	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/venc_shm_throttle.c src/venc_codel.c src/venc_frame_queue.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
 
-$(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h include/venc_shm_throttle.h
+$(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h include/venc_shm_throttle.h include/venc_codel.h include/venc_frame_queue.h
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
 
 test: $(TEST_RUNNER)
