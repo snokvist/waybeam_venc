@@ -141,7 +141,17 @@ Satisfies R4.
 - `/etc/init.d/S96waybeam-link stop` — it writes `video0.bitrate` continuously
   and is invisible in the config file.
 - Confirm `max_dgram_qlen` ≥ 256.
-- Confirm production ≈ `video0.bitrate` against a healthy consumer.
+- **Zero `video0.maxIBytes` / `maxPBytes`.** They are sized for the ~2829 kbps
+  waybeam-link normally commands and are driven upward by link at runtime;
+  with link stopped and bitrate forced to 15000 the stale 4096 B P-cap
+  throttles production to ~4.9 Mbps (measured 2026-08-03). Setting both to 0
+  restored 13.0 Mbps with no scene change.
+- Confirm production ≈ `video0.bitrate` against a healthy consumer — *after*
+  the above, or the check measures the cap rather than the scene.
+- Check the drain target against the clamp floor: `VENC_CODEL_FLOOR_PERMILLE`
+  (250) × `video0.bitrate` is the lowest rate the controller can command. A
+  consumer slower than that puts the run in a floor-limited regime where
+  overflow cannot converge and overflow comparisons are meaningless.
 
 ## Verification
 

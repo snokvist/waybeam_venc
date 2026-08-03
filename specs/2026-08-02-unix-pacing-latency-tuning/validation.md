@@ -83,8 +83,85 @@ at capacity. Another instance of the same interaction.
 
 ## Next
 
-Device confirmation of `2 + AI_EVERY=5` against the shipped `8 + 1`, same A/B
-as handover §5.11, with the real encoder and `max_dgram_qlen` 256. Then T1
-(layer-aware admission), which should let the residual ~13 overflows land on
-non-reference frames and push delivered past 99.5 % without giving back the
-tail.
+T1 (layer-aware admission), and a decision on the clamp floor — see below.
+
+---
+
+# Device confirmation — 2026-08-03, SSC338Q `.2.232`
+
+Real encoder, ARM, `max_dgram_qlen` 256, `waybeam-link` stopped. Two star6e
+builds differing only in the two constants. 60 s per run, consumer capped at
+**3000 kbps** (see "operating point" below), production measured immediately
+before each run.
+
+| | **A** = 8 slots / `AI_EVERY`=1 *(shipped)* | **B** = 2 slots / `AI_EVERY`=5 |
+|---|---:|---:|
+| production before run | 7.52 Mbps | 8.10 Mbps |
+| sojourn avg | 129.3 ms | **17.0 ms** (7.6x) |
+| sojourn p50 | 149.1 ms | **16.8 ms** |
+| sojourn p95 | 150.5 ms | **34.4 ms** (4.4x) |
+| sojourn max | 233.8 ms | **66.9 ms** (3.5x) |
+| `queueDelayUs` avg | 113.8 ms | **6.0 ms** |
+| `queueOverflows` | 630 | 679 |
+| frames delivered | 2967 | 2923 |
+| goodput | 3.000 Mbps | 3.000 Mbps |
+| waybeam CPU | 14.9 % | 15.1 % |
+| floor hits | 1 | 56 |
+
+**The latency result reproduces on hardware** — average 7.6x, p95 4.4x, max
+3.5x, at identical goodput and CPU. Host ordering transferred.
+
+**The overflow difference is not real.** B shows +7.8 % overflows, but B also
+ran at +7.7 % production (8.10 vs 7.52 Mbps — the scene drifted upward during
+the session). Same magnitude, so the two are indistinguishable; this A/B
+cannot separate them.
+
+**Healthy link, variant B (30 s):** 14.93 Mbps, 1803 frames = 60.1 fps, 0
+sequence gaps, `queueFrames` max **0**, `throttlePermille` 1000 throughout,
+sojourn 145 µs, no new overflows, CPU 16.4 %. So **2 slots — the structural
+minimum — is still invisible when nothing is wrong**, which was the main risk
+of going that shallow.
+
+## The 250-permille floor blocked convergence
+
+Not planned, but this run answered a question filed for session 3.
+
+`video0.bitrate` was 15000, so the floor at 250 permille commands 3750 kbps —
+**above the consumer's 3000 kbps capacity**. The clamp therefore bottomed out
+and could not reach the rate it needed, which is why overflows stayed at
+630–679 for *both* variants and delivered frames sat at ~82 %. B hit the floor
+56 times to A's 1: B recovers off the floor and re-probes, A simply stayed
+pinned.
+
+So: **when the sustainable rate is below `VENC_CODEL_FLOOR_PERMILLE`, the
+controller cannot converge and overflow persists regardless of tuning.** The
+floor is a fixed fraction of a configured bitrate that may itself be far above
+what the scene produces, which makes it doubly awkward. Worth deciding whether
+the floor should be lower, or expressed against measured production rather
+than `video0.bitrate`.
+
+Consequence for reading the table: this A/B ran in a **floor-limited regime**
+the host sweep never entered (host was 15 Mbps configured vs an 8 Mbps
+consumer, comfortably above floor). Latency comparisons hold; overflow
+comparisons do not transfer between the two.
+
+## ⚠️ Test-methodology trap: stale frame-size caps
+
+Production initially measured **4.9 Mbps** against a 15000 kbps target, which
+I first misread as a static scene. It was not — setting `video0.maxPBytes=0`
+jumped production to **13.0 Mbps instantly with no scene change**.
+
+Cause: the craft config carries `maxIBytes=21761` / `maxPBytes=4096`, sized
+for the ~2829 kbps that `waybeam-link` normally commands. In normal operation
+link drives these upward as it drives bitrate (observed live value 17885 with
+link running). **Stopping link and forcing `bitrate=15000` leaves the stale
+small caps in place, strangling the encoder to roughly a third of target.**
+
+**Any test that stops `waybeam-link` and raises the bitrate must also zero
+`maxIBytes`/`maxPBytes`.** Added to the session-start checklist. This also
+partly revises the earlier "static scene" diagnosis — content and the caps are
+separate ceilings and both must be cleared before a congestion result means
+anything.
+
+Note this contradicts a prior finding that `maxPBytes` was a no-op; that
+conclusion came from static-scene evidence, and it is wrong here.
