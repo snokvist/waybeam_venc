@@ -346,3 +346,48 @@ while negative), which enforces the mean rate exactly. Verified: a constant
 
 Lesson worth keeping: a rate limiter that never goes into debt does not limit
 rate — it limits *poll frequency*.
+
+---
+
+# Device confirmation of continuity-first, FPV profile — 2026-08-03
+
+`.2.232`, real encoder, `waybeam-link` stopped for the whole session and left
+stopped. `resilience: "range"`, `maxIBytes`/`maxPBytes` zeroed, production
+12.3 Mbps, same 20 s FPV profile as the host sweep, 60 s runs.
+
+| | **A** = 8/1/250 *(shipped)* | **C** = 2 slots / `AI_EVERY`=5 / floor 100 |
+|---|---:|---:|
+| sojourn avg | 68.8 ms | **4.15 ms** (16.6x) |
+| sojourn p50 | 50.1 ms | **0.14 ms** (366x) |
+| sojourn p95 | 199.1 ms | **17.5 ms** (11.4x) |
+| sojourn max | **931.3 ms** | **250.2 ms** (3.7x) |
+| `queueDelayUs` max | 981 ms | 133 ms |
+| `queueOverflows` | 209 | **175** (−16 %) |
+| RTP sequence gaps | 1461 | **1074** (−26 %) |
+| frames delivered | 3395 | **3429** (+1 %) |
+| consumer max frame spread | 272.7 ms | **257.0 ms** |
+| delivered bitrate | 5.43 Mbps | 4.15 Mbps (−24 %) |
+| `queueFrames` max | 8 | 2 |
+
+**The host prediction holds on hardware**, and the effect is larger: latency
+better on every percentile, continuity better on every measure (fewer
+overflows, fewer gaps, more frames), at a bitrate cost — −24 % here versus −8 %
+predicted on the host rig.
+
+**The floor change is doing real work.** A's worst sojourn is **931 ms**. The
+profile's deep segment is 2000 kbps; A's floor of 250 permille against
+`video0.bitrate` 15000 commands 3750 kbps, so A *cannot* clamp low enough and
+the queue runs away. C's floor of 100 permille commands 1500 kbps, below the
+2000 kbps consumer, so it tracks the fade and its worst case falls back to
+**250.2 ms — the profile's 250 ms stall**, i.e. the structural limit identified
+in the host sweep. Nothing can go below that; C is already there.
+
+Caveats: n=1 per arm. CPU read 15.5 % (A) vs 25.5 % (C) — the third
+unexplained swing of this size on this rig, not tracking the change and not
+believed; worth a dedicated repeat rather than attribution. Sequence-gap
+quantisation is not clean here (1074 / 6.96 pkt-per-frame ≈ 154 vs 175
+overflows) because frame size varies widely as the clamp moves, so the
+§5.10 integer test does not apply under a dynamic profile.
+
+**Selected configuration:** `VENC_FRAME_QUEUE_SLOTS` 2, `VENC_CODEL_AI_EVERY`
+5, `VENC_CODEL_FLOOR_PERMILLE` 100.
