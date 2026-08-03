@@ -501,6 +501,57 @@ scope by design.
 
 ---
 
+## 5.12 Tuning probe — queue depth is the latency (2026-08-02, same device)
+
+**Not part of the PR. Proposals only**, measured to answer "can the ~300 ms
+excursions be reduced". Code on `experiment/pr215-tuning`; this section records
+the device data so the handover stays the single device record.
+
+Same A/B as §5.11 (15 Mbps configured, `--drain-kbps 8000`, moving scene).
+
+| | **8 slots** (as-shipped) | **4 slots** | **4 + single-charge** |
+|---|---:|---:|---:|
+| sojourn avg | 27.7 ms | **9.2 ms** | 11.0 ms |
+| sojourn p50 | 0.24 ms | 0.20 ms | 0.24 ms |
+| sojourn p95 | 166.4 ms | **66.2 ms** | 66.8 ms |
+| **sojourn max** | **299.1 ms** | **133.7 ms** | **116.8 ms** |
+| `queueOverflows` /60 s | 149 | **95** | 106 |
+| frames delivered | 3456 / 3600 | **3506** | 3496 |
+| goodput | 7.930 Mbps | 8.000 | 8.000 |
+| floor hits | **14** | 2 | **1** |
+| clamp cycle period | ~4.6 s | ~20 s | ~30 s |
+| waybeam CPU | 15.6 % | 15.6 % | 21.4 % ⚠️ |
+
+**The ceiling is structural.** Clamp-*off* max sojourn went 266.9 →
+**149.1 ms** on the same 8→4 change — near-exactly halved. Worst-case added
+latency is `queued bytes ÷ drain rate`; nothing in `venc_codel.c` can reduce
+it. That is also why clamp-off (267 ms) and clamp-on (299 ms) measured the
+same at 8 slots: both are simply "queue full".
+
+**Halving the depth improved every metric, including the one predicted to get
+worse** — overflows *fell* 149 → 95 and delivered frames *rose*. Mechanism: at
+4 slots the queue drains in less than `VENC_CODEL_INTERVAL_US`, so the loop
+stops deciding on evidence that predates its own last decision and settles
+instead of floor-slamming and re-climbing (floor hits 14 → 2). The dead-time
+instability and the latency ceiling are the same fix from two directions.
+
+**Suppressing the double-charge** (overflow ×3/5 in `venc_codel_observe()` and
+sojourn ×4/5 in `venc_codel_tick()` both landing in one interval, compounding
+to ×0.48) is correct in principle — same event billed twice — but marginal
+once the queue is shallow, with differences inside run-to-run spread.
+
+⚠️ **Evidence quality:** every row above is **n=1**, and the scene was
+hand-moved, so encoder output varied between runs. The 8→4 result is large
+enough to survive that; the single-charge column is **not** — treat it as
+indicative only. The 21.4 % CPU reading is not believed (a 2-line change at
+5 Hz cannot cost 6 points) and is recorded unexplained. Future sweeps should
+use `tools/unix_pacing_soak` on ARM (§6) for deterministic input and n≥3.
+
+Follow-on programme, targets and remaining ideas:
+`specs/2026-08-02-unix-pacing-latency-tuning/`.
+
+---
+
 ## 6. Optional: soak harness on ARM
 
 `tools/unix_pacing_soak.c` drives the real modules over a real socket with

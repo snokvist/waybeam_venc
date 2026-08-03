@@ -10,5 +10,6 @@ warranted, `plan.md` and `validation.md`.
 
 | Spec | Status |
 |---|---|
+| `2026-08-02-unix-pacing-latency-tuning/` | Active; baseline measured, clamp works, tail is the target |
 | `2026-07-08-maruko-stab/` | Phase 0 done (IVE unblocked); Phase 1 bench = go/no-go gate |
 | `2026-07-08-ive-hw-accel/` | IVE HW proven + benchmarked; no consumer built yet |
