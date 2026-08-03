@@ -184,6 +184,66 @@ static void print_summary(const char *name, const ConsumerStats *stats,
 	printf("}}\n");
 }
 
+/* Time-varying drain profile.  An FPV radio link does not fail as a single
+ * step to a fixed rate — it drops, recovers, briefly stalls, and throttles
+ * locally.  A profile is a looped list of "kbps:milliseconds" segments, so one
+ * mechanism covers all four: a lower kbps is a throttle, a higher one a
+ * recovery, and 0 is a hard stall for that long. */
+#define MAX_PROFILE_SEGMENTS 32
+
+typedef struct {
+	uint32_t kbps;
+	uint32_t ms;
+} ProfileSeg;
+
+static ProfileSeg g_profile[MAX_PROFILE_SEGMENTS];
+static unsigned g_profile_len;
+static uint64_t g_profile_total_ms;
+
+/* "8000:6000,3000:2500,0:400" -> segments.  Returns 0 on success. */
+static int profile_parse(const char *spec)
+{
+	const char *p = spec;
+
+	g_profile_len = 0;
+	g_profile_total_ms = 0;
+	while (*p && g_profile_len < MAX_PROFILE_SEGMENTS) {
+		char *end;
+		unsigned long kbps, ms;
+
+		kbps = strtoul(p, &end, 10);
+		if (end == p || *end != ':')
+			return -1;
+		p = end + 1;
+		ms = strtoul(p, &end, 10);
+		if (end == p || ms == 0)
+			return -1;
+		p = end;
+		g_profile[g_profile_len].kbps = (uint32_t)kbps;
+		g_profile[g_profile_len].ms = (uint32_t)ms;
+		g_profile_total_ms += ms;
+		g_profile_len++;
+		if (*p == ',')
+			p++;
+		else if (*p)
+			return -1;
+	}
+	return (g_profile_len > 0 && *p == '\0') ? 0 : -1;
+}
+
+static uint32_t profile_rate_at(uint64_t elapsed_us)
+{
+	uint64_t t = (elapsed_us / 1000u) % g_profile_total_ms;
+	unsigned i;
+
+	for (i = 0; i < g_profile_len; ++i) {
+		if (t < g_profile[i].ms)
+			return g_profile[i].kbps;
+		t -= g_profile[i].ms;
+	}
+	return g_profile[g_profile_len - 1].kbps;
+}
+
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
@@ -194,7 +254,11 @@ static void usage(const char *argv0)
 		"  --drain-kbps  sustained slow drain: keep reading, but no faster\n"
 		"                than KBPS.  This is the standing-backlog case a\n"
 		"                producer-side sojourn controller is actually for;\n"
-		"                a hard stall only exercises the overflow path.\n",
+		"                a hard stall only exercises the overflow path.\n"
+		"  --profile     looped \"kbps:ms,kbps:ms,...\" drain schedule, for\n"
+		"                RF-like behaviour: drops, recoveries, brief stalls\n"
+		"                (kbps 0) and partial throttles in one run.\n"
+		"                Overrides --drain-kbps.\n",
 		argv0);
 }
 
@@ -207,6 +271,9 @@ int main(int argc, char **argv)
 	uint32_t drain_kbps = 0;
 	uint64_t drained_bits = 0;
 	uint64_t drain_started_us = 0;
+	int64_t  profile_credit_bits = 0;
+	uint64_t profile_last_us = 0;
+	uint32_t profile_rate = UINT32_MAX;  /* force a RATE line on entry */
 	struct sockaddr_un addr;
 	ConsumerStats stats;
 	uint8_t *buffer = NULL;
@@ -238,6 +305,11 @@ int main(int argc, char **argv)
 		} else if (strcmp(argv[i], "--drain-kbps") == 0 && i + 1 < argc) {
 			if (parse_u32(argv[++i], &drain_kbps) != 0 ||
 			    drain_kbps == 0) {
+				usage(argv[0]);
+				return 2;
+			}
+		} else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+			if (profile_parse(argv[++i]) != 0) {
 				usage(argv[0]);
 				return 2;
 			}
@@ -281,6 +353,7 @@ int main(int argc, char **argv)
 	started_us = monotonic_us();
 	deadline_us = started_us + (uint64_t)duration_sec * 1000000u;
 	drain_started_us = started_us;
+	profile_last_us = started_us;
 	printf("READY @%s qlen=%d duration_sec=%u drain_kbps=%u\n", name,
 		read_max_dgram_qlen(), duration_sec, drain_kbps);
 
@@ -328,7 +401,49 @@ int main(int argc, char **argv)
 		 * in the kernel queue (rather than reading and discarding) is
 		 * the point — it is what produces standing backlog on the
 		 * sender without ever fully wedging. */
-		if (drain_kbps > 0) {
+		if (g_profile_len > 0) {
+			/* Token bucket rather than the cumulative model used by
+			 * --drain-kbps: with a schedule the rate changes, and a
+			 * cumulative allowance would let the consumer bank
+			 * credit during a stall and then drain it in a burst,
+			 * which is the opposite of what a stalled radio does.
+			 * Credit is capped at PROFILE_BURST_MS worth so a rate
+			 * change takes effect within that bound. */
+			const uint64_t burst_ms = 20;
+			uint32_t rate = profile_rate_at(now_us - started_us);
+
+			if (rate != profile_rate) {
+				printf("RATE t=%" PRIu64 "ms kbps=%u\n",
+					(now_us - started_us) / 1000u, rate);
+				fflush(stdout);
+				profile_rate = rate;
+			}
+			if (rate == 0) {
+				/* Hard stall: no accrual, and drop any credit so
+				 * the recovery does not start with a burst. */
+				struct timespec nap = { 0, 1000000L };
+				profile_credit_bits = 0;
+				profile_last_us = now_us;
+				(void)nanosleep(&nap, NULL);
+				continue;
+			}
+			profile_credit_bits += (int64_t)rate * 1000 *
+				(int64_t)(now_us - profile_last_us) / 1000000;
+			profile_last_us = now_us;
+			if (profile_credit_bits > (int64_t)rate * (int64_t)burst_ms)
+				profile_credit_bits = (int64_t)rate * (int64_t)burst_ms;
+			/* Credit goes into debt after a read, and reading is
+			 * blocked until it recovers.  Gating on "credit > 0"
+			 * instead would let a single bit of credit buy a whole
+			 * 1400 B datagram, degenerating to one datagram per
+			 * poll (~11 Mbps) for every rate below that — the
+			 * shaping would silently not happen. */
+			if (profile_credit_bits <= 0) {
+				struct timespec nap = { 0, 500000L };  /* 0.5 ms */
+				(void)nanosleep(&nap, NULL);
+				continue;
+			}
+		} else if (drain_kbps > 0) {
 			uint64_t elapsed_us = now_us - drain_started_us;
 			uint64_t allowed_bits =
 				(uint64_t)drain_kbps * 1000u * elapsed_us /
@@ -345,7 +460,10 @@ int main(int argc, char **argv)
 			ssize_t received = recv(fd, buffer, MAX_DATAGRAM_BYTES, 0);
 
 			if (received > 0) {
-				drained_bits += (uint64_t)received * 8u;
+				uint64_t bits = (uint64_t)received * 8u;
+
+				drained_bits += bits;
+				profile_credit_bits -= (int64_t)bits;
 				observe_rtp(&stats, buffer, (size_t)received, monotonic_us());
 			}
 			else if (received < 0 && errno != EINTR) {

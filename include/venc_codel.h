@@ -84,7 +84,13 @@ extern "C" {
 #define VENC_CODEL_INTERVAL_US    200000u  /* control period */
 #define VENC_CODEL_TARGET_US       10000u  /* >= this -> decrease */
 #define VENC_CODEL_RECOVER_US       5000u  /* <= this -> increase */
+/* Overridable for sweeps.  The floor is the lowest rate the controller can
+ * command, as a fraction of the *configured* bitrate — so a consumer slower
+ * than FLOOR x video0.bitrate cannot be tracked at all (device-measured
+ * 2026-08-03). */
+#ifndef VENC_CODEL_FLOOR_PERMILLE
 #define VENC_CODEL_FLOOR_PERMILLE    250u
+#endif
 #define VENC_CODEL_FULL_PERMILLE    1000u
 #define VENC_CODEL_AI_STEP            50u  /* additive increase */
 

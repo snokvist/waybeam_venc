@@ -255,3 +255,94 @@ any droppable frames exist. **T1 is withdrawn**, not deferred.
 - n=1 per cell here. The effect sizes (21x, 443x) are far outside plausible
   noise, but the small differences (goodput −1 %, CPU) are not.
 - P6/P7/P8 from the handover, the bitrate matrix, and the long soak.
+
+---
+
+# FPV-profile sweep — host rig, 2026-08-03
+
+An FPV link does not fail as one step to a fixed rate. `tools/unix_dgram_consumer`
+gained `--profile "kbps:ms,..."` (looped), so drops, recoveries, brief stalls
+(`kbps` 0) and partial throttles all come from one mechanism.
+
+Profile used (20.07 s loop, mean capacity ~9.3 Mbps):
+
+```
+12000:4000, 4000:3000, 12000:2000, 0:250, 9000:2500,
+0:120, 7000:3000, 15000:3000, 2000:1200, 12000:1000
+```
+
+It deliberately includes a 2000 kbps segment — **below** the 250-permille floor
+against `video0.bitrate` 15000 (= 3750 kbps) — because a deep fade really does
+go there.
+
+n=3, 45 s, producer 15000 kbps / 60 fps, clamp on. **Consumer-side** columns are
+what actually arrived:
+
+| slots | ai_every | floor | sojourn avg | overflows | delivered | frames | gaps |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| **8** | **1** | **250** *(shipped)* | 103.0 ±3.2 ms | 111 | 3.73 Mbps | 2584 | 0 |
+| 4 | 1 | 250 | 41.2 ±1.7 | 157 | 4.58 | 2541 | 0 |
+| 2 | 1 | 250 | 14.4 ±0.9 | 239 | **6.76** | 2461 | 0 |
+| 2 | 3 | 250 | 13.4 ±0.7 | 168 | 5.41 | 2532 | 0 |
+| 2 | 5 | 250 | 13.1 ±0.7 | 156 | 4.79 | 2544 | 0 |
+| 2 | 1 | 100 | 12.5 ±1.6 | 200 | 6.72 | 2500 | 0 |
+| 2 | 3 | 100 | 10.2 ±1.0 | 104 | 4.33 | 2596 | 0 |
+| **2** | **5** | **100** | **7.7 ±0.5** | **78** | 3.42 | **2623** | 0 |
+
+## Findings
+
+**Depth still dominates latency.** 8 → 4 → 2 slots at fixed `ai`/floor gives
+103 → 41 → 14 ms average sojourn, a 7.2x improvement. Same conclusion as the
+static sweep, and the strongest single effect here.
+
+**The static-drain recommendation reverses under a dynamic link.** With a
+constant bottleneck, `AI_EVERY=5` looked like a clear win. Under the FPV
+profile it costs **29 % of delivered bitrate** (6.76 → 4.79 Mbps at 2 slots)
+while barely changing latency (14.4 → 13.1 ms). A real link keeps *recovering*,
+and a deliberately slow prober cannot reclaim the capacity in time. What slower
+probing actually buys here is **frame continuity**, not latency: overflows
+239 → 156, frames 2461 → 2544.
+
+**So `AI_EVERY` and the floor are both bitrate-vs-frame-continuity levers**, not
+latency levers, once the queue is shallow. Two defensible operating points:
+
+- **Throughput-first: `2 / 1 / 100`** — 12.5 ms sojourn, **6.72 Mbps** (+80 %
+  over shipped), but 200 overflows and 2500 frames.
+- **Continuity-first: `2 / 5 / 100`** — **7.7 ms** sojourn (13x better than
+  shipped), **78 overflows** (−30 %), **2623 frames** (+1.5 %), at 3.42 Mbps
+  (−8 % vs shipped).
+
+For FPV the second is the better trade: a dropped frame is a visible glitch,
+whereas 8 % less bitrate is a small quality change. Recommendation is therefore
+**2 slots / `AI_EVERY`=5 / floor 100**, with `2/1/100` as the option if raw
+bitrate matters more.
+
+**A lower floor is free improvement at fixed `ai`.** 2/3/250 → 2/3/100 moves
+latency 13.4 → 10.2 ms, overflows 168 → 104 and frames 2532 → 2596. It lets the
+clamp actually follow a deep fade instead of bottoming out — the round-1 device
+failure mode.
+
+**Frame-atomic admission holds under dynamic conditions.** Consumer-side
+sequence gaps are **0 in every configuration**, including through hard stalls.
+All loss is whole frames refused at admission.
+
+**No parameter can beat the stall.** `max_frame_spread` measured 253–262 ms in
+every configuration — the profile's 250 ms stall. Under a hard link stall,
+end-to-end frame latency equals the stall duration and no queue or controller
+setting changes that.
+
+## ⚠️ Instrument defect found and fixed mid-sweep
+
+The first two profile sweeps were **invalid** and are discarded. The token
+bucket gated reads on `credit > 0`, so a single bit of credit bought a whole
+1400 B datagram — for any rate below ~11 Mbps the consumer degenerated to one
+datagram per poll and the throttle levels never happened. Stalls (`rate 0`)
+still worked, which is why those runs showed a plausible-looking uniform
+233 ms max.
+
+Fixed by letting credit go into **debt** (`int64_t`, read then subtract, block
+while negative), which enforces the mean rate exactly. Verified: a constant
+5000 kbps profile now delivers ~4 Mbps rather than pinning at 11–14.
+
+Lesson worth keeping: a rate limiter that never goes into debt does not limit
+rate — it limits *poll frequency*.
