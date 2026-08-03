@@ -148,6 +148,9 @@ Satisfies R4.
   restored 13.0 Mbps with no scene change.
 - Confirm production ≈ `video0.bitrate` against a healthy consumer — *after*
   the above, or the check measures the cap rather than the scene.
+- Discard the first ~2 runs (~2 min) after any restart before believing a CPU
+  number — a post-restart transient runs ~10 points high and is otherwise
+  perfectly confounded with whatever config you just deployed.
 - Check the drain target against the clamp floor: `VENC_CODEL_FLOOR_PERMILLE`
   (250) × `video0.bitrate` is the lowest rate the controller can command. A
   consumer slower than that puts the run in a floor-limited regime where

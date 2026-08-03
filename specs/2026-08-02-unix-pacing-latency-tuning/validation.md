@@ -503,3 +503,67 @@ frames and 46 % fewer sequence gaps, at the cost of ~9 points of one core and
 `queueOverflows` is cumulative and venc was not restarted between repeats, so
 per-repeat overflow means are not meaningful in this table. Consumer-side
 sequence gaps are the reliable per-run loss metric and are reported instead.
+
+---
+
+# CPU investigation — the penalty was a restart transient, 2026-08-03
+
+The previous section reported a real, reproducible ~+9 point CPU cost for the
+selected config. **That was wrong, and this section supersedes it.**
+
+## Attribution attempt: a 2x2
+
+A and D differ in *two* variables, so the CPU could not be attributed. Filling
+in the missing cells (n=3 each, same profile + follower):
+
+| | `AI_EVERY`=1 | `AI_EVERY`=5 |
+|---|---|---|
+| **8 slots** | A: 15.53 ±0.12 % | E: 15.47 ±0.21 % |
+| **2 slots** | F: **19.73 ±5.55 %** | D: 24.73 ±2.37 % |
+
+F's ±5.55 was the tell — its three runs read 26.0, 18.0, 15.2 %, a monotone
+decay rather than scatter about a mean.
+
+## The transient
+
+D run six times consecutively **without a restart in between**:
+
+| rep | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| waybeam CPU | 25.9 % | 21.3 % | **15.1 %** | 15.1 % | 15.1 % | 15.1 % |
+
+It settles at **15.1 %** — indistinguishable from A (15.53 %) and E (15.47 %).
+
+**There is no sustained CPU cost.** What I measured was a post-restart warm-up
+lasting roughly two 60 s runs, and because every variant was measured
+immediately after its own deploy-and-restart, the transient was *perfectly
+confounded* with the configuration change. A and E happened not to exhibit it
+in their first run, which made the pattern look like a config effect.
+
+P3 therefore stands as originally recorded: pacing costs well under the ~2
+point threshold. The earlier "+9 points, over the P3 criterion" statement is
+withdrawn.
+
+## The latency result is not affected
+
+The same six consecutive runs, latency:
+
+| rep | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| sojourn avg | 2.04 | 1.97 | 2.30 | 3.35 | 2.86 | 2.48 ms |
+| `queueFrames` max | 2 | 2 | 2 | 2 | 2 | 2 |
+
+Stable around 2–3 ms with no trend, so the headline comparison (A ~41 ms vs
+D ~2.5 ms average) is unaffected by the transient. p95 alternates between
+~0.5 ms and ~17 ms across runs — that is the profile's phase relative to the
+run boundary under 5 Hz sampling, not instability; the 20.07 s loop does not
+divide evenly into a 60 s run.
+
+## Methodology fix
+
+**When comparing configurations that each require a restart, discard the first
+~2 runs (~2 minutes) after each restart.** Otherwise the restart transient is
+perfectly aligned with the variable under test. This applies to CPU
+specifically; queue latency showed no warm-up.
+
+Added to the session-start checklist.
