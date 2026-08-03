@@ -165,3 +165,93 @@ anything.
 
 Note this contradicts a prior finding that `maxPBytes` was a no-op; that
 conclusion came from static-scene evidence, and it is wrong here.
+
+---
+
+# Device round 2 — clean A/B above the floor, 2026-08-03
+
+Round 1 was accidentally run **below** the clamp floor (3000 kbps consumer vs a
+3750 kbps floor), which pinned both variants and made the overflow numbers
+meaningless. Repeated at `--drain-kbps 8000` with `maxIBytes`/`maxPBytes`
+zeroed, production **15.3–15.6 Mbps**, floor 3750 well below the consumer's
+capacity. `resilience: "range"` (the craft's deployed setting) on both sides.
+
+| | **A** = 8 slots / `AI_EVERY`=1 *(shipped)* | **B** = 2 slots / `AI_EVERY`=5 |
+|---|---:|---:|
+| sojourn avg | 20.4 ms | **0.96 ms** (21x) |
+| sojourn p50 | 213 µs | 184 µs |
+| sojourn p95 | 134.2 ms | **0.30 ms** (443x) |
+| sojourn max | 249.8 ms | **50.1 ms** (5x) |
+| `queueDelayUs` avg | 17.3 ms | **0.28 ms** |
+| `queueOverflows` | 118 | **20** (5.9x fewer) |
+| RTP sequence gaps | 1308 | **190** (6.9x fewer) |
+| frames delivered | 3486 / 3600 = 96.8 % | **3584 / 3600 = 99.6 %** |
+| goodput | 7.978 Mbps | 7.896 Mbps |
+| `queueFrames` max | 8 | 2 |
+| waybeam CPU | 20.7 % | 15.4 % |
+
+**All three `requirements.md` targets are met, with margin:**
+
+| target | result |
+|---|---|
+| p95 < 20 ms | **0.30 ms** |
+| max < 70 ms | **50.1 ms** |
+| delivered > 99.5 % | **99.6 %** |
+
+Goodput is −1 % (inside run-to-run spread) and CPU did not regress. The
+headline is p95: the shipped configuration spends a large fraction of its time
+deeply queued (p95 134 ms), whereas the candidate's queue is essentially empty
+except during brief excursions (p50 184 µs, p95 303 µs, max 50 ms).
+
+## Intra-refresh vs periodic IDR — no difference
+
+Tested on variant B at the same operating point: `resilience: "range"`
+(intra-refresh `balanced` + refPred, ref_base 1 / ref_enhance 4) against
+`resilience: "off"` with `gopSize` 2.0 (no intra refresh, no refPred, periodic
+IDR).
+
+| | `range` | `off` (normal GOP + periodic I) |
+|---|---:|---:|
+| sojourn avg | 963 µs | 684 µs |
+| sojourn p50 | 184 µs | 185 µs |
+| sojourn p95 | 303 µs | 309 µs |
+| sojourn max | 50.1 ms | 48.7 ms |
+| `queueOverflows` | 20 | 21 |
+| sequence gaps | 190 | 187 |
+| frames delivered | 3584 | 3583 |
+| goodput | 7.896 Mbps | 7.895 Mbps |
+
+**Statistically identical on every metric.** Frame-size variance between
+rolling intra-refresh and periodic IDR does **not** drive queue latency at this
+depth — which is consistent with the mechanism: a 2-slot queue cannot hold
+enough frames for the size *distribution* to matter, only the individual head
+frame's size, and that is similar either way.
+
+Practical consequence: **choose `resilience` on its own merits** (error
+resilience, OSD-safety per the preset table's `OSD-safe?` column) — it is not a
+latency lever. Plan item **T4 (flatten frame-size variance) is closed as
+not-useful** at 2 slots.
+
+CPU read 15.4 % (`range`) vs 22.6 % (`off`) vs 20.7 % (A). These swings do not
+track the changes and match the unexplained outliers seen twice before; CPU
+differences under ~5 points on this rig should not be believed without repeats.
+
+## T1 withdrawn
+
+Temporal-layer-aware admission assumed non-reference SVC-T frames exist to drop
+preferentially. Per the craft owner, **ref-enhance is not run**, so no frame
+ever carries `ENHANCE_P_NOTFORREF` and the policy would have nothing to select
+on. `svct_active` is merely `ref_base > 0`
+(`src/star6e_pipeline.c:2679`), which is true under `range` without implying
+any droppable frames exist. **T1 is withdrawn**, not deferred.
+
+## Remaining
+
+- **The clamp floor.** `VENC_CODEL_FLOOR_PERMILLE` 250 x `video0.bitrate` is
+  the lowest commandable rate; a consumer below it cannot be tracked (round 1
+  demonstrated this). The floor is a fraction of a *configured* bitrate the
+  scene may never reach, which makes it doubly awkward. Decide whether to lower
+  it or express it against measured production.
+- n=1 per cell here. The effect sizes (21x, 443x) are far outside plausible
+  noise, but the small differences (goodput −1 %, CPU) are not.
+- P6/P7/P8 from the handover, the bitrate matrix, and the long soak.
