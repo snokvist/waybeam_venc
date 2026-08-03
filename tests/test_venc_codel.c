@@ -41,6 +41,7 @@ int test_venc_codel(void)
 	VencCodel c;
 	uint64_t now = 1000000;
 	int i;
+	int rep;
 
 	/* ── 1. Engage ──────────────────────────────────────────────── */
 	venc_codel_reset(&c, now);
@@ -77,11 +78,17 @@ int test_venc_codel(void)
 	/* An interval that is deeply backed up for all but one frame, where
 	 * the queue did reach empty once.  High-water would clamp; the
 	 * minimum rule must recover instead. */
-	for (i = 0; i < STEPS; ++i) {
-		now += IVL / STEPS;
-		venc_codel_observe(&c, (i == 5) ? 0 : VENC_CODEL_TARGET_US * 5,
-			0);
-		(void)venc_codel_tick(&c, now);
+	/* Repeated VENC_CODEL_AI_EVERY times: asymmetric probing allows one
+	 * increase per that many quiet intervals, and every interval here is
+	 * quiet by the minimum rule.  Expressed via the constant so the test
+	 * does not encode today's probe rate. */
+	for (rep = 0; rep < (int)VENC_CODEL_AI_EVERY; ++rep) {
+		for (i = 0; i < STEPS; ++i) {
+			now += IVL / STEPS;
+			venc_codel_observe(&c,
+				(i == 5) ? 0 : VENC_CODEL_TARGET_US * 5, 0);
+			(void)venc_codel_tick(&c, now);
+		}
 	}
 	CHECK("codel_touched_bottom_recovers",
 		venc_codel_permille(&c) == 850);
@@ -137,7 +144,12 @@ int test_venc_codel(void)
 	CHECK("codel_floor_edge_enter", venc_codel_floor_edge(&c) == 1);
 	CHECK("codel_floor_edge_once", venc_codel_floor_edge(&c) == 0);
 
-	(void)step_interval(&c, &now, 0, 0);
+	/* Asymmetric probing (VENC_CODEL_AI_EVERY) rate-limits the increase to
+	 * one step every N intervals, so the climb needs N quiet intervals to
+	 * produce its first step.  Written in terms of the constant so the test
+	 * holds at any setting rather than encoding today's value. */
+	for (i = 0; i < (int)VENC_CODEL_AI_EVERY; ++i)
+		(void)step_interval(&c, &now, 0, 0);
 	CHECK("codel_leaves_floor",
 		venc_codel_permille(&c) == VENC_CODEL_FLOOR_PERMILLE +
 			VENC_CODEL_AI_STEP);
@@ -145,7 +157,7 @@ int test_venc_codel(void)
 	CHECK("codel_floor_edge_leave_once", venc_codel_floor_edge(&c) == 0);
 
 	/* ── 6. Additive increase ramps to full and stops there ─────── */
-	for (i = 0; i < 40; ++i)
+	for (i = 0; i < 40 * (int)VENC_CODEL_AI_EVERY; ++i)
 		(void)step_interval(&c, &now, 0, 0);
 	CHECK("codel_recovers_to_full", venc_codel_permille(&c) == 1000);
 	CHECK("codel_no_change_at_full",

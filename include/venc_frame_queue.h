@@ -60,17 +60,24 @@
 extern "C" {
 #endif
 
-/* EXPERIMENT (not for merge as-is): 8 -> 4.  The worst-case added latency is
- * queue depth divided by drain rate, not anything the controller chooses —
- * device measurement put max sojourn at 267 ms clamp-off and 299 ms clamp-on,
- * i.e. both are simply "queue full" (8 frames x ~32 KB / 8 Mbps = 256 ms).
- * Halving the depth halves that ceiling and, as a side effect, drops the
+/* 8 -> 2, selected 2026-08-03 after a host sweep and n=3 device repeats
+ * (specs/2026-08-02-unix-pacing-latency-tuning/validation.md).
+ *
+ * Worst-case added latency is queue depth divided by drain rate — a property
+ * of the queue, not of the controller: clamp-off and clamp-on both measured
+ * ~the same max sojourn at 8 slots because both are simply "queue full".
+ * Depth is therefore the only lever on the tail, and it also drops the control
  * loop's dead time below VENC_CODEL_INTERVAL_US so the controller stops
- * deciding on evidence that predates its last decision. */
+ * deciding on evidence that predates its own last decision.
+ *
+ * 2 is the structural minimum: one frame draining, one filling.  Under an
+ * RF-shaped drain profile this gave 13.8x lower average and far lower p95
+ * queue latency than 8 slots, with 3 % more frames delivered, 46 % fewer
+ * sequence gaps and no CPU cost. */
 /* Overridable at compile time so a depth sweep does not need a source edit
  * per data point (-DVENC_FRAME_QUEUE_SLOTS=N). */
 #ifndef VENC_FRAME_QUEUE_SLOTS
-#define VENC_FRAME_QUEUE_SLOTS        4u
+#define VENC_FRAME_QUEUE_SLOTS        2u
 #endif
 #define VENC_FRAME_QUEUE_SLOT_BYTES   (384u * 1024u)
 

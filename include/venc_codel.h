@@ -101,7 +101,7 @@ extern "C" {
  * walking past the sustainable rate and refilling the queue.  1 = the
  * as-shipped behaviour, so the default is a no-op. */
 #ifndef VENC_CODEL_AI_EVERY
-#define VENC_CODEL_AI_EVERY            1u
+#define VENC_CODEL_AI_EVERY            5u
 #endif
 
 #define VENC_CODEL_NO_SAMPLE  0xFFFFFFFFu

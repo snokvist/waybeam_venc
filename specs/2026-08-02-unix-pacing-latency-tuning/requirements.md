@@ -1,6 +1,8 @@
 # `unix://` paced egress — latency & performance tuning
 
-Status: **active**, device-measured baseline established 2026-08-02.
+Status: **selection locked 2026-08-03** — `VENC_FRAME_QUEUE_SLOTS` 2 and
+`VENC_CODEL_AI_EVERY` 5 are now the branch defaults; floor stays at the stock
+250. Remaining work is real-RF confirmation, not tuning.
 Depends on PR #215 (`claude/waybeam-venc-bitrate-throttle-brujl3`, v0.64.0),
 which is itself stacked on #214. Experiment code:
 `experiment/pr215-tuning`. Sibling: the coordination repo's

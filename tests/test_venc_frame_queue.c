@@ -43,6 +43,7 @@ int test_venc_frame_queue(void)
 	const uint8_t *base;
 	uint64_t now = 1000000;
 	uint32_t i;
+	uint32_t fifo_n;
 
 	CHECK("fq_create", q != NULL);
 	if (!q)
@@ -89,11 +90,15 @@ int test_venc_frame_queue(void)
 
 	/* ── 4. FIFO order, and delay follows the OLDEST frame ──────── */
 	venc_frame_queue_reset(q);
-	for (i = 0; i < 3; ++i)
+	/* Bounded by the queue depth: the point is FIFO order and that the
+	 * delay reports the OLDEST frame, both of which need only two slots.
+	 * Hard-coding 3 would fail on any build with a shallower queue. */
+	fifo_n = VENC_FRAME_QUEUE_SLOTS < 3u ? VENC_FRAME_QUEUE_SLOTS : 3u;
+	for (i = 0; i < fifo_n; ++i)
 		CHECK("fq_fifo_push",
 			push_frame(q, now + i * 1000, 2, 50,
 				(uint8_t)(0x10 + i)) == 0);
-	CHECK("fq_fifo_depth", venc_frame_queue_depth(q) == 3);
+	CHECK("fq_fifo_depth", venc_frame_queue_depth(q) == fifo_n);
 	/* Oldest is 2 ms older than the newest; the delay must report the
 	 * oldest, since that is the frame whose latency is worst. */
 	CHECK("fq_delay_uses_oldest",
