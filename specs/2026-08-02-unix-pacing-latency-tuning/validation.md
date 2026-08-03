@@ -442,3 +442,64 @@ and frames 3374 → 3456 (+2.4 %) — at 6.01 → 3.44 Mbps delivered.
 
 Note A's 932 ms worst case persists even with the outer loop following: an
 8-slot queue is the problem there regardless of floor or bitrate target.
+
+---
+
+# n=3 device repeats — and a correction on CPU, 2026-08-03
+
+Selected config vs shipped, FPV profile + emulated waybeam-link bitrate
+following, 60 s runs, three repeats each, `waybeam-link` stopped throughout.
+
+| | **A** = 8/1/250 *(shipped)* | **D** = 2 / `AI_EVERY`5 / 250 |
+|---|---:|---:|
+| sojourn avg | 40.95 ±2.14 ms | **2.97 ±0.14 ms** (13.8x) |
+| sojourn p50 | 0.17 ±0.01 ms | 0.13 ±0.00 ms |
+| sojourn p95 | 277.46 ±24.96 ms | **0.33 ±0.04 ms** (841x) |
+| sojourn max | 904.06 ±50.10 ms | **238.15 ±9.24 ms** (3.8x) |
+| frames delivered | 3373.7 ±16.0 | **3476.3 ±3.2** (+3.0 %) |
+| RTP sequence gaps | 1185.7 ±96.8 | **639.7 ±45.2** (−46 %) |
+| delivered bitrate | 5.88 Mbps | 3.77 Mbps (−36 %) |
+| consumer max frame spread | 262.9 ms | 258.6 ms |
+| `queueFrames` max | 8 | 2 |
+| **waybeam CPU** | **15.53 ±0.12 %** | **24.73 ±2.37 %** |
+| system busy (2 cores) | 19.77 ±1.14 % | 21.13 ±0.25 % |
+
+Error bars are tight on everything that matters. The p95 result is the headline:
+**277 ms → 0.33 ms**. D's queue is essentially always empty and only fills
+during the profile's hard stall, where its worst case (238 ms) is the stall
+itself.
+
+## ⚠️ Correction: the CPU difference is real, not noise
+
+I twice dismissed a ~6–10 point CPU swing on this rig as unexplained noise. With
+n=3 it is unambiguous and reproducible: **A 15.53 ±0.12 %, D 24.73 ±2.37 %** —
+roughly **+9 points of one core**, a ~60 % increase in the daemon's own CPU. A's
+spread of ±0.12 % across three runs leaves no room to call this variance.
+
+This matters against the original P3 criterion, which was "fail if more than ~2
+points of CPU attributable to pacing". The selected configuration is well over
+that. It does not invalidate the latency result, but it is a real cost that was
+being reported as absent.
+
+Two things are still unexplained and should not be glossed:
+
+- **Process CPU rises ~9 points of one core while system busy rises only ~1.4
+  points of two.** Those do not reconcile (+9 of one core should be ~+4.5 of
+  two). Either the per-process accounting (utime+stime over wall time, assumed
+  `HZ`=100 — `getconf CLK_TCK` is unavailable on this busybox) or the
+  idle-derived system figure is misleading.
+- **Mechanism unknown.** The plausible candidate is the drain gate: with a
+  2-slot queue the pipeline thread attempts the drain far more often and finds
+  the socket unready, spinning inside `STAR6E_OUTPUT_DRAIN_BUDGET_US`. That
+  ties directly to plan item T5, and it may be fixable rather than inherent.
+
+Until that is understood, the honest statement is: **the selected configuration
+buys a 13.8x lower average and 841x lower p95 queue latency, plus 3 % more
+frames and 46 % fewer sequence gaps, at the cost of ~9 points of one core and
+36 % of delivered bitrate.**
+
+## Note on the overflow counter
+
+`queueOverflows` is cumulative and venc was not restarted between repeats, so
+per-repeat overflow means are not meaningful in this table. Consumer-side
+sequence gaps are the reliable per-run loss metric and are reported instead.
