@@ -567,3 +567,65 @@ perfectly aligned with the variable under test. This applies to CPU
 specifically; queue latency showed no warm-up.
 
 Added to the session-start checklist.
+
+---
+
+# Does the depth finding transfer to frame-shm? No. 2026-08-03
+
+Asked because `frame-shm://` — not `unix://` — is the path waybeam-link
+actually streams through (`io/src/config.cpp:78,89` accepts `frame-shm` and
+`udp` only; there is **no `unix://` ingest**). So the tuning above is not in the
+production video path on this craft.
+
+The ring looks like the same problem — `venc_frame_ring_create(..., 8,
+384*1024)`, an AIMD clamp with an identical 200 ms window, ×4/5 decrease, +50
+increase, 250 floor and once-per-window drop charge. **But the depth result must
+not be ported**, for two reasons.
+
+**1. Depth is not the operating point.** `venc_shm_throttle` engages on the
+window's *low-water* mark at `ENGAGE_SLOTS` = 2 and recovers at
+`RECOVER_SLOTS` = 1 (`include/venc_shm_throttle.h:82-83`). The controller
+already holds occupancy at ~0–1 slots; the other 7 are headroom it never
+intends to use. Device transport status on the frame-shm path reads
+`usedSlots: 0`, `fillPct: 0` in steady state. On `unix://` the pacing gate let
+the queue fill toward `SLOTS` and depth *was* the operating point — which is
+why halving it halved the tail. Not the same situation.
+
+**2. The headroom is absorbing consumer scheduling jitter, and that is
+measured.** From the module's own header:
+
+> Measured on a Star6E at 100 fps into an 8-slot ring with a perfectly healthy
+> consumer, the ring routinely spikes to 2-3 slots inside a 200 ms window and
+> drains again — the consumer reads one frame per event-loop iteration, so
+> short bursts are normal.
+
+A 2-slot ring turns those routine 2–3 slot bursts into overflow drops. The
+`unix://` queue could afford to be shallow because the kernel's socket queue
+sat *behind* it as a second buffer; the frame-shm ring is the only buffer
+between two processes and has nothing to fall back on.
+
+**What does transfer is the probing asymmetry.** The AIMD is structurally
+identical, so the same overshoot dynamic — climb past the sustainable rate,
+refill, get cut — should be present, and that is what `VENC_CODEL_AI_EVERY`
+addressed. It is a bitrate-vs-continuity lever there and would be here too.
+
+⚠️ **One constraint the unix path did not carry.** `venc_shm_throttle.h:26-29`
+requires the 200 ms window stay **≥5x faster than the slowest external actuator
+(~1500 ms settle)** so the cascaded controllers do not couple. Rate-limiting
+the *increase* to one step per 5 windows makes the probe cadence 1 s, which is
+only 1.5x that settle. The decrease stays at every window, so the
+fast-reaction path is preserved and only the recovery direction slows — but the
+guidance is explicit and the same tension applies to the `unix://` change
+already locked. Evidence against coupling so far: the device A/B ran *with* an
+emulated ~1 s-lag outer loop and the selected config showed a single clamp
+transition over 60 s, i.e. stable. Worth watching rather than assuming.
+
+## Proposed next step
+
+1. Port asymmetric probing to `venc_shm_throttle` behind the same style of
+   compile-time knob. **Do not change `venc_frame_ring` depth.**
+2. Build the rig: `tools/frame_shm_consumer_test.c` exists but has no rate
+   shaping. It needs the `--profile` treatment the unix consumer just got, so
+   the same RF-shaped drain can be applied to the ring.
+3. A/B on host, then device, then real RF with waybeam-link — which *is*
+   meaningful on this path, unlike a unix:// RF test.
