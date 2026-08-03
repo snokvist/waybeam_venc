@@ -67,7 +67,11 @@ extern "C" {
  * Halving the depth halves that ceiling and, as a side effect, drops the
  * loop's dead time below VENC_CODEL_INTERVAL_US so the controller stops
  * deciding on evidence that predates its last decision. */
+/* Overridable at compile time so a depth sweep does not need a source edit
+ * per data point (-DVENC_FRAME_QUEUE_SLOTS=N). */
+#ifndef VENC_FRAME_QUEUE_SLOTS
 #define VENC_FRAME_QUEUE_SLOTS        4u
+#endif
 #define VENC_FRAME_QUEUE_SLOT_BYTES   (384u * 1024u)
 
 /* Datagrams one frame may occupy.  A 384 KB frame at the smallest

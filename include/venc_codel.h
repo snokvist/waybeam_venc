@@ -88,6 +88,16 @@ extern "C" {
 #define VENC_CODEL_FULL_PERMILLE    1000u
 #define VENC_CODEL_AI_STEP            50u  /* additive increase */
 
+/* EXPERIMENT: asymmetric probing.  Congestion *response* must be fast, but
+ * capacity *discovery* need not be — a link does not gain headroom on a
+ * 200 ms timescale.  Rate-limiting the increase to one step every N control
+ * intervals (decrease still every interval) is intended to stop the climb
+ * walking past the sustainable rate and refilling the queue.  1 = the
+ * as-shipped behaviour, so the default is a no-op. */
+#ifndef VENC_CODEL_AI_EVERY
+#define VENC_CODEL_AI_EVERY            1u
+#endif
+
 #define VENC_CODEL_NO_SAMPLE  0xFFFFFFFFu
 
 typedef struct {
@@ -104,6 +114,8 @@ typedef struct {
 	uint8_t  overflow_charged;   /* overflow MD already applied this interval */
 	uint8_t  at_floor;           /* edge state for _floor_edge */
 	uint8_t  floor_edge_pending; /* 1 = entered, 2 = left */
+	uint8_t  ai_hold;            /* intervals still to skip before the next
+	                              * additive increase (VENC_CODEL_AI_EVERY) */
 } VencCodel;
 
 /* Zero state, permille = 1000, enabled.  Safe to call at any time; a

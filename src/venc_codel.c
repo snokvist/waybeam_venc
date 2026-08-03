@@ -29,6 +29,11 @@ static void set_permille(VencCodel *c, uint32_t value)
 
 	if (next == c->permille)
 		return;
+	/* Any decrease restarts the probe hold, so the climb after a
+	 * congestion event always begins from a full quiet period rather than
+	 * resuming a partially-elapsed one. */
+	if (next < c->permille)
+		c->ai_hold = VENC_CODEL_AI_EVERY - 1u;
 	c->permille = next;
 	c->pending_change = 1;
 	note_floor_edge(c);
@@ -134,9 +139,20 @@ int venc_codel_tick(VencCodel *c, uint64_t now_us)
 			    !c->overflow_charged)
 				set_permille(c,
 					(uint32_t)c->permille * 4u / 5u);
-			else if (c->interval_min_us <= VENC_CODEL_RECOVER_US)
-				set_permille(c, (uint32_t)c->permille +
-					VENC_CODEL_AI_STEP);
+			else if (c->interval_min_us <= VENC_CODEL_RECOVER_US) {
+				/* Asymmetric probing: decrease every interval,
+				 * increase only every AI_EVERY intervals.  The
+				 * hold is reset by any decrease, so a fresh
+				 * congestion event always restarts the climb
+				 * from a full quiet period. */
+				if (c->ai_hold > 0)
+					c->ai_hold--;
+				else {
+					set_permille(c, (uint32_t)c->permille +
+						VENC_CODEL_AI_STEP);
+					c->ai_hold = VENC_CODEL_AI_EVERY - 1u;
+				}
+			}
 			/* Between RECOVER and TARGET: hold.  The band is what
 			 * keeps a continuous signal from alternating decrease
 			 * and increase around a single threshold. */
