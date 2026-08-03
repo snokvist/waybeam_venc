@@ -391,3 +391,54 @@ overflows) because frame size varies widely as the clamp moves, so the
 
 **Selected configuration:** `VENC_FRAME_QUEUE_SLOTS` 2, `VENC_CODEL_AI_EVERY`
 5, `VENC_CODEL_FLOOR_PERMILLE` 100.
+
+---
+
+# The floor change is unnecessary once the outer loop follows — 2026-08-03
+
+**Craft-owner correction:** in production `waybeam-link` lowers `video0.bitrate`
+during link duress; it does not hold 15000 while the link falters. Every run
+above had `waybeam-link` stopped and the bitrate **pinned** at 15000, so the
+250-permille floor was 250 permille of a target that never moved. That is not
+the deployed condition.
+
+Re-tested with an emulated outer loop: a device-side script drives
+`video0.bitrate` to track the profile's capacity with a ~1 s settle lag,
+ignoring sub-second transients the real ~1.5 s loop could not follow either.
+Same FPV profile, 60 s, `waybeam-link` still stopped (the emulator replaces it).
+
+| | **A** = 8/1/250 | **D** = 2 / ai5 / **floor 250 (stock)** | **C** = 2 / ai5 / floor 100 |
+|---|---:|---:|---:|
+| sojourn avg | 40.0 ms | **4.58 ms** | 2.79 ms |
+| sojourn p50 | 204 µs | 124 µs | 117 µs |
+| sojourn p95 | 216.6 ms | **16.9 ms** | 16.7 ms |
+| sojourn max | 932.6 ms | **233.5 ms** | 100.4 ms |
+| `queueOverflows` | 230 | **147** | 135 |
+| sequence gaps | 1080 | 775 | 670 |
+| frames delivered | 3374 | **3456** | 3468 |
+| delivered bitrate | 6.01 Mbps | **3.44 Mbps** | 2.90 Mbps |
+
+**Confirmed: with the bitrate target following, the stock floor is no longer
+the binding constraint.** D matches C on average (4.58 vs 2.79 ms) and p95
+(16.9 vs 16.7 ms), and beats it on delivered bitrate (3.44 vs 2.90 Mbps). The
+floor's dramatic effect in the pinned-bitrate runs — A's 931 ms worst case —
+was an artifact of holding the target at 15000 while the link collapsed to
+2000 kbps. The outer loop is what rescues that case, exactly as designed; the
+inner clamp is scaling a target that is itself already coming down.
+
+C retains an edge on worst-case sojourn (100 vs 233 ms), but that is one sample
+per arm and costs 16 % of delivered bitrate. Not worth diverging from an
+upstream constant for.
+
+**Revised selection: `VENC_FRAME_QUEUE_SLOTS` 2, `VENC_CODEL_AI_EVERY` 5,
+`VENC_CODEL_FLOOR_PERMILLE` unchanged at 250.** Two changed constants become
+one plus one, the composition with waybeam-link stays as designed, and
+throughput is better.
+
+Against the shipped 8/1/250 under the same emulated-outer-loop conditions, D
+gives sojourn avg 40.0 → 4.58 ms (8.7x), p95 216.6 → 16.9 ms (12.8x), max
+932.6 → 233.5 ms (4.0x), overflows 230 → 147 (−36 %), gaps 1080 → 775 (−28 %)
+and frames 3374 → 3456 (+2.4 %) — at 6.01 → 3.44 Mbps delivered.
+
+Note A's 932 ms worst case persists even with the outer loop following: an
+8-slot queue is the problem there regardless of floor or bitrate target.
