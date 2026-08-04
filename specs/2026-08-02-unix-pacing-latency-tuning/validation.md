@@ -706,3 +706,54 @@ Three consequences, in descending severity:
 the frame queue when the new transport is not `unix://`, and re-create it when
 it is — which would make `is_paced()` truthful, restore the clamp-release path,
 and drop stale frames as documented.
+
+---
+
+# What `allowUnixEncoderStall` actually buys, 2026-08-04
+
+Prompted by the observation that in Phase B's R0 — pacing off, flag off — a
+slow consumer already degraded the encoder to 31 fps with **zero** drops, which
+suggests the flag may be redundant.
+
+The flag's only effect is whether `SO_SNDTIMEO` = 2 ms is set on the AF_UNIX
+socket (`src/output_socket.c:100`). Off → each `sendmsg` blocks at most 2 ms
+then returns EAGAIN and the packet is dropped. On → no timeout, `sendmsg`
+blocks until the consumer reads.
+
+R0 only exercised a *steady* slow consumer, where sends complete inside the
+2 ms window so nothing times out and the cumulative waiting merely halves the
+framerate. The flag makes no difference there. Under a **hard wedge** it does.
+4 s wedge, pacing off, everything else identical:
+
+| | flag **off** (default) | flag **on** |
+|---|---:|---:|
+| `transportDrops` | **4396** | **0** |
+| RTP sequence gaps | 4396 | **0** |
+| frames delivered | 673 | 674 |
+| delivered bitrate | 11.43 Mbps | 11.44 Mbps |
+| max frame spread | 4.00 s | 4.00 s |
+
+**So the flag is not redundant** — it converts packet loss into blocking. Both
+modes stall for the wedge's full duration (4.0 s spread either way) and deliver
+the same frame count, but the default discards 4396 packets while the flag
+delivers everything.
+
+The catch is that the flag's stall is **unbounded**: a consumer that never
+resumes blocks capture indefinitely, which is the failure #214 added the
+timeout to prevent. This test used a recoverable 4 s wedge, so it flattered the
+flag.
+
+**The better framing is that pacing obsoletes it, not that the default does.**
+Three mutually exclusive behaviours under congestion:
+
+| mode | loss shape | stall |
+|---|---|---|
+| default (no pacing, no flag) | packet-granular — partial frames, broken reference chain | bounded (2 ms/send) |
+| `allowUnixEncoderStall` | none | **unbounded** |
+| pacing (the locked config) | **frame-atomic** — whole frames refused | bounded, and rate-controlled |
+
+For FPV the third dominates: it keeps the reference chain intact like the flag
+does, without the unbounded-stall failure mode. The PR already makes pacing and
+the flag mutually exclusive, so if pacing ships on, the flag is dead weight —
+which is the right reason to consider retiring it. Retiring it because the
+default already degrades gracefully would be wrong; the default drops packets.
