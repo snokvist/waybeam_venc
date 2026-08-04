@@ -629,3 +629,80 @@ transition over 60 s, i.e. stable. Worth watching rather than assuming.
    the same RF-shaped drain can be applied to the ring.
 3. A/B on host, then device, then real RF with waybeam-link — which *is*
    meaningful on this path, unlike a unix:// RF test.
+
+---
+
+# P6 / P7 / P8 — the last unrun handover checks, 2026-08-04
+
+Run on the locked build (2 slots / `AI_EVERY` 5 / floor 250), `.2.232`,
+`waybeam-link` stopped. These are PR #215 acceptance checks, not tuning.
+
+## P8 — mutual exclusion · PASS
+
+`unixPacing=true` + `allowUnixEncoderStall=true`, restart:
+
+```
+WARNING: outgoing.unixPacing ignored — allowUnixEncoderStall is set,
+         and the two are mutually exclusive
+```
+
+Appears exactly once, `paced` reports `false`. Exactly as specified.
+
+## P6 — shared-socket audio · PASS
+
+`outgoing.audioPort = 0` (Opus on the video socket), healthy consumer, 20 s:
+delivered 14.06 Mbps, **`queueFrames` 0 and `queueOverflows` 0 throughout**,
+and the consumer's payload-type histogram shows **both** streams — PT 97
+(video) 25400 packets, PT 98 (audio) 949. The 4 KiB
+`OUTPUT_SOCKET_PACING_SLACK_BYTES` holds: audio sharing the socket does not
+hold the pacing gate shut.
+
+⚠️ *Tool caveat:* the run reports `sequence_gaps: 8821822`. That is an artifact
+of `unix_dgram_consumer`, which tracks a single `last_sequence` across all
+payload types; two RTP streams with independent sequence spaces on one socket
+make the gap counter meaningless. **Not loss.** The consumer would need
+per-PT sequence tracking for this check to report gaps at all.
+
+## P7 — live redirect · PASS on liveness, FAIL on the pacing gate
+
+`unix://` → `udp://` → `unix://` via `/api/v1/set` under load. No crash, venc
+stayed alive, the queue re-armed on return, and `queueOverflows` reset to 0
+across the redirect.
+
+**But `paced` stayed `true` on the `udp://` leg.** The handover requires it to
+go false, and §2 states pacing is `unix://` + RTP only, with `paced` as the way
+to confirm it.
+
+Cause: `star6e_output_apply_server()` (`src/star6e_output.c:1213`) reconfigures
+the socket and `output->transport` but **never touches `output->frame_queue`**,
+and `star6e_output_is_paced()` is simply `output->frame_queue != NULL`
+(`src/star6e_output.c:302`). So a live redirect leaves the producer-side queue
+running on whatever transport it lands on.
+
+Three consequences, in descending severity:
+
+1. **The intended clamp release on redirect never fires.**
+   `star6e_service_unix_codel()` guards it with `if
+   (!star6e_output_is_paced(output))` and comments that this exists "so a live
+   redirect away cannot leave the encoder pinned". That branch is unreachable
+   on a redirect. **Measured:** clamped to 250 permille / 3750 kbps on
+   `unix://`, redirected to `udp://` — the clamp did *not* release immediately;
+   it walked back 250 → 800 → 1000 over **~12 s** via additive increase,
+   because `udp://` yields quiet sojourn samples. So the failure is **bounded,
+   not a permanent pin** — but the encoder runs clamped for up to ~15 s after a
+   redirect. Note the locked `AI_EVERY`=5 *lengthens* this; at the stock
+   `AI_EVERY`=1 it would be ~3 s.
+2. **Two code comments assert behaviour that does not exist** — the drain's "A
+   redirect resets the queue outright (star6e_output_apply_server), so nothing
+   here belongs to a stale destination", and the release branch's rationale
+   above.
+3. **Frames queued for the old destination can reach the new one.** The queue
+   is not reset on redirect and the drain picks up the current socket, so up to
+   `SLOTS` frames can be misdirected. Not observed here (2 slots makes the
+   window ~2 frames), but it is precisely what P7's "no stale frames delivered
+   to the new destination" is meant to catch, and the code permits it.
+
+**Suggested fix** (author's call): have `star6e_output_apply_server()` destroy
+the frame queue when the new transport is not `unix://`, and re-create it when
+it is — which would make `is_paced()` truthful, restore the clamp-release path,
+and drop stale frames as documented.
