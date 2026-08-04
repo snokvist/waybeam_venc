@@ -79,6 +79,12 @@ static int test_defaults(void)
 	CHECK("defaults_unix_throttle_on", cfg.outgoing.unix_throttle == true);
 	CHECK("defaults_unix_legacy_blocking_off",
 		cfg.outgoing.unix_legacy_blocking == false);
+	/* 3 frame periods, device-measured: 1 buys nothing (the bound expires as
+	 * the slot frees), 3 removes ~94 % of refusals and flips the clamp from
+	 * loss-driven back to delay-driven.  Frame periods, not ms, so it holds
+	 * across the fps matrix. */
+	CHECK("defaults_unix_admit_hold_frames",
+		cfg.outgoing.unix_admit_hold_frames == 3);
 
 	CHECK("defaults_web_port", cfg.system.web_port == 80);
 	CHECK("defaults_overclock", cfg.system.overclock_level == 1);

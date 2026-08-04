@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #define STAR6E_RTP_HEADER_SIZE 12
@@ -286,6 +287,9 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 	 * never engage.  Compact mode is excluded because it does not use
 	 * the batch path (UNIX_SOCKET_HANDOVER.md §6). */
 	output->unix_pacing = setup->unix_pacing ? 1 : 0;
+	output->admit_hold_us = setup->admit_hold_frames *
+		(setup->fps ? (1000000u / setup->fps) :
+			STAR6E_OUTPUT_FRAME_PERIOD_FALLBACK_US);
 	star6e_output_refresh_pacing(output);
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
@@ -599,6 +603,36 @@ static int star6e_batch_flush(Star6eOutput *output)
 	return (int)sent_total;
 }
 
+/* Bounded hold: drain until a queue slot frees, or the bound expires and the
+ * caller refuses the frame as before.  See STAR6E_OUTPUT_ADMIT_HOLD_US.
+ *
+ * Deliberately checks depth rather than calling _begin and retrying: a failed
+ * _begin counts an overflow, and a hold loop would both inflate the counter
+ * and feed the clamp a burst of phantom congestion events.
+ *
+ * The 200 us nap matters.  The pacing gate stops the drain while the socket
+ * still holds a frame, so without it this spins on SIOCOUTQ for the whole
+ * bound on the CPU the encode thread is pinned to. */
+static void star6e_output_hold_for_slot(Star6eOutput *output)
+{
+	uint64_t deadline = wb_monotonic_us() + output->admit_hold_us;
+
+	while (venc_frame_queue_depth(output->frame_queue) >=
+	       VENC_FRAME_QUEUE_SLOTS) {
+		struct timespec nap = { 0, 200000 };
+
+		if (wb_monotonic_us() >= deadline)
+			break;
+		if (star6e_output_drain_paced(output) == 0)
+			(void)nanosleep(&nap, NULL);
+	}
+	/* Draining borrows the batch scratch; restore what begin_frame set. */
+	output->batch.count = 0;
+	output->batch.flush_budget_us = STAR6E_OUTPUT_FLUSH_BUDGET_US;
+	output->batch.discard_remaining = 0;
+	output->batch.discard_as_error = 0;
+}
+
 void star6e_output_begin_frame(Star6eOutput *output)
 {
 	Star6eOutputBatch *b;
@@ -676,6 +710,8 @@ void star6e_output_begin_frame(Star6eOutput *output)
 		? 1 : 0;
 	b->queue_open = 0;
 	if (b->paced) {
+		if (output->admit_hold_us > 0)
+			star6e_output_hold_for_slot(output);
 		b->queue_open = (venc_frame_queue_begin(output->frame_queue,
 			wb_monotonic_us()) == 0) ? 1 : 0;
 	}

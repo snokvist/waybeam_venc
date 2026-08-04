@@ -52,6 +52,42 @@
  * since production is also one frame per call. */
 #define STAR6E_OUTPUT_DRAIN_BUDGET_US 4000
 
+/* Bounded hold at admission (outgoing.unix_admit_hold_frames, 0 = off):
+ * when the paced frame queue is full, drain and wait for a slot instead of
+ * refusing the frame outright.
+ *
+ * A refused frame is a reference picture the decoder never receives.  A frame
+ * the encoder was held from producing costs framerate only — the next capture
+ * is encoded against the previous *encoded* frame, so the H.265 chain stays
+ * intact.  Holding trades the first kind of loss for the second.
+ *
+ * It also restores the control signal.  At 2 slots without a hold the queue is
+ * bimodal — 0 or full — so the minimum-over-interval sojourn that venc_codel
+ * decides on always sees a zero sample, and every clamp decrease ends up
+ * triggered by an overflow that already cost a frame.  A hold long enough to
+ * produce standing occupancy flips the loop back to delay-driven: measured at
+ * 60 fps / 2 slots, 0 delay-driven cuts without the hold versus 37 with it,
+ * and refusals down from 16.7 to 1.0 per 45 s.
+ *
+ * Counted in FRAME PERIODS, not milliseconds, because what the hold must cover
+ * is one queued frame's drain time — at CBR that is (bitrate/fps)/drain_rate,
+ * which scales as 1/fps.  A millisecond bound worth 3 frame periods at 60 fps
+ * is 6 at 120 and 1.5 at 30: too long to be safe at one end of the matrix and
+ * too short to do anything at the other.  Device-measured at 60 fps: 1 frame
+ * period bought nothing (the bound expires exactly as the slot would free),
+ * 3 removed ~94 % of refusals for ~1.3 fps.
+ *
+ * Unlike the drain budget above, this one *is* inside the VENC critical
+ * section (begin_frame runs between MI_VENC_GetStream and
+ * MI_VENC_ReleaseStream), which is exactly where UNIX_SOCKET_HANDOVER.md §1.2
+ * measured a 634 ms capture stall from an unbounded block.  The bound is what
+ * makes it safe: the frame is still refused when it expires, so a wedged
+ * consumer degrades to today's behaviour instead of stalling capture.  Device
+ * check: a 4 s hard wedge cost a 4.02 s delivery gap and nothing more. */
+
+/* Frame period assumed when fps is unknown (0), i.e. 60 fps. */
+#define STAR6E_OUTPUT_FRAME_PERIOD_FALLBACK_US 16667u
+
 typedef enum {
 	STAR6E_STREAM_MODE_COMPACT = 0,
 	STAR6E_STREAM_MODE_RTP = 1,
@@ -63,6 +99,8 @@ typedef struct {
 	int requested_connected_udp;
 	int unix_legacy_blocking;
 	int unix_pacing;
+	uint32_t fps;   /* video0.fps; sizes the admit hold, 0 = assume 60 */
+	uint8_t admit_hold_frames;  /* outgoing.unix_admit_hold_frames */
 	int has_server;
 } Star6eOutputSetup;
 
@@ -131,6 +169,10 @@ typedef struct {
 	 * frame_queue != NULL: the queue is allocated lazily and kept across a
 	 * redirect, so this is what star6e_output_is_paced() reports. */
 	int paced_active;
+	/* Bounded admit hold in us, = ADMIT_HOLD_FRAMES x the frame period at
+	 * the configured fps.  Resolved once at open so the frame path does no
+	 * division; 0 disables the hold. */
+	uint32_t admit_hold_us;
 	venc_ring_t *ring;
 	venc_frame_ring_t *frame_ring;
 	/* Paced unix:// egress (include/venc_frame_queue.h).  Non-NULL only

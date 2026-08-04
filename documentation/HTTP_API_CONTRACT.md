@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.20.0`
+- `contract_version`: `0.21.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -1631,6 +1631,15 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.21.0` (additive — bounded admit hold on `unix://`):
+  Added restart-required `outgoing.unix_admit_hold_frames` (camelCase alias
+  `outgoing.unixAdmitHoldFrames`), `uint8`, default **`3`**. When the paced
+  frame queue is full, the encoder is held this many **frame periods** waiting
+  for a slot before the frame is refused; `0` restores 0.20.0 behaviour of
+  refusing immediately. Frame periods rather than milliseconds because the wait
+  covers one queued frame's drain time, which scales as `1/fps`. Inert unless
+  `outgoing.unix_pacing` is on and the transport is `unix://` in RTP mode.
+  No response shapes change.
 - `0.20.0` (behaviour + rename — Unix pacing on by default):
   `GET /api/v1/transport/status` gains `queueOversizeDrops` on the UDP/Unix
   branch — frames refused because they exceed one queue slot, which was

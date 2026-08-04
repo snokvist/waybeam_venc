@@ -2,8 +2,8 @@
 
 <!-- version: 1.2.0 -->
 
-Branch: `claude/waybeam-venc-bitrate-throttle-brujl3` · Version `0.64.0` ·
-Contract `0.19.0`
+Branch: `claude/waybeam-venc-bitrate-throttle-brujl3` · Version `0.65.0` ·
+Contract `0.20.0`
 
 **Base:** this branch sits on **PR #214** (`claude/unix-socket-speed-limits-az62s4`,
 0.63.0), which is open and unmerged. #214 is a prerequisite, not a
@@ -26,7 +26,7 @@ is the gate for everything else.
 ## 1. What this adds, in one paragraph
 
 `unix://` output can now hold encoded frames in a producer-side queue
-(`src/venc_frame_queue.c`, 8 slots x 384 KB) and feed the socket one frame
+(`src/venc_frame_queue.c`, 2 slots x 384 KB since §5.12) and feed the socket one frame
 at a time, so backlog accumulates somewhere venc can measure it instead of
 in the kernel's datagram-counted queue — whose depth is latched into the
 *consumer's* socket at that socket's creation and which venc therefore does
@@ -69,7 +69,7 @@ programs it. That is the mode most of this plan is measured in.
 | Field | Meaning |
 |---|---|
 | `paced` | pacing actually active |
-| `queueFrames` | frames currently queued (0..8) |
+| `queueFrames` | frames currently queued (0..VENC_FRAME_QUEUE_SLOTS) |
 | `queueDelayUs` | **the controller's input** — age of the oldest queued frame, 0 when empty |
 | `queueSojournUs` | last completed frame's measured queue time (telemetry only) |
 | `queueOverflows` | frames refused whole because the queue was full |
@@ -704,3 +704,113 @@ Two commits on top of #214. `git revert` the implementation commit and the
 branch returns to plain 0.63.0 behaviour. Or leave it deployed and set
 `unixPacing=false` — the flag is the rollback, which is why the default is
 off.
+
+---
+
+## 5.14 Pacing + bounded blocking: the missing mode (2026-08-04, same device)
+
+Proposed by the author: pace *and* block — let the pacer catch the common case,
+and when the queue does fill, hold the encoder instead of refusing the frame.
+Currently the two are mutually exclusive and `unixLegacyBlocking` turns pacing
+off entirely.
+
+**Why it should work, and why the obvious mechanism is not the one.** A refused
+frame is a reference picture the decoder never receives. A *held* frame is one
+the encoder never produced — the next capture is encoded against the previous
+encoded frame, so the H.265 reference chain is intact and the only cost is
+framerate. Holding converts a chain break into a dropped frame at the source.
+
+My prior expectation — that holding would let the queue stand full and revive
+the dead min-sojourn signal of §5.13 — is **wrong**: `queueFrames` still reads
+only 0 or 2, never 1, and delay-driven cuts stayed at 0. The queue at depth 2 is
+bimodal; holding does not create standing delay, it just alternates faster. The
+mechanism is simpler than that — the hold buys the drain enough time to free a
+slot.
+
+Implemented as `STAR6E_OUTPUT_ADMIT_HOLD_US` (0 = off): before
+`venc_frame_queue_begin`, drain in a loop while the queue is full, up to a
+bound, then refuse exactly as before. **The bound is not optional.**
+`begin_frame` runs between `MI_VENC_GetStream` and `MI_VENC_ReleaseStream`,
+which is precisely where UNIX_SOCKET_HANDOVER.md §1.2 measured a 634 ms capture
+stall from an unbounded block.
+
+Same operating point as §5.13 (15 Mbps configured, `--drain-kbps 8000`, 45 s,
+n=3):
+
+| | default (refuse) | hold 16 ms | **hold 50 ms** |
+|---|---:|---:|---:|
+| frames refused (chain breaks) | 16.7 | 19.5 | **1.7** |
+| sequence gaps | 141 | 184 | **3.3** |
+| frames never encoded | 0 | 0 | 73 |
+| delivered fps | 59.7 | 59.6 | 58.4 |
+| goodput | 7.891 Mbps | 7.87 | **8.000** (drain ceiling) |
+
+**50 ms removes 90 % of the chain breaks and 98 % of the sequence gaps, and
+goodput goes *up*** — pinned at the consumer's 8.000 Mbps ceiling, because
+capacity is no longer spent encoding frames that get thrown away. The price is
+73 frames per 45 s that were never encoded: 58.4 fps instead of 59.7.
+
+**16 ms buys nothing** — worse than the default, inside spread. One frame of
+drain at 8 Mbps is ~16 ms, so a one-frame-period bound expires just as the slot
+would have freed. The bound has to cover several frames of drain to be worth
+anything.
+
+### Hard wedge — the case the bound exists for
+
+4 s wedge inside a 40 s run, hold 50 ms: delivery gap **4.02 s**, i.e. the wedge
+and nothing more. 80 frames refused once the bound expired, HTTP responsive
+throughout, CPU 19.7 %, no capture stall. Recovery on an uncapped consumer
+immediately after: **60.07 fps, 14.87 Mbps, 0 sequence gaps**, max frame spread
+567 us. Compare the same wedge on the other modes (§5.11): pre-0.65 default
+discards 4396 packets as partial frames, `unixLegacyBlocking` discards none but
+stalls capture for the full duration and unboundedly beyond.
+
+So the three-way exclusion is wrong. The useful axis is not "pace *or* block",
+it is **how long to hold before giving up**, with `unixLegacyBlocking`
+(unbounded) and the pre-0.66 default (zero) as the two ends of it. Shipped as
+`outgoing.unixAdmitHoldFrames`, default **3**.
+
+### Correction — the delay signal *does* come back
+
+The paragraph above (written from the 16 ms run) said holding does not revive
+§5.13's dead min-sojourn signal. That is wrong, and only counting cut causes
+across the whole matrix showed it:
+
+| | loss-driven cuts | delay-driven cuts |
+|---|---:|---:|
+| no hold (§5.13) | 28 | **0** |
+| hold 1 frame period | 7 | **0** |
+| **hold 3 frame periods, 2 slots** | 3 | **37** |
+| hold 3 frame periods, 3 slots | 1 | 44 |
+
+One frame period is too short to produce standing occupancy, so the queue stays
+bimodal and every cut is still loss-driven. Three is enough: `queueFrames`
+starts reading intermediate values, the interval minimum clears `TARGET_US`, and
+**the controller flips back to delay-driven** — clamping before the queue
+overflows, which is what it was designed to do. That is the mechanism behind the
+94 % drop in refusals, and it means the hold is not a workaround bolted beside
+the controller but the thing that lets the controller work at this depth.
+
+### Depth revisited, with the hold in place
+
+Hold fixed at 3 frame periods, n=3 each:
+
+| | **2 slots** | 3 slots | 4 slots |
+|---|---:|---:|---:|
+| frames refused | 1.0 | 0.3 | 0.3 |
+| delivered fps | 58.68 | 59.22 | 59.38 |
+| frames never encoded | 60 | 37 | 30 |
+| goodput | **7.994 Mbps** | 7.979 | 7.953 |
+| queue delay p95 | **19.8 ms** | 34.8 | 50.6 |
+| queue delay max | **38.2 ms** | 65.6 | 98.9 |
+
+Each extra slot buys ~0.35 fps (fewer holds) and costs ~15 ms of p95 queue
+delay. §5.12's law — added latency is depth over drain rate — still holds, but
+for a changed reason: the queue no longer *runs* full, it simply sits deeper.
+Refusals are already ~1 per 45 s at 2 slots, so depth has almost nothing left to
+remove. **2 slots stays.**
+
+⚠️ Do not read `max_marker_gap_us` as queue latency. It is delivery *spacing*
+and is dominated by encoder cadence — it read 35.7 / 33.8 / 36.2 ms across the
+three depths while the actual queue delay doubled. Use `queueDelayUs` from the
+status poll.

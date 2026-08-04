@@ -6,7 +6,7 @@
  * from the code twice (0.19.0 was documented while the code still emitted
  * 0.18.0).  test_contract_version_matches_doc() fails the build if the doc and
  * this macro disagree, so a doc-only bump cannot ship again. */
-#define VENC_CONTRACT_VERSION "0.20.0"
+#define VENC_CONTRACT_VERSION "0.21.0"
 
 #include "venc_config.h"
 

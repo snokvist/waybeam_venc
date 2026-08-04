@@ -1,5 +1,46 @@
 # History
 
+## [0.66.0] - 2026-08-04
+
+`unix://` pacing and blocking are no longer opposites.
+
+New `outgoing.unixAdmitHoldFrames` (default **3**, restart-required): when the
+paced frame queue is full, hold the encoder that many **frame periods** waiting
+for a slot before refusing the frame. 0 restores 0.65.0 behaviour.
+
+A refused frame is a reference picture the decoder never receives. A frame the
+encoder was held from producing costs framerate only — the next capture is
+encoded against the previous *encoded* frame, so the H.265 chain stays intact.
+Holding trades the first kind of loss for the second, and at 15 Mbps against an
+8 Mbps consumer that trade measured: **refusals 16.7 -> 1.0 per 45 s and
+sequence gaps 141 -> 2, for 1.3 fps** (58.7 delivered instead of 59.7) — with
+goodput going *up*, to the consumer's 8.000 Mbps ceiling, because capacity is no
+longer spent encoding frames that get thrown away.
+
+It also repairs the control loop. At 2 slots the queue was bimodal, so the
+minimum-over-interval sojourn `venc_codel` decides on always saw a zero sample
+and **every** clamp decrease was triggered by an overflow that had already cost
+a frame — 0 delay-driven cuts in 28. With the hold it is 37 delay-driven against
+3 loss-driven: the clamp now acts *before* the queue overflows, as designed.
+
+Counted in frame periods rather than milliseconds because the wait has to cover
+one queued frame's drain time, which at CBR scales as 1/fps. A millisecond bound
+worth 3 frame periods at 60 fps would be 6 at 120 and 1.5 at 30. Device-measured
+at 60 fps: 1 frame period buys nothing, 3 is the first value that works.
+
+The bound is what makes this safe. `begin_frame` runs inside the VENC critical
+section, where UNIX_SOCKET_HANDOVER.md §1.2 measured a 634 ms capture stall from
+an unbounded block; when the bound expires the frame is refused exactly as
+before. A 4 s hard wedge cost a 4.02 s delivery gap and nothing more, with the
+HTTP surface responsive throughout and recovery to 60.07 fps / 14.87 Mbps / 0
+gaps immediately after.
+
+Queue depth stays at 2. With the hold in place, 3 and 4 slots remove the last
+~0.7 refusals and buy ~0.35 fps each, but cost ~15 ms of p95 queue delay per
+slot — the wrong trade for an FPV link.
+
+Contract `0.21.0`.
+
 ## [0.65.0] - 2026-08-04
 
 Paced `unix://` egress is now the **default**, and the flag that opts out of it

@@ -241,6 +241,13 @@ typedef struct {
 	                                     * (include/venc_codel.h) on top of
 	                                     * unix_pacing.  Off = measure and
 	                                     * report only. */
+	uint8_t unix_admit_hold_frames;     /* when the paced queue is full, hold
+	                                     * the encoder this many FRAME PERIODS
+	                                     * waiting for a slot before refusing
+	                                     * the frame.  Counted in frame
+	                                     * periods because the wait covers one
+	                                     * frame's drain time, which scales as
+	                                     * 1/fps.  0 = refuse immediately. */
 } VencConfigOutgoing;
 
 typedef struct {
