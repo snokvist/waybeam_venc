@@ -58,7 +58,6 @@
     "unixLegacyBlocking": false,
     "unixPacing": true,
     "unixThrottle": true,
-    "unixAdmitHoldFrames": 3,
     "audioPort": 5601,
     "sidecarPort": 5602,
     "shmThrottle": true

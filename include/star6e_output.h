@@ -52,9 +52,11 @@
  * since production is also one frame per call. */
 #define STAR6E_OUTPUT_DRAIN_BUDGET_US 4000
 
-/* Bounded hold at admission (outgoing.unix_admit_hold_frames, 0 = off):
- * when the paced frame queue is full, drain and wait for a slot instead of
- * refusing the frame outright.
+/* Bounded hold at admission: when the paced frame queue is full, drain and
+ * wait for a slot instead of refusing the frame outright.  Compile-time
+ * policy like the budgets above — the value is already expressed in the unit
+ * that makes it fps-invariant, so there is nothing left for a config knob to
+ * vary.
  *
  * A refused frame is a reference picture the decoder never receives.  A frame
  * the encoder was held from producing costs framerate only — the next capture
@@ -85,6 +87,8 @@
  * consumer degrades to today's behaviour instead of stalling capture.  Device
  * check: a 4 s hard wedge cost a 4.02 s delivery gap and nothing more. */
 
+#define STAR6E_OUTPUT_ADMIT_HOLD_FRAMES 3u
+
 /* Frame period assumed when fps is unknown (0), i.e. 60 fps. */
 #define STAR6E_OUTPUT_FRAME_PERIOD_FALLBACK_US 16667u
 
@@ -100,7 +104,6 @@ typedef struct {
 	int unix_legacy_blocking;
 	int unix_pacing;
 	uint32_t fps;   /* video0.fps; sizes the admit hold, 0 = assume 60 */
-	uint8_t admit_hold_frames;  /* outgoing.unix_admit_hold_frames */
 	int has_server;
 } Star6eOutputSetup;
 

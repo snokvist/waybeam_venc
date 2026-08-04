@@ -768,7 +768,9 @@ stalls capture for the full duration and unboundedly beyond.
 So the three-way exclusion is wrong. The useful axis is not "pace *or* block",
 it is **how long to hold before giving up**, with `unixLegacyBlocking`
 (unbounded) and the pre-0.66 default (zero) as the two ends of it. Shipped as
-`outgoing.unixAdmitHoldFrames`, default **3**.
+`STAR6E_OUTPUT_ADMIT_HOLD_FRAMES` = **3**, compile-time policy rather than a
+config key: expressed in frame periods the value is already fps-invariant, so
+there is nothing left for a knob to vary. No contract change.
 
 ### Correction — the delay signal *does* come back
 
@@ -814,3 +816,40 @@ remove. **2 slots stays.**
 and is dominated by encoder cadence — it read 35.7 / 33.8 / 36.2 ms across the
 three depths while the actual queue delay doubled. Use `queueDelayUs` from the
 status poll.
+
+### The workload that actually matters: transient stalls, not sustained congestion
+
+Every number above came from a consumer pinned at 8 Mbps for the whole run — a
+*permanently* congested link, which is a state the craft never flies in
+(waybeam-link would have dropped `video0.bitrate` long before). Real FPV is
+~95 % healthy with transient wedges. Re-run under the RF-shaped `fpv` profile —
+`12000:4000,4000:3000,12000:2000,0:250,9000:2500,0:120,7000:3000,15000:3000,2000:1200,12000:1000`,
+a 20 s loop with two hard wedges (250 ms, 120 ms), drops to 2-4 Mbps and a fully
+healthy 15 Mbps segment — with `follow.sh` emulating waybeam-link's ~1.5 s rate
+loop on top. 60 s, n=3:
+
+| | hold 0 | **hold 3 frames** |
+|---|---:|---:|
+| frames refused (chain breaks) | 138.0 (141/132/141) | **33.3** (34/30/36) |
+| sequence gaps | 649 | **284** |
+| frames delivered | 3466 (57.8 fps) | **3466 (57.8 fps)** |
+| goodput | 3.597 Mbps | **3.999 Mbps** |
+| max delivery gap | 276 ms | 277 ms |
+| CPU (settled runs) | 15.35 % | 15.5 % |
+
+**76 % fewer chain breaks, 11 % more goodput, and — unlike the sustained case —
+no framerate cost at all.** Delivered frames are identical to the frame. The
+1.3 fps the hold cost against a permanently slow consumer does not appear here,
+because the encoder is only held during the wedges and runs free the rest of the
+time; integrated over a realistic duty cycle the held time is negligible.
+
+The tail is unchanged: max delivery gap 276 vs 277 ms, which is the profile's own
+250 ms wedge plus a frame period. The hold adds no latency spike of its own.
+
+This is the case the feature exists for, and it is a strictly better result than
+the sustained test that motivated it — worth remembering that the artificial
+worst case understated the benefit *and* overstated the cost.
+
+⚠️ CPU per run was 25.7/15.3/15.4 (hold 0) and 26.9/24.9/15.5 (hold 3) — the
+post-restart transient again, and it took three runs to decay on one arm and two
+on the other. Only the settled runs are comparable, and they are equal.

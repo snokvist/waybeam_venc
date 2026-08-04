@@ -131,7 +131,6 @@ void venc_config_defaults(VencConfig *cfg)
 	 * benefit on the table. */
 	cfg->outgoing.unix_pacing = true;
 	cfg->outgoing.unix_throttle = true;
-	cfg->outgoing.unix_admit_hold_frames = 3;
 	cfg->outgoing.shm_throttle = true;
 
 	/* fpv */
@@ -702,8 +701,6 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 		s->unix_legacy_blocking);
 	s->unix_pacing = json_get_bool(obj, "unixPacing", s->unix_pacing);
 	s->unix_throttle = json_get_bool(obj, "unixThrottle", s->unix_throttle);
-	s->unix_admit_hold_frames = (uint8_t)json_get_int(obj,
-		"unixAdmitHoldFrames", (int)s->unix_admit_hold_frames);
 	s->audio_port = json_get_int(obj, "audioPort", s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
@@ -1367,8 +1364,6 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 		cfg->outgoing.unix_legacy_blocking, 0);
 	pp_field_bool(p,   2, "unixPacing",      cfg->outgoing.unix_pacing,     0);
 	pp_field_bool(p,   2, "unixThrottle",    cfg->outgoing.unix_throttle,   0);
-	pp_field_int(p,    2, "unixAdmitHoldFrames",
-		(int)cfg->outgoing.unix_admit_hold_frames, 0);
 	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
 	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    0);
 	pp_field_bool(p,   2, "shmThrottle",     cfg->outgoing.shm_throttle,      1);
@@ -1633,8 +1628,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddBoolToObject(out, "unixPacing", cfg->outgoing.unix_pacing);
 		cJSON_AddBoolToObject(out, "unixThrottle",
 			cfg->outgoing.unix_throttle);
-		cJSON_AddNumberToObject(out, "unixAdmitHoldFrames",
-			cfg->outgoing.unix_admit_hold_frames);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
 		cJSON_AddBoolToObject(out, "shmThrottle", cfg->outgoing.shm_throttle);

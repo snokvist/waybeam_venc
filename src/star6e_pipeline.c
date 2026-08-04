@@ -1768,8 +1768,6 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	/* The admit hold is expressed in frame periods rather than
 	 * milliseconds, so the output layer needs fps to resolve it. */
 	pconf->output_setup.fps = vcfg->video0.fps;
-	pconf->output_setup.admit_hold_frames =
-		vcfg->outgoing.unix_admit_hold_frames;
 
 	/* Auto-cap exposure to frame period so the AE shutter never exceeds
 	 * the frame period.  Without this, the AE converges on a long

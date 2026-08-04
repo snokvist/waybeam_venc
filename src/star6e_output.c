@@ -287,7 +287,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 	 * never engage.  Compact mode is excluded because it does not use
 	 * the batch path (UNIX_SOCKET_HANDOVER.md §6). */
 	output->unix_pacing = setup->unix_pacing ? 1 : 0;
-	output->admit_hold_us = setup->admit_hold_frames *
+	output->admit_hold_us = STAR6E_OUTPUT_ADMIT_HOLD_FRAMES *
 		(setup->fps ? (1000000u / setup->fps) :
 			STAR6E_OUTPUT_FRAME_PERIOD_FALLBACK_US);
 	star6e_output_refresh_pacing(output);

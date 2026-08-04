@@ -464,15 +464,6 @@ static const FieldUi ui_unix_throttle = {
 	"Requires Unix frame pacing; off means measure and report only."
 };
 
-static const FieldUi ui_unix_admit_hold = {
-	"Outgoing", "Unix admit hold (frames)", "number", 0, 10, 1, NULL,
-	"unix:// only: when the paced queue is full, wait up to this many frame "
-	"periods for a slot before refusing the frame. Holding stalls the encoder "
-	"briefly, which costs framerate; refusing costs a reference picture and "
-	"breaks the H.265 chain. Measured at 60 fps: 3 removes ~94% of refusals "
-	"for ~1.3 fps. 0 = refuse immediately (pre-0.66 behaviour)."
-};
-
 static const FieldUi ui_shm_throttle = {
 	"Outgoing", "SHM ring throttle", "toggle", 0, 0, 0, NULL,
 	"frame-shm:// only: clamp the encoder bitrate when the ring backs up, so "
@@ -599,8 +590,6 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(outgoing, shm_throttle,   FT_BOOL,   MUT_LIVE, &ui_shm_throttle),
 	FIELD_UI(outgoing, unix_pacing,    FT_BOOL,   MUT_RESTART, &ui_unix_pacing),
 	FIELD_UI(outgoing, unix_throttle,  FT_BOOL,   MUT_LIVE, &ui_unix_throttle),
-	FIELD_UI(outgoing, unix_admit_hold_frames, FT_UINT8, MUT_RESTART,
-		&ui_unix_admit_hold),
 
 	/* mDNS device beacon — read at boot / re-read on SIGHUP-respawn, so
 	 * all restart-required (no live re-announce path). */
@@ -794,7 +783,6 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.shmThrottle", "outgoing.shm_throttle" },
 	{ "outgoing.unixPacing", "outgoing.unix_pacing" },
 	{ "outgoing.unixThrottle", "outgoing.unix_throttle" },
-	{ "outgoing.unixAdmitHoldFrames", "outgoing.unix_admit_hold_frames" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.unixLegacyBlocking", "outgoing.unix_legacy_blocking" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
