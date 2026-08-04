@@ -1376,7 +1376,7 @@ static int test_unix_legacy_blocking_restart(void)
 		cfg.outgoing.unix_legacy_blocking == false);
 	CHECK("unix stall restart rc",
 		apply_set_query_http(&cfg, "maruko", NULL,
-			"outgoing.allowUnixEncoderStall=true", &status, response,
+			"outgoing.unixLegacyBlocking=true", &status, response,
 			sizeof(response)) == 0);
 	CHECK("unix stall restart status", status == 200);
 	CHECK("unix stall restart cfg",

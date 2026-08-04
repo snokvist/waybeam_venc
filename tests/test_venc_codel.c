@@ -46,7 +46,6 @@ int test_venc_codel(void)
 	/* ── 1. Engage ──────────────────────────────────────────────── */
 	venc_codel_reset(&c, now);
 	CHECK("codel_reset_unclamped", venc_codel_permille(&c) == 1000);
-	CHECK("codel_reset_enabled", venc_codel_is_enabled(&c) == 1);
 	CHECK("codel_reset_no_floor_edge", venc_codel_floor_edge(&c) == 0);
 	CHECK("codel_reset_no_reported_min",
 		venc_codel_reported_min_us(&c) == VENC_CODEL_NO_SAMPLE);
@@ -171,50 +170,22 @@ int test_venc_codel(void)
 	CHECK("codel_silent_no_change", venc_codel_tick(&c, now) == 0);
 	CHECK("codel_silent_holds", venc_codel_permille(&c) == 800);
 
-	/* ── 8. Enable/disable releases the clamp ───────────────────── */
+	/* ── 8. Reset releases the clamp ────────────────────────────── */
 	venc_codel_reset(&c, now);
 	(void)step_interval(&c, &now, VENC_CODEL_TARGET_US * 3, 0);
-	CHECK("codel_disable_setup", venc_codel_permille(&c) == 800);
-	venc_codel_set_enabled(&c, 0, now);
-	CHECK("codel_disable_releases", venc_codel_permille(&c) == 1000);
-	CHECK("codel_disable_reports_change", venc_codel_tick(&c, now) == 1);
-	CHECK("codel_disabled_flag", venc_codel_is_enabled(&c) == 0);
+	CHECK("codel_reset_setup", venc_codel_permille(&c) == 800);
+	venc_codel_reset(&c, now);
+	CHECK("codel_reset_releases", venc_codel_permille(&c) == 1000);
 
-	/* Disabled, the law does not run however bad the sojourn looks. */
-	(void)step_interval(&c, &now, VENC_CODEL_TARGET_US * 10, 0);
-	CHECK("codel_disabled_ignores_sojourn",
-		venc_codel_permille(&c) == 1000);
-
-	venc_codel_set_enabled(&c, 1, now);
-	CHECK("codel_reenable_starts_full", venc_codel_permille(&c) == 1000);
-	CHECK("codel_reenabled_flag", venc_codel_is_enabled(&c) == 1);
-
-	/* Idempotent — re-enabling an enabled controller must not reset a
-	 * clamp it has legitimately applied. */
-	(void)step_interval(&c, &now, VENC_CODEL_TARGET_US * 3, 0);
-	venc_codel_set_enabled(&c, 1, now);
-	CHECK("codel_enable_idempotent", venc_codel_permille(&c) == 800);
-
-	/* ── 9. Scaling ─────────────────────────────────────────────── */
-	CHECK("codel_scale_full", venc_codel_scale(1000, 15000) == 15000);
-	CHECK("codel_scale_half", venc_codel_scale(500, 15000) == 7500);
-	CHECK("codel_scale_floor_clamped",
-		venc_codel_scale(10, 15000) ==
-			15000 * VENC_CODEL_FLOOR_PERMILLE / 1000);
-	CHECK("codel_scale_no_overflow",
-		venc_codel_scale(800, 4000000u) == 3200000u);
-
-	/* ── 10. NULL safety ────────────────────────────────────────── */
+	/* ── 9. NULL safety ─────────────────────────────────────────── */
 	CHECK("codel_null_permille",
 		venc_codel_permille(NULL) == VENC_CODEL_FULL_PERMILLE);
 	CHECK("codel_null_tick", venc_codel_tick(NULL, now) == 0);
-	CHECK("codel_null_enabled", venc_codel_is_enabled(NULL) == 0);
 	CHECK("codel_null_floor_edge", venc_codel_floor_edge(NULL) == 0);
 	CHECK("codel_null_reported",
 		venc_codel_reported_min_us(NULL) == VENC_CODEL_NO_SAMPLE);
 	venc_codel_reset(NULL, now);
 	venc_codel_observe(NULL, 0, 0);
-	venc_codel_set_enabled(NULL, 1, now);
 
 	return failures;
 }

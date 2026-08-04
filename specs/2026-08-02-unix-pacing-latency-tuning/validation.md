@@ -819,3 +819,47 @@ the defect found in the original PR — and I reproduced it in this same change
 `test_contract_version_matches_doc()` asserting
 `documentation/HTTP_API_CONTRACT.md` declares the same string, so a doc-only
 bump fails the test suite.
+
+## Why the default still refuses ~0.6 % of frames (2026-08-04)
+
+Full data and method: `documentation/UNIX_PACING_DEVICE_HANDOVER.md` §5.13.
+Three results, in order of how much they constrain future work:
+
+**1. The receiver's "sequence gaps" are refused frames, exactly.** Across 14
+runs `frames_delivered + queueOverflows` equalled the encoded frame count
+(2701-2704 against 60.05 fps x 45 s) with `queueOversizeDrops` 0. There is no
+second loss mechanism to hunt.
+
+**2. The delay signal is structurally dead at 2 slots.** All 45 clamp decreases
+observed were triggered by an overflow; the min-sojourn rule fired zero times,
+including with the control interval shortened 200 ms -> 50 ms. Two slots at
+60 fps is 33 ms of queue, so the queue cannot stand non-empty across an interval
+without refusing first, and the minimum-over-interval rule therefore always sees
+a zero sample. **At depth 2 the controller is loss-driven by construction** and
+each AIMD cycle costs a frame. This is the price of the §5.12 depth reduction,
+and it should be stated whenever that reduction is cited: 8 slots bought a
+delay-driven loop, 2 slots bought 13.8x lower latency and a loss-driven one.
+
+**3. Only the cycle rate is tunable, and it trades frames for bitrate.**
+`VENC_CODEL_AI_STEP` 50 -> 20 halved refusals (16.7 -> 8.3 per 45 s, 0.62 % ->
+0.31 % of frames) at 2.8 % lower goodput. Softening the overflow charge x3/5 ->
+x4/5 moves the same trade back the other way. Two independent knobs landing on
+one frames-against-bitrate curve is the signature of a real trade rather than a
+mistuned constant.
+
+One candidate lands off that curve — AI_STEP 20 *with* the softer x4/5 charge
+gave baseline goodput (7.873 vs 7.891 Mbps) at ~29 % fewer refusals — but its
+spread (17, 11, 8) is much wider than baseline's (16, 16, 18) and trends within
+the set, so it is a lead, not a result. Nothing is adopted: these are
+single-operating-point numbers and the shipped values were locked against the
+broader RF-shaped profile, where a slower climb is charged differently. Re-run
+the candidate under that profile first.
+
+Rejected on measurement: draining before admission (the queue got *deeper* —
+sojourn max 33.6 -> 66.3 ms — with loss unchanged, because pushing earlier fills
+the socket and the pacing gate then blocks the next pass).
+
+Repeat of a known trap: CPU read 15.4 % (long-running control) vs 25.8 %
+(freshly restarted candidate) and looked like a regression. Restarting the
+control reproduced 25.8 %, decaying to 15.2 % by its third run. Restart both
+sides, discard two runs.

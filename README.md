@@ -253,7 +253,7 @@ omitted fields keep their compiled-in defaults.
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400,
-    "connectedUdp": true, "allowUnixEncoderStall": false,
+    "connectedUdp": true, "unixLegacyBlocking": false,
     "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv":      {

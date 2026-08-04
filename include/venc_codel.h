@@ -81,7 +81,10 @@
 extern "C" {
 #endif
 
+/* Overridable for sweeps (-DVENC_CODEL_INTERVAL_US=N). */
+#ifndef VENC_CODEL_INTERVAL_US
 #define VENC_CODEL_INTERVAL_US    200000u  /* control period */
+#endif
 #define VENC_CODEL_TARGET_US       10000u  /* >= this -> decrease */
 #define VENC_CODEL_RECOVER_US       5000u  /* <= this -> increase */
 /* Overridable for sweeps.  The floor is the lowest rate the controller can
@@ -92,9 +95,11 @@ extern "C" {
 #define VENC_CODEL_FLOOR_PERMILLE    250u
 #endif
 #define VENC_CODEL_FULL_PERMILLE    1000u
+#ifndef VENC_CODEL_AI_STEP
 #define VENC_CODEL_AI_STEP            50u  /* additive increase */
+#endif
 
-/* EXPERIMENT: asymmetric probing.  Congestion *response* must be fast, but
+/* Asymmetric probing.  Congestion *response* must be fast, but
  * capacity *discovery* need not be — a link does not gain headroom on a
  * 200 ms timescale.  Rate-limiting the increase to one step every N control
  * intervals (decrease still every interval) is intended to stop the climb
@@ -115,7 +120,6 @@ typedef struct {
 	uint64_t interval_start_us;
 	uint64_t last_overflows;
 	uint8_t  seeded;             /* last_overflows is meaningful */
-	uint8_t  enabled;
 	uint8_t  pending_change;     /* consumed by _tick */
 	uint8_t  overflow_charged;   /* overflow MD already applied this interval */
 	uint8_t  at_floor;           /* edge state for _floor_edge */
@@ -124,19 +128,16 @@ typedef struct {
 	                              * additive increase (VENC_CODEL_AI_EVERY) */
 } VencCodel;
 
-/* Zero state, permille = 1000, enabled.  Safe to call at any time; a
- * caller that re-creates its queue should call this so a stale interval
- * boundary or overflow count cannot leak across the restart. */
+/* Zero state, permille = 1000.  Safe to call at any time; a caller that
+ * re-creates its queue should call this so a stale interval boundary or
+ * overflow count cannot leak across the restart.
+ *
+ * The controller has no enable switch: it always observes, and whether its
+ * factor is *applied* is the caller's decision (outgoing.unixThrottle).
+ * Observing unconditionally is what lets the factor be reported while the
+ * apply is off, and it keeps the loop's state honest for the moment the
+ * apply is turned back on. */
 void venc_codel_reset(VencCodel *c, uint64_t now_us);
-
-/* Enable/disable.  Idempotent — safe to call every frame from config.
- * Disabling restores permille to 1000 and raises a pending change, so the
- * caller re-applies the unclamped bitrate rather than leaving the encoder
- * pinned at whatever the clamp last programmed.  Re-enabling starts from
- * 1000 with a fresh interval. */
-void venc_codel_set_enabled(VencCodel *c, int enabled, uint64_t now_us);
-
-int venc_codel_is_enabled(const VencCodel *c);
 
 /* Called once per encoded frame — no syscalls, a few loads and compares.
  * `sojourn_us` is the age of the oldest frame still queued, or 0 when the
@@ -154,13 +155,6 @@ uint16_t venc_codel_permille(const VencCodel *c);
  * any interval has closed.  Telemetry only — the control path uses the
  * in-progress accumulator, which this deliberately does not expose. */
 uint32_t venc_codel_reported_min_us(const VencCodel *c);
-
-/* Scale a bitrate by a clamp factor.  Takes the permille rather than the
- * struct because the apply path lives in the backend control layer, which
- * is reached from the HTTP thread and holds only the published factor —
- * the controller instance itself belongs to the pipeline thread. */
-uint32_t venc_codel_scale(uint16_t permille, uint32_t kbps);
-
 
 /* Floor-pinned transition, consumed by the caller's logging.  Returns 1
  * exactly once when the clamp reaches the floor, -1 exactly once when it

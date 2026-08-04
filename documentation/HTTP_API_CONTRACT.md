@@ -106,7 +106,7 @@ Response `200`:
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
       "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "resilience": "off", "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
-      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
+      "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "unixLegacyBlocking": false },
       "fpv": { "roiEnabled": true, "roiQp": 0, "roiSteps": 2, "roiCenter": 0.25, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
       "debug": { "showOsd": false }
@@ -566,7 +566,7 @@ curl "http://<device-ip>/api/v1/set?outgoing.maxPayloadSize=4000"
 # Restart-only
 curl "http://<device-ip>/api/v1/set?outgoing.stream_mode=compact"
 curl "http://<device-ip>/api/v1/set?outgoing.connected_udp=true"
-curl "http://<device-ip>/api/v1/set?outgoing.allowUnixEncoderStall=true"
+curl "http://<device-ip>/api/v1/set?outgoing.unixLegacyBlocking=true"
 ```
 
 - `outgoing.stream_mode`: `"rtp"` (default) or `"compact"`. Determines packetization format.
@@ -1392,7 +1392,7 @@ denominator is calibrated from the first send that saturates the queue and
 is an estimate from `net.unix.max_dgram_qlen` before that.  `fillPct` may
 therefore read low until the transport has been pushed once.
 
-With `outgoing.allowUnixEncoderStall=false`, `transportDrops` rising on
+With `outgoing.unixLegacyBlocking=false`, `transportDrops` rising on
 `unix://` means the consumer is not keeping up: a frame's packets exhausted
 the cumulative flush budget and the remainder was dropped rather than
 stalling the encoder. With the compatibility option enabled, ordinary queue
@@ -1636,10 +1636,17 @@ divergence is listed.  As of `contract_version: 0.12.1`:
   branch — frames refused because they exceed one queue slot, which was
   counted internally and never surfaced.
   `outgoing.unixPacing` and `outgoing.unixThrottle` now default **`true`**, so
-  a stock `unix://` deploy is paced and clamped. `outgoing.allowUnixEncoderStall`
-  is renamed `outgoing.unixLegacyBlocking`; the old key and the old
-  `/api/v1/set` field name both still resolve, so no client breaks. Field
-  shapes are unchanged.
+  a stock `unix://` deploy is paced and clamped.
+  **`outgoing.allowUnixEncoderStall` / `outgoing.allow_unix_encoder_stall` are
+  retired and replaced by `outgoing.unixLegacyBlocking` /
+  `outgoing.unix_legacy_blocking`.** The old spellings are not accepted — not
+  in the config file and not on `/api/v1/set`, where they now 404 as an
+  unknown field. They named a behaviour ("permit a stall") rather than the
+  mode they select, and they only ever existed on the 0.18.0-0.19.0
+  development line, so there is no deployed client to break. A config file
+  carrying only the old key loads cleanly and keeps the default (`false`) —
+  which is the same blocking-off behaviour that key's default selected.
+  Field shapes are unchanged.
 - `0.19.0` (additive — Unix paced egress + sojourn throttle):
   - Added restart-required `outgoing.unix_pacing` (alias
     `outgoing.unixPacing`) and live `outgoing.unix_throttle` (alias

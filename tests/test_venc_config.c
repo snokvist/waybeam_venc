@@ -28,9 +28,12 @@ static char *write_temp_json(const char *json)
 
 /* ── Tests ───────────────────────────────────────────────────────────── */
 
-/* outgoing.allowUnixEncoderStall was renamed to outgoing.unixLegacyBlocking in
- * 0.65.0.  Existing configs on disk still carry the old key, so both must
- * load, and a config carrying neither must keep the default. */
+/* outgoing.allowUnixEncoderStall was renamed to outgoing.unixLegacyBlocking
+ * in 0.65.0 and the old spelling is not accepted: it named a behaviour
+ * ("permit a stall") rather than the mode it selects, and it never shipped
+ * outside the 0.65.0 development branch, so there is no deployed config to
+ * keep working.  A config carrying only the retired key must load cleanly
+ * and keep the default rather than silently selecting blocking sends. */
 static int test_unix_legacy_blocking_key_compat(void)
 {
 	int failures = 0;
@@ -46,9 +49,9 @@ static int test_unix_legacy_blocking_key_compat(void)
 			"{\"outgoing\":{\"unixLegacyBlocking\":true}}");
 
 		venc_config_defaults(&cfg);
-		CHECK("legacy_key_old_name_loads",
+		CHECK("legacy_key_retired_name_ignored",
 			old_path && venc_config_load(old_path, &cfg) == 0 &&
-			cfg.outgoing.unix_legacy_blocking == true);
+			cfg.outgoing.unix_legacy_blocking == false);
 
 		venc_config_defaults(&cfg);
 		CHECK("legacy_key_new_name_loads",
@@ -255,7 +258,7 @@ static int test_load_full_json(void)
 		/* "codec" above is intentionally legacy — parser must silently drop it. */
 		"    \"size\": \"1280x720\", \"bitrate\": 4096, \"gopSize\": 1, \"qpDelta\": -7,"
 		"    \"framing\": \"zoom-2x\", \"zoomX\": 0.25, \"zoomY\": 0.75 },"
-		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false, \"allowUnixEncoderStall\": true },"
+		"  \"outgoing\": { \"enabled\": true, \"server\": \"udp://10.0.0.1:6000\", \"streamMode\": \"compact\", \"maxPayloadSize\": 1200, \"connectedUdp\": false, \"unixLegacyBlocking\": true },"
 		"  \"fpv\": { \"roiEnabled\": true, \"roiQp\": -18, \"roiSteps\": 2, \"noiseLevel\": 5 }"
 		"}";
 

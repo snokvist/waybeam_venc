@@ -48,37 +48,11 @@ void venc_codel_reset(VencCodel *c, uint64_t now_us)
 	c->interval_min_us = VENC_CODEL_NO_SAMPLE;
 	c->reported_min_us = VENC_CODEL_NO_SAMPLE;
 	c->interval_start_us = now_us;
-	c->enabled = 1;
-}
-
-void venc_codel_set_enabled(VencCodel *c, int enabled, uint64_t now_us)
-{
-	uint8_t want = enabled ? 1u : 0u;
-
-	if (!c || c->enabled == want)
-		return;
-
-	c->enabled = want;
-	c->interval_min_us = VENC_CODEL_NO_SAMPLE;
-	c->interval_start_us = now_us;
-	c->seeded = 0;
-	c->overflow_charged = 0;
-
-	/* Both directions land on 1000: disabling must actively release the
-	 * clamp (otherwise the encoder stays pinned wherever the loop last
-	 * left it), and enabling starts from unclamped so the first decision
-	 * is made on fresh evidence. */
-	set_permille(c, VENC_CODEL_FULL_PERMILLE);
-}
-
-int venc_codel_is_enabled(const VencCodel *c)
-{
-	return (c && c->enabled) ? 1 : 0;
 }
 
 void venc_codel_observe(VencCodel *c, uint32_t sojourn_us, uint64_t overflows)
 {
-	if (!c || !c->enabled)
+	if (!c)
 		return;
 
 	if (sojourn_us < c->interval_min_us)
@@ -126,15 +100,14 @@ int venc_codel_tick(VencCodel *c, uint64_t now_us)
 		 * (encoder idle, output disabled).  No evidence either way,
 		 * so hold -- decreasing on a silent interval would clamp an
 		 * idle encoder for no reason. */
-		if (c->enabled &&
-		    c->interval_min_us != VENC_CODEL_NO_SAMPLE) {
+		if (c->interval_min_us != VENC_CODEL_NO_SAMPLE) {
 			c->reported_min_us = c->interval_min_us;
-			/* EXPERIMENT (not for merge as-is): an overflow means
-			 * the queue was full, which means sojourn was already
-			 * far past TARGET — the two are the same event, and
-			 * charging both in one interval compounds to x0.48 and
-			 * walks straight to the floor before the first cut can
-			 * possibly be observed.  Take the harder charge only. */
+			/* An overflow means the queue was full, which means
+			 * sojourn was already far past TARGET — the two are
+			 * the same event, and charging both in one interval
+			 * compounds to x0.48 and walks straight to the floor
+			 * before the first cut can possibly be observed.  Take
+			 * the harder charge only. */
 			if (c->interval_min_us >= VENC_CODEL_TARGET_US &&
 			    !c->overflow_charged)
 				set_permille(c,
@@ -175,16 +148,6 @@ uint16_t venc_codel_permille(const VencCodel *c)
 uint32_t venc_codel_reported_min_us(const VencCodel *c)
 {
 	return c ? c->reported_min_us : VENC_CODEL_NO_SAMPLE;
-}
-
-uint32_t venc_codel_scale(uint16_t permille, uint32_t kbps)
-{
-	if (permille >= VENC_CODEL_FULL_PERMILLE)
-		return kbps;
-	if (permille < VENC_CODEL_FLOOR_PERMILLE)
-		permille = (uint16_t)VENC_CODEL_FLOOR_PERMILLE;
-	return (uint32_t)(((uint64_t)kbps * permille) /
-		VENC_CODEL_FULL_PERMILLE);
 }
 
 int venc_codel_floor_edge(VencCodel *c)

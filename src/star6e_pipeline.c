@@ -1758,7 +1758,7 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	if (vcfg->outgoing.unix_pacing &&
 	    vcfg->outgoing.unix_legacy_blocking) {
 		fprintf(stderr, "WARNING: outgoing.unixPacing ignored — "
-			"allowUnixEncoderStall is set, and the two are "
+			"unixLegacyBlocking is set, and the two are "
 			"mutually exclusive\n");
 		pconf->output_setup.unix_pacing = 0;
 	} else {

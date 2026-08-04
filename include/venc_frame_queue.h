@@ -38,10 +38,10 @@
  * latency to something the receiver cannot decode anyway.  This matches
  * the batch-flush semantics established in PR #214.
  *
- * Sizing mirrors venc_frame_ring: 8 slots of 384 KB.  Both egress paths
- * having one story is worth more than a few hundred KB.  8 frames is
- * 133 ms at 60 fps — deliberately deeper than the controller's target, so
- * venc_codel has room to act before the queue can overflow at all.
+ * Sizing does NOT mirror venc_frame_ring, though it started there.  The
+ * ring's 8 slots are consumer-jitter headroom around an operating point its
+ * controller holds at 0-1 slots; here the pacing gate lets the queue fill
+ * toward its depth, so depth is the latency.  See VENC_FRAME_QUEUE_SLOTS.
  *
  * Threading: single producer, single consumer, both the pipeline thread.
  * Not internally synchronised and does not need to be.  Stats are plain

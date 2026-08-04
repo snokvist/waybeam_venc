@@ -16,9 +16,13 @@ with the clamp off versus 96 % with it on.
 
 `outgoing.allowUnixEncoderStall` is renamed **`outgoing.unixLegacyBlocking`**.
 It is no longer just "permit a stall" — it is how you select the pre-0.63
-blocking-send behaviour, and selecting it disables pacing. The old JSON key and
-the old `/api/v1/set` field name both still resolve, so existing configs and
-clients keep working.
+blocking-send behaviour, and selecting it disables pacing. The old spelling is
+**removed**, not aliased: it only ever existed on the 0.18.0-0.19.0 contract
+line, so there is no deployed client to keep working, and carrying a
+compatibility alias for a name that describes the wrong thing is how a config
+surface accumulates. A config file holding only the old key loads cleanly and
+keeps the default, which is the same behaviour that key's own default selected;
+`/api/v1/set` returns 404 unknown_field for it.
 
 Fixed: a live redirect away from `unix://` left pacing running on the new
 transport. `star6e_output_apply_server()` only reconfigures the socket, and

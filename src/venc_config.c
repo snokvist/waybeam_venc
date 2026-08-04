@@ -697,11 +697,6 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
 	s->connected_udp = json_get_bool(obj, "connectedUdp", s->connected_udp);
-	/* Renamed from allowUnixEncoderStall in 0.65.0.  The old key is still
-	 * accepted so existing configs keep working; it is read first so an
-	 * explicit new-name setting wins if a config carries both. */
-	s->unix_legacy_blocking = json_get_bool(obj, "allowUnixEncoderStall",
-		s->unix_legacy_blocking);
 	s->unix_legacy_blocking = json_get_bool(obj, "unixLegacyBlocking",
 		s->unix_legacy_blocking);
 	s->unix_pacing = json_get_bool(obj, "unixPacing", s->unix_pacing);

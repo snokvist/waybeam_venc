@@ -350,8 +350,12 @@ int main(int argc, char **argv)
 		next_frame_us += 1000000u / fps;
 
 		permille = venc_codel_permille(&codel);
+		/* Plain multiply: the controller already clamps its factor to
+		 * FLOOR..FULL, so re-flooring here would only hide a controller
+		 * bug this harness exists to find. */
 		effective_kbps = throttle ?
-			venc_codel_scale(permille, kbps) : kbps;
+			(uint32_t)(((uint64_t)kbps * permille) /
+				VENC_CODEL_FULL_PERMILLE) : kbps;
 
 		/* Frame sizes carry the whole point of the experiment: an IDR
 		 * is IDR_RATIO x a P-frame, so occupancy measured in packets

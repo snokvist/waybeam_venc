@@ -53,7 +53,8 @@ Constraints, all enforced in code:
   pacing off — `paced` in the transport status is how you confirm it is
   actually on.
 - Mutually exclusive with `unixLegacyBlocking` (renamed from
-  `allowUnixEncoderStall` in 0.65.0; the old key still loads). Setting both
+  `allowUnixEncoderStall` in 0.65.0; the old key is retired, not aliased —
+  it loads as unknown and leaves the default). Setting both
   logs a warning and pacing loses — that flag *is* the way to turn pacing off.
 - `unixThrottle` with `unixPacing` off does nothing.
 
@@ -247,7 +248,7 @@ queue re-arms on return. Queued frames are dropped on a redirect by design.
 
 ### P8 — Mutual exclusion
 
-Set `unixPacing=true` and `allowUnixEncoderStall=true` together, restart.
+Set `unixPacing=true` and `unixLegacyBlocking=true` together, restart.
 
 **Pass:** the `outgoing.unixPacing ignored` warning appears once and
 `paced` reports `false`.
@@ -553,6 +554,107 @@ Follow-on programme, targets and remaining ideas:
 `specs/2026-08-02-unix-pacing-latency-tuning/`.
 
 ---
+
+## 5.13 Where the refused frames come from (2026-08-04, same device)
+
+Asked because the shipped default still refuses ~0.6 % of frames against a
+sustained slow consumer, and the RTP receiver reports that as sequence gaps.
+
+Setup: 15000 kbps configured, 1080p60, `resilience=range`,
+`server=unix://waybeam_venc_test`, consumer `--drain-kbps 8000`, 45 s,
+`waybeam-link` stopped, `maxIBytes`/`maxPBytes` zero. Production verified
+against an **uncapped** consumer first: 15.28 Mbps, 60.05 fps, 0 gaps — so no
+static-scene undershoot (§5.11). n=3 per variant, all after a restart, so the
+CPU transient below is common to every row.
+
+### The gaps are the refused frames, and nothing else
+
+In all 14 runs:
+
+    frames_delivered + queueOverflows = 2701..2704 = 60.05 fps x 45 s
+
+Every frame the encoder produced was either delivered whole or refused whole.
+No partial frames, no packet-granular loss, `queueOversizeDrops` 0 throughout.
+The receiver still sees a hole because RTP sequence numbers are assigned before
+admission (§5.10), and a refused frame burns ~8.6 of them against ~12.2 in an
+average frame — the frame that gets refused is the one *after* the frame that
+filled the queue, so it is typically smaller than average.
+
+### Every clamp decrease was triggered by a lost frame
+
+Counting clamp decreases in the 5 Hz status log and attributing each to whether
+`queueOverflows` moved in the same sample:
+
+| variant | loss-driven cuts | delay-driven cuts |
+|---|---:|---:|
+| as-shipped (200 ms interval) | 28 | **0** |
+| 50 ms interval | 8 | **0** |
+| AI_STEP 20 | 9 | **0** |
+
+**The min-sojourn rule never fires.** It is not mistuned — at 2 slots it cannot
+fire. `venc_codel` decides on the *minimum* sojourn across a control interval,
+and 2 slots at 60 fps is 33 ms of queue: the window between "queue starts
+standing" and "queue refuses a frame" is shorter than any usable interval, so
+every interval contains a sample where the queue touched empty and the minimum
+reads 0. Shortening the interval 4x does not reach it either.
+
+So at depth 2 the controller is necessarily **loss-driven** — Reno without ECN.
+Refusals are not a failure of the loop, they *are* its input, and the refusal
+count is the AIMD cycle count. This is the other half of the §5.12 depth
+decision: 8 slots (133 ms) could hold standing delay across a 200 ms interval,
+2 slots cannot. The 13.8x latency win and the loss-driven control are one fact.
+
+### What actually moves it
+
+Only the cycle *rate* is left, i.e. how fast the probe walks past capacity
+(sustainable here is 8000/15000 = 533 permille):
+
+| n=3 each | as-shipped | 50 ms interval | AI_STEP 20 | AI_STEP 20 + overflow x4/5 |
+|---|---:|---:|---:|---:|
+| frames refused | 16.7 | 13.3 | **8.3** | 12.0 |
+| (per run) | 16-16-18 | 14-14-12 | 10-7-8 | 17-11-8 |
+| sequence gaps | 141 | 115 | **73** | 121 |
+| goodput | 7.891 Mbps | 7.767 | 7.667 | **7.873** |
+| frame loss | 0.62 % | 0.49 % | **0.31 %** | 0.44 % |
+
+Halving the additive step halves the refusals for ~2.8 % goodput: the clamp
+tracks capacity more tightly (mean permille 500-534 against a sustainable 533)
+but spends longer below it after each cut. Softening the overflow charge moves
+the same trade back the other way — goodput restored, refusals part-way back.
+Two independent knobs landing on one frames-against-bitrate curve is what a real
+trade looks like, not a mistuned constant.
+
+The fourth column is the one worth another look: it lands *off* that curve —
+baseline goodput with ~29 % fewer refusals — but its run-to-run spread (17, 11,
+8) is far wider than the baseline's (16, 16, 18) and trends downward within the
+set, so it is suggestive, not established. **Nothing here is adopted.** These
+are single-operating-point numbers; the shipped constants were locked against
+the RF-shaped profile of §5.12, where a slower climb is charged differently.
+Re-run the candidate under that profile before touching a default.
+
+### Rejected: drain before admitting
+
+Hypothesis: `MI_VENC_GetStream` blocks for most of a frame period, so at
+admission the socket may have drained since the last pass; draining first would
+free a slot instead of refusing. Measured with a drain call added ahead of
+`venc_frame_queue_begin`, n=3 against an n=3 post-restart control:
+
+| | control | drain-before-admit |
+|---|---:|---:|
+| frames refused | 16, 16, 18 | 17, 17, 17 |
+| sequence gaps | 143, 117, 163 | 136, 168, 140 |
+| queue depth reached | 0-1 | 0-2 |
+| sojourn max | 33.6 ms | 66.3 ms |
+
+No effect on loss and the queue got *deeper*, because pushing earlier fills the
+socket and the pacing gate then blocks the following pass. Reverted.
+
+⚠️ **CPU is unreadable for ~2 runs after a restart** — again. The first
+measurement read 15.4 % (control, long-running) against 25.8 % (modified, fresh
+restart) and looked like a large regression. Restarting the *control* binary
+reproduced 25.8 %, and by its third run it had decayed to 15.2 %. Same trap as
+§5.12's unexplained 21.4 %. Any CPU comparison must restart both sides and
+discard the first two runs.
 
 ## 6. Optional: soak harness on ARM
 
