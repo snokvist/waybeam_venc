@@ -757,3 +757,65 @@ does, without the unbounded-stall failure mode. The PR already makes pacing and
 the flag mutually exclusive, so if pacing ships on, the flag is dead weight —
 which is the right reason to consider retiring it. Retiring it because the
 default already degrades gracefully would be wrong; the default drops packets.
+
+---
+
+# 0.65.0 — pacing on by default, flag renamed, redirect fixed. 2026-08-04
+
+Three changes, device-verified together.
+
+| check | result |
+|---|---|
+| stock config with **no** unix keys comes up paced | `paced: true`, `throttlePermille` 1000 ✓ |
+| redirect `unix://` → `udp://` clears pacing | `paced` **false** ✓ |
+| clamp releases immediately on redirect | 2 s after: `throttlePermille` **1000**, `effectiveBitrateKbps` 15000 ✓ |
+| redirect back to `unix://` re-arms | `paced: true` ✓ |
+| `unixLegacyBlocking: true` (new key) | warning once, `paced: false` ✓ |
+| `allowUnixEncoderStall: true` (retired key) | warning once, `paced: false`, reads back as `unixLegacyBlocking` ✓ |
+| venc alive throughout | ✓ |
+
+## Two corrections to the earlier P7 report
+
+**Stale frames were never a defect.** `begin_frame` already resets the queue on
+the pipeline thread when the transport generation changes — that is why
+`queueOverflows` reset across my original redirect. P7 consequence #3 was
+wrong, and the drain comment I called false is merely *misattributed* (the
+reset is in `begin_frame`, not `apply_server`); the behaviour it relies on is
+real.
+
+**The fix could not go where I first proposed.** The frame queue is
+deliberately unsynchronised and owned by the pipeline thread; freeing it from
+`apply_server` (HTTP thread) would have raced the drain. Pacing is instead
+re-evaluated on the pipeline thread at the same generation-change edge, via
+`star6e_output_refresh_pacing()`, and `is_paced()` now reports a
+`paced_active` flag rather than `frame_queue != NULL`. The queue is allocated
+lazily and kept across a redirect, so returning to `unix://` costs no
+allocation in the frame path.
+
+## The bug the device found that code reading did not
+
+Fixing `is_paced()` alone made the redirect case **worse**.
+`star6e_service_unix_codel()` was only called when `is_paced()` was true
+(`src/star6e_runtime.c:1368`), so its internal `if (!is_paced) { release }`
+branch was **dead code by construction**. Previously `is_paced` wrongly stayed
+true, so the service kept running and the clamp at least crept back to 1000
+over ~12 s. With `is_paced` corrected, the service stopped being called and the
+clamp **froze** at 300 permille indefinitely — measured on device.
+
+The service is now called unconditionally; only the drain stays gated. That
+makes the release branch reachable and the clamp returns to 1000 within one
+control window.
+
+Worth recording as a pattern: a correctness fix to a predicate can silently
+disable the very cleanup that depended on the predicate being wrong. The static
+read said the fix was complete; the device said otherwise.
+
+## Contract-version drift, guarded
+
+Bumping the contract to 0.20.0 in the docs and forgetting the code is exactly
+the defect found in the original PR — and I reproduced it in this same change
+(device reported 0.19.0 from a 0.65.0 build). The version now lives in
+`VENC_CONTRACT_VERSION` (`include/venc_api.h`) with
+`test_contract_version_matches_doc()` asserting
+`documentation/HTTP_API_CONTRACT.md` declares the same string, so a doc-only
+bump fails the test suite.

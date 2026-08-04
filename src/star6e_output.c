@@ -230,7 +230,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 
 	output->stream_mode = setup->stream_mode;
 	output->requested_connected_udp = setup->requested_connected_udp;
-	output->allow_unix_encoder_stall = setup->allow_unix_encoder_stall;
+	output->unix_legacy_blocking = setup->unix_legacy_blocking;
 	if (!setup->has_server)
 		return 0;
 
@@ -274,7 +274,7 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &setup->uri,
-	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    output->requested_connected_udp, output->unix_legacy_blocking,
 	    &output->connected_udp) != 0)
 		return -1;
 	(void)output_socket_capture_capacity(output->socket_handle,
@@ -285,23 +285,54 @@ int star6e_output_init(Star6eOutput *output, const Star6eOutputSetup *setup)
 	 * would read ~0 whatever the link is doing and the controller could
 	 * never engage.  Compact mode is excluded because it does not use
 	 * the batch path (UNIX_SOCKET_HANDOVER.md §6). */
-	if (setup->unix_pacing &&
-	    output->transport == VENC_OUTPUT_URI_UNIX &&
-	    output->stream_mode == STAR6E_STREAM_MODE_RTP &&
-	    !output->allow_unix_encoder_stall) {
-		output->frame_queue = venc_frame_queue_create();
-		if (!output->frame_queue) {
-			fprintf(stderr, "ERROR: venc_frame_queue_create() "
-				"failed; unix:// pacing disabled\n");
-		}
-	}
+	output->unix_pacing = setup->unix_pacing ? 1 : 0;
+	star6e_output_refresh_pacing(output);
 	__atomic_fetch_add(&output->transport_gen, 2, __ATOMIC_RELEASE);
 	return 0;
 }
 
+/* Should pacing run for the transport currently configured?  udp:// is
+ * excluded on purpose — its queue drains at qdisc speed, so the sojourn signal
+ * would read ~0 whatever the link is doing and the controller could never
+ * engage.  Compact mode is excluded because it does not use the batch path
+ * (UNIX_SOCKET_HANDOVER.md §6). */
+static int pacing_wanted(const Star6eOutput *output)
+{
+	return output->unix_pacing &&
+		output->transport == VENC_OUTPUT_URI_UNIX &&
+		output->stream_mode == STAR6E_STREAM_MODE_RTP &&
+		!output->unix_legacy_blocking;
+}
+
+/* Re-evaluate pacing against the current transport.  MUST be called on the
+ * pipeline thread only: the frame queue is deliberately unsynchronised, so
+ * allocating or freeing it from the HTTP thread (where apply_server runs)
+ * would race the drain.  The queue is allocated lazily on first need and then
+ * kept — a redirect away only clears paced_active, so returning to unix://
+ * costs no allocation in the frame path. */
+void star6e_output_refresh_pacing(Star6eOutput *output)
+{
+	if (!output)
+		return;
+	if (!pacing_wanted(output)) {
+		output->paced_active = 0;
+		return;
+	}
+	if (!output->frame_queue) {
+		output->frame_queue = venc_frame_queue_create();
+		if (!output->frame_queue) {
+			fprintf(stderr, "ERROR: venc_frame_queue_create() "
+				"failed; unix:// pacing disabled\n");
+			output->paced_active = 0;
+			return;
+		}
+	}
+	output->paced_active = 1;
+}
+
 int star6e_output_is_paced(const Star6eOutput *output)
 {
-	return (output && output->frame_queue) ? 1 : 0;
+	return (output && output->paced_active) ? 1 : 0;
 }
 
 void star6e_output_observe_queue(Star6eOutput *output, uint64_t now_us)
@@ -480,7 +511,7 @@ static int star6e_batch_flush(Star6eOutput *output)
 
 	started = 0;
 	deadline = 0;
-	if (!b->allow_unix_encoder_stall) {
+	if (!b->unix_legacy_blocking) {
 		started = wb_monotonic_us();
 		deadline = started + b->flush_budget_us;
 	}
@@ -499,7 +530,7 @@ static int star6e_batch_flush(Star6eOutput *output)
 				 * costs ~2 iterations, not a busy-spin. */
 				output_socket_note_saturation(fd,
 					&output->send_queue);
-				if (b->allow_unix_encoder_stall)
+				if (b->unix_legacy_blocking)
 					continue;
 				if (wb_monotonic_us() < deadline)
 					continue;
@@ -541,7 +572,7 @@ static int star6e_batch_flush(Star6eOutput *output)
 		 * capacity reading for the unix:// fill denominator. */
 		if (sent_total < b->count) {
 			output_socket_note_saturation(fd, &output->send_queue);
-			if (b->allow_unix_encoder_stall)
+			if (b->unix_legacy_blocking)
 				continue;
 			if (wb_monotonic_us() >= deadline) {
 				output->socket_drops +=
@@ -553,7 +584,7 @@ static int star6e_batch_flush(Star6eOutput *output)
 	}
 
 	output->socket_writes += (uint32_t)sent_total;
-	if (!b->allow_unix_encoder_stall) {
+	if (!b->unix_legacy_blocking) {
 		elapsed = wb_monotonic_us() - started;
 		if (elapsed >= b->flush_budget_us) {
 			b->flush_budget_us = 0;
@@ -604,9 +635,9 @@ void star6e_output_begin_frame(Star6eOutput *output)
 		b->dst = output->dst;
 		b->dst_len = output->dst_len;
 		b->connected_udp = output->connected_udp;
-		b->allow_unix_encoder_stall =
+		b->unix_legacy_blocking =
 			(output->transport == VENC_OUTPUT_URI_UNIX) &&
-			output->allow_unix_encoder_stall;
+			output->unix_legacy_blocking;
 		gen_after = __atomic_load_n(&output->transport_gen,
 			__ATOMIC_ACQUIRE);
 		if (gen_before == gen_after)
@@ -619,8 +650,16 @@ void star6e_output_begin_frame(Star6eOutput *output)
 	 * pipeline thread, because apply_server() runs on the HTTP thread and
 	 * the queue is not synchronised.  venc_codel re-seeds off the
 	 * backwards overflow count on its own. */
-	if (output->frame_queue && b->snapshot_gen != gen_before) {
-		venc_frame_queue_reset(output->frame_queue);
+	if (b->snapshot_gen != gen_before) {
+		/* Re-evaluate pacing for the new transport before anything
+		 * reads it: apply_server() only reconfigures the socket, so
+		 * without this a redirect away from unix:// would leave the
+		 * queue running and `paced` reporting true — and the clamp
+		 * release in star6e_service_unix_codel(), guarded on
+		 * !is_paced, would never fire. */
+		star6e_output_refresh_pacing(output);
+		if (output->frame_queue)
+			venc_frame_queue_reset(output->frame_queue);
 		b->snapshot_gen = gen_before;
 	}
 
@@ -631,7 +670,8 @@ void star6e_output_begin_frame(Star6eOutput *output)
 	 * packets as they arrive.  Dropping the *whole* frame is deliberate —
 	 * a partially queued frame is undecodable anyway, so admitting one is
 	 * strictly worse than refusing it. */
-	b->paced = (output->frame_queue && b->active) ? 1 : 0;
+	b->paced = (output->paced_active && output->frame_queue && b->active)
+		? 1 : 0;
 	b->queue_open = 0;
 	if (b->paced) {
 		b->queue_open = (venc_frame_queue_begin(output->frame_queue,
@@ -1238,7 +1278,7 @@ int star6e_output_apply_server(Star6eOutput *output, const char *uri)
 	__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* odd = writing */
 	if (output_socket_configure(&output->socket_handle, &output->dst,
 	    &output->dst_len, &output->transport, &parsed,
-	    output->requested_connected_udp, output->allow_unix_encoder_stall,
+	    output->requested_connected_udp, output->unix_legacy_blocking,
 	    &output->connected_udp) != 0) {
 		__atomic_fetch_add(&output->transport_gen, 1, __ATOMIC_RELEASE); /* restore even */
 		return -1;
@@ -1275,7 +1315,7 @@ void star6e_output_teardown(Star6eOutput *output)
 	output->dst_len = 0;
 	output->connected_udp = 0;
 	output->requested_connected_udp = 0;
-	output->allow_unix_encoder_stall = 0;
+	output->unix_legacy_blocking = 0;
 	output->transport = VENC_OUTPUT_URI_UDP;
 }
 

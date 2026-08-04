@@ -43,16 +43,18 @@ results in its §9.
 
 | Key | Mutability | Default | Meaning |
 |---|---|---|---|
-| `outgoing.unixPacing` | **restart** | `false` | Producer-side frame queue + pacing |
-| `outgoing.unixThrottle` | live | `false` | Apply the sojourn clamp on top |
+| `outgoing.unixPacing` | **restart** | **`true`** (0.65.0) | Producer-side frame queue + pacing |
+| `outgoing.unixThrottle` | live | **`true`** (0.65.0) | Apply the sojourn clamp on top |
+| `outgoing.unixLegacyBlocking` | **restart** | `false` | Opt back out to pre-0.63 blocking sends; disables pacing |
 
 Constraints, all enforced in code:
 
 - `unix://` **and** `streamMode: "rtp"` only. Anything else silently leaves
   pacing off — `paced` in the transport status is how you confirm it is
   actually on.
-- Mutually exclusive with `allowUnixEncoderStall`. Setting both logs a
-  warning and pacing loses.
+- Mutually exclusive with `unixLegacyBlocking` (renamed from
+  `allowUnixEncoderStall` in 0.65.0; the old key still loads). Setting both
+  logs a warning and pacing loses — that flag *is* the way to turn pacing off.
 - `unixThrottle` with `unixPacing` off does nothing.
 
 `unixThrottle=false` while pacing is on is the **observe-only mode**: the

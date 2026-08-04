@@ -61,7 +61,7 @@ typedef struct {
 	Star6eStreamMode stream_mode;
 	VencOutputUri uri;
 	int requested_connected_udp;
-	int allow_unix_encoder_stall;
+	int unix_legacy_blocking;
 	int unix_pacing;
 	int has_server;
 } Star6eOutputSetup;
@@ -96,7 +96,7 @@ typedef struct {
 	struct sockaddr_storage dst;
 	socklen_t dst_len;
 	int connected_udp;
-	int allow_unix_encoder_stall;
+	int unix_legacy_blocking;
 	uint32_t flush_budget_us;
 	int discard_remaining;
 	int discard_as_error;
@@ -122,7 +122,15 @@ typedef struct {
 	socklen_t dst_len;
 	int connected_udp;
 	int requested_connected_udp;
-	int allow_unix_encoder_stall;
+	int unix_legacy_blocking;
+	/* Config intent, so the pipeline thread can re-evaluate pacing after a
+	 * live redirect (star6e_output_apply_server only reconfigures the
+	 * socket). */
+	int unix_pacing;
+	/* Pacing active for the CURRENT transport.  Distinct from
+	 * frame_queue != NULL: the queue is allocated lazily and kept across a
+	 * redirect, so this is what star6e_output_is_paced() reports. */
+	int paced_active;
 	venc_ring_t *ring;
 	venc_frame_ring_t *frame_ring;
 	/* Paced unix:// egress (include/venc_frame_queue.h).  Non-NULL only
@@ -282,6 +290,7 @@ int star6e_output_drain_paced(Star6eOutput *output);
 void star6e_output_observe_queue(Star6eOutput *output, uint64_t now_us);
 
 /** Whether paced egress is active on this output. */
+void star6e_output_refresh_pacing(Star6eOutput *output);
 int star6e_output_is_paced(const Star6eOutput *output);
 
 /** Send RTP header and payload parts as a single UDP datagram.

@@ -911,8 +911,8 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			if (star6e_output_prepare(&ds_setup, ps->dual->server,
 			    vcfg->outgoing.stream_mode,
 			    vcfg->outgoing.connected_udp) == 0) {
-				ds_setup.allow_unix_encoder_stall =
-					vcfg->outgoing.allow_unix_encoder_stall ? 1 : 0;
+				ds_setup.unix_legacy_blocking =
+					vcfg->outgoing.unix_legacy_blocking ? 1 : 0;
 				if (star6e_output_init(&ps->dual->output,
 				    &ds_setup) == 0) {
 					star6e_video_init(&ps->dual->video, vcfg,
@@ -1365,10 +1365,13 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * backed up behind it — now that the VENC output slot is free, so a
 	 * slow consumer costs queue latency instead of held capture buffers
 	 * (UNIX_SOCKET_HANDOVER.md §1.2).  No-op when pacing is off. */
-	if (star6e_output_is_paced(&ps->output)) {
+	if (star6e_output_is_paced(&ps->output))
 		(void)star6e_output_drain_paced(&ps->output);
-		star6e_service_unix_codel(&ps->output, vcfg);
-	}
+	/* Serviced unconditionally: its !is_paced branch releases the clamp so a
+	 * live redirect away from unix:// cannot leave the encoder pinned.
+	 * Gating this call on is_paced() made that branch dead code — the clamp
+	 * then froze at whatever the last unix:// window set. */
+	star6e_service_unix_codel(&ps->output, vcfg);
 
 	/* Check HTTP record control flags.
 	 *

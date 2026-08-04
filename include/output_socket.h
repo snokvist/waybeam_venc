@@ -48,7 +48,7 @@ int output_socket_fill_udp_destination(const char *host, uint16_t port,
 int output_socket_configure(int *socket_handle, struct sockaddr_storage *dst,
 	socklen_t *dst_len, VencOutputUriType *transport,
 	const VencOutputUri *uri, int requested_connected_udp,
-	int allow_unix_encoder_stall, int *connected_udp);
+	int unix_legacy_blocking, int *connected_udp);
 
 /** Warn when the running max_dgram_qlen is too shallow for a unix://
  *  output.  Call once per unix:// socket setup.  Purely advisory — it

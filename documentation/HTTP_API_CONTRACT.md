@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.19.0`
+- `contract_version`: `0.20.0`
 - `status`: `active`
 
 ## Governance Rules
@@ -1631,6 +1631,12 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits. |
 
 ## Change Log (Contract)
+- `0.20.0` (behaviour + rename — Unix pacing on by default):
+  `outgoing.unixPacing` and `outgoing.unixThrottle` now default **`true`**, so
+  a stock `unix://` deploy is paced and clamped. `outgoing.allowUnixEncoderStall`
+  is renamed `outgoing.unixLegacyBlocking`; the old key and the old
+  `/api/v1/set` field name both still resolve, so no client breaks. Field
+  shapes are unchanged.
 - `0.19.0` (additive — Unix paced egress + sojourn throttle):
   - Added restart-required `outgoing.unix_pacing` (alias
     `outgoing.unixPacing`) and live `outgoing.unix_throttle` (alias

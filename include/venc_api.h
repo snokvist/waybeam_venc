@@ -1,6 +1,13 @@
 #ifndef VENC_API_H
 #define VENC_API_H
 
+/* Single source of truth for the HTTP contract version.  It is mirrored in
+ * documentation/HTTP_API_CONTRACT.md and HISTORY.md, and has silently drifted
+ * from the code twice (0.19.0 was documented while the code still emitted
+ * 0.18.0).  test_contract_version_matches_doc() fails the build if the doc and
+ * this macro disagree, so a doc-only bump cannot ship again. */
+#define VENC_CONTRACT_VERSION "0.20.0"
+
 #include "venc_config.h"
 
 #ifdef __cplusplus

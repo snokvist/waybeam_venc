@@ -28,7 +28,7 @@ int test_maruko_config(void)
 	CHECK("maruko defaults 3dnr", cfg.vpe_level_3dnr == 1);
 	CHECK("maruko defaults verbose", cfg.verbose == 0);
 	CHECK("maruko defaults unix stall disabled",
-		cfg.allow_unix_encoder_stall == 0);
+		cfg.unix_legacy_blocking == 0);
 
 	venc_config_defaults(&vcfg);
 	vcfg.video0.width = 2688;
@@ -48,7 +48,7 @@ int test_maruko_config(void)
 	strcpy(vcfg.isp.sensor_bin, "/etc/sensors/imx415.bin");
 	vcfg.fpv.noise_level = 4;
 	vcfg.system.verbose = true;
-	vcfg.outgoing.allow_unix_encoder_stall = true;
+	vcfg.outgoing.unix_legacy_blocking = true;
 
 	CHECK("maruko config from venc ok", maruko_config_from_venc(&vcfg, &cfg) == 0);
 	CHECK("maruko config width", cfg.sensor_width == 2688);
@@ -74,7 +74,7 @@ int test_maruko_config(void)
 	CHECK("maruko config 3dnr", cfg.vpe_level_3dnr == 4);
 	CHECK("maruko config verbose", cfg.verbose == 1);
 	CHECK("maruko config unix stall propagated",
-		cfg.allow_unix_encoder_stall == 1);
+		cfg.unix_legacy_blocking == 1);
 
 	strcpy(vcfg.outgoing.server, "bad://server");
 	CHECK("maruko config bad uri fails", maruko_config_from_venc(&vcfg, &cfg) != 0);

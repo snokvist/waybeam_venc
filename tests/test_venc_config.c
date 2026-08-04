@@ -28,11 +28,54 @@ static char *write_temp_json(const char *json)
 
 /* ── Tests ───────────────────────────────────────────────────────────── */
 
+/* outgoing.allowUnixEncoderStall was renamed to outgoing.unixLegacyBlocking in
+ * 0.65.0.  Existing configs on disk still carry the old key, so both must
+ * load, and a config carrying neither must keep the default. */
+static int test_unix_legacy_blocking_key_compat(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+
+	venc_config_defaults(&cfg);
+	CHECK("legacy_key_default_off", cfg.outgoing.unix_legacy_blocking == false);
+
+	{
+		char *old_path = write_temp_json(
+			"{\"outgoing\":{\"allowUnixEncoderStall\":true}}");
+		char *new_path = write_temp_json(
+			"{\"outgoing\":{\"unixLegacyBlocking\":true}}");
+
+		venc_config_defaults(&cfg);
+		CHECK("legacy_key_old_name_loads",
+			old_path && venc_config_load(old_path, &cfg) == 0 &&
+			cfg.outgoing.unix_legacy_blocking == true);
+
+		venc_config_defaults(&cfg);
+		CHECK("legacy_key_new_name_loads",
+			new_path && venc_config_load(new_path, &cfg) == 0 &&
+			cfg.outgoing.unix_legacy_blocking == true);
+
+		if (old_path) { remove(old_path); free(old_path); }
+		if (new_path) { remove(new_path); free(new_path); }
+	}
+
+	return failures;
+}
+
 static int test_defaults(void)
 {
 	int failures = 0;
 	VencConfig cfg;
 	venc_config_defaults(&cfg);
+
+	/* Paced unix:// egress is on by default from 0.65.0, together with its
+	 * clamp — pacing without the throttle still loses frames wholesale
+	 * under congestion, so defaulting only one of them would ship most of
+	 * the cost and little of the benefit. */
+	CHECK("defaults_unix_pacing_on", cfg.outgoing.unix_pacing == true);
+	CHECK("defaults_unix_throttle_on", cfg.outgoing.unix_throttle == true);
+	CHECK("defaults_unix_legacy_blocking_off",
+		cfg.outgoing.unix_legacy_blocking == false);
 
 	CHECK("defaults_web_port", cfg.system.web_port == 80);
 	CHECK("defaults_overclock", cfg.system.overclock_level == 1);
@@ -65,8 +108,8 @@ static int test_defaults(void)
 	CHECK("defaults_stream_mode", strcmp(cfg.outgoing.stream_mode, "rtp") == 0);
 	CHECK("defaults_payload", cfg.outgoing.max_payload_size == 1400);
 	CHECK("defaults_connected_udp", cfg.outgoing.connected_udp == true);
-	CHECK("defaults_allow_unix_encoder_stall",
-		cfg.outgoing.allow_unix_encoder_stall == false);
+	CHECK("defaults_unix_legacy_blocking",
+		cfg.outgoing.unix_legacy_blocking == false);
 
 	CHECK("defaults_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("defaults_roi_qp", cfg.fpv.roi_qp == 0);
@@ -259,8 +302,8 @@ static int test_load_full_json(void)
 	CHECK("load_stream_mode", strcmp(cfg.outgoing.stream_mode, "compact") == 0);
 	CHECK("load_payload", cfg.outgoing.max_payload_size == 1200);
 	CHECK("load_connected_udp", cfg.outgoing.connected_udp == false);
-	CHECK("load_allow_unix_encoder_stall",
-		cfg.outgoing.allow_unix_encoder_stall == true);
+	CHECK("load_unix_legacy_blocking",
+		cfg.outgoing.unix_legacy_blocking == true);
 	CHECK("load_roi_on", cfg.fpv.roi_enabled == true);
 	CHECK("load_roi_qp", cfg.fpv.roi_qp == -18);
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
@@ -1154,6 +1197,7 @@ int test_venc_config(void)
 {
 	int failures = 0;
 	failures += test_defaults();
+	failures += test_unix_legacy_blocking_key_compat();
 	failures += test_load_full_json();
 	failures += test_load_partial_json();
 	failures += test_load_missing_file();

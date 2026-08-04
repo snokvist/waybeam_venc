@@ -120,9 +120,17 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
 	cfg->outgoing.connected_udp = true;
-	cfg->outgoing.allow_unix_encoder_stall = false;
-	cfg->outgoing.unix_pacing = false;
-	cfg->outgoing.unix_throttle = false;
+	cfg->outgoing.unix_legacy_blocking = false;
+	/* Paced egress is the default from 0.65.0: it is the only unix:// mode
+	 * that loses whole frames rather than packets, so a congested consumer
+	 * degrades framerate instead of breaking the H.265 reference chain.
+	 * outgoing.unixLegacyBlocking opts back out to the pre-0.63 blocking
+	 * behaviour.  The throttle defaults on with it — without the clamp the
+	 * queue still overflows wholesale under congestion (device-measured
+	 * 52 % vs 96 % of frames delivered), so pacing alone leaves most of the
+	 * benefit on the table. */
+	cfg->outgoing.unix_pacing = true;
+	cfg->outgoing.unix_throttle = true;
 	cfg->outgoing.shm_throttle = true;
 
 	/* fpv */
@@ -689,8 +697,13 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
 	s->connected_udp = json_get_bool(obj, "connectedUdp", s->connected_udp);
-	s->allow_unix_encoder_stall = json_get_bool(obj, "allowUnixEncoderStall",
-		s->allow_unix_encoder_stall);
+	/* Renamed from allowUnixEncoderStall in 0.65.0.  The old key is still
+	 * accepted so existing configs keep working; it is read first so an
+	 * explicit new-name setting wins if a config carries both. */
+	s->unix_legacy_blocking = json_get_bool(obj, "allowUnixEncoderStall",
+		s->unix_legacy_blocking);
+	s->unix_legacy_blocking = json_get_bool(obj, "unixLegacyBlocking",
+		s->unix_legacy_blocking);
 	s->unix_pacing = json_get_bool(obj, "unixPacing", s->unix_pacing);
 	s->unix_throttle = json_get_bool(obj, "unixThrottle", s->unix_throttle);
 	s->audio_port = json_get_int(obj, "audioPort", s->audio_port);
@@ -1352,8 +1365,8 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "streamMode",      cfg->outgoing.stream_mode,       0);
 	pp_field_uint(p,   2, "maxPayloadSize",  cfg->outgoing.max_payload_size,  0);
 	pp_field_bool(p,   2, "connectedUdp",    cfg->outgoing.connected_udp,     0);
-	pp_field_bool(p,   2, "allowUnixEncoderStall",
-		cfg->outgoing.allow_unix_encoder_stall, 0);
+	pp_field_bool(p,   2, "unixLegacyBlocking",
+		cfg->outgoing.unix_legacy_blocking, 0);
 	pp_field_bool(p,   2, "unixPacing",      cfg->outgoing.unix_pacing,     0);
 	pp_field_bool(p,   2, "unixThrottle",    cfg->outgoing.unix_throttle,   0);
 	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
@@ -1615,8 +1628,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(out, "streamMode", cfg->outgoing.stream_mode);
 		cJSON_AddNumberToObject(out, "maxPayloadSize", cfg->outgoing.max_payload_size);
 		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
-		cJSON_AddBoolToObject(out, "allowUnixEncoderStall",
-			cfg->outgoing.allow_unix_encoder_stall);
+		cJSON_AddBoolToObject(out, "unixLegacyBlocking",
+			cfg->outgoing.unix_legacy_blocking);
 		cJSON_AddBoolToObject(out, "unixPacing", cfg->outgoing.unix_pacing);
 		cJSON_AddBoolToObject(out, "unixThrottle",
 			cfg->outgoing.unix_throttle);

@@ -220,7 +220,7 @@ typedef struct {
 	char stream_mode[16];               /* "rtp" or "compact" */
 	uint16_t max_payload_size;
 	bool connected_udp;             /* connect() socket (skip per-packet routing) */
-	bool allow_unix_encoder_stall;   /* preserve blocking unix:// send semantics */
+	bool unix_legacy_blocking;   /* preserve blocking unix:// send semantics */
 	int32_t audio_port;                 /* <0  = record-only: audio is captured and
 	                                     *       recorded but NEVER streamed (no UDP send)
 	                                     *  0   = same as video port — AVOID: mixing
@@ -235,7 +235,7 @@ typedef struct {
 	                                     * (include/venc_frame_queue.h): hold
 	                                     * frames here and feed the socket one
 	                                     * at a time.  RTP mode only; ignored
-	                                     * with allow_unix_encoder_stall,
+	                                     * with unix_legacy_blocking,
 	                                     * which is its opposite. */
 	bool unix_throttle;                 /* apply the sojourn-time clamp
 	                                     * (include/venc_codel.h) on top of

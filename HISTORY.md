@@ -1,5 +1,39 @@
 # History
 
+## [0.65.0] - 2026-08-04
+
+Paced `unix://` egress is now the **default**, and the flag that opts out of it
+has a name that says so.
+
+`outgoing.unixPacing` and `outgoing.unixThrottle` both default to `true`. As an
+opt-in defaulting off, pacing reached nobody unless they knew to enable it,
+while the default path drops *packets* under congestion — producing partial
+frames and a broken H.265 reference chain, which is the damage the queue exists
+to avoid. Pacing loses whole frames instead, and the clamp converts that loss
+into a rate reduction. Both are defaulted on together because pacing without
+the clamp still overflows wholesale: device-measured 52 % of frames delivered
+with the clamp off versus 96 % with it on.
+
+`outgoing.allowUnixEncoderStall` is renamed **`outgoing.unixLegacyBlocking`**.
+It is no longer just "permit a stall" — it is how you select the pre-0.63
+blocking-send behaviour, and selecting it disables pacing. The old JSON key and
+the old `/api/v1/set` field name both still resolve, so existing configs and
+clients keep working.
+
+Fixed: a live redirect away from `unix://` left pacing running on the new
+transport. `star6e_output_apply_server()` only reconfigures the socket, and
+`star6e_output_is_paced()` was `frame_queue != NULL`, so `paced` kept reporting
+`true` on `udp://` and the clamp-release path — guarded on `!is_paced`
+precisely so a redirect cannot leave the encoder pinned — never fired; the
+clamp instead walked back to 1000 over ~12 s. Pacing state is now re-evaluated
+against the current transport on the **pipeline thread**, where the frame queue
+is already owned; the queue is deliberately unsynchronised, so freeing it from
+the HTTP thread would have raced the drain. The queue is allocated lazily and
+kept across a redirect, so returning to `unix://` costs no allocation in the
+frame path.
+
+Contract `0.20.0`.
+
 ## [0.64.0] - 2026-08-02
 
 `unix://` can now hold encoded frames in venc instead of in the kernel, and

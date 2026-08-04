@@ -1476,7 +1476,7 @@ static int test_star6e_output_unix_stall_mode_resumes_without_drops(void)
 	snprintf(uri, sizeof(uri), "unix://%s", abstract_name);
 	CHECK("unix stall prepare",
 		star6e_output_prepare(&setup, uri, "rtp", 0) == 0);
-	setup.allow_unix_encoder_stall = 1;
+	setup.unix_legacy_blocking = 1;
 	CHECK("unix stall init", star6e_output_init(&output, &setup) == 0);
 	{
 		struct timeval timeout = { .tv_sec = 1, .tv_usec = 1 };
@@ -1523,7 +1523,7 @@ static int test_star6e_output_unix_stall_mode_resumes_without_drops(void)
 	CHECK("unix stall waited for consumer", elapsed >= 10000);
 	CHECK("unix stall resumed promptly", elapsed < 1000000);
 	CHECK("unix stall batch policy selected",
-		output.batch.allow_unix_encoder_stall == 1);
+		output.batch.unix_legacy_blocking == 1);
 	CHECK("unix stall frame kept", output.batch.discard_remaining == 0);
 	CHECK("unix stall no transport drops", output.socket_drops == 0);
 	CHECK("unix stall no send errors", output.send_errors == 0);

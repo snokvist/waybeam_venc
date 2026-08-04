@@ -450,7 +450,7 @@ static const FieldUi ui_pause_stab = {
  * inert on every transport except unix://. */
 static const FieldUi ui_unix_pacing = {
 	"Outgoing", "Unix frame pacing", "toggle", 0, 0, 0, NULL,
-	"unix:// only: hold encoded frames in venc and feed the socket one frame "
+	"unix:// only, ON by default: hold encoded frames in venc and feed the socket one frame "
 	"at a time, instead of letting the kernel's datagram queue buffer them. "
 	"Makes queue latency measurable and is required by the Unix sojourn "
 	"throttle. RTP mode only; ignored when Unix encoder stall is on."
@@ -584,7 +584,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
 	FIELD(outgoing, max_payload_size,  FT_UINT16, MUT_LIVE),
 	FIELD(outgoing, connected_udp,     FT_BOOL,   MUT_RESTART),
-	FIELD(outgoing, allow_unix_encoder_stall, FT_BOOL, MUT_RESTART),
+	FIELD(outgoing, unix_legacy_blocking, FT_BOOL, MUT_RESTART),
 	FIELD(outgoing, audio_port,        FT_INT,    MUT_RESTART),
 	FIELD(outgoing, sidecar_port,      FT_UINT16, MUT_RESTART),
 	FIELD_UI(outgoing, shm_throttle,   FT_BOOL,   MUT_LIVE, &ui_shm_throttle),
@@ -784,7 +784,8 @@ static const FieldAlias g_field_aliases[] = {
 	{ "outgoing.unixPacing", "outgoing.unix_pacing" },
 	{ "outgoing.unixThrottle", "outgoing.unix_throttle" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
-	{ "outgoing.allowUnixEncoderStall", "outgoing.allow_unix_encoder_stall" },
+	{ "outgoing.allowUnixEncoderStall", "outgoing.unix_legacy_blocking" },
+	{ "outgoing.unixLegacyBlocking",     "outgoing.unix_legacy_blocking" },
 	{ "outgoing.streamMode", "outgoing.stream_mode" },
 	{ "discovery.serviceType", "discovery.service_type" },
 	{ "discovery.bareAlias", "discovery.bare_alias" },
@@ -2779,7 +2780,7 @@ static int handle_version(int fd, const HttpRequest *req, void *ctx)
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{"
 		"\"app_version\":\"%s\","
-		"\"contract_version\":\"0.19.0\","
+		"\"contract_version\":\"" VENC_CONTRACT_VERSION "\","
 		"\"config_schema_version\":\"1.0.0\","
 		"\"backend\":\"%s\""
 		"}}", VENC_VERSION, g_backend);

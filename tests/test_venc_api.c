@@ -258,6 +258,35 @@ static int apply_set_query_http(VencConfig *cfg, const char *backend_name,
 		query, http_status, response_buf, response_buf_size);
 }
 
+/* The contract version lives in VENC_CONTRACT_VERSION and is mirrored in
+ * documentation/HTTP_API_CONTRACT.md.  They have silently disagreed twice, so
+ * assert the doc actually declares what the code emits. */
+static int test_contract_version_matches_doc(void)
+{
+	int failures = 0;
+	FILE *f = fopen("documentation/HTTP_API_CONTRACT.md", "r");
+	char want[64];
+	char line[512];
+	int found = 0;
+
+	snprintf(want, sizeof(want), "`contract_version`: `%s`",
+		VENC_CONTRACT_VERSION);
+	if (f) {
+		while (fgets(line, sizeof(line), f)) {
+			if (strstr(line, want)) {
+				found = 1;
+				break;
+			}
+		}
+		fclose(f);
+	} else {
+		/* Not run from the repo root — skip rather than fail. */
+		found = 1;
+	}
+	CHECK("contract_version_doc_matches_code", found == 1);
+	return failures;
+}
+
 static int test_apply_bitrate(uint32_t kbps)
 {
 	g_api_cb_state.apply_bitrate_calls++;
@@ -1335,7 +1364,7 @@ static int test_framing_preset_restart(void)
 	return failures;
 }
 
-static int test_allow_unix_encoder_stall_restart(void)
+static int test_unix_legacy_blocking_restart(void)
 {
 	int failures = 0;
 	VencConfig cfg;
@@ -1344,14 +1373,14 @@ static int test_allow_unix_encoder_stall_restart(void)
 
 	venc_config_defaults(&cfg);
 	CHECK("unix stall default false",
-		cfg.outgoing.allow_unix_encoder_stall == false);
+		cfg.outgoing.unix_legacy_blocking == false);
 	CHECK("unix stall restart rc",
 		apply_set_query_http(&cfg, "maruko", NULL,
 			"outgoing.allowUnixEncoderStall=true", &status, response,
 			sizeof(response)) == 0);
 	CHECK("unix stall restart status", status == 200);
 	CHECK("unix stall restart cfg",
-		cfg.outgoing.allow_unix_encoder_stall == true);
+		cfg.outgoing.unix_legacy_blocking == true);
 	CHECK("unix stall restart response",
 		strstr(response, "\"reinit_pending\":true") != NULL);
 	venc_api_clear_reinit();
@@ -1744,7 +1773,7 @@ int test_venc_api(void)
 	failures += test_live_zoom_pan_applies();
 	failures += test_zoom_validation_rejects_invalid();
 	failures += test_framing_preset_restart();
-	failures += test_allow_unix_encoder_stall_restart();
+	failures += test_unix_legacy_blocking_restart();
 	failures += test_live_set_isp_bin_dispatches_callback();
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();
@@ -1756,6 +1785,7 @@ int test_venc_api(void)
 	failures += test_capabilities_emits_ui();
 	failures += test_capabilities_awb_fps_backend_gate();
 	failures += test_snapshot_routes();
+	failures += test_contract_version_matches_doc();
 	stop_api_test_server();
 	return failures;
 }
