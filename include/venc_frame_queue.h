@@ -176,6 +176,12 @@ uint32_t venc_frame_queue_delay_us(const VencFrameQueue *q, uint64_t now_us);
 uint32_t venc_frame_queue_depth(const VencFrameQueue *q);
 uint64_t venc_frame_queue_overflows(const VencFrameQueue *q);
 
+/* Frames refused because they exceed one slot (VENC_FRAME_QUEUE_SLOT_BYTES).
+ * Distinct from overflows, which mean the queue was full: this one means the
+ * frame could never fit at any depth, so no amount of clamping helps.  It was
+ * previously counted and never read, which made that failure silent. */
+uint64_t venc_frame_queue_oversize_drops(const VencFrameQueue *q);
+
 #ifdef __cplusplus
 }
 #endif

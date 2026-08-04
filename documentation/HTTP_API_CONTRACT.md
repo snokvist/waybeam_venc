@@ -1632,6 +1632,9 @@ divergence is listed.  As of `contract_version: 0.12.1`:
 
 ## Change Log (Contract)
 - `0.20.0` (behaviour + rename — Unix pacing on by default):
+  `GET /api/v1/transport/status` gains `queueOversizeDrops` on the UDP/Unix
+  branch — frames refused because they exceed one queue slot, which was
+  counted internally and never surfaced.
   `outgoing.unixPacing` and `outgoing.unixThrottle` now default **`true`**, so
   a stock `unix://` deploy is paced and clamped. `outgoing.allowUnixEncoderStall`
   is renamed `outgoing.unixLegacyBlocking`; the old key and the old

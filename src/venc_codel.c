@@ -187,11 +187,6 @@ uint32_t venc_codel_scale(uint16_t permille, uint32_t kbps)
 		VENC_CODEL_FULL_PERMILLE);
 }
 
-uint32_t venc_codel_apply(const VencCodel *c, uint32_t kbps)
-{
-	return venc_codel_scale(venc_codel_permille(c), kbps);
-}
-
 int venc_codel_floor_edge(VencCodel *c)
 {
 	uint8_t edge;

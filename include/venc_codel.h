@@ -161,8 +161,6 @@ uint32_t venc_codel_reported_min_us(const VencCodel *c);
  * the controller instance itself belongs to the pipeline thread. */
 uint32_t venc_codel_scale(uint16_t permille, uint32_t kbps);
 
-/* Convenience wrapper for callers that do hold the instance. */
-uint32_t venc_codel_apply(const VencCodel *c, uint32_t kbps);
 
 /* Floor-pinned transition, consumed by the caller's logging.  Returns 1
  * exactly once when the clamp reaches the floor, -1 exactly once when it

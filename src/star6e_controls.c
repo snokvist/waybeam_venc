@@ -1584,6 +1584,7 @@ static char *query_transport_status(void)
 			"\"queueDelayUs\":%u,"
 			"\"queueSojournUs\":%u,"
 			"\"queueOverflows\":%u,"
+			"\"queueOversizeDrops\":%u,"
 			"\"throttlePermille\":%u,"
 			"\"effectiveBitrateKbps\":%u}}",
 			transport,
@@ -1602,6 +1603,8 @@ static char *query_transport_status(void)
 			(unsigned)__atomic_load_n(&ps->output.queue_sojourn_us,
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&ps->output.queue_overflows,
+				__ATOMIC_RELAXED),
+			(unsigned)__atomic_load_n(&ps->output.queue_oversize_drops,
 				__ATOMIC_RELAXED),
 			(unsigned)permille,
 			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));

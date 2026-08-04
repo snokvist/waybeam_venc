@@ -157,6 +157,7 @@ typedef struct {
 	uint32_t queue_delay_us;
 	uint32_t queue_sojourn_us;
 	uint32_t queue_overflows;
+	uint32_t queue_oversize_drops;
 	/* Last clamp factor published by the frame-shm ring-fill throttle
 	 * (include/venc_shm_throttle.h), 1000 = unclamped.  Cached here so
 	 * the sidecar emit path can report it without reaching into the

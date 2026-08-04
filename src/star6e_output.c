@@ -354,6 +354,8 @@ void star6e_output_observe_queue(Star6eOutput *output, uint64_t now_us)
 		__ATOMIC_RELAXED);
 	__atomic_store_n(&output->queue_overflows,
 		(uint32_t)venc_frame_queue_overflows(q), __ATOMIC_RELAXED);
+	__atomic_store_n(&output->queue_oversize_drops,
+		(uint32_t)venc_frame_queue_oversize_drops(q), __ATOMIC_RELAXED);
 }
 
 int star6e_output_is_rtp(const Star6eOutput *output)

@@ -211,3 +211,8 @@ uint64_t venc_frame_queue_overflows(const VencFrameQueue *q)
 {
 	return q ? q->overflows : 0u;
 }
+
+uint64_t venc_frame_queue_oversize_drops(const VencFrameQueue *q)
+{
+	return q ? q->oversize_drops : 0u;
+}
