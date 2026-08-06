@@ -103,8 +103,6 @@ typedef struct {
 	 * waiting for a ground RecoveryRequest over RF. */
 	void (*request_idr)(void *ctx);
 	void *idr_ctx;
-	uint32_t chain_break_drops;
-	uint32_t droppable_drops;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */

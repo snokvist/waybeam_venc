@@ -335,13 +335,9 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
 	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
-		if (!venc_frame_drop_breaks_chain(meta.flags)) {
-			output->droppable_drops++;
-		} else {
-			output->chain_break_drops++;
-			if (output->request_idr)
-				output->request_idr(output->idr_ctx);
-		}
+		if (venc_frame_drop_breaks_chain(meta.flags) &&
+		    output->request_idr)
+			output->request_idr(output->idr_ctx);
 		return 0;
 	}
 

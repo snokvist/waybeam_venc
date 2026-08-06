@@ -890,13 +890,9 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
 	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0) {
-		if (!venc_frame_drop_breaks_chain(meta.flags)) {
-			output->droppable_drops++;
-		} else {
-			output->chain_break_drops++;
-			if (output->request_idr)
-				output->request_idr(output->idr_ctx);
-		}
+		if (venc_frame_drop_breaks_chain(meta.flags) &&
+		    output->request_idr)
+			output->request_idr(output->idr_ctx);
 		return 0;
 	}
 

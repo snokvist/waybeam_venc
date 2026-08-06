@@ -22,8 +22,6 @@ Re-establish the reference chain when a frame-shm:// ring-full drop breaks it.
   persistently full ring coalesces into at most ~10 IDRs/s instead of a
   keyframe storm. `video0.resilience=ltr` makes this materially cheaper still:
   half the frames are non-referenced and take the free path.
-- Split counters `chain_break_drops` / `droppable_drops` on both backends
-  distinguish damage from benign loss.
 
 Deliberately NOT included: blocking the encoder when the ring fills. Bounded
 blocking is a latency tradeoff rather than a free win, and unbounded blocking

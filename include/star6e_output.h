@@ -163,8 +163,6 @@ typedef struct {
 	/* Ring-full drops split by whether they actually broke the chain.
 	 * A non-referenced (SVC-T) frame is droppable by construction, so
 	 * those cost exactly one frame and must NOT trigger an IDR. */
-	uint32_t chain_break_drops;
-	uint32_t droppable_drops;
 } Star6eOutput;
 
 typedef struct {
