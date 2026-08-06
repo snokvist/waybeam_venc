@@ -1,5 +1,36 @@
 # History
 
+## [0.63.3] - 2026-08-06
+
+Dual floor for the frame-shm ring-fill bitrate clamp.
+
+- The clamp floor was a pure percentage (250 permille), which tied how hard it
+  may squeeze to the bitrate the OPERATOR configured -- a number unrelated to
+  what the radio can carry. At the measured 21839 kbps it bottomed out at
+  5459 kbps.
+- That is the wrong shape for the case it exists to cover. If the link drops
+  to MCS0 before waybeam-link's §9.6 bitrate demotion actuates (a 1.5-8 s
+  outer loop), this clamp is the only thing defending the ring, and 5.5 Mbps
+  is several times MCS0's deliverable capacity -- so the ring stays full and
+  every referenced frame is a chain-breaking drop for the whole window.
+- The floor is now `min(100 permille x configured, 2500 kbps)`: the percentage
+  keeps it proportionate at ordinary bitrates, the absolute cap stops a high
+  configured bitrate from stranding it above what the radio can carry. The two
+  coincide at 25000 kbps, today's reference-craft ceiling; the absolute term
+  only binds above that, and exists so the floor keeps its meaning when a
+  higher-bitrate mode is configured. At the measured rate the floor is now
+  2183 kbps instead of 5459.
+- 2500 kbps derivation: MCS0/HT20 is 6.5 Mbps PHY, ~4-5 Mbps goodput after
+  802.11 overhead, and 300/200 permille FEC leaves ~3.2-4 Mbps for video.
+  2500 kbps of video is ~3.1 Mbps of airtime at that FEC, and sits clear of
+  VENC_BITRATE_MIN_KBPS (1000), which remains the encoder collapse rail.
+- The AIMD integrator gains a separate, lower control-range bound
+  (VENC_SHM_THROTTLE_MIN_PERMILLE, 50) because the absolute cap can require an
+  effective ratio below the percentage floor. Recovery to unclamped now takes
+  19 AIMD windows (3.8 s) rather than 15 (3.0 s) from the deepest clamp.
+  Cascade stability is unaffected -- this changes the clamp's range, not its
+  200 ms period, so the inner/outer loop separation is preserved.
+
 ## [0.63.2] - 2026-08-06
 
 Re-establish the reference chain when a frame-shm:// ring-full drop breaks it.
