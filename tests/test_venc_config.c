@@ -185,6 +185,85 @@ static int test_resilience_preset_expansion(void)
 			cfg.video0.gop_size == 2.0);
 	}
 
+	/* "ltr" family: base=1, pred off, intra-refresh off, user's gopSize
+	 * preserved (a long GOP is the point of the scheme).  Bare "ltr" must
+	 * be enhance=1 — device-measured as the MAXIMUM non-reference density
+	 * (one droppable frame in every enhance+1), so any larger default
+	 * would silently be less resilient. */
+	{
+		struct {
+			const char *preset;
+			uint8_t     enhance;
+		} ltr_cases[] = {
+			{ "ltr",     1 },
+			{ "ltr:1",   1 },
+			{ "ltr:4",   4 },
+			{ "ltr:255", 255 },
+		};
+		for (size_t i = 0; i < sizeof(ltr_cases)/sizeof(ltr_cases[0]); ++i) {
+			char json[160];
+			snprintf(json, sizeof(json),
+				"{\"video0\":{\"resilience\":\"%s\",\"gopSize\":5.0}}",
+				ltr_cases[i].preset);
+			FILE *f = fopen(path, "w");
+			if (!f) { close(fd); unlink(path); return failures; }
+			fputs(json, f);
+			fclose(f);
+
+			venc_config_defaults(&cfg);
+			int rc = venc_config_load(path, &cfg);
+			CHECK("ltr_load_ok", rc == 0);
+			CHECK("ltr_preset_stored",
+				strcmp(cfg.video0.resilience, ltr_cases[i].preset) == 0);
+			CHECK("ltr_ref_base_one", cfg.video0.ref_base == 1);
+			CHECK("ltr_ref_pred_off", cfg.video0.ref_pred == false);
+			CHECK("ltr_intra_off",
+				strcmp(cfg.video0.intra_refresh_mode, "off") == 0);
+			CHECK("ltr_ref_enhance",
+				cfg.video0.ref_enhance == ltr_cases[i].enhance);
+			CHECK("ltr_keeps_user_gop", cfg.video0.gop_size == 5.0);
+		}
+	}
+
+	/* Malformed "ltr:" forms are rejected outright (fall back to off) —
+	 * a silently-clamped ratio would make a sweep measure the wrong thing. */
+	{
+		const char *bad[] = { "ltr:", "ltr:0", "ltr:abc", "ltr:12x",
+				      "ltr:256", "ltr:99999", "ltrx" };
+		for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+			VencConfigVideo v;
+			venc_config_defaults(&cfg);
+			v = cfg.video0;
+			CHECK("ltr_bad_rejected",
+				venc_config_apply_resilience_preset(bad[i], &v) != 0);
+		}
+	}
+
+	/* "ltr" differs from "rally" (same 1:1 ratio) exactly in that it keeps
+	 * the caller's GOP and forces intra-refresh off.  Guard both, since
+	 * that difference is the whole reason the preset exists. */
+	{
+		VencConfigVideo v;
+		venc_config_defaults(&cfg);
+		v = cfg.video0;
+		v.gop_size = 5.0;
+		CHECK("ltr_vs_rally_apply_ok",
+			venc_config_apply_resilience_preset("ltr", &v) == 0);
+		CHECK("ltr_vs_rally_keeps_gop", v.gop_size == 5.0);
+		CHECK("ltr_vs_rally_intra_off",
+			strcmp(v.intra_refresh_mode, "off") == 0);
+
+		venc_config_defaults(&cfg);
+		v = cfg.video0;
+		v.gop_size = 5.0;
+		CHECK("rally_apply_ok",
+			venc_config_apply_resilience_preset("rally", &v) == 0);
+		CHECK("rally_same_ratio", v.ref_enhance == 1 && v.ref_base == 1);
+		CHECK("rally_overrides_gop", v.gop_size == 2.0);
+		CHECK("rally_enables_intra",
+			strcmp(v.intra_refresh_mode, "off") != 0);
+	}
+
 	close(fd);
 	unlink(path);
 	return failures;

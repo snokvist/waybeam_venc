@@ -124,17 +124,23 @@ typedef struct {
 	uint16_t intra_refresh_lines; /* CTU rows refreshed per P-frame */
 	uint8_t intra_refresh_qp;  /* I-CTU QP override for stripe */
 	uint8_t ref_base;          /* SVC-T base-layer period; 0 = off */
-	uint8_t ref_enhance;       /* SVC-T enhance-layer ratio */
+	/* SVC-T reference PERIOD, not a count of non-reference frames:
+	 * measured on Star6E (2026-08-06), exactly one frame in every
+	 * (ref_enhance + 1) is emitted non-referenced.  So 1 is the most
+	 * resilient value (50 % of frames droppable) and larger values are
+	 * progressively less so — 4 gives 20 %, 299 gives 0.3 %. */
+	uint8_t ref_enhance;
 	bool ref_pred;             /* SVC-T enhance→base prediction */
 	/* Resilience preset — sole user-facing knob for intra-refresh +
 	 * SVC-T refPred + GOP.  Recognised values: "off", "quality",
-	 * "racing", "range", "fpv".  Every recognised value (including
-	 * "off") overwrites the granular intra_refresh_* and ref_*
-	 * fields with the preset's expansion; named presets additionally
-	 * override gop_size, while "off" preserves the user's gopSize
-	 * and disables both intra-refresh and refPred.  Unknown values
-	 * fall back to "off".  See apply_resilience_preset() in
-	 * src/venc_config.c for the canonical table. */
+	 * "racing", "range", "fpv", "ltr" / "ltr:<N>".  Every recognised
+	 * value (including "off") overwrites the granular intra_refresh_*
+	 * and ref_* fields with the preset's expansion; named presets
+	 * additionally override gop_size, while "off" and the "ltr" family
+	 * preserve the user's gopSize and (for "off") disable both
+	 * intra-refresh and refPred.  Unknown values fall back to "off".
+	 * See apply_resilience_preset() in src/venc_config.c for the
+	 * canonical table. */
 	char resilience[16];
 	/* Framing mode — the single user-facing knob for what the crop path does
 	 * (replaces the old standalone stab/zoom fields).  Recognised values:

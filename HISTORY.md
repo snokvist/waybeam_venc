@@ -1,5 +1,43 @@
 # History
 
+## [0.64.0] - 2026-08-06
+
+`ltr` resilience preset — maximum non-reference density with a long GOP.
+
+- **`video0.resilience = "ltr"` / `"ltr:<N>"`** selects the most resilient
+  SVC-T reference structure this SoC can express: `InRnRnRn…`, half the
+  frames non-referenced, so half of all frame losses cost exactly one frame
+  instead of cascading to the next IDR. Unlike `rally` (same 1:1 ratio) it
+  preserves the caller's `gopSize` and forces intra-refresh off, so it can be
+  paired with a long GOP and asymmetric transport FEC — heavy protection on
+  the IDR, light on the rest.
+- **`MI_VENC_ParamRef_t.u32Enhance` semantics established by measurement**
+  (Star6E, raw-ES NAL census; the SDK documents nothing). It is a *period*:
+  exactly one frame in every `enhance + 1` is emitted non-referenced.
+  Measured: `enhance=1` → 50.0 % droppable, `4` → 17.6 %, `299` → 0.3 %
+  (the census dilutes the short group with IDRs and partial groups; the
+  steady-state rule is exactly 1 in `enhance + 1`). **Smaller is more
+  resilient**, so bare `ltr` uses 1 and `ltr:<N>` is strictly less resilient
+  as N grows.
+- Also established: P-frames always predict from the previous frame, never
+  from the IDR (frame size is flat across the GOP under motion), and
+  `bEnablePred` is a **no-op** for non-reference marking — `rally`
+  (`pred=true`) and `ltr:1` (`pred=false`) yield identical patterns. The full
+  SigmaStar SDK exposes no long-term-reference, SmartP, or GOP-mode API, so
+  an IDR-anchored ("virtual IDR") structure is not achievable on Infinity6E.
+- **`/api/v1/set?video0.resilience=<unknown>` now returns 409** instead of
+  silently accepting. It previously returned 200, persisted the bad name to
+  `/etc/waybeam.json`, and left the derived `intra_refresh_*` / `ref_*` fields
+  holding the PREVIOUS preset's expansion — so `/api/v1/config` disagreed with
+  the running encoder until the next start, where the disk loader falls back
+  to `"off"` and the operator lands on a preset they never asked for.
+  Pre-existing, but the parameterised `ltr:<N>` form makes the invalid space
+  wide and plausible (`ltr:0`, `ltr:256`), so it is fixed here. Validation
+  matches how `video0.framing` and `video0.stab_accuracy` already reject.
+- Measured cost at pinned QP 30 on a moving scene: under 1 % bitrate delta vs
+  `off` (5.62/5.64 vs 5.65/5.68 Mbps, alternating runs). `ltr` remains
+  OSD-unsafe — it maximises the SVC-T chroma-smear condition. See README.
+
 ## [0.63.3] - 2026-08-06
 
 Dual floor for the frame-shm ring-fill bitrate clamp.

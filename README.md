@@ -872,10 +872,60 @@ length are all derived from the preset — no per-feature knobs.
 | **Long stable flight**     | `patrol` — balanced + 4 s GOP                | `fpv` — drone FPV (heaviest refPred)          |
 | **Slow recovery OK**       | `quality` — plane / cruiser (IDR-based)      | —                                             |
 
+##### `ltr` — maximum non-reference density with a long GOP
+
+`ltr` trades differently from the other presets: instead of shortening the
+GOP so damage is repaired sooner, it makes **half the stream disposable**
+and lets you keep a long GOP.
+
+**What `u32Enhance` actually means** (device-measured on Star6E,
+2026-08-06, by NAL census of the raw elementary stream — the SDK documents
+nothing): it is a *period*, not a count.  The encoder emits exactly one
+non-referenced frame in every `enhance + 1`:
+
+| `enhance` | frame pattern | non-referenced |
+|-----------|---------------|----------------|
+| 1         | `InRnRnRn…`   | **50 %** (max) |
+| 4         | `IRRRnRRRRn…` | 20 %           |
+| 299       | `IRRRR…`      | 0.3 %          |
+
+So **smaller is more resilient**, and `enhance=1` is the ceiling this SoC
+can express.  Bare `ltr` selects it; `ltr:<N>` pins the period for sweeps
+and is strictly less resilient as N grows.
+
+A lost non-referenced frame costs exactly one frame — the next frame is
+already clean.  The other half of the stream is an ordinary P-chain, so
+losing one of *those* still cascades to the next IDR.  There is no way to
+do better here: the full SigmaStar SDK's `MI_VENC_Set*` surface has **no
+long-term-reference, SmartP, or GOP-mode API** — `MI_VENC_SetRefParam` is
+the only reference-structure control, and P-frames always predict from the
+previous frame, never from the IDR.
+
+Unlike `rally` (the same 1:1 ratio) `ltr` preserves your `gopSize` and
+forces intra-refresh off, so it can be paired with a long GOP and
+**asymmetric FEC** on the transport: heavy protection on the IDR, light on
+the rest.  In waybeam-link that is `fec.i_rate_permille` high with
+`fec.p_rate_permille` low.
+
+**Measured cost: essentially none.**  At pinned QP 30 on a moving scene,
+`ltr:1` and `off` differ by under 1 % in bitrate (5.62/5.64 vs 5.65/5.68
+Mbps over alternating runs).  P-frame size is flat across the GOP, since
+prediction is from the previous frame either way.
+
+> ⚠️  **`ltr` is OSD-unsafe.**  It maximises the `ref_enhance > 0`
+> condition described above, so expect persistent chroma "green smear"
+> over static OSD text, clearing only on the IDR — and with a long GOP it
+> persists correspondingly longer.  Verify what the encoder applied with
+> `GET /api/v1/resilience/status`.
+>
+> `bEnablePred` is a **no-op** for this marking on Star6E: `rally`
+> (`pred=true`) and `ltr:1` (`pred=false`) produce byte-identical
+> `InRnRn…` patterns.
+
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
-| `video0.resilience` | string | **reboot** | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` (default `off`) |
-| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience: "off"`; named presets override it.  Live-reinit applies (no reboot). |
+| `video0.resilience` | string | **reboot** | `off` \| `rescue` \| `quality` \| `sprint` \| `racing` \| `endurance` \| `patrol` \| `rally` \| `range` \| `fpv` \| `ltr` \| `ltr:<N>` (default `off`) |
+| `video0.gopSize`    | double | restart | Seconds between IDRs.  Honoured **only** when `resilience` is `"off"` or an `ltr` form; the other named presets override it.  Live-reinit applies (no reboot). |
 
 > ⚠️  **Resilience changes require a reboot on both Star6E and Maruko.**
 > Setting `video0.resilience` (or any of the derived fields
@@ -944,6 +994,17 @@ curl "http://<device>/api/v1/set?video0.resilience=patrol"
 
 # OSD off, heavy refPred for long-range lossy link
 curl "http://<device>/api/v1/set?video0.resilience=fpv"
+
+# Max non-reference density (50 % droppable) with a long GOP; OSD-unsafe.
+# Pair with asymmetric FEC (protect the IDR, barely protect the rest).
+curl "http://<device>/api/v1/set?video0.gopSize=5.0"
+curl "http://<device>/api/v1/set?video0.resilience=ltr"
+
+# Sweep the period — larger N is LESS resilient (1 droppable frame per N+1)
+curl "http://<device>/api/v1/set?video0.resilience=ltr:4"
+
+# Confirm what the encoder actually applied (resolved ratio, not AUTO)
+curl "http://<device>/api/v1/resilience/status"
 ```
 
 Notes:
@@ -956,7 +1017,8 @@ Notes:
   (`intra_refresh_*`, `ref_base`, `ref_enhance`, `ref_pred`) are
   intentionally not part of the JSON schema or HTTP API — the preset
   table fully drives them.  Use a named preset; if none fits, file an
-  issue and we'll add one.
+  issue and we'll add one.  `ltr:<N>` is the one parameterised form,
+  and it exists so the reference ratio can be swept without a rebuild.
 - Applied to ch0 only.  The dual-VENC recorder (ch1) is intentionally
   skipped — TS containers expect IDRs at GOP boundaries.
 - Budget +20–30 % bitrate when picking a preset that enables
