@@ -443,6 +443,10 @@ int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 	 *   rally       150ms     1    2.0s   300ms     no  (light refPred)
 	 *   range       500ms     4    2.0s   2500ms    no  (heavy refPred)
 	 *   fpv        1000ms     4    2.0s   5000ms    no  (heaviest refPred)
+	 *
+	 * The "ltr" family is handled below the table, not in it: its
+	 * enhance ratio is derived from the GOP (which the user owns) and
+	 * so cannot be a static column.  See the block above the loop.
 	 */
 	static const struct preset table[] = {
 		{ "off",        "off",      0, 0, 0.0 },   /* gopSize honoured */
@@ -458,6 +462,52 @@ int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 	};
 
 	const char *want = (!name || !*name) ? "off" : name;
+
+	/* "ltr" / "ltr:<N>" — maximum non-reference density, long GOP.
+	 *
+	 * Device-measured on Star6E 2026-08-06 (raw-ES NAL census, see
+	 * HISTORY 0.63.0).  MI_VENC_ParamRef_t.u32Enhance is a PERIOD: the
+	 * encoder emits exactly one non-referenced frame in every
+	 * (u32Enhance + 1).  enhance=4 yields `IRRRnRRRRn…` (20 % droppable),
+	 * enhance=299 yields 0.3 %.  So enhance=1 — `InRnRnRn…`, 50 %
+	 * droppable — is the most resilient structure this SoC can express,
+	 * and it is what bare "ltr" selects.  "ltr:<N>" pins the period for
+	 * sweeps; larger N is strictly LESS resilient.
+	 *
+	 * A lost non-referenced frame costs exactly one frame.  The other
+	 * half of the stream is an ordinary P-chain, so losing one of those
+	 * still cascades to the next IDR — there is no long-term-reference
+	 * API on Infinity6E to do better (the full SDK's MI_VENC_Set*
+	 * surface has no LTR/SmartP/GOP-mode entry point).
+	 *
+	 * Unlike "rally" (the same 1:1 ratio) this preserves the caller's
+	 * gop_size and forces intra-refresh off, so it can be paired with a
+	 * long GOP and asymmetric transport FEC.  Stripes landing in
+	 * non-referenced frames never enter the DPB, so with half the stream
+	 * non-referenced they cost bitrate and repair nothing.
+	 */
+	if (strncmp(want, "ltr", 3) == 0 && (want[3] == '\0' || want[3] == ':')) {
+		unsigned long enh = 1ul;
+
+		if (want[3] == ':') {
+			char *end = NULL;
+
+			errno = 0;
+			enh = strtoul(want + 4, &end, 10);
+			if (errno != 0 || end == want + 4 || *end != '\0' ||
+			    enh < 1ul || enh > 255ul)
+				return -1;
+		}
+		safe_strcpy(v->intra_refresh_mode,
+			sizeof(v->intra_refresh_mode), "off");
+		v->intra_refresh_lines = 0;
+		v->intra_refresh_qp = 0;
+		v->ref_base = 1;
+		v->ref_enhance = (uint8_t)enh;
+		v->ref_pred = false;
+		return 0;
+	}
+
 	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); ++i) {
 		if (strcmp(want, table[i].name) != 0)
 			continue;
@@ -595,7 +645,7 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		safe_strcpy(v->resilience, sizeof(v->resilience), rname);
 		if (venc_config_apply_resilience_preset(v->resilience, v) != 0) {
 			fprintf(stderr, "[config] WARNING: unknown video0.resilience "
-				"'%s' (use off|quality|racing|range|fpv) — falling "
+				"'%s' (use off|quality|racing|range|fpv|ltr[:N]) — falling "
 				"back to off\n", v->resilience);
 			safe_strcpy(v->resilience, sizeof(v->resilience), "off");
 			(void)venc_config_apply_resilience_preset("off", v);

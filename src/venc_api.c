@@ -1017,6 +1017,22 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 				"zoom-1.25x, zoom-1.50x, zoom-1.75x, zoom-2x, "
 				"zoom-3x, zoom-4x";
 	}
+	/* Without this an unknown preset is committed: the SET returns 200,
+	 * persists the bad name to /etc/waybeam.json, and leaves the derived
+	 * intra_refresh_* / ref_* fields holding the PREVIOUS preset's
+	 * expansion — so /api/v1/config disagrees with the encoder until the
+	 * next start, where the disk loader silently falls back to "off" and
+	 * the operator lands on a preset they never asked for.  The
+	 * parameterised "ltr:<N>" form makes the invalid space wide and
+	 * plausible ("ltr:0", "ltr:256"), so this must reject, not clamp. */
+	if (strcmp(key, "video0.resilience") == 0) {
+		VencConfigVideo probe = cfg->video0;
+		if (venc_config_apply_resilience_preset(cfg->video0.resilience,
+				&probe) != 0)
+			return "resilience must be one of: off, rescue, quality, "
+				"sprint, racing, endurance, patrol, rally, range, "
+				"fpv, ltr, ltr:<1-255>";
+	}
 	if (strcmp(key, "attitude.mount_deg") == 0) {
 		int v = cfg->attitude.mount_deg;
 		if (v != 0 && v != 90 && v != 180 && v != 270)
@@ -1200,6 +1216,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.zoom_x",
 		"video0.zoom_y",
 		"video0.framing",
+		"video0.resilience",
 		"fpv.roi_qp",
 		"fpv.roi_steps",
 		"fpv.roi_center",
