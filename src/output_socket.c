@@ -282,7 +282,13 @@ int output_socket_capture_capacity(int socket_handle, OutputSocketQueue *queue)
 
 	if (!queue)
 		return -1;
-	memset(queue, 0, sizeof(*queue));
+	/* Reset field-by-field rather than memset: on a live redirect this
+	 * runs on the control thread while the producer may still be inside a
+	 * flush calling output_socket_note_saturation() on the same struct, and
+	 * a bulk plain write there would race the atomic accesses. */
+	__atomic_store_n(&queue->sndbuf_capacity, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&queue->unix_capacity, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&queue->logged_capacity, 0, __ATOMIC_RELAXED);
 	if (socket_handle < 0)
 		return -1;
 	if (getsockopt(socket_handle, SOL_SOCKET, SO_SNDBUF, &sndbuf,
@@ -407,10 +413,10 @@ void output_socket_note_saturation(int socket_handle, OutputSocketQueue *queue)
 	 * was raised: the sysctl reads healthy, but that consumer's socket
 	 * kept the shallow depth it was created with, so the startup warning
 	 * stays silent.  Log once, on the cold path. */
-	if (!queue->logged_capacity) {
+	if (!__atomic_load_n(&queue->logged_capacity, __ATOMIC_RELAXED)) {
 		int dgrams = queued / UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
 
-		queue->logged_capacity = 1;
+		__atomic_store_n(&queue->logged_capacity, 1, __ATOMIC_RELAXED);
 		if (dgrams < OUTPUT_SOCKET_UNIX_QLEN_RECOMMENDED / 2) {
 			fprintf(stderr,
 				"[output_socket] WARNING: unix:// peer queue holds only "

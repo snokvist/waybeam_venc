@@ -2,22 +2,35 @@
 
 ## [0.63.1] - 2026-08-06
 
-Fix the cross-thread data race on the `unix://` send-queue capacities.
+Remove the data races on the `unix://` send-queue capacity accounting.
 
-- `OutputSocketQueue.sndbuf_capacity` and `.unix_capacity` are written by the
-  producer (encode) thread and read by the HTTP/status thread to scale the
-  transport fill percentage. Both were plain `int` accesses. Benign in
-  practice on the ARM targets — aligned word access, and the worst outcome is
-  one stale telemetry reading — but still a data race the compiler is
-  entitled to exploit, and one no test can catch, because the host suite never
-  runs those two threads against this path concurrently.
-- Both are now accessed with relaxed atomics, matching the `__atomic_*` idiom
-  already used for `transport_gen` in the same struct. Relaxed is the correct
-  strength: each is an independent scalar and nothing else is published
-  through them. `logged_capacity` is producer-only and stays a plain int.
+- `OutputSocketQueue` is touched by three threads, not one: the producer
+  (encode) thread raises `unix_capacity` / sets `logged_capacity` from the
+  send path, the HTTP/status thread reads both capacities to scale the
+  reported transport fill percentage, and the control thread RESETS all three
+  in `output_socket_capture_capacity()` on a live transport redirect. All
+  three fields were plain `int`.
+- The `transport_gen` seqlock does not serialise that third writer: the
+  producer consults it only to snapshot the transport into its batch and then
+  flushes outside it, so a redirect can land while a flush is still updating
+  this struct. The reset was additionally a bulk `memset` racing those
+  accesses.
+- All three fields now use relaxed atomics, matching the `__atomic_*` idiom
+  already used for `transport_gen`, and the reset writes them individually
+  instead of `memset`. Relaxed is the correct strength: each is an
+  independent scalar and nothing else is published through them.
 - `output_socket_get_fill_pct()` now snapshots both capacities once instead of
   re-reading `unix_capacity` per use, so a calibration landing mid-call can no
   longer mix an old and a new value into a percentage that never existed.
+
+This removes the undefined behaviour, not every interleaving: a redirect
+racing an in-flight flush can still leave `unix_capacity` holding the previous
+socket's learned value, because the compare-then-store in
+`output_socket_note_saturation()` is not itself atomic. That is bounded and
+self-healing — the next saturation on the new socket recalibrates it, and the
+only consequence meanwhile is a skewed fill percentage. Serialising it would
+need a lock on the encode thread's send path, which costs more than the
+telemetry is worth. The threading contract is now documented on the struct.
 
 No behavioural change. Flagged during review of #214, which introduced the
 calibration write and deferred this to a maintainer call.
