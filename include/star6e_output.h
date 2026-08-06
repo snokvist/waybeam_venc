@@ -143,6 +143,26 @@ typedef struct {
 	int svct_active;
 	uint8_t gdr_cycle_len;
 	uint8_t gdr_counter;
+	/* Recovery hook for a frame-shm:// ring-full drop.
+	 *
+	 * A full ring discards a frame that is ALREADY ENCODED, so the
+	 * decoder's reference chain breaks and it renders garbage until the
+	 * next IDR — with a long GOP, that is seconds.  The producer is the
+	 * one party that knows instantly it just broke the chain, so it
+	 * re-establishes it locally instead of waiting for the ground to
+	 * notice and ask: waybeam-link only requests an IDR on a
+	 * RecoveryRequest arriving over RF, which is a full round trip and is
+	 * off by default (venc.recovery_enabled).
+	 *
+	 * Wired to star6e_scene_request_idr(), so it inherits the shared
+	 * per-channel IDR rate limiter (100 ms) — a persistently full ring
+	 * coalesces into at most ~10 IDRs/s instead of a keyframe storm into
+	 * the very ring that is already congested. */
+	void (*request_idr)(void *ctx);
+	void *idr_ctx;
+	/* Ring-full drops split by whether they actually broke the chain.
+	 * A non-referenced (SVC-T) frame is droppable by construction, so
+	 * those cost exactly one frame and must NOT trigger an IDR. */
 } Star6eOutput;
 
 typedef struct {

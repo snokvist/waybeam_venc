@@ -334,8 +334,12 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 	    stream->h265Info.refType == MARUKO_REFTYPE_ENHANCE_P_NOTFORREF)
 		meta.flags |= VENC_FRAME_FLAG_ENHANCE;
 
-	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0)
+	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
+		if (venc_frame_drop_breaks_chain(meta.flags) &&
+		    output->request_idr)
+			output->request_idr(output->idr_ctx);
 		return 0;
+	}
 
 	for (i = 0; i < stream->count; ++i) {
 		const i6c_venc_pack *pack = &stream->packet[i];

@@ -1,5 +1,34 @@
 # History
 
+## [0.63.2] - 2026-08-06
+
+Re-establish the reference chain when a frame-shm:// ring-full drop breaks it.
+
+- A full ring discards a frame that is ALREADY ENCODED, so the decoder's
+  reference chain breaks and it renders garbage until the next IDR — with a
+  long GOP that is seconds. Nothing closed that loop: `waybeam-link` requests
+  an IDR only on a `RecoveryRequest` arriving from the ground over RF, which
+  is a full round trip and is off by default (`venc.recovery_enabled`), and
+  the ring's `full_drops` counter is read by the link but wired to telemetry
+  only. The producer is the one party that knows instantly, and now acts on
+  it locally.
+- Only when the drop actually broke the chain. An SVC-T enhance frame is
+  non-referenced by construction, so discarding one costs exactly one frame;
+  firing an IDR there would push the largest frame in the stream into a ring
+  that is already full, to repair damage that never happened. The policy is
+  one shared inline (`venc_frame_drop_breaks_chain`) rather than a copy per
+  backend.
+- Routed through the existing per-channel IDR rate limiter (100 ms), so a
+  persistently full ring coalesces into at most ~10 IDRs/s instead of a
+  keyframe storm. `video0.resilience=ltr` makes this materially cheaper still:
+  half the frames are non-referenced and take the free path.
+
+Deliberately NOT included: blocking the encoder when the ring fills. Bounded
+blocking is a latency tradeoff rather than a free win, and unbounded blocking
+cannot be made safe here — a dead SHM consumer gives no error signal (there is
+no EPIPE equivalent), so it would wedge the encoder permanently with no
+recovery path on SigmaStar.
+
 ## [0.63.1] - 2026-08-06
 
 Remove the data races on the `unix://` send-queue capacity accounting.

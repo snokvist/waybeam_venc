@@ -859,6 +859,14 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 			STAR6E_CONTROLS_IDLE_FPS);
 	}
 
+	/* Let a frame-shm:// ring-full drop re-establish the reference chain
+	 * locally.  Same rate-limited primitive the scene detector uses, so
+	 * both producers of forced IDRs coalesce through one 100 ms window.
+	 * Set here rather than in the pipeline because the callback is
+	 * runtime-local; safe against pipeline restarts, which re-run this. */
+	ps->output.request_idr = star6e_scene_request_idr;
+	ps->output.idr_ctx = &ps->venc_channel;
+
 	star6e_recorder_init(&ps->recorder);
 	audio_ring_init(&ps->audio_ring);
 	{
