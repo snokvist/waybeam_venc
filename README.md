@@ -883,11 +883,15 @@ and lets you keep a long GOP.
 nothing): it is a *period*, not a count.  The encoder emits exactly one
 non-referenced frame in every `enhance + 1`:
 
-| `enhance` | frame pattern | non-referenced |
-|-----------|---------------|----------------|
-| 1         | `InRnRnRn…`   | **50 %** (max) |
-| 4         | `IRRRnRRRRn…` | 20 %           |
-| 299       | `IRRRR…`      | 0.3 %          |
+| `enhance` | frame pattern | non-referenced (steady state) | measured |
+|-----------|---------------|-------------------------------|----------|
+| 1         | `InRnRnRn…`   | **50 %** (max)                | 50.0 %   |
+| 4         | `IRRRnRRRRn…` | 20 %                          | 17.6 %   |
+| 299       | `IRRRR…`      | 0.33 %                        | 0.3 %    |
+
+A capture reads slightly under the steady-state figure because the census
+includes the IDR and the partial groups at each end; the shorter the group,
+the more that dilutes.  The rule itself is exact.
 
 So **smaller is more resilient**, and `enhance=1` is the ceiling this SoC
 can express.  Bare `ltr` selects it; `ltr:<N>` pins the period for sweeps
