@@ -29,7 +29,20 @@
  * in SIOCOUTQ bytes, learned the first time a send blocks or fails with
  * EAGAIN; 0 until that happens.  See output_socket_note_saturation().
  * `logged_capacity` keeps the one-shot calibration log to one line per
- * socket. */
+ * socket.
+ *
+ * THREADING: `sndbuf_capacity` and `unix_capacity` are written by the
+ * producer (encode) thread and read by the HTTP/status thread, so both are
+ * accessed with relaxed atomics.  Relaxed is the right strength: each is an
+ * independent scalar used only to scale a telemetry percentage, and nothing
+ * else is published through them, so no ordering with other stores is
+ * implied or needed.  Without the atomics these are plain cross-thread
+ * scalars — benign in practice on the ARM targets (aligned word access), but
+ * still a data race the compiler is entitled to exploit, and one the test
+ * suite cannot catch because the host tests never run the two threads
+ * against this path concurrently.  `logged_capacity` is producer-only (it
+ * guards a one-shot log inside output_socket_note_saturation) and stays a
+ * plain int. */
 typedef struct {
 	int sndbuf_capacity;
 	int unix_capacity;

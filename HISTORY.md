@@ -1,5 +1,27 @@
 # History
 
+## [0.63.1] - 2026-08-06
+
+Fix the cross-thread data race on the `unix://` send-queue capacities.
+
+- `OutputSocketQueue.sndbuf_capacity` and `.unix_capacity` are written by the
+  producer (encode) thread and read by the HTTP/status thread to scale the
+  transport fill percentage. Both were plain `int` accesses. Benign in
+  practice on the ARM targets — aligned word access, and the worst outcome is
+  one stale telemetry reading — but still a data race the compiler is
+  entitled to exploit, and one no test can catch, because the host suite never
+  runs those two threads against this path concurrently.
+- Both are now accessed with relaxed atomics, matching the `__atomic_*` idiom
+  already used for `transport_gen` in the same struct. Relaxed is the correct
+  strength: each is an independent scalar and nothing else is published
+  through them. `logged_capacity` is producer-only and stays a plain int.
+- `output_socket_get_fill_pct()` now snapshots both capacities once instead of
+  re-reading `unix_capacity` per use, so a calibration landing mid-call can no
+  longer mix an old and a new value into a percentage that never existed.
+
+No behavioural change. Flagged during review of #214, which introduced the
+calibration write and deferred this to a maintainer call.
+
 ## [0.63.0] - 2026-08-01
 
 `unix://` output no longer stalls the encoder, and its backpressure

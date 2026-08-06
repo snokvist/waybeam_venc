@@ -290,7 +290,7 @@ int output_socket_capture_capacity(int socket_handle, OutputSocketQueue *queue)
 		return -1;
 	if (sndbuf <= 0)
 		return -1;
-	queue->sndbuf_capacity = sndbuf;
+	__atomic_store_n(&queue->sndbuf_capacity, sndbuf, __ATOMIC_RELAXED);
 	return 0;
 }
 
@@ -398,9 +398,9 @@ void output_socket_note_saturation(int socket_handle, OutputSocketQueue *queue)
 		return;
 	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
 		return;
-	if (queued <= queue->unix_capacity)
+	if (queued <= __atomic_load_n(&queue->unix_capacity, __ATOMIC_RELAXED))
 		return;
-	queue->unix_capacity = queued;
+	__atomic_store_n(&queue->unix_capacity, queued, __ATOMIC_RELAXED);
 
 	/* First calibration reveals the peer's real queue depth, which is the
 	 * only way to catch a consumer that was started before max_dgram_qlen
@@ -428,27 +428,38 @@ int output_socket_get_fill_pct(int socket_handle,
 	OutputSocketQueue local;
 	int queued = 0;
 	int denom;
+	int cap_unix;
+	int cap_sndbuf;
 	uint64_t pct;
 
 	if (socket_handle < 0 || !out_pct)
 		return -1;
-	if (!queue || queue->sndbuf_capacity <= 0) {
+	if (!queue ||
+	    __atomic_load_n(&queue->sndbuf_capacity, __ATOMIC_RELAXED) <= 0) {
 		if (output_socket_capture_capacity(socket_handle, &local) != 0)
 			return -1;
 		if (queue)
-			local.unix_capacity = queue->unix_capacity;
+			local.unix_capacity = __atomic_load_n(
+				&queue->unix_capacity, __ATOMIC_RELAXED);
 		queue = &local;
 	}
+	/* Snapshot both capacities once.  The producer can raise
+	 * unix_capacity at any point (first saturation calibrates it), and
+	 * re-reading it per use could mix an old and a new value into one
+	 * result — publishing a percentage that never existed. */
+	cap_unix = __atomic_load_n(&queue->unix_capacity, __ATOMIC_RELAXED);
+	cap_sndbuf = __atomic_load_n(&queue->sndbuf_capacity, __ATOMIC_RELAXED);
+
 	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
 		return -1;
 	if (queued < 0)
 		queued = 0;
 
 	if (socket_is_unix_dgram(socket_handle)) {
-		denom = queue->unix_capacity > 0 ? queue->unix_capacity :
-			unix_estimated_capacity(queue->sndbuf_capacity);
+		denom = cap_unix > 0 ? cap_unix :
+			unix_estimated_capacity(cap_sndbuf);
 	} else {
-		denom = queue->sndbuf_capacity;
+		denom = cap_sndbuf;
 	}
 
 	if (denom <= 0)
