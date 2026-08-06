@@ -253,7 +253,8 @@ omitted fields keep their compiled-in defaults.
   "outgoing": {
     "enabled": false, "server": "", "streamMode": "rtp",
     "maxPayloadSize": 1400,
-    "connectedUdp": true, "audioPort": 5601, "sidecarPort": 5602
+    "connectedUdp": true, "allowUnixEncoderStall": false,
+    "audioPort": 5601, "sidecarPort": 5602
   },
   "fpv":      {
     "roiEnabled": true, "roiQp": 0, "roiSteps": 2,
@@ -989,6 +990,7 @@ Notes:
 | `outgoing.stream_mode` | string | restart | `"rtp"` or `"compact"` |
 | `outgoing.max_payload_size` | uint16 | restart | Max UDP payload bytes |
 | `outgoing.connected_udp` | bool | restart | Connect UDP socket (applies only to `udp://`) |
+| `outgoing.allow_unix_encoder_stall` | bool | restart | Preserve blocking `unix://` behavior when the consumer queue fills. Default `false`: bounded wait then drop the rest of the frame |
 | `outgoing.audio_port` | int32 | restart | `>0` = dedicated audio port; `0` = shared video destination; `<0` (e.g. `-1`) = record-only (audio captured + recorded but never streamed). With `unix://`, dedicated audio is sent to `127.0.0.1:<audioPort>` |
 | `outgoing.sidecar_port` | uint16 | restart | RTP timing sidecar port (0 = disabled) |
 
@@ -997,6 +999,28 @@ both `rtp` and `compact` mode. On Star6E, `audioPort=0` piggybacks on the
 same active video destination for both `udp://` and `unix://`. `shm://`
 remains RTP-only; it cannot share audio, but a nonzero `audioPort` still
 uses a dedicated local UDP audio destination.
+
+> **`unix://` requires a deep datagram queue.** Unlike UDP, an AF_UNIX
+> datagram sender blocks on the *receiver's* queue depth. The kernel
+> snapshots that depth from `net.unix.max_dgram_qlen` when the receiving
+> socket is created, and the default of **10 datagrams** is only ~7 ms of
+> buffer at 15 Mbps with 1400-byte RTP payloads — less than one 60 fps
+> frame (~23 packets). Every frame then overruns the queue and stalls the
+> encode thread waiting on consumer scheduling, which shows up as timing
+> jitter and dropped capture frames rather than as packet loss.
+>
+> Raise it **before the consumer starts** — raising it afterwards does
+> nothing for a socket that already exists:
+>
+> ```sh
+> echo 256 > /proc/sys/net/unix/max_dgram_qlen
+> ```
+>
+> `init.d/S95waybeam` does this at boot. venc warns on stderr at startup
+> when it finds a shallower value. Sends are additionally bounded by
+> `SO_SNDTIMEO` and a 4 ms per-frame flush deadline, so a wedged consumer
+> costs bounded packet drops (counted as `transportDrops` in
+> `GET /api/v1/transport/status`) instead of stalling the encoder.
 
 <a id="frame-shm-output"></a>
 `frame-shm://` publishes **whole encoded frames** (Annex-B, start codes

@@ -34,6 +34,8 @@ JSON_CLI_TARGET := $(OUT_DIR)/json_cli
 REGSCAN_TARGET := $(OUT_DIR)/regscan
 TIMING_PROBE_TARGET := rtp_timing_probe
 TIMING_PROBE_SRC := tools/rtp_timing_probe.c
+UNIX_CONSUMER_TARGET := $(OUT_DIR)/unix_dgram_consumer
+UNIX_CONSUMER_SRC := tools/unix_dgram_consumer.c
 
 VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # -MMD -MP emits per-object .d files so a one-line change rebuilds just
@@ -116,7 +118,7 @@ LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
         remote-test verify pre-pr \
         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
-        qr-decode qr-test-host qr-test-cli qr-test-extended qr-test-phone webui webui-check
+        qr-decode unix-dgram-consumer qr-test-host qr-test-cli qr-test-extended qr-test-phone webui webui-check
 
 help:
 	@echo "Targets:"
@@ -124,6 +126,7 @@ help:
 	@echo "  make build SOC_BUILD=maruko"
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
 	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
+	@echo "  make unix-dgram-consumer Build the target-local unix:// RTP test consumer"
 	@echo "  make qr-test-host Run the deterministic QR perspective corpus"
 	@echo "  make qr-test-cli Run decoder CLI and image loader regressions"
 	@echo "  make qr-test-extended Run the extended QR skew/defocus series"
@@ -216,6 +219,15 @@ $(TARGET): $(OBJS)
 # Host-native timing probe (no cross-compiler or SDK libs needed)
 $(TIMING_PROBE_TARGET): $(TIMING_PROBE_SRC) include/rtp_sidecar.h
 	$(HOST_CC) -std=c99 -Wall -Wextra -O2 -D_GNU_SOURCE -Iinclude $(TIMING_PROBE_SRC) -lm -o $@
+
+# Target-local abstract AF_UNIX datagram sink used for unix:// throughput and
+# controlled-stall validation. It is a test tool, not part of the runtime image.
+unix-dgram-consumer: $(TOOLCHAIN_TARGET) | $(OUT_DIR)
+unix-dgram-consumer: $(UNIX_CONSUMER_TARGET)
+
+$(UNIX_CONSUMER_TARGET): $(UNIX_CONSUMER_SRC)
+	@mkdir -p $(@D)
+	$(CC) -Os -s -Wall -Wextra -Werror -std=c99 -D_GNU_SOURCE -o $@ $<
 
 # json_cli — vendored from waybeam-hub (tools/json_cli/{json_cli.c,jsmn.h}).
 # Cross-compiled with the SOC's toolchain so the same binary that runs venc
@@ -531,8 +543,8 @@ remote-test:
 
 # ── Verification targets ──────────────────────────────────────────────
 
-STAR6E_BINS := out/star6e/waybeam out/star6e/qr_decode
-MARUKO_BINS := out/maruko/waybeam out/maruko/qr_decode
+STAR6E_BINS := out/star6e/waybeam out/star6e/qr_decode out/star6e/unix_dgram_consumer
+MARUKO_BINS := out/maruko/waybeam out/maruko/qr_decode out/maruko/unix_dgram_consumer
 
 webui:
 	python3 tools/build_webui.py
@@ -544,6 +556,7 @@ verify: webui-check qr-test-host qr-test-cli
 	@echo "=== Building Maruko backend ==="
 	$(MAKE) build SOC_BUILD=maruko
 	$(MAKE) qr-decode SOC_BUILD=maruko
+	$(MAKE) unix-dgram-consumer SOC_BUILD=maruko
 	@echo ""
 	@echo "=== Verifying Maruko binaries ==="
 	@for f in $(MARUKO_BINS); do \
@@ -554,6 +567,7 @@ verify: webui-check qr-test-host qr-test-cli
 	@echo "=== Building Star6E backend ==="
 	$(MAKE) build SOC_BUILD=star6e
 	$(MAKE) qr-decode SOC_BUILD=star6e
+	$(MAKE) unix-dgram-consumer SOC_BUILD=star6e
 	@echo ""
 	@echo "=== Verifying Star6E binaries ==="
 	@for f in $(STAR6E_BINS); do \

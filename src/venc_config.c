@@ -120,6 +120,7 @@ void venc_config_defaults(VencConfig *cfg)
 	safe_strcpy(cfg->outgoing.stream_mode, sizeof(cfg->outgoing.stream_mode), "rtp");
 	cfg->outgoing.max_payload_size = 1400;
 	cfg->outgoing.connected_udp = true;
+	cfg->outgoing.allow_unix_encoder_stall = false;
 	cfg->outgoing.shm_throttle = true;
 
 	/* fpv */
@@ -686,6 +687,8 @@ static void load_outgoing(const cJSON *root, VencConfigOutgoing *s)
 	s->max_payload_size = (uint16_t)json_get_int(obj, "maxPayloadSize",
 		(int)s->max_payload_size);
 	s->connected_udp = json_get_bool(obj, "connectedUdp", s->connected_udp);
+	s->allow_unix_encoder_stall = json_get_bool(obj, "allowUnixEncoderStall",
+		s->allow_unix_encoder_stall);
 	s->audio_port = json_get_int(obj, "audioPort", s->audio_port);
 	s->sidecar_port = (uint16_t)json_get_int(obj, "sidecarPort",
 		(int)s->sidecar_port);
@@ -1345,6 +1348,8 @@ static void render_outgoing(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_string(p, 2, "streamMode",      cfg->outgoing.stream_mode,       0);
 	pp_field_uint(p,   2, "maxPayloadSize",  cfg->outgoing.max_payload_size,  0);
 	pp_field_bool(p,   2, "connectedUdp",    cfg->outgoing.connected_udp,     0);
+	pp_field_bool(p,   2, "allowUnixEncoderStall",
+		cfg->outgoing.allow_unix_encoder_stall, 0);
 	pp_field_int(p,    2, "audioPort",       cfg->outgoing.audio_port,        0);
 	pp_field_uint(p,   2, "sidecarPort",    cfg->outgoing.sidecar_port,    0);
 	pp_field_bool(p,   2, "shmThrottle",     cfg->outgoing.shm_throttle,      1);
@@ -1604,6 +1609,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddStringToObject(out, "streamMode", cfg->outgoing.stream_mode);
 		cJSON_AddNumberToObject(out, "maxPayloadSize", cfg->outgoing.max_payload_size);
 		cJSON_AddBoolToObject(out, "connectedUdp", cfg->outgoing.connected_udp);
+		cJSON_AddBoolToObject(out, "allowUnixEncoderStall",
+			cfg->outgoing.allow_unix_encoder_stall);
 		cJSON_AddNumberToObject(out, "audioPort", cfg->outgoing.audio_port);
 		cJSON_AddNumberToObject(out, "sidecarPort", cfg->outgoing.sidecar_port);
 		cJSON_AddBoolToObject(out, "shmThrottle", cfg->outgoing.shm_throttle);

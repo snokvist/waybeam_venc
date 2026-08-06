@@ -1750,6 +1750,8 @@ static int prepare_pipeline_config(Star6ePipelineState *state,
 	    vcfg->outgoing.stream_mode,
 	    vcfg->outgoing.connected_udp) != 0)
 		return -1;
+	pconf->output_setup.allow_unix_encoder_stall =
+		vcfg->outgoing.allow_unix_encoder_stall ? 1 : 0;
 
 	/* Auto-cap exposure to frame period so the AE shutter never exceeds
 	 * the frame period.  Without this, the AE converges on a long

@@ -55,6 +55,7 @@
     "streamMode": "rtp",
     "maxPayloadSize": 1400,
     "connectedUdp": true,
+    "allowUnixEncoderStall": false,
     "audioPort": 5601,
     "sidecarPort": 5602,
     "shmThrottle": true

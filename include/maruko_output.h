@@ -1,6 +1,7 @@
 #ifndef MARUKO_OUTPUT_H
 #define MARUKO_OUTPUT_H
 
+#include "output_socket.h"
 #include "venc_config.h"
 #include "venc_frame_ring.h"
 #include "venc_ring.h"
@@ -20,6 +21,10 @@
  * 12 (RTP) + 4000 = 4012 bytes; rounded up to 4096 for slack and
  * alignment. Sized for jumbo-frame links such as the Realtek 3993 MTU. */
 #define MARUKO_OUTPUT_BATCH_SLOT_SCRATCH 4096
+
+/* Wall-clock ceiling on flushing one frame's batch.  Mirrors
+ * STAR6E_OUTPUT_FLUSH_BUDGET_US; see the rationale there. */
+#define MARUKO_OUTPUT_FLUSH_BUDGET_US 4000
 
 /* Per-frame sendmmsg batch. We own `scratch[slot]` containing
  * [RTP header || payload1] concatenated — both the header (built on the
@@ -47,6 +52,10 @@ typedef struct {
 	struct sockaddr_storage dst;
 	socklen_t dst_len;
 	int connected_udp;
+	int allow_unix_encoder_stall;
+	uint32_t flush_budget_us;
+	int discard_remaining;
+	int discard_as_error;
 } MarukoOutputBatch;
 
 /** Maruko output module — manages socket/SHM lifecycle and destination. */
@@ -64,9 +73,14 @@ typedef struct {
 	uint16_t throttle_permille;
 	int requested_connected_udp; /* user preference, persisted for apply_server */
 	int connected_udp;           /* actual kernel state — set by configure() */
+	int allow_unix_encoder_stall; /* unix:// blocking compatibility mode */
 	uint32_t send_errors;
 	uint32_t transport_gen; /* seqlock: odd = write in progress, even = stable */
-	int send_buf_capacity; /* cached SO_SNDBUF (kernel-reported), 0 = unknown */
+	OutputSocketQueue send_queue; /* SO_SNDBUF + learned unix:// capacity */
+	/* Lifetime socket-transport counters, producer-thread only.  Mirror
+	 * of Star6eOutput; see the docstring there. */
+	uint32_t socket_drops;
+	uint32_t socket_writes;
 	MarukoOutputBatch batch;
 	/* Transport-pressure observation cache.  Mirrors Star6eOutput; see
 	 * the docstring there.  Populated once per frame by
@@ -86,7 +100,7 @@ typedef struct {
 
 /** Initialize UDP or Unix socket output from a parsed URI. */
 int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
-	int requested_connected_udp);
+	int requested_connected_udp, int allow_unix_encoder_stall);
 
 /** Initialize SHM output: create shared memory ring buffer. */
 int maruko_output_init_shm(MarukoOutput *output, const char *shm_name);
@@ -133,6 +147,10 @@ int maruko_output_batch_enqueue(MarukoOutput *output,
 	const uint8_t *header, size_t header_len,
 	const uint8_t *payload1, size_t payload1_len,
 	const uint8_t *payload2, size_t payload2_len);
+
+/** Classify the errno from a failed socket send as congestion or hard error. */
+void maruko_output_account_send_failure(MarukoOutput *output, int socket_handle,
+	uint32_t packets);
 
 /** Return and reset accumulated send error count. */
 uint32_t maruko_output_drain_send_errors(MarukoOutput *output);

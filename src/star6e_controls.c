@@ -1567,7 +1567,7 @@ static char *query_transport_status(void)
 		uint8_t fill_pct = 0;
 		int in_pressure;
 		if (output_socket_get_fill_pct(ps->output.socket_handle,
-		    ps->output.send_buf_capacity, &fill_pct) != 0)
+		    &ps->output.send_queue, &fill_pct) != 0)
 			fill_pct = 0;
 		in_pressure = fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
 		pos = snprintf(buf, sizeof(buf),
@@ -1576,11 +1576,17 @@ static char *query_transport_status(void)
 			"\"transport\":\"%s\","
 			"\"fillPct\":%u,"
 			"\"inPressure\":%s,"
-			"\"pressureDrops\":%u}}",
+			"\"pressureDrops\":%u,"
+			"\"transportDrops\":%u,"
+			"\"packetsSent\":%u}}",
 			transport,
 			(unsigned)fill_pct,
 			in_pressure ? "true" : "false",
-			(unsigned)pressure_drops);
+			(unsigned)pressure_drops,
+			(unsigned)__atomic_load_n(&ps->output.socket_drops,
+				__ATOMIC_RELAXED),
+			(unsigned)__atomic_load_n(&ps->output.socket_writes,
+				__ATOMIC_RELAXED));
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
