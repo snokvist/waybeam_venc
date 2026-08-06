@@ -282,7 +282,13 @@ int output_socket_capture_capacity(int socket_handle, OutputSocketQueue *queue)
 
 	if (!queue)
 		return -1;
-	memset(queue, 0, sizeof(*queue));
+	/* Reset field-by-field rather than memset: on a live redirect this
+	 * runs on the control thread while the producer may still be inside a
+	 * flush calling output_socket_note_saturation() on the same struct, and
+	 * a bulk plain write there would race the atomic accesses. */
+	__atomic_store_n(&queue->sndbuf_capacity, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&queue->unix_capacity, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&queue->logged_capacity, 0, __ATOMIC_RELAXED);
 	if (socket_handle < 0)
 		return -1;
 	if (getsockopt(socket_handle, SOL_SOCKET, SO_SNDBUF, &sndbuf,
@@ -290,7 +296,7 @@ int output_socket_capture_capacity(int socket_handle, OutputSocketQueue *queue)
 		return -1;
 	if (sndbuf <= 0)
 		return -1;
-	queue->sndbuf_capacity = sndbuf;
+	__atomic_store_n(&queue->sndbuf_capacity, sndbuf, __ATOMIC_RELAXED);
 	return 0;
 }
 
@@ -398,19 +404,19 @@ void output_socket_note_saturation(int socket_handle, OutputSocketQueue *queue)
 		return;
 	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
 		return;
-	if (queued <= queue->unix_capacity)
+	if (queued <= __atomic_load_n(&queue->unix_capacity, __ATOMIC_RELAXED))
 		return;
-	queue->unix_capacity = queued;
+	__atomic_store_n(&queue->unix_capacity, queued, __ATOMIC_RELAXED);
 
 	/* First calibration reveals the peer's real queue depth, which is the
 	 * only way to catch a consumer that was started before max_dgram_qlen
 	 * was raised: the sysctl reads healthy, but that consumer's socket
 	 * kept the shallow depth it was created with, so the startup warning
 	 * stays silent.  Log once, on the cold path. */
-	if (!queue->logged_capacity) {
+	if (!__atomic_load_n(&queue->logged_capacity, __ATOMIC_RELAXED)) {
 		int dgrams = queued / UNIX_DGRAM_AVG_SKB_TRUESIZE_BYTES;
 
-		queue->logged_capacity = 1;
+		__atomic_store_n(&queue->logged_capacity, 1, __ATOMIC_RELAXED);
 		if (dgrams < OUTPUT_SOCKET_UNIX_QLEN_RECOMMENDED / 2) {
 			fprintf(stderr,
 				"[output_socket] WARNING: unix:// peer queue holds only "
@@ -428,27 +434,38 @@ int output_socket_get_fill_pct(int socket_handle,
 	OutputSocketQueue local;
 	int queued = 0;
 	int denom;
+	int cap_unix;
+	int cap_sndbuf;
 	uint64_t pct;
 
 	if (socket_handle < 0 || !out_pct)
 		return -1;
-	if (!queue || queue->sndbuf_capacity <= 0) {
+	if (!queue ||
+	    __atomic_load_n(&queue->sndbuf_capacity, __ATOMIC_RELAXED) <= 0) {
 		if (output_socket_capture_capacity(socket_handle, &local) != 0)
 			return -1;
 		if (queue)
-			local.unix_capacity = queue->unix_capacity;
+			local.unix_capacity = __atomic_load_n(
+				&queue->unix_capacity, __ATOMIC_RELAXED);
 		queue = &local;
 	}
+	/* Snapshot both capacities once.  The producer can raise
+	 * unix_capacity at any point (first saturation calibrates it), and
+	 * re-reading it per use could mix an old and a new value into one
+	 * result — publishing a percentage that never existed. */
+	cap_unix = __atomic_load_n(&queue->unix_capacity, __ATOMIC_RELAXED);
+	cap_sndbuf = __atomic_load_n(&queue->sndbuf_capacity, __ATOMIC_RELAXED);
+
 	if (ioctl(socket_handle, SIOCOUTQ, &queued) != 0)
 		return -1;
 	if (queued < 0)
 		queued = 0;
 
 	if (socket_is_unix_dgram(socket_handle)) {
-		denom = queue->unix_capacity > 0 ? queue->unix_capacity :
-			unix_estimated_capacity(queue->sndbuf_capacity);
+		denom = cap_unix > 0 ? cap_unix :
+			unix_estimated_capacity(cap_sndbuf);
 	} else {
-		denom = queue->sndbuf_capacity;
+		denom = cap_sndbuf;
 	}
 
 	if (denom <= 0)

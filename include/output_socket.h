@@ -29,7 +29,40 @@
  * in SIOCOUTQ bytes, learned the first time a send blocks or fails with
  * EAGAIN; 0 until that happens.  See output_socket_note_saturation().
  * `logged_capacity` keeps the one-shot calibration log to one line per
- * socket. */
+ * socket.
+ *
+ * THREADING: every field is touched by more than one thread, so all three
+ * are accessed with relaxed atomics.
+ *
+ *   - producer (encode) thread: output_socket_note_saturation() raises
+ *     `unix_capacity` and sets `logged_capacity` on the send/flush path.
+ *   - HTTP/status thread: output_socket_get_fill_pct() reads both capacities
+ *     to scale the reported percentage.
+ *   - control thread: output_socket_capture_capacity() RESETS all three on a
+ *     live transport redirect (star6e_output_apply_server /
+ *     maruko_output_apply_server).
+ *
+ * That last one makes this multi-writer, not single-writer.  The
+ * `transport_gen` seqlock does NOT serialise it: the producer reads the
+ * seqlock only to snapshot the transport into its batch, then flushes
+ * outside it, so a redirect can land while a flush is still calling
+ * note_saturation() on this struct.
+ *
+ * Relaxed is the right strength: each field is an independent scalar used
+ * only to scale a telemetry percentage, and nothing else is published
+ * through them, so no ordering with other stores is implied or needed.
+ *
+ * The atomics remove the undefined behaviour, not the interleaving.  A
+ * redirect racing an in-flight flush can still leave `unix_capacity` holding
+ * the previous socket's learned value, because note_saturation()'s
+ * compare-then-store is not itself atomic.  That is bounded and
+ * self-healing: the next saturation on the new socket recalibrates it, and
+ * the only consequence meanwhile is a skewed fill percentage.  Serialising
+ * it properly would need a lock on the encode thread's send path, which
+ * costs more than the telemetry is worth.  Without the atomics this was also
+ * a plain data race the compiler could exploit — one no test can catch,
+ * since the host suite never runs these threads against this path
+ * concurrently. */
 typedef struct {
 	int sndbuf_capacity;
 	int unix_capacity;
