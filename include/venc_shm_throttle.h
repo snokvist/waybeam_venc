@@ -59,8 +59,11 @@
  * chance for the multiplicative decrease to find an intermediate rate.
  *
  * Multiplicative-decrease / additive-increase, so recovery is deliberately
- * slower than the retreat: 1000 -> bottom takes 10 windows (~2.0 s), bottom
- * -> 1000 takes 19 windows (~3.8 s).  The dual floor below means a wedged
+ * slower than the retreat: 1000 -> bottom takes 14 windows (~2.8 s) on the
+ * x4/5 engage path or 6 (~1.2 s) on the x3/5 drop path, and bottom -> 1000
+ * takes 19 windows (~3.8 s).  (Counts are asserted in
+ * tests/test_venc_shm_throttle.c so they cannot silently drift if the
+ * multipliers or the bound are retuned.)  The dual floor below means a wedged
  * consumer cannot drive the encoder to nothing, while still permitting a
  * rate MCS0 can actually carry.
  *
