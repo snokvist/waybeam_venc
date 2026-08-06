@@ -1332,6 +1332,44 @@ static int test_framing_preset_restart(void)
 	CHECK("stab_accuracy reject unchanged",
 		strcmp(cfg.video0.stab_accuracy, "medium") == 0);
 
+	/* A valid resilience preset applies; an unknown one must be REJECTED,
+	 * not committed.  Committing it would persist the bad name to disk with
+	 * the previous preset's derived ref_ and intra_ fields still in place,
+	 * and the next start would silently fall back to "off". */
+	CHECK("resilience ltr rc",
+		apply_set_query_http(&cfg, "star6e", &cb,
+			"video0.resilience=ltr", &status, response,
+			sizeof(response)) == 0);
+	CHECK("resilience ltr status", status == 200);
+	CHECK("resilience ltr expands",
+		cfg.video0.ref_base == 1 && cfg.video0.ref_enhance == 1 &&
+		cfg.video0.ref_pred == false);
+	venc_api_clear_reinit();
+
+	{
+		/* Every malformed parameterised form the "ltr:<N>" syntax
+		 * newly makes reachable. */
+		const char *bad[] = { "ltr:0", "ltr:256", "ltr:abc", "ltr:",
+				      "bogus" };
+		size_t i;
+		for (i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+			char q[64];
+			snprintf(q, sizeof(q), "video0.resilience=%s", bad[i]);
+			CHECK("resilience reject rc",
+				apply_set_query_http(&cfg, "star6e", &cb, q,
+					&status, response,
+					sizeof(response)) == 0);
+			CHECK("resilience reject status", status == 409);
+			CHECK("resilience reject error",
+				strstr(response, "resilience must be one of")
+					!= NULL);
+			CHECK("resilience reject unchanged",
+				strcmp(cfg.video0.resilience, "ltr") == 0);
+			CHECK("resilience reject derived intact",
+				cfg.video0.ref_enhance == 1);
+		}
+	}
+
 	return failures;
 }
 
