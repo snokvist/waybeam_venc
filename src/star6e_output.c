@@ -921,8 +921,23 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 			unsigned int nal_count = (unsigned int)pack->packNum;
 			unsigned int k;
 
-			if (nal_count > info_cap)
+			if (nal_count > info_cap) {
+				/* Truncating here ships a frame missing NALs
+				 * (slices, with video0.sliceCount high).  Say
+				 * so once — silence made this clamp the top
+				 * multi-slice hazard in review. */
+				static int warned;
+				if (!warned) {
+					warned = 1;
+					fprintf(stderr,
+						"WARN: pack has %u NALs, "
+						"packetInfo caps at %u — "
+						"frame truncated (lower "
+						"video0.sliceCount)\n",
+						nal_count, info_cap);
+				}
 				nal_count = info_cap;
+			}
 
 			for (k = 0; k < nal_count; ++k) {
 				MI_U32 length = pack->packetInfo[k].length;

@@ -165,6 +165,9 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.scene_threshold = 0;   /* 0 = off */
 	cfg->video0.scene_holdoff = 2;
 
+	/* H.265 multi-slice split (video0, Star6E) — 1 = off */
+	cfg->video0.slice_count = 1;
+
 	/* intra refresh (video0) — disabled by default; mode-driven */
 	safe_strcpy(cfg->video0.intra_refresh_mode,
 		sizeof(cfg->video0.intra_refresh_mode), "off");
@@ -634,6 +637,10 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
 		(int)v->scene_holdoff);
 	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
+	v->slice_count = (uint32_t)json_get_int(obj, "sliceCount",
+		(int)v->slice_count);
+	if (v->slice_count < 1) v->slice_count = 1;
+	if (v->slice_count > 8) v->slice_count = 8;
 
 	/* Resilience preset is the sole driver of intra-refresh + SVC-T
 	 * (refPred).  For named presets it also overrides gop_size; only
@@ -1379,6 +1386,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "maxQp",          cfg->video0.max_qp,          0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
+	pp_field_uint(p,   2, "sliceCount",     cfg->video0.slice_count,     0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
 	pp_field_double(p, 2, "zoomY",             cfg->video0.zoom_y,              0);
@@ -1636,6 +1644,7 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "maxQp", cfg->video0.max_qp);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
+		cJSON_AddNumberToObject(vid, "sliceCount", cfg->video0.slice_count);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
 		cJSON_AddNumberToObject(vid, "zoomX",   cfg->video0.zoom_x);
 		cJSON_AddNumberToObject(vid, "zoomY",   cfg->video0.zoom_y);

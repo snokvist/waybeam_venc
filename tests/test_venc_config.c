@@ -81,6 +81,7 @@ static int test_defaults(void)
 	CHECK("defaults_audio_port", cfg.outgoing.audio_port == 5601);
 	CHECK("defaults_scene_threshold_off", cfg.video0.scene_threshold == 0);
 	CHECK("defaults_scene_holdoff", cfg.video0.scene_holdoff == 2);
+	CHECK("defaults_slice_count_off", cfg.video0.slice_count == 1);
 
 	CHECK("defaults_ref_base_off", cfg.video0.ref_base == 0);
 	CHECK("defaults_ref_enhance", cfg.video0.ref_enhance == 0);
@@ -345,6 +346,39 @@ static int test_load_full_json(void)
 	CHECK("load_roi_steps", cfg.fpv.roi_steps == 2);
 	CHECK("load_noise", cfg.fpv.noise_level == 5);
 	/* scene_threshold/scene_holdoff live in video0 section */
+
+	return failures;
+}
+
+static int test_slice_count(void)
+{
+	int failures = 0;
+	const char *json =
+		"{ \"video0\": { \"sliceCount\": 4 } }";
+	char *path = write_temp_json(json);
+	VencConfig cfg;
+
+	CHECK("slice_tmpfile", path != NULL);
+	if (!path) return failures;
+	venc_config_defaults(&cfg);
+	CHECK("slice_load", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_4", cfg.video0.slice_count == 4);
+	unlink(path); free(path);
+
+	/* out-of-range values clamp to the 1..8 SDK window */
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": 99 } }");
+	CHECK("slice_tmpfile2", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load2", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_clamped", cfg.video0.slice_count == 8);
+	unlink(path); free(path);
+
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": 0 } }");
+	CHECK("slice_tmpfile3", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load3", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_floor", cfg.video0.slice_count == 1);
+	unlink(path); free(path);
 
 	return failures;
 }
@@ -1271,6 +1305,7 @@ int test_venc_config(void)
 	failures += test_defaults();
 	failures += test_load_full_json();
 	failures += test_load_partial_json();
+	failures += test_slice_count();
 	failures += test_load_missing_file();
 	failures += test_load_bad_json();
 	failures += test_load_qp_bounds_validation();

@@ -115,6 +115,10 @@ typedef struct {
 	uint32_t max_qp;           /* RC QP ceiling; 0 = leave the driver default */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
+	uint32_t slice_count;      /* independent H.265 slices per picture, 1..8;
+	                            * 1 = split off. >1 enables spatial loss
+	                            * concealment on the link RX (waybeam-link
+	                            * PROTOCOL.md §6.3b). Star6E only. */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

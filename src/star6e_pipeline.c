@@ -1448,6 +1448,31 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 	 * StartRecvPic, producing a flat single-layer stream. */
 	(void)star6e_pipeline_pre_start_apply_ref_pred(*chn, vcfg);
 
+	/* H.265 multi-slice split (same pre-Start window as SetRefParam).
+	 * sliceCount is what the operator asks for; the SDK knob is CTU rows
+	 * per slice (CTU=32), so the achieved count is ceil(rows/rows_per) —
+	 * logged, because a short picture can't honor a large count. */
+	if (vcfg->video0.slice_count > 1) {
+		uint32_t rows = (height + 31) / 32;
+		uint32_t per = (rows + vcfg->video0.slice_count - 1) / vcfg->video0.slice_count;
+		MI_VENC_ParamH265SliceSplit_t split = {
+			.bSplitEnable = 1,
+			.u32SliceRowCount = per > 0 ? per : 1,
+		};
+		ret = MI_VENC_SetH265SliceSplit(*chn, &split);
+		if (ret != 0) {
+			fprintf(stderr,
+				"WARN: MI_VENC_SetH265SliceSplit(%u rows/slice) "
+				"failed %d — single-slice stream\n",
+				split.u32SliceRowCount, ret);
+		} else {
+			printf("VENC: H.265 slice split ON: %u CTU rows/slice "
+			       "(%u rows -> %u slices)\n",
+			       split.u32SliceRowCount, rows,
+			       (rows + per - 1) / per);
+		}
+	}
+
 	ret = MI_VENC_StartRecvPic(*chn);
 	if (ret != 0) {
 		fprintf(stderr, "ERROR: MI_VENC_StartRecvPic failed %d\n", ret);
