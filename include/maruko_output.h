@@ -103,10 +103,15 @@ typedef struct {
 	 * party that knows instantly, so it re-establishes locally rather than
 	 * waiting for a ground RecoveryRequest over RF.  Paced by
 	 * venc_frame_drop_idr_due() (1 s holdoff, state below) so a
-	 * consumer-less ring does not become an IDR storm. */
-	void (*request_idr)(void *ctx);
+	 * consumer-less ring does not become an IDR storm.  Returns 1 when
+	 * issued, 0 when the shared 100 ms limiter swallowed it — the caller
+	 * rolls the holdoff back so the next drop retries. */
+	int (*request_idr)(void *ctx);
 	void *idr_ctx;
 	uint64_t drop_idr_last_us;
+	/* One WARN per init when a pack overflows packetInfo (frame aborted,
+	 * never shipped truncated). */
+	uint8_t trunc_warned;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */

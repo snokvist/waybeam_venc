@@ -1458,11 +1458,15 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 		uint32_t rows = (height + 31) / 32;
 		uint32_t per = (rows + vcfg->video0.slice_count - 1) / vcfg->video0.slice_count;
 		uint32_t ctu_rows = (height + 63) / 64;
-		uint32_t ctu_per = (per + 1) / 2;
-		MI_VENC_ParamH265SliceSplit_t split = {
-			.bSplitEnable = 1,
-			.u32SliceRowCount = per > 0 ? per : 1,
-		};
+		uint32_t ctu_per;
+		MI_VENC_ParamH265SliceSplit_t split;
+		MI_VENC_ParamH265SliceSplit_t rb;
+
+		if (per < 1)
+			per = 1;  /* unreachable via validated config */
+		ctu_per = (per + 1) / 2;
+		split.bSplitEnable = 1;
+		split.u32SliceRowCount = per;
 		ret = MI_VENC_SetH265SliceSplit(*chn, &split);
 		if (ret != 0) {
 			fprintf(stderr,
@@ -1474,9 +1478,14 @@ static int star6e_pipeline_start_venc(uint32_t width, uint32_t height,
 			       "%u slices of %u CTU-64 rows (SDK unit %u "
 			       "32-px rows)\n",
 			       vcfg->video0.slice_count,
-			       ctu_per > 0 ? (ctu_rows + ctu_per - 1) / ctu_per
-			                   : ctu_rows,
+			       (ctu_rows + ctu_per - 1) / ctu_per,
 			       ctu_per, split.u32SliceRowCount);
+			memset(&rb, 0, sizeof(rb));
+			if (MI_VENC_GetH265SliceSplit(*chn, &rb) == 0)
+				printf("VENC: slice split readback: enable=%u "
+				       "rows=%u\n",
+				       (unsigned)rb.bSplitEnable,
+				       (unsigned)rb.u32SliceRowCount);
 		}
 	}
 

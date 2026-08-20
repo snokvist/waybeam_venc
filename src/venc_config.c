@@ -637,10 +637,14 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
 		(int)v->scene_holdoff);
 	if (v->scene_holdoff < 1 && v->scene_threshold > 0) v->scene_holdoff = 1;
-	v->slice_count = (uint32_t)json_get_int(obj, "sliceCount",
-		(int)v->slice_count);
-	if (v->slice_count < 1) v->slice_count = 1;
-	if (v->slice_count > 8) v->slice_count = 8;
+	{
+		/* Clamp in signed space: a negative value must floor to 1
+		 * (single slice), not wrap through uint32 to the maximum. */
+		int sc = json_get_int(obj, "sliceCount", (int)v->slice_count);
+		if (sc < 1) sc = 1;
+		if (sc > 8) sc = 8;
+		v->slice_count = (uint32_t)sc;
+	}
 
 	/* Resilience preset is the sole driver of intra-refresh + SVC-T
 	 * (refPred).  For named presets it also overrides gop_size; only

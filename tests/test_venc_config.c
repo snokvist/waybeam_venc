@@ -380,6 +380,15 @@ static int test_slice_count(void)
 	CHECK("slice_count_floor", cfg.video0.slice_count == 1);
 	unlink(path); free(path);
 
+	/* A negative value must floor to 1, not wrap through the unsigned
+	 * store to the 8-slice maximum. */
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": -1 } }");
+	CHECK("slice_tmpfile4", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load4", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_negative_floors", cfg.video0.slice_count == 1);
+	unlink(path); free(path);
+
 	return failures;
 }
 
