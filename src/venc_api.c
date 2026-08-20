@@ -473,11 +473,13 @@ static const FieldUi ui_max_qp = {
 	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
 };
 static const FieldUi ui_slice_count = {
-	"Video", "Slices per frame", "number", 1, 8, 1, NULL,
+	"Video", "Slices per frame", "number", 1, VENC_SLICE_COUNT_MAX, 1, NULL,
 	"Independent H.265 slices per picture (Star6E). 1 = off. Multi-slice "
 	"output lets the waybeam-link receiver conceal RF loss spatially "
-	"(frozen region) instead of dropping the whole frame. Capped at 8 by "
-	"the SDK's 8-entry per-pack NAL table. Restart-only."
+	"instead of dropping the whole frame, and the concealed area shrinks "
+	"as 1/N. The request is quantized: the SDK rounds slice height up to "
+	"whole CTU-64 rows, so 1080p delivers only 1,2,3,4,5,6,9,17 and "
+	"saturates at 17 (720p at 12). Restart-only."
 };
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
@@ -1252,10 +1254,13 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	    cfg->video0.scene_threshold > 0)
 		return "video0.scene_holdoff must be >= 1 when scene_threshold > 0";
 	if (strcmp(key, "video0.slice_count") == 0) {
-		/* 1 = split off; ceiling 8 tracks the SDK's 8-entry per-pack
-		 * packetInfo table (every stream walker clamps there). */
-		if (cfg->video0.slice_count < 1 || cfg->video0.slice_count > 8)
-			return "video0.slice_count must be 1..8";
+		/* 1 = split off.  The ceiling is a sanity bound, not the
+		 * delivered count — the SDK saturates a request at the
+		 * picture's CTU-64 row count.  See VENC_SLICE_COUNT_MAX for
+		 * why the old 8 was wrong. */
+		if (cfg->video0.slice_count < 1 ||
+		    cfg->video0.slice_count > VENC_SLICE_COUNT_MAX)
+			return "video0.slice_count must be 1..32";
 	}
 	if (strcmp(key, "video0.min_qp") == 0 || strcmp(key, "video0.max_qp") == 0) {
 		/* H.264/H.265 QP range; the SDK accepts min > max without

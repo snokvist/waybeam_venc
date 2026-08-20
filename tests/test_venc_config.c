@@ -365,12 +365,23 @@ static int test_slice_count(void)
 	CHECK("slice_count_4", cfg.video0.slice_count == 4);
 	unlink(path); free(path);
 
-	/* out-of-range values clamp to the 1..8 SDK window */
+	/* out-of-range values clamp to VENC_SLICE_COUNT_MAX */
 	path = write_temp_json("{ \"video0\": { \"sliceCount\": 99 } }");
 	CHECK("slice_tmpfile2", path != NULL);
 	if (!path) return failures;
 	CHECK("slice_load2", venc_config_load(path, &cfg) == 0);
-	CHECK("slice_count_clamped", cfg.video0.slice_count == 8);
+	CHECK("slice_count_clamped",
+	      cfg.video0.slice_count == VENC_SLICE_COUNT_MAX);
+	unlink(path); free(path);
+
+	/* 17 must survive the clamp: it is one slice per CTU-64 row at 1080p,
+	 * the finest the encoder can deliver, and the old ceiling of 8 made it
+	 * — and 9 — unreachable, capping the fleet at 6 delivered slices. */
+	path = write_temp_json("{ \"video0\": { \"sliceCount\": 17 } }");
+	CHECK("slice_tmpfile5", path != NULL);
+	if (!path) return failures;
+	CHECK("slice_load5", venc_config_load(path, &cfg) == 0);
+	CHECK("slice_count_17_survives", cfg.video0.slice_count == 17);
 	unlink(path); free(path);
 
 	path = write_temp_json("{ \"video0\": { \"sliceCount\": 0 } }");

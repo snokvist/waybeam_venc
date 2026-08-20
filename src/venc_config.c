@@ -642,7 +642,7 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		 * (single slice), not wrap through uint32 to the maximum. */
 		int sc = json_get_int(obj, "sliceCount", (int)v->slice_count);
 		if (sc < 1) sc = 1;
-		if (sc > 8) sc = 8;
+		if (sc > VENC_SLICE_COUNT_MAX) sc = VENC_SLICE_COUNT_MAX;
 		v->slice_count = (uint32_t)sc;
 	}
 
