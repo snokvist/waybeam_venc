@@ -903,7 +903,9 @@ static size_t star6e_output_send_frame_ring(Star6eOutput *output,
 
 	if (venc_frame_ring_begin_write(output->frame_ring, &meta) != 0) {
 		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr)
+		    output->request_idr &&
+		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
+					    wb_monotonic_us()))
 			output->request_idr(output->idr_ctx);
 		return 0;
 	}

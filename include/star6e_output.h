@@ -156,11 +156,15 @@ typedef struct {
 	 * off by default (venc.recovery_enabled).
 	 *
 	 * Wired to star6e_scene_request_idr(), so it inherits the shared
-	 * per-channel IDR rate limiter (100 ms) — a persistently full ring
-	 * coalesces into at most ~10 IDRs/s instead of a keyframe storm into
-	 * the very ring that is already congested. */
+	 * per-channel IDR rate limiter (100 ms) — but 10 IDRs/s into an
+	 * already-congested ring is still a storm (measured: a consumer-less
+	 * ring degraded the stream to an IDR every ~7 frames with GDR
+	 * suppressed), so this path adds its own holdoff on top:
+	 * venc_frame_drop_idr_due(), one request per second, state in
+	 * drop_idr_last_us. */
 	void (*request_idr)(void *ctx);
 	void *idr_ctx;
+	uint64_t drop_idr_last_us;
 	/* Ring-full drops split by whether they actually broke the chain.
 	 * A non-referenced (SVC-T) frame is droppable by construction, so
 	 * those cost exactly one frame and must NOT trigger an IDR. */

@@ -101,9 +101,12 @@ typedef struct {
 	 * there.  A full ring discards an already-encoded frame, so the
 	 * reference chain breaks until the next IDR; the producer is the only
 	 * party that knows instantly, so it re-establishes locally rather than
-	 * waiting for a ground RecoveryRequest over RF. */
+	 * waiting for a ground RecoveryRequest over RF.  Paced by
+	 * venc_frame_drop_idr_due() (1 s holdoff, state below) so a
+	 * consumer-less ring does not become an IDR storm. */
 	void (*request_idr)(void *ctx);
 	void *idr_ctx;
+	uint64_t drop_idr_last_us;
 } MarukoOutput;
 
 /** Initialize UDP or Unix socket output from a parsed URI. */

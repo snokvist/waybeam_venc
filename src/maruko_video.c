@@ -2,6 +2,7 @@
 
 #include "h26x_util.h"
 #include "hevc_rtp.h"
+#include "timing.h"
 #include "rtp_packetizer.h"
 #include "rtp_session.h"
 
@@ -336,7 +337,9 @@ static size_t maruko_send_frame_ring(const i6c_venc_strm *stream,
 
 	if (venc_frame_ring_begin_write(frame_ring, &meta) != 0) {
 		if (venc_frame_drop_breaks_chain(meta.flags) &&
-		    output->request_idr)
+		    output->request_idr &&
+		    venc_frame_drop_idr_due(&output->drop_idr_last_us,
+					    wb_monotonic_us()))
 			output->request_idr(output->idr_ctx);
 		return 0;
 	}
