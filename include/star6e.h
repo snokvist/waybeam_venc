@@ -492,10 +492,12 @@ typedef struct {
 _Static_assert(sizeof(MI_VENC_ParamRef_t) == 12,
 	"MI_VENC_ParamRef_t layout changed — verify SDK match");
 
-/* H.265 multi-slice split (mi_venc_datatype.h:558) — u32SliceRowCount is CTU
- * rows PER SLICE (CTU=32 on this encoder), not a slice count.  Symbol is
- * exported by both star6e and maruko libmi_venc.so; bound star6e-only for
- * now (maruko adds VeDev, and its backend keeps its own loader). */
+/* H.265 multi-slice split (mi_venc_datatype.h:558) — u32SliceRowCount is
+ * 32-px rows PER SLICE, not a slice count, and NOT CTU rows: the encoder's
+ * CTU is 64 (measured 2026-08-20, SPS 30x17 CTBs at 1080p) and the SDK
+ * rounds the request up to whole CTU-64 rows.  Symbol is exported by both
+ * star6e and maruko libmi_venc.so; bound star6e-only for now (maruko adds
+ * VeDev, and its backend keeps its own loader). */
 typedef struct {
 	MI_BOOL bSplitEnable;
 	MI_U32  u32SliceRowCount;
