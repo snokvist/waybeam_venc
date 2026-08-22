@@ -35,7 +35,8 @@
 
 typedef struct {
 	struct {
-		unsigned long long idle; /* idle + iowait jiffies */
+		/* busy nanoseconds when use_sched, else idle+iowait jiffies */
+		unsigned long long acc;
 		struct timespec ts;      /* when this snapshot was taken */
 	} ring[OSD_CPU_RING];
 	int count;                 /* snapshots stored (saturates at RING) */
@@ -43,25 +44,48 @@ typedef struct {
 	int pct;                   /* last computed CPU% */
 	struct timespec ts;        /* last snapshot time (cadence gate) */
 	long hz;                   /* USER_HZ for /proc/stat, always 100 */
-	int ncores;                /* cpuN lines in /proc/stat, probed once */
+	int ncores;                /* cpu lines in the source, probed once */
+	int use_sched;             /* /proc/schedstat readable, probed once */
+	int probed;                /* source decision taken */
 } OsdCpuSampler;
 
-static void osd_cpu_sample(OsdCpuSampler *cs)
+/* /proc/schedstat cpuN row: "cpu%d %u 0 %u %u %u %u %llu %llu %lu" -- six
+ * counters after the label, THEN rq_cpu_time in nanoseconds. That is real
+ * task-execution time off the scheduler clock, so it does not inherit the
+ * tick-sampling error that makes /proc/stat unusable on CV610: measured on
+ * .181, /proc/stat read 1.9-95.3% (stdev 22.05) for a box steady at ~33%,
+ * while schedstat read 30.1-38.3% (stdev 2.02). Returns 0 when the kernel
+ * lacks CONFIG_SCHEDSTATS, which keeps the /proc/stat path below. */
+static int osd_read_schedstat(unsigned long long *busy_ns, int *cores)
 {
-	struct timespec now;
-	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
-	unsigned long long idle_all;
 	char line[256];
-	int have = 0, cores = 0;
-	FILE *f;
+	FILE *f = fopen("/proc/schedstat", "r");
+	if (!f) return 0;
 
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	long ms = (now.tv_sec - cs->ts.tv_sec) * 1000 +
-	          (now.tv_nsec - cs->ts.tv_nsec) / 1000000;
-	if (cs->count > 0 && ms < 500) return;
+	*busy_ns = 0;
+	*cores = 0;
+	while (fgets(line, sizeof line, f)) {
+		unsigned long long ns;
+		if (strncmp(line, "cpu", 3) != 0) continue;
+		if (line[3] < '0' || line[3] > '9') continue;
+		if (sscanf(line, "cpu%*u %*u %*u %*u %*u %*u %*u %llu", &ns) != 1)
+			continue;
+		*busy_ns += ns;
+		(*cores)++;
+	}
+	fclose(f);
+	return *cores > 0;
+}
 
-	f = fopen("/proc/stat", "r");
-	if (!f) return;
+static int osd_read_procstat(unsigned long long *idle_all, int *cores)
+{
+	unsigned long long user, nice, sys, idle, iowait, irq, softirq;
+	char line[256];
+	int have = 0;
+	FILE *f = fopen("/proc/stat", "r");
+	if (!f) return 0;
+
+	*cores = 0;
 	/* The aggregate "cpu " line comes first, then one "cpuN" line per core,
 	 * then non-cpu keys. One pass gets both the idle counter and the core
 	 * count. Lines are ~110 bytes, well inside the buffer. */
@@ -73,19 +97,40 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 			           &softirq) == 7)
 				have = 1;
 		} else if (line[3] >= '0' && line[3] <= '9') {
-			cores++;
+			(*cores)++;
 		}
 	}
 	fclose(f);
-	if (!have) return;
+	if (!have) return 0;
+	*idle_all = idle + iowait;
+	return 1;
+}
+
+static void osd_cpu_sample(OsdCpuSampler *cs)
+{
+	struct timespec now;
+	unsigned long long acc = 0;
+	int cores = 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	long ms = (now.tv_sec - cs->ts.tv_sec) * 1000 +
+	          (now.tv_nsec - cs->ts.tv_nsec) / 1000000;
+	if (cs->count > 0 && ms < 500) return;
+
+	/* Probe once and latch, the way hz and ncores already are. */
+	if (!cs->probed) {
+		cs->probed = 1;
+		cs->use_sched = osd_read_schedstat(&acc, &cores);
+	} else if (cs->use_sched) {
+		if (!osd_read_schedstat(&acc, &cores)) return;
+	}
+	if (!cs->use_sched && !osd_read_procstat(&acc, &cores)) return;
 
 	if (cs->hz <= 0) {
 		cs->hz = sysconf(_SC_CLK_TCK);
 		if (cs->hz <= 0) cs->hz = 100;
 	}
 	if (cs->ncores <= 0) cs->ncores = cores > 0 ? cores : 1;
-
-	idle_all = idle + iowait;
 
 	if (cs->count > 0) {
 		/* When the ring is full, head (about to be overwritten) is the
@@ -94,15 +139,25 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 		long span_ms =
 			(now.tv_sec - cs->ring[oldest].ts.tv_sec) * 1000L +
 			(now.tv_nsec - cs->ring[oldest].ts.tv_nsec) / 1000000L;
+		/* Guard the unsigned subtraction: a counter that fails to advance
+		 * monotonically would wrap to a huge delta and silently pin the
+		 * display at 0%. */
+		unsigned long long d = (acc >= cs->ring[oldest].acc)
+		                     ? acc - cs->ring[oldest].acc : 0;
 		if (span_ms > 0) {
-			unsigned long long avail =
-				(unsigned long long)span_ms *
-				(unsigned long long)cs->hz *
-				(unsigned long long)cs->ncores / 1000ULL;
-			unsigned long long di = idle_all - cs->ring[oldest].idle;
-			/* Clamp: idle is sampled a hair after the wall clock, so a
-			 * fully idle box can round to di slightly over avail. */
-			unsigned long long busy = (avail > di) ? avail - di : 0;
+			unsigned long long avail, busy;
+			if (cs->use_sched) {
+				avail = (unsigned long long)span_ms * 1000000ULL *
+					(unsigned long long)cs->ncores;
+				busy = d;
+			} else {
+				avail = (unsigned long long)span_ms *
+					(unsigned long long)cs->hz *
+					(unsigned long long)cs->ncores / 1000ULL;
+				/* Clamp: idle is sampled a hair after the wall clock, so
+				 * a fully idle box can round to d slightly over avail. */
+				busy = (avail > d) ? avail - d : 0;
+			}
 			if (avail > 0) {
 				cs->pct = (int)(busy * 100ULL / avail);
 				if (cs->pct > 100) cs->pct = 100;
@@ -110,7 +165,7 @@ static void osd_cpu_sample(OsdCpuSampler *cs)
 		}
 	}
 
-	cs->ring[cs->head].idle = idle_all;
+	cs->ring[cs->head].acc = acc;
 	cs->ring[cs->head].ts = now;
 	cs->head = (cs->head + 1) % OSD_CPU_RING;
 	if (cs->count < OSD_CPU_RING) cs->count++;
