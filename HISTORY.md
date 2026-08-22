@@ -1,5 +1,35 @@
 # History
 
+## [0.67.2] - 2026-08-22
+
+Debug-OSD `cpu NN%` reads honestly on CV610. No wire format, config schema,
+frame-SHM layout or HTTP contract changes.
+
+- **CV610 debug-OSD CPU% swung 1.9–95.3% for a box steady at ~33%.** The shared
+  `OsdCpuSampler` in `src/debug_osd.c` derives busy from `/proc/stat` idle,
+  which the CV610 5.10 kernel does not account honestly over short windows.
+  Unlike Star6E — where the *total* is inconsistent and `idle` is the stable
+  anchor — CV610's total is exactly right (`Δfields + Δidle == avail` in every
+  window), so idle-derived and field-derived are algebraically one number and
+  the v0.51.0 fix is a no-op there. It is the idle/busy *split* that
+  oscillates: the aggregate line is purely tick-sampled while per-task times
+  are rescaled to the ns-accurate `sum_exec_runtime`, and venc's 100 fps beats
+  against HZ=100. Now prefers `/proc/schedstat` `rq_cpu_time` (field 8 —
+  nanoseconds of real task execution off the scheduler clock): measured
+  30.1–38.3%, stdev 2.02, against an independent all-task truth of 32.3.
+- **Star6E and Maruko are unaffected.** The source is probed once and falls
+  back to the existing `/proc/stat` path where `CONFIG_SCHEDSTATS` is absent,
+  which is the case on the 4.9 kernel. That ordering is deliberate: on Star6E
+  idle-derived reads 60.5 against an all-task sum of 52.7, a 7.7-point gap of
+  real IRQ/softirq work charged to no task, and `rq_cpu_time` would
+  under-report by exactly that. Verified a no-op on .232.
+- **Guarded an unsigned underflow in the sampler.**
+  `di = idle_all - cs->ring[oldest].idle` was unguarded; any non-monotonic
+  counter wraps it to a huge value, `avail > di` goes false, and the readout
+  silently pins at 0%. The waybeam-hub twin already carried this guard.
+- `documentation/STAR6E_CPU_PROFILE.md` gains a CV610 section and its stale
+  render-site line references are corrected.
+
 ## [0.67.1] - 2026-08-22
 
 Pre-upstream review pass over 0.65.3..0.67.0. Three defects introduced by that

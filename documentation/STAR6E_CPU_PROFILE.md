@@ -212,8 +212,9 @@ under-report**.
 ## The debug OSD `cpu NN%` readout (fixed)
 
 The built-in debug OSD had the identical bug. `src/debug_osd.c`'s shared
-`OsdCpuSampler` (used by both the Star6E and Maruko backends, rendered as
-`cpu NN%` from `star6e_runtime.c:1284` / `maruko_pipeline.c:3984`) computed:
+`OsdCpuSampler` (used by the Star6E, Maruko and CV610 backends, rendered as
+`cpu NN%` from `star6e_runtime.c:1457` / `maruko_pipeline.c:4255` /
+`cv610_runtime.c:1042`) computed:
 
 ```c
 total = user + nice + sys + idle + iowait + irq + softirq;  /* the bad sum */
@@ -248,6 +249,51 @@ Both samplers simulated on .232 at the same instants, 60 × 0.5 s:
 The old readout swung 2–54% and **under-reported the mean by a third** (19.1 vs
 31.1), consistent with the field deficit measured above. The new one holds
 ±1 point.
+
+### CV610 breaks the other way — and needs a different source
+
+Everything above is Star6E-specific. The CV610 (Hi3516CV6xx, 5.10) fails in the
+**opposite** direction, so the fix above is a no-op there.
+
+On Star6E the /proc/stat *total* is inconsistent (287–554 jiffies against a
+404-jiffy budget) and `idle` is the stable anchor. On CV610 the total is
+**exactly** right — `Δfields + Δidle == avail` in every window — so idle-derived
+and field-derived are algebraically the same number. Measured on .181, both
+read 29.5 mean / 2.4–71.6 / stdev 23.2, identical to a decimal. It is the
+idle/busy **split** that oscillates, not the total, so choosing a different half
+buys nothing. A window sweep needs **30 s** before stdev settles (1.5), and even
+then reads 26% against a true 36.5%.
+
+Mechanism: the aggregate `/proc/stat` line is purely tick-sampled, while
+per-task `utime/stime` are rescaled to the ns-accurate `sum_exec_runtime`
+(`cputime_adjust`) — which is why per-task is flat and the aggregate is not.
+venc runs **100 fps against HZ=100**, so the tick keeps landing on the same
+phase of every frame; the beat between the two clocks is the ~20–30 s cycle.
+
+**Source: `/proc/schedstat`.** Each `cpuN` row is
+`"cpu%d %u 0 %u %u %u %u %llu %llu %lu"` — six counters after the label, THEN
+`rq_cpu_time` in nanoseconds, i.e. **field 8, not 7** (field 7 is one of the
+zeros; an awk sum over `$7` returns 0, which reads as a permanently idle box).
+That is real task-execution time off the scheduler clock:
+
+| source (.181, same 39 s) | mean | min | max | **stdev** |
+|---|---|---|---|---|
+| `/proc/stat` idle-derived | 15.0 | 1.9 | 95.3 | **22.05** |
+| `/proc/schedstat` `rq_cpu_time` | 34.4 | 30.1 | 38.3 | **2.02** |
+| all-task sum (independent truth) | 32.3 | 28.0 | 35.8 | **2.08** |
+
+**Star6E must NOT switch to schedstat**, and does not: the 4.9 kernel has no
+`CONFIG_SCHEDSTATS`, so `/proc/schedstat` is absent and the probe falls back to
+the idle path above. That ordering is not merely safe, it is correct — measured
+on .232, idle-derived reads **60.5** while the all-task sum reads **52.7**, a
+**7.7-point** gap of real IRQ/softirq work charged to no task. `rq_cpu_time`
+counts only task execution, so it would under-report Star6E by exactly that
+gap. Take the cpu index off the `cpuN` label rather than counting lines, since
+an offline CPU leaves a gap.
+
+Verified no-op on .232 (before → after deploying the schedstat build):
+`@cpu_total` 60.5 → 59.1, still tracking the recomputed idle-derived value
+(60.4 → 60.6), with the all-task sum unchanged at 52.7 → 52.6.
 
 ### Rules for reading CPU on Star6E
 
