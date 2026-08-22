@@ -282,14 +282,24 @@ That is real task-execution time off the scheduler clock:
 | `/proc/schedstat` `rq_cpu_time` | 34.4 | 30.1 | 38.3 | **2.02** |
 | all-task sum (independent truth) | 32.3 | 28.0 | 35.8 | **2.08** |
 
-**Star6E must NOT switch to schedstat**, and does not: the 4.9 kernel has no
-`CONFIG_SCHEDSTATS`, so `/proc/schedstat` is absent and the probe falls back to
-the idle path above. That ordering is not merely safe, it is correct — measured
-on .232, idle-derived reads **60.5** while the all-task sum reads **52.7**, a
-**7.7-point** gap of real IRQ/softirq work charged to no task. `rq_cpu_time`
-counts only task execution, so it would under-report Star6E by exactly that
-gap. Take the cpu index off the `cpuN` label rather than counting lines, since
-an offline CPU leaves a gap.
+**Star6E must NOT switch to schedstat.** Measured on .232, idle-derived reads
+**60.5** while the all-task sum reads **52.7** — a **7.7-point** gap of real
+IRQ/softirq work charged to no task. `rq_cpu_time` counts only task execution,
+so it would under-report Star6E by exactly that gap. The 4.9 kernel has no
+`CONFIG_SCHEDSTATS` so it could not switch anyway, but the sampler does not
+rest the invariant on that: the schedstat branch is **compile-time
+`PLATFORM_CV610` only**. The same reasoning excludes the ground station — on
+x86 (12 cores) `/proc/stat` reads 2.20 against schedstat 1.97 and an all-task
+truth of 1.26, all three steady, so there is no defect there to fix and
+switching would only shift the number.
+
+Two properties of the file to respect. Schedstat lists only *online* CPUs, so
+counting `cpuN` rows gives the correct denominator directly — but a consumer
+that keeps a running total across samples must handle that total **stepping
+down** when a core goes offline, which reads as a backwards counter. Treat a
+backwards accumulator as *no measurement* and keep the previous value: feeding
+a zero delta to the formulae fabricates opposite extremes (0% on the schedstat
+path, 100% on the idle path).
 
 Verified no-op on .232 (before → after deploying the schedstat build):
 `@cpu_total` 60.5 → 59.1, still tracking the recomputed idle-derived value

@@ -17,16 +17,29 @@ frame-SHM layout or HTTP contract changes.
   against HZ=100. Now prefers `/proc/schedstat` `rq_cpu_time` (field 8 —
   nanoseconds of real task execution off the scheduler clock): measured
   30.1–38.3%, stdev 2.02, against an independent all-task truth of 32.3.
-- **Star6E and Maruko are unaffected.** The source is probed once and falls
-  back to the existing `/proc/stat` path where `CONFIG_SCHEDSTATS` is absent,
-  which is the case on the 4.9 kernel. That ordering is deliberate: on Star6E
-  idle-derived reads 60.5 against an all-task sum of 52.7, a 7.7-point gap of
-  real IRQ/softirq work charged to no task, and `rq_cpu_time` would
-  under-report by exactly that. Verified a no-op on .232.
-- **Guarded an unsigned underflow in the sampler.**
-  `di = idle_all - cs->ring[oldest].idle` was unguarded; any non-monotonic
-  counter wraps it to a huge value, `avail > di` goes false, and the readout
-  silently pins at 0%. The waybeam-hub twin already carried this guard.
+- **Star6E and Maruko are unaffected — structurally.** The schedstat branch is
+  compile-time `PLATFORM_CV610` only, not a runtime probe. Star6E's 4.9 kernel
+  has no `CONFIG_SCHEDSTATS` and Maruko ships without it, so a probe would have
+  fallen back anyway; the gate makes it independent of a kernel `.config`.
+  That matters because schedstat would be *wrong* on Star6E: idle-derived reads
+  60.5 there against an all-task sum of 52.7, a 7.7-point gap of real
+  IRQ/softirq work charged to no task, which `rq_cpu_time` does not count.
+  Verified a no-op on .232.
+- **A backwards accumulator now means "no measurement".**
+  `di = idle_all - cs->ring[oldest].idle` was an unguarded unsigned
+  subtraction that wraps to a huge value on any non-monotonic counter. Simply
+  clamping the delta to zero is not the fix — it fabricates an opposite
+  extreme on each path: 0% on the schedstat path, and 100% on the `/proc/stat`
+  path (`avail - 0`), which reads as an alarm on the overlay. The sampler now
+  skips the update and keeps the last good value. Reachable via CPU hotplug,
+  since schedstat rows cover only online CPUs.
+- **The source is re-decided each sample rather than latched.** A latch taken
+  on a transient `fopen` failure at the first encoded frame would have pinned
+  the readout to the wrong source for the process lifetime; and a latched
+  source that could not fall back retried per *frame* (100 Hz) instead of per
+  500 ms window, because the cadence gate is only armed on a successful
+  sample. If the source changes, the ring is dropped rather than differencing
+  nanoseconds against jiffies.
 - `documentation/STAR6E_CPU_PROFILE.md` gains a CV610 section and its stale
   render-site line references are corrected.
 
