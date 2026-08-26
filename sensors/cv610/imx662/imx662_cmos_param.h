@@ -48,12 +48,20 @@
 #define IMX662_AWB_STATIC_WB_GR    256           /* 1.000 * 256 */
 #define IMX662_AWB_STATIC_WB_GB    256           /* 1.000 * 256 */
 /* 545 was the factory xipc value.  Measured on .181 at ~2900 K indoor: AWB
- * converged ~10% too blue against the operator's eye, and a post-CCM trim of
- * R,G x1.109 (blue down 9.8% relative, R:G held) was judged correct.  Folding
- * that into the calibration rather than trimming after the CCM keeps the
- * correction in AWB's own domain, so it tracks colour temperature instead of
- * fighting it.  545 x 0.9028 = 492.  NOTE: verified at ONE colour temperature
- * (~2900 K indoor); the daylight end is still unmeasured. */
+ * converged ~10% too blue against the operator's eye.  This is the right place
+ * for the correction -- gain_offset[] is the WB gain at wb_ref_temp, so it
+ * moves with colour temperature, where a post-CCM color_tone trim would not.
+ *
+ * It is a PARTIAL correction.  gain_offset is a calibration anchor, not a
+ * multiplier on the converged gain, and the transfer saturates: measured at
+ * analog gain 18.20x, 545 -> 492 moved b/r -5.0% and 492 -> 440 only a further
+ * -1.2%.  So this recovers about half of the ~10%, and pushing the constant
+ * lower buys almost nothing while dragging the CCT estimate off.  The rest is
+ * a wb_para curve-shape problem -- a real AWB calibration, not a constant.
+ *
+ * NOTE: measured at ONE colour temperature (~2900 K indoor), and the arm was
+ * not reproducible to better than 6% once the room light drifted.  The
+ * daylight end is entirely unmeasured.  See the tracking issue. */
 #define IMX662_AWB_STATIC_WB_B     492
 #define IMX662_AWB_P1              (-86)
 #define IMX662_AWB_P2              342

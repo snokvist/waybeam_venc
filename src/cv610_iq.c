@@ -776,7 +776,12 @@ out:
  * ========================================================================== */
 char *cv610_awb_query(void)
 {
-	static char buf[2048];
+	/* Local, not static like cv610_iq_query()'s: that one is static because
+	 * 24 KB does not belong on the httpd thread's stack, and it holds
+	 * g_iq_mutex across the fill.  This one is 2 KB and touches no shared
+	 * state, so a local keeps it correct without depending on the server
+	 * staying single-threaded. */
+	char buf[2048];
 	ot_isp_wb_info wb;
 	ot_isp_exp_info exp;
 	td_s32 wb_ret, exp_ret;
