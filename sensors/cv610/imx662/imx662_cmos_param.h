@@ -54,7 +54,7 @@
  * correction in AWB's own domain, so it tracks colour temperature instead of
  * fighting it.  545 x 0.9028 = 492.  NOTE: verified at ONE colour temperature
  * (~2900 K indoor); the daylight end is still unmeasured. */
-#define IMX662_AWB_STATIC_WB_B     545
+#define IMX662_AWB_STATIC_WB_B     492
 #define IMX662_AWB_P1              (-86)
 #define IMX662_AWB_P2              342
 #define IMX662_AWB_Q1              0
