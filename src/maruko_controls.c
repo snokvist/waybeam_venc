@@ -1212,17 +1212,25 @@ static int maruko_apply_output_enabled(bool on)
 /* ── Live server change (Step 3C) ────────────────────────────────────── */
 
 static MarukoOutput *g_maruko_output_ptr;
+/* Destination the output socket is ACTUALLY pointed at — see the note in
+ * maruko_apply_server().  Never derive this from vcfg. */
+static char g_maruko_applied_server[VENC_CONFIG_STRING_MAX];
 
 static int maruko_apply_server(const char *uri)
 {
 	if (!g_maruko_output_ptr)
 		return -1;
-	/* Star6E parity — an unchanged destination is not a bootstrap event. */
-	if (g_ctx.vcfg && uri &&
-	    strcmp(g_ctx.vcfg->outgoing.server, uri) == 0)
+	/* Star6E parity — an unchanged destination is not a bootstrap event.
+	 * Compare what we actually applied, never vcfg: the config is
+	 * committed before this callback runs, so a vcfg comparison matches
+	 * even on a real change and would skip the repoint. */
+	if (uri && g_maruko_applied_server[0] &&
+	    strcmp(g_maruko_applied_server, uri) == 0)
 		return 0;
 	if (maruko_output_apply_server(g_maruko_output_ptr, uri) != 0)
 		return -1;
+	snprintf(g_maruko_applied_server,
+		sizeof(g_maruko_applied_server), "%s", uri);
 
 	/* A new destination is a receiver that has never seen a parameter set,
 	 * so this is counted but never coalesced. */
@@ -1559,6 +1567,12 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	g_ctx.output_enabled_ptr = &backend->output_enabled;
 	g_ctx.stored_fps_ptr = &backend->stored_fps;
 	g_maruko_output_ptr = &backend->output;
+	/* Seed from the create path so the first live set naming the
+	 * already-active destination is correctly seen as unchanged. */
+	if (g_ctx.vcfg)
+		snprintf(g_maruko_applied_server,
+			sizeof(g_maruko_applied_server), "%s",
+			g_ctx.vcfg->outgoing.server);
 }
 
 const VencApplyCallbacks *maruko_controls_callbacks(void)

@@ -36,6 +36,12 @@ typedef struct {
 	uint32_t frame_height;
 	Star6ePipelineState *pipeline;
 	VencConfig *vcfg;
+	/* Destination the output socket is ACTUALLY pointed at.  Must not be
+	 * read from vcfg: venc_api's apply_live_group_for_cfg() commits the
+	 * new config into g_cfg *before* dispatching to these callbacks, so
+	 * vcfg->outgoing.server already equals the incoming uri -- comparing
+	 * against it matches even on a real change. */
+	char applied_server[VENC_CONFIG_STRING_MAX];
 } Star6eControlContext;
 
 typedef struct {
@@ -1418,9 +1424,17 @@ static int apply_server(const char *uri)
 		return -1;
 	/* Re-pointing at the destination already in use is not a bootstrap
 	 * event — see apply_output_enabled() above.  Compare before touching
-	 * the socket so an unchanged re-POST costs nothing at all. */
-	if (g_star6e_control_ctx.vcfg && uri &&
-	    strcmp(g_star6e_control_ctx.vcfg->outgoing.server, uri) == 0)
+	 * the socket so an unchanged re-POST costs nothing at all.
+	 *
+	 * Compare the destination we actually APPLIED, never vcfg: venc_api's
+	 * apply_live_group_for_cfg() commits the new config into g_cfg before
+	 * dispatching here, so a vcfg comparison is equal even for a real
+	 * change — which skipped the repoint entirely and left
+	 * /api/v1/config advertising a destination venc was not sending to.
+	 * Device-verified on Star6E: the socket stayed on the startup
+	 * destination while the API reported the new one. */
+	if (uri && g_star6e_control_ctx.applied_server[0] &&
+	    strcmp(g_star6e_control_ctx.applied_server, uri) == 0)
 		return 0;
 	if (star6e_output_apply_server(&g_star6e_control_ctx.pipeline->output,
 	    uri) != 0) {
@@ -1433,6 +1447,8 @@ static int apply_server(const char *uri)
 	 * socket sits on the OLD one, leaving /api/v1/config advertising a
 	 * destination venc is not sending to.  Maruko already treated this as
 	 * non-fatal; the backends now genuinely agree. */
+	snprintf(g_star6e_control_ctx.applied_server,
+		sizeof(g_star6e_control_ctx.applied_server), "%s", uri);
 	if (request_idr_bootstrap() != 0)
 		fprintf(stderr, "WARN: destination changed but the bootstrap "
 			"IDR request failed; the new receiver has no start "
@@ -1845,6 +1861,11 @@ void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)
 	g_star6e_control_ctx.frame_height = pipeline->image_height;
 	g_star6e_control_ctx.pipeline = pipeline;
 	g_star6e_control_ctx.vcfg = vcfg;
+	/* Seed from the create path so the first live set naming the
+	 * already-active destination is correctly seen as unchanged. */
+	snprintf(g_star6e_control_ctx.applied_server,
+		sizeof(g_star6e_control_ctx.applied_server), "%s",
+		vcfg->outgoing.server);
 }
 
 void star6e_controls_reset(void)
