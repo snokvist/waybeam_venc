@@ -13,7 +13,6 @@
 #include "star6e_vpe_ports.h"
 #include "venc_api.h"
 #include "venc_jpeg.h"
-#include "venc_shm_throttle.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -152,6 +151,7 @@ static Star6eControlContext g_star6e_control_ctx;
 
 static int apply_encoder_gop(uint32_t gop_size);
 static int request_idr(void);
+static int request_idr_bootstrap(void);
 
 static uint32_t align_down(uint32_t value, uint32_t align)
 {
@@ -203,33 +203,34 @@ static uint32_t rc_compensate_kbps(uint32_t kbps, uint32_t delivered_fps)
 	return kbps;
 }
 
-/* Published clamp factor from the frame-shm ring-fill throttle
- * (include/venc_shm_throttle.h).  Written by the pipeline thread, read on
- * every bitrate apply including from the httpd thread — RELAXED atomics are
- * enough, it is a naturally aligned advisory scalar. */
-static uint16_t g_output_throttle_permille = VENC_SHM_THROTTLE_FULL_PERMILLE;
-
-/* No IDR on bitrate writes.  The decoder needs no resync — the rate
- * controller absorbs rate changes mid-GOP, which the shm-throttle clamp
- * (re-programming as often as every 200 ms) has always relied on.  The
- * forced IDR this path used to request was itself the dominant latency-spike
- * source: an IDR is the largest frame the encoder can emit (~42 KB at
- * 10 Mbps, measured 2026-08-22), so every adaptive-link ladder or congestion
- * write that cleared the 100 ms IDR gate turned rate control into IDR
- * trains.  A controller that wants a resync point calls request_idr()
- * explicitly. */
+/* No IDR request on bitrate writes.
+ *
+ * This removal is a no-op on the wire, and that is worth stating plainly:
+ * MI_VENC_SetChnAttr() below emits an IDR on its own.  Measured on a
+ * SSC338Q (IMX335 1920x1080@60, H.265 CBR, GDR via the racing preset,
+ * 2026-08-23), ten spaced video0.bitrate writes produced eleven IRAP
+ * access units both with and without the request — it only ever
+ * duplicated a keyframe the SDK had already inserted.
+ *
+ * It is still worth removing.  The request consumed a slot in the shared
+ * 100 ms gate (idr_rate_limit_allow), so a genuine request — /request/idr,
+ * or the receiver's own recovery ask — landing within 100 ms of a bitrate
+ * write was silently swallowed.  And every write inflated
+ * /api/v1/idr/stats with an IDR it did not cause, which is what made the
+ * counters read as if bitrate writes were the IDR source.
+ *
+ * The surviving implicit IDR is a SetChnAttr property that this layer
+ * cannot gate: MI_VENC_RcParam_t carries no bitrate field on either
+ * SigmaStar backend (include/star6e.h), so there is no rate-only actuator
+ * to switch to.  Calling SetChnAttr less often is the open follow-up. */
 static int apply_bitrate(uint32_t kbps)
 {
 	MI_VENC_ChnAttr_t attr = {0};
 	MI_U32 bits;
 
-	/* Order is pinned: clamp first so the throttle scales the *requested*
-	 * rate, then the >120 fps exact-CBR compensation, then the absolute
-	 * MIN/MAX rails last so neither correction can push the programmed
+	/* Order is pinned: the >120 fps exact-CBR compensation first, then the
+	 * absolute MIN/MAX rails, so the correction cannot push the programmed
 	 * value outside what the encoder accepts. */
-	kbps = venc_shm_throttle_scale(
-		__atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED),
-		kbps);
 	kbps = rc_compensate_kbps(kbps, g_star6e_control_ctx.delivered_fps);
 	if (kbps > VENC_BITRATE_MAX_KBPS)
 		kbps = VENC_BITRATE_MAX_KBPS;
@@ -266,32 +267,6 @@ static int apply_bitrate(uint32_t kbps)
 	if (MI_VENC_SetChnAttr(g_star6e_control_ctx.venc_chn, &attr) != 0)
 		return -1;
 	return 0;
-}
-
-int star6e_controls_set_output_throttle(uint16_t permille)
-{
-	uint32_t cfg_kbps;
-	int rc;
-
-	__atomic_store_n(&g_output_throttle_permille, permille,
-		__ATOMIC_RELAXED);
-
-	/* Re-program from the *configured* bitrate so the clamp is a pure
-	 * multiplier on it — video0.bitrate is never written, which is what
-	 * keeps an external rate controller's write-on-change cache coherent
-	 * and the WebUI slider truthful. */
-	if (!venc_api_cfg_trylock())
-		return -1;  /* config transaction in flight; retry next window */
-	cfg_kbps = g_star6e_control_ctx.vcfg
-		? g_star6e_control_ctx.vcfg->video0.bitrate : 0;
-	rc = cfg_kbps > 0 ? apply_bitrate(cfg_kbps) : 0;
-	venc_api_cfg_unlock();
-	return rc;
-}
-
-uint16_t star6e_controls_output_throttle(void)
-{
-	return __atomic_load_n(&g_output_throttle_permille, __ATOMIC_RELAXED);
 }
 
 static int apply_encoder_gop(uint32_t gop_size)
@@ -359,8 +334,11 @@ static int apply_qp_delta(int delta)
 		return -1;
 	if (MI_VENC_SetRcParam(g_star6e_control_ctx.venc_chn, &param) != 0)
 		return -1;
-	if (request_idr() != 0)
-		return -1;
+	/* No IDR: a QP-delta change is rate-control state, absorbed mid-GOP.
+	 * Unlike apply_bitrate() this is a real reduction — MI_VENC_SetRcParam
+	 * does NOT implicitly keyframe, so the request removed here was the
+	 * only IDR source on this path.  Measured 2026-08-23: ten spaced
+	 * video0.qpDelta writes went from eleven IRAP access units to one. */
 	printf("> qpDelta changed to %d\n", delta);
 	return 0;
 }
@@ -467,8 +445,11 @@ static int apply_max_frame_size(uint32_t max_i_bytes, uint32_t max_p_bytes)
 		: E_MI_VENC_RC_PRIORITY_BITRATE_FIRST;
 	MI_VENC_SetRcPriority(g_star6e_control_ctx.venc_chn, pri);
 
-	if (request_idr() != 0)
-		return -1;
+	/* No IDR: frame-size caps are rate-control state.  As with
+	 * apply_qp_delta(), neither MI_VENC_SetRcParam nor MI_VENC_SetRcPriority
+	 * keyframes implicitly, so this is a real reduction — measured
+	 * 2026-08-23, ten spaced video0.maxIBytes writes went from eleven IRAP
+	 * access units to one. */
 	printf("> maxFrameSize changed: I=%u P=%u bytes, priority=%s\n",
 		max_i_bytes, max_p_bytes,
 		pri == E_MI_VENC_RC_PRIORITY_FRAMEBITS_FIRST
@@ -589,10 +570,37 @@ static int apply_fps(uint32_t fps)
 			(void)apply_bitrate(cfg_kbps);
 	}
 
-	request_idr();
+	/* No IDR here.  A rebind does need one, but three of this function's
+	 * four callers do not: output-enable issues its own immediately after
+	 * (two back-to-back requests, coalesced only by luck of the 100 ms
+	 * gate), output-disable would emit one *after* the output is already
+	 * off, and the startup idle transition has no consumer at all.  Only
+	 * the live video0.fps write needs it, so it is issued there — see
+	 * apply_fps_live(). */
 	printf("> FPS delivered %u, RC fpsNum %u (bind %u:%u)\n", fps, rc_fps,
 		sensor_fps, fps);
 	return 0;
+}
+
+/* Live video0.fps write: the rebind re-creates the encoder channel, so the
+ * stream is genuinely discontinuous and a receiver needs a random-access
+ * point.  This is the one fps path that owns an IDR. */
+static int apply_fps_live(uint32_t fps)
+{
+	/* Only a real rebind is a bootstrap event.  apply_fps() returns 0 both
+	 * for a rebind and for its unchanged-fps early return, and the caller
+	 * cannot tell them apart -- venc_api dispatches on key name and never
+	 * compares old against new, so any POST naming video0.fps lands here.
+	 * Firing the deliberately un-coalescible bootstrap IDR on the no-op
+	 * turned a ground re-posting its profile into an ungated keyframe at
+	 * the caller's write rate: exactly the storm the spacing gate exists
+	 * to absorb.  Compare the delivered fps instead of trusting ret. */
+	uint32_t before = g_star6e_control_ctx.delivered_fps;
+	int ret = apply_fps(fps);
+
+	if (ret == 0 && g_star6e_control_ctx.delivered_fps != before)
+		(void)request_idr_bootstrap();
+	return ret;
 }
 
 static int apply_gain_max(uint32_t gain)
@@ -634,6 +642,18 @@ static int request_idr(void)
 	int chn = g_star6e_control_ctx.venc_chn;
 	if (!idr_rate_limit_allow(chn))
 		return 0;  /* coalesced — not an error */
+	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
+}
+
+/* Bootstrap form: output enable, destination change, live fps rebind.  Each
+ * hands the stream to a receiver that has seen no parameter set, so the
+ * spacing gate must not swallow it — see idr_rate_limit_force().  Counted,
+ * never coalesced, so a -1 here means a real SDK failure and the callers'
+ * error handling finally means what it says. */
+static int request_idr_bootstrap(void)
+{
+	int chn = g_star6e_control_ctx.venc_chn;
+	idr_rate_limit_force(chn);
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
@@ -1343,6 +1363,15 @@ static int apply_output_enabled(bool on)
 	if (!g_star6e_control_ctx.pipeline)
 		return -1;
 
+	/* Enabling an already-enabled output is not a bootstrap event: nothing
+	 * was re-created and no consumer lost its parameter sets.  Firing the
+	 * un-coalescible IDR on it turned an unchanged re-POST into an ungated
+	 * keyframe at the caller's request rate — and because a forced IDR
+	 * re-arms the spacing anchor, it starved the scene detector for the
+	 * duration.  Same reasoning as apply_fps_live(). */
+	if (on == (g_star6e_control_ctx.pipeline->output_enabled ? 1 : 0))
+		return 0;
+
 	if (on) {
 		if (!g_star6e_control_ctx.vcfg ||
 		    !g_star6e_control_ctx.vcfg->outgoing.server[0]) {
@@ -1357,10 +1386,16 @@ static int apply_output_enabled(bool on)
 			g_star6e_control_ctx.pipeline->output_enabled = 0;
 			return -1;
 		}
-		if (request_idr() != 0) {
-			g_star6e_control_ctx.pipeline->output_enabled = 0;
-			return -1;
-		}
+		/* Not fatal.  The output IS enabled and the fps restored; a
+		 * failed keyframe request is a slower first picture, not a
+		 * failed apply, and unwinding output_enabled here would leave
+		 * the restored fps behind on a disabled output.  Recovery has
+		 * other routes (the explicit endpoint, and the receiver's own
+		 * request), so log it and keep the work. */
+		if (request_idr_bootstrap() != 0)
+			fprintf(stderr, "WARN: output enabled but the bootstrap "
+				"IDR request failed; the receiver has no start "
+				"point until the next one\n");
 		printf("> Output enabled, FPS restored to %u\n", restored_fps);
 	} else {
 		g_star6e_control_ctx.pipeline->output_enabled = 0;
@@ -1381,12 +1416,27 @@ static int apply_server(const char *uri)
 {
 	if (!g_star6e_control_ctx.pipeline)
 		return -1;
+	/* Re-pointing at the destination already in use is not a bootstrap
+	 * event — see apply_output_enabled() above.  Compare before touching
+	 * the socket so an unchanged re-POST costs nothing at all. */
+	if (g_star6e_control_ctx.vcfg && uri &&
+	    strcmp(g_star6e_control_ctx.vcfg->outgoing.server, uri) == 0)
+		return 0;
 	if (star6e_output_apply_server(&g_star6e_control_ctx.pipeline->output,
 	    uri) != 0) {
 		return -1;
 	}
-	if (request_idr() != 0)
-		return -1;
+	/* Not fatal, and here it is actively important: the socket has ALREADY
+	 * been repointed above, so returning -1 sends venc_api into
+	 * rollback_live_groups(), which re-enters this same failing call --
+	 * and if that fails too it commits the NEW outgoing.server while the
+	 * socket sits on the OLD one, leaving /api/v1/config advertising a
+	 * destination venc is not sending to.  Maruko already treated this as
+	 * non-fatal; the backends now genuinely agree. */
+	if (request_idr_bootstrap() != 0)
+		fprintf(stderr, "WARN: destination changed but the bootstrap "
+			"IDR request failed; the new receiver has no start "
+			"point until the next one\n");
 	printf("> Destination changed to %s\n", uri);
 	return 0;
 }
@@ -1465,12 +1515,6 @@ static char *query_transport_status(void)
 	const char *transport;
 	int pos;
 	uint32_t pressure_drops;
-	/* Clamp state, reported alongside the ring so an operator can see the
-	 * gap between the bitrate they set and the one actually programmed.
-	 * video0.bitrate itself is deliberately untouched (D1). */
-	uint16_t permille = star6e_controls_output_throttle();
-	uint32_t cfg_kbps = g_star6e_control_ctx.vcfg
-		? g_star6e_control_ctx.vcfg->video0.bitrate : 0;
 
 	if (!ps)
 		return NULL;
@@ -1507,7 +1551,8 @@ static char *query_transport_status(void)
 			"\"packetsSent\":%llu,"
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
-			"\"usedSlots\":%u}}",
+			"\"usedSlots\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1516,7 +1561,9 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.writes,
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
-			(unsigned)fill.used_slots);
+			(unsigned)fill.used_slots,
+			(unsigned long long)__atomic_load_n(
+				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if (ps->output.frame_ring) {
 		venc_frame_ring_fill_t fill;
 		int in_pressure;
@@ -1535,8 +1582,9 @@ static char *query_transport_status(void)
 			"\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,"
 			"\"usedSlots\":%u,"
-			"\"throttlePermille\":%u,"
-			"\"effectiveBitrateKbps\":%u}}",
+			"\"ringLowWaterSlots\":%u,"
+			"\"otherDrops\":%llu,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1546,8 +1594,10 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots,
-			(unsigned)permille,
-			(unsigned)venc_shm_throttle_scale(permille, cfg_kbps));
+			(unsigned)ps->output.low_water_slots,
+			(unsigned long long)fill.other_drops,
+			(unsigned long long)__atomic_load_n(
+				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if ((ps->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            ps->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           ps->output.socket_handle >= 0) {
@@ -1565,7 +1615,8 @@ static char *query_transport_status(void)
 			"\"inPressure\":%s,"
 			"\"pressureDrops\":%u,"
 			"\"transportDrops\":%u,"
-			"\"packetsSent\":%u}}",
+			"\"packetsSent\":%u,"
+			"\"badAuDrops\":%llu}}",
 			transport,
 			(unsigned)fill_pct,
 			in_pressure ? "true" : "false",
@@ -1573,7 +1624,9 @@ static char *query_transport_status(void)
 			(unsigned)__atomic_load_n(&ps->output.socket_drops,
 				__ATOMIC_RELAXED),
 			(unsigned)__atomic_load_n(&ps->output.socket_writes,
-				__ATOMIC_RELAXED));
+				__ATOMIC_RELAXED),
+			(unsigned long long)__atomic_load_n(
+				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
@@ -1737,7 +1790,7 @@ static int attitude_calibrate_level(float *roll_deg, float *pitch_deg)
 static const VencApplyCallbacks g_star6e_apply_callbacks = {
 	.apply_bitrate = apply_bitrate,
 	.apply_qp_bounds = apply_qp_bounds,
-	.apply_fps = apply_fps,
+	.apply_fps = apply_fps_live,
 	.apply_gop = apply_gop,
 	.apply_qp_delta = apply_qp_delta,
 	.apply_roi_qp = apply_roi_qp,
