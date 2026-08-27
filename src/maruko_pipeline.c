@@ -4063,7 +4063,7 @@ static void maruko_service_ring_low_water(MarukoOutput *output)
 		/* Transport switch away from frame-shm — see the
 		 * star6e_runtime equivalent. */
 		output->low_water_ready = 0;
-		output->low_water_slots = 0;
+		venc_ring_low_water_reset(&output->low_water, 0);
 		return;
 	}
 
@@ -4079,7 +4079,6 @@ static void maruko_service_ring_low_water(MarukoOutput *output)
 		uint16_t slots =
 			venc_ring_low_water_slots(&output->low_water);
 
-		output->low_water_slots = slots;
 		venc_frame_ring_set_low_water(output->frame_ring, slots);
 	}
 }
@@ -4223,7 +4222,8 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 		{
 			/* See the star6e_runtime equivalent. */
 			char osd_ring[16];
-			unsigned int lw = ctx->output.low_water_slots;
+			unsigned int lw = venc_ring_low_water_slots(
+				&ctx->output.low_water);
 
 			osd_ring[0] = '\0';
 			if (lw > 1)

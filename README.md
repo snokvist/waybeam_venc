@@ -385,7 +385,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.67.0","backend":"star6e","contract_version":"0.18.5","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.69.0","backend":"star6e","contract_version":"0.19.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -560,8 +560,9 @@ curl http://<device-ip>:<port>/api/v1/audio/status
 #### GET /api/v1/transport/status
 
 Live observability for the active video transport (UDP / Unix / SHM):
-fill percentage, backpressure flag, lifetime drop counters. Used by the
-WebUI status bar and external link controllers.
+fill percentage, backpressure flag, lifetime drop counters, and on
+`frame-shm://` the ring low-water gauge. Consumed by external link
+controllers; the WebUI does not call it.
 
 ```sh
 curl http://<device-ip>:<port>/api/v1/transport/status

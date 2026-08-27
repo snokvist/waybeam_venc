@@ -12,7 +12,8 @@
  *
  * Differs from venc_ring (RTP-packet ring):
  *   - uint32_t slot lengths (frames can exceed 64 KB)
- *   - larger default slot_data_size (512 KB vs ~4 KB)
+ *   - larger default slot_data_size (384 KB SigmaStar / 512 KB CV610,
+ *     vs ~4 KB)
  *   - staged write API (begin/append/commit) to gather scattered NAL
  *     data from the encoder without a separate staging buffer
  *   - separate magic/version to prevent cross-type attach
@@ -146,6 +147,16 @@ static_assert(sizeof(venc_frame_ring_hdr_t) == 192,
               "venc_frame_ring_hdr_t must be exactly 192 bytes");
 static_assert(sizeof(VencFrameMeta) == VENC_FRAME_META_SIZE,
               "VencFrameMeta must be exactly 8 bytes");
+/* Same offset pins as the C branch below -- a byte-addressed consumer is as
+ * likely to be C++ as C, and a reorder must fail to compile on both. */
+static_assert(offsetof(venc_frame_ring_hdr_t, write_idx) == 64, "off 64");
+static_assert(offsetof(venc_frame_ring_hdr_t, futex_seq) == 72, "off 72");
+static_assert(offsetof(venc_frame_ring_hdr_t, health_magic) == 76, "off 76");
+static_assert(offsetof(venc_frame_ring_hdr_t, full_drops) == 80, "off 80");
+static_assert(offsetof(venc_frame_ring_hdr_t, low_water_slots) == 88, "off 88");
+static_assert(offsetof(venc_frame_ring_hdr_t, other_drops) == 96, "off 96");
+static_assert(offsetof(venc_frame_ring_hdr_t, read_idx) == 128, "off 128");
+static_assert(offsetof(venc_frame_ring_hdr_t, consumer_waiting) == 136, "off 136");
 #else
 _Static_assert(sizeof(venc_frame_ring_hdr_t) == 192,
                "venc_frame_ring_hdr_t must be exactly 192 bytes");
@@ -324,7 +335,7 @@ static inline void venc_ring_low_water_reset(VencRingLowWater *t,
 	t->low_slots = 0;
 	t->slot_count = 0;
 	t->window_us = now_us;
-	t->slots = 0;
+	__atomic_store_n(&t->slots, (uint16_t)0, __ATOMIC_RELAXED);
 	t->seen = 0;
 }
 
@@ -359,7 +370,11 @@ static inline int venc_ring_low_water_tick(VencRingLowWater *t,
 	 * process boundary -- keep it in range at the point of publication. */
 	if (low > t->slot_count)
 		low = t->slot_count;
-	t->slots = (uint16_t)low;
+	/* Relaxed store: the pipeline thread publishes, the httpd thread
+	 * reads.  Same producer/consumer pair -- and same reasoning -- as
+	 * bad_au_drops; the throttle_permille field this replaced used
+	 * relaxed atomics for it too. */
+	__atomic_store_n(&t->slots, (uint16_t)low, __ATOMIC_RELAXED);
 
 	t->window_us = now_us;
 	t->low_slots = 0;
@@ -369,7 +384,7 @@ static inline int venc_ring_low_water_tick(VencRingLowWater *t,
 
 static inline uint16_t venc_ring_low_water_slots(const VencRingLowWater *t)
 {
-	return t ? t->slots : 0u;
+	return t ? __atomic_load_n(&t->slots, __ATOMIC_RELAXED) : 0u;
 }
 
 /* ── Inline helpers ──────────────────────────────────────────────────── */

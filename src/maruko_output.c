@@ -43,7 +43,6 @@ int maruko_output_init(MarukoOutput *output, const VencOutputUri *uri,
 	output->send_errors = 0;
 	output->trunc_warned = 0;
 	output->bad_au_drops = 0;
-	output->low_water_slots = 0;
 	/* The window state too, not just the published scalar: a stale
 	 * low_water_ready would skip the reset on the next ring and let a
 	 * carried-over low_slots of 0 swallow the new ring's first sample,
@@ -85,7 +84,6 @@ int maruko_output_init_shm(MarukoOutput *output, const char *shm_name)
 	output->send_errors = 0;
 	output->trunc_warned = 0;
 	output->bad_au_drops = 0;
-	output->low_water_slots = 0;
 	/* The window state too, not just the published scalar: a stale
 	 * low_water_ready would skip the reset on the next ring and let a
 	 * carried-over low_slots of 0 swallow the new ring's first sample,
@@ -132,7 +130,6 @@ int maruko_output_init_frame_shm(MarukoOutput *output, const char *shm_name)
 	output->send_errors = 0;
 	output->trunc_warned = 0;
 	output->bad_au_drops = 0;
-	output->low_water_slots = 0;
 	/* The window state too, not just the published scalar: a stale
 	 * low_water_ready would skip the reset on the next ring and let a
 	 * carried-over low_slots of 0 swallow the new ring's first sample,

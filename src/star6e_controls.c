@@ -1369,16 +1369,25 @@ static int apply_output_enabled(bool on)
 	if (!g_star6e_control_ctx.pipeline)
 		return -1;
 
-	/* Enabling an already-enabled output is not a bootstrap event: nothing
-	 * was re-created and no consumer lost its parameter sets.  Firing the
-	 * un-coalescible IDR on it turned an unchanged re-POST into an ungated
-	 * keyframe at the caller's request rate — and because a forced IDR
-	 * re-arms the spacing anchor, it starved the scene detector for the
-	 * duration.  Same reasoning as apply_fps_live(). */
-	if (on == (g_star6e_control_ctx.pipeline->output_enabled ? 1 : 0))
-		return 0;
-
 	if (on) {
+		/* Enabling an already-enabled output is not a bootstrap event:
+		 * nothing was re-created and no consumer lost its parameter
+		 * sets.  Firing the un-coalescible IDR on it turned an
+		 * unchanged re-POST into an ungated keyframe at the caller's
+		 * request rate, and a forced IDR re-arms the spacing anchor,
+		 * starving the scene detector for the duration.
+		 *
+		 * The guard belongs HERE, not above the branch: the disable
+		 * arm has side effects beyond the flag — it captures
+		 * stored_fps and idles the encoder — and apply_fps() does not
+		 * consult output_enabled.  Guarding both arms let a re-POST
+		 * carrying video0.fps AND enabled=false rebind to full rate
+		 * and then skip the re-idle, leaving the encoder running flat
+		 * out with the output off.  Re-running the ENABLE arm is not
+		 * safe the same way: it would restore a stale stored_fps over
+		 * an fps the caller set in the same batch. */
+		if (g_star6e_control_ctx.pipeline->output_enabled)
+			return 0;
 		if (!g_star6e_control_ctx.vcfg ||
 		    !g_star6e_control_ctx.vcfg->outgoing.server[0]) {
 			fprintf(stderr, "> Cannot enable output: no server configured\n");
@@ -1610,7 +1619,7 @@ static char *query_transport_status(void)
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots,
-			(unsigned)ps->output.low_water_slots,
+			(unsigned)venc_ring_low_water_slots(&ps->output.low_water),
 			(unsigned long long)fill.other_drops,
 			(unsigned long long)__atomic_load_n(
 				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
@@ -1862,10 +1871,17 @@ void star6e_controls_bind(Star6ePipelineState *pipeline, VencConfig *vcfg)
 	g_star6e_control_ctx.pipeline = pipeline;
 	g_star6e_control_ctx.vcfg = vcfg;
 	/* Seed from the create path so the first live set naming the
-	 * already-active destination is correctly seen as unchanged. */
-	snprintf(g_star6e_control_ctx.applied_server,
-		sizeof(g_star6e_control_ctx.applied_server), "%s",
-		vcfg->outgoing.server);
+	 * already-active destination is correctly seen as unchanged -- but
+	 * ONLY if the output actually came up.  Seeding from config over a
+	 * failed bring-up would make a re-POST of the same URI a no-op and
+	 * remove the one route back: re-POSTing the destination to retry
+	 * output_socket_configure().  Left empty, the guard falls through and
+	 * the retry happens. */
+	if (pipeline->output.ring || pipeline->output.frame_ring ||
+	    pipeline->output.socket_handle >= 0)
+		snprintf(g_star6e_control_ctx.applied_server,
+			sizeof(g_star6e_control_ctx.applied_server), "%s",
+			vcfg->outgoing.server);
 }
 
 void star6e_controls_reset(void)

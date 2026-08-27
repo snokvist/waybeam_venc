@@ -329,10 +329,19 @@ static void cv610_service_ring_low_water(Cv610RunnerContext *ctx)
 	venc_frame_ring_fill_t fill;
 	uint64_t now_us;
 
-	if (!ctx || !ctx->frame_ring)
+	if (!ctx)
 		return;
-	if (venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0)
+	/* Clear the window when there is no ring, exactly as the SigmaStar
+	 * backends do: a carried-over low_slots of 0 would swallow the next
+	 * ring's first sample and publish "perfectly drained" over a ring
+	 * that is full.  Unreachable today (the context is created once per
+	 * process), kept symmetric so it stays that way. */
+	if (!ctx->frame_ring ||
+	    venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0) {
+		venc_ring_low_water_reset(&ctx->low_water, 0);
+		ctx->low_water_ready = 0;
 		return;
+	}
 
 	now_us = wb_monotonic_us();
 	if (!ctx->low_water_ready) {

@@ -357,6 +357,7 @@ static int maruko_apply_fps(uint32_t fps)
 	i6c_venc_chn attr = {0};
 	MI_S32 bind_ret;
 	uint32_t sensor_fps;
+	int rebound = 0;
 
 	if (fps == 0 || fps > PIPELINE_LIVE_FPS_MAX)
 		return -1;
@@ -401,6 +402,12 @@ static int maruko_apply_fps(uint32_t fps)
 		}
 	}
 
+	/* The encoder channel HAS been rebound at this point.  Everything
+	 * below is best-effort bookkeeping of the RC fpsNum, and it is
+	 * skipped outright when the attr read fails or the rate mode is not
+	 * one we enumerate -- so a caller must NOT infer "did it change?"
+	 * by diffing fpsNum.  Report it in the return value instead. */
+	rebound = 1;
 	if (maruko_mi_venc_get_chn_attr(g_ctx.venc_dev,
 	    g_ctx.venc_chn, &attr) == 0) {
 		switch (attr.rate.mode) {
@@ -427,7 +434,9 @@ static int maruko_apply_fps(uint32_t fps)
 	 * live video0.fps write needs one; it is issued in
 	 * maruko_apply_fps_live(). */
 	printf("> FPS changed to %u (bind %u:%u)\n", fps, sensor_fps, fps);
-	return 0;
+	/* 1 = the encoder was rebound, 0 = nothing to do, -1 = failed.
+	 * Callers that only care about failure keep testing < 0. */
+	return rebound;
 }
 
 static int maruko_apply_verbose(bool on)
@@ -443,21 +452,20 @@ static int maruko_apply_verbose(bool on)
  * apply_fps_live() in src/star6e_controls.c. */
 static int maruko_apply_fps_live(uint32_t fps)
 {
-	/* Star6E parity -- see apply_fps_live() there for why ret == 0 is not
-	 * enough to conclude a rebind happened.
-	 *
-	 * Both reads must SUCCEED before a difference means anything:
-	 * maruko_query_live_fps() returns 0 when the SDK attr read fails, so a
-	 * transient failure on the first call alone would read as 0 -> fps,
-	 * i.e. "it changed", and fire an ungated IDR on an apply that never
-	 * touched the encoder. */
-	uint32_t before = maruko_query_live_fps();
+	/* Only a real rebind is a bootstrap event, and maruko_apply_fps()
+	 * reports that directly rather than leaving us to diff the RC fpsNum:
+	 * it rebinds BEFORE writing fpsNum, and skips that write when the attr
+	 * read fails or the rate mode is not one we enumerate -- so a diff
+	 * reads "unchanged" over a channel that WAS rebound, leaving the
+	 * receiver with no random-access point.  Star6E compares delivered_fps,
+	 * which its apply_fps() sets on exactly that path. */
 	int ret = maruko_apply_fps(fps);
-	uint32_t after = maruko_query_live_fps();
 
-	if (ret == 0 && before != 0 && after != 0 && after != before)
+	if (ret < 0)
+		return -1;
+	if (ret == 1)
 		(void)maruko_request_idr_bootstrap();
-	return ret;
+	return 0;
 }
 
 static int maruko_request_idr(void)
@@ -1175,13 +1183,14 @@ static int maruko_apply_output_enabled(bool on)
 	if (!g_ctx.output_enabled_ptr)
 		return -1;
 
-	/* Star6E parity — see apply_output_enabled() there for why an unchanged
-	 * re-POST must not reach the un-coalescible IDR. */
-	if (g_ctx.output_enabled_ptr &&
-	    on == (*g_ctx.output_enabled_ptr ? 1 : 0))
-		return 0;
-
 	if (on) {
+		/* Star6E parity — see apply_output_enabled() there for why an
+		 * unchanged re-POST must not reach the un-coalescible IDR, and
+		 * why this guard covers only the enable arm: the disable arm
+		 * also idles the encoder, and skipping that leaves it at full
+		 * rate with the output off. */
+		if (*g_ctx.output_enabled_ptr)
+			return 0;
 		if (!g_ctx.vcfg || !g_ctx.vcfg->outgoing.server[0]) {
 			fprintf(stderr, "> Cannot enable output: no server configured\n");
 			return -1;
@@ -1356,7 +1365,7 @@ static char *maruko_query_transport_status(void)
 			(unsigned long long)fill.oversize_drops,
 			(unsigned)fill.slot_count,
 			(unsigned)fill.used_slots,
-			(unsigned)backend->output.low_water_slots,
+			(unsigned)venc_ring_low_water_slots(&backend->output.low_water),
 			(unsigned long long)fill.other_drops,
 			(unsigned long long)__atomic_load_n(
 				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
@@ -1568,8 +1577,12 @@ void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg)
 	g_ctx.stored_fps_ptr = &backend->stored_fps;
 	g_maruko_output_ptr = &backend->output;
 	/* Seed from the create path so the first live set naming the
-	 * already-active destination is correctly seen as unchanged. */
-	if (g_ctx.vcfg)
+	 * already-active destination is correctly seen as unchanged -- but
+	 * ONLY if the output actually came up; see the Star6E twin for why
+	 * seeding over a failed bring-up would remove the retry route. */
+	if (g_ctx.vcfg &&
+	    (backend->output.ring || backend->output.frame_ring ||
+	     backend->output.socket_handle >= 0))
 		snprintf(g_maruko_applied_server,
 			sizeof(g_maruko_applied_server), "%s",
 			g_ctx.vcfg->outgoing.server);

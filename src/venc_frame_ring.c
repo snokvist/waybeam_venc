@@ -98,6 +98,7 @@ venc_frame_ring_t *venc_frame_ring_create(const char *shm_name,
 	 * never see VHLT set over uninitialised counters. */
 	hdr->full_drops = 0;
 	hdr->low_water_slots = 0;
+	hdr->other_drops = 0;
 	__atomic_store_n(&hdr->health_magic, VENC_FRAME_RING_HEALTH_MAGIC,
 		__ATOMIC_RELEASE);
 

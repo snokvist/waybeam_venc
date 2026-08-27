@@ -109,10 +109,6 @@ typedef struct {
 	uint32_t socket_drops;
 	uint32_t socket_writes;
 	Star6eOutputBatch batch;
-	/* Last frame-shm ring low-water reading, in slots.  <= 1 is healthy
-	 * (the ring's idle occupancy is one frame).  Cached here so the debug
-	 * OSD can report it without recomputing the window. */
-	uint16_t low_water_slots;
 	/* Window state for the reading above.  PER OUTPUT, not a file-static
 	 * singleton: a second frame-shm output (dual-stream ch1) is a second
 	 * ring with its own occupancy, and a shared tracker cannot represent

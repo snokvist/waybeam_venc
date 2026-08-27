@@ -1506,7 +1506,8 @@ Field reference:
 | `inPressure` | Point-in-time HTTP snapshot: true when the current `fillPct >= 75`, false otherwise. The RTP sidecar field uses 75/50 hysteresis |
 | `transportDrops` | Lifetime drops: ring-full for SHM; unsent datagrams after `EAGAIN`/`ENOBUFS` or frame-budget exhaustion for UDP/Unix |
 | `pressureDrops` | Frames dropped by the in-process backpressure path while a sidecar probe was subscribed |
-| `packetsSent` | Lifetime sends accepted: ring writes for SHM, datagrams for UDP/Unix |
+| `packetsSent` | Lifetime sends accepted: ring writes on `shm://`, datagrams on `udp://`/`unix://`.  Absent on `frame-shm://`, which reports whole frames as `framesSent` instead |
+| `framesSent` | (`frame-shm` only) Lifetime whole frames written into the ring.  The `frame-shm` counterpart of `packetsSent`: this transport carries one access unit per slot, not packets |
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
 | `otherDrops` | (frame-shm only, all three backends) Frames the producer discarded for a reason **other than a full ring** — an access unit it could not build at all (oversize, or a malformed SDK packet table).  Kept apart from `transportDrops` on purpose: that one is congestion the consumer is causing and a rate controller should slow down for it, this one is not congestion and slowing down fixes nothing.  Mirrored into the ring header at offset 96 so the consumer sees it too |
@@ -1914,66 +1915,34 @@ in Notes. As of `contract_version: 0.19.0`:
   - Sidecar `TRANSPORT_INFO` trailer: `throttle_permille` returns to `_pad[2]`.
     Trailer stays 16 bytes and later trailers keep their offsets.
 
-- `0.18.7` (behavioral — venc stops injecting IDRs of its own accord).
-  **Never shipped separately: it is folded into `0.19.0` above, which
-  superseded most of it.** The ring-full recovery IDR described below was
-  removed outright for plain GOP as well as GDR, and the throttle-clamp
-  deadband went with the clamp. Recorded for the reasoning and the device
-  measurements, which still stand:
-  A `frame-shm://` ring-full drop no longer requests a recovery IDR when the
-  stream is running a rolling intra refresh (GDR).  Such a stream repairs a
-  chain break on its own within one refresh cycle -- bounded, and already
-  paid for -- so the IDR bought only the gap between the drop and the sweep
-  passing over the damage, at the cost of the largest frame the encoder
-  makes pushed into a ring that is by definition full.  A plain GOP stream
-  keeps the recovery IDR unconditionally: it has no other heal, and with a
-  long GOP the damage otherwise persists for seconds.  No configuration --
-  venc can see which case it is in.
-
-  Device-measured with the ring consumer stopped for 12 s (ring pinned at
-  100%, 8/8 slots, ~900 drops): a GDR craft went from 13 IRAP access units
-  to 1 (the recorder's own start IDR), while the same craft with
-  `video0.resilience=off` kept its recovery IDRs.  The path remains paced by
-  a 1 s holdoff (0.66.0) in the GOP case.
-
-  The `frame-shm` ring-fill clamp now deadbands its own writes: movement
-  below 100 permille (10%) does not re-program the encoder.  Both rails are
-  exempt and the comparison is against the last *applied* value, so the
-  floor and full release are always reachable — device-confirmed, the clamp
-  still walked to its floor with the consumer stopped.
-
-  The fps-rebind IDR moved to the one caller that wants it.  Output enable
-  emitted two back-to-back requests (its own plus `apply_fps`'s) and output
-  disable emitted one *after* the output was already off; enable now emits
-  exactly one and disable none.  A live `video0.fps` write still emits one,
-  because the rebind re-creates the encoder channel.
-
-  Maruko's `/request/idr`, output-enable and server-change IDRs now go
-  through the shared per-channel gate, so every Maruko IDR source is paced
-  and counted in `/api/v1/idr/stats` — previously none of these were, which
-  is why the parity statement below did not hold.
-
-  Rate-control writes no longer request an IDR:
-  `video0.bitrate`, `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no
-  longer request an IDR after applying, on Star6E and Maruko. A controller
-  that wants a resync point calls `/request/idr` (ch0) or
-  `/api/v1/dual/idr` (ch1) explicitly. CV610 never IDR'd on these paths.
-
-  Device-measured on a SSC338Q, 2026-08-23, ten live writes spaced 300 ms,
-  counted as IRAP access units in the encoder's own bitstream: `qpDelta`
-  and `maxIBytes` fell from 11 to 1, `bitrate` stayed at 11. The bitrate
-  path is unchanged **on the wire** because `MI_VENC_SetChnAttr` emits an
-  IDR by itself and `MI_VENC_RcParam_t` carries no bitrate field, leaving
-  no rate-only actuator to switch to; what the removal does fix there is
-  the shared 100 ms IDR gate, which a bitrate write used to consume — a
-  genuine recovery request arriving within that window was swallowed — and
-  `/api/v1/idr/stats`, which counted an IDR per bitrate write that the
-  write did not cause.
-
-  Two contract corrections with no code change: the `/api/v1/dual/set` `bitrate` row no
-  longer claims venc requests an IDR (it never did), and the
-  `/api/v1/idr/stats` example reports `min_spacing_us: 100000`, matching
-  `IDR_RATE_LIMIT_MIN_SPACING_US`.
+- **`0.18.7` was never a servable contract version.**  It was staged during
+  review and folded into `0.19.0` above; no device ever reports
+  `contract_version: 0.18.7`, so do not match against it.  Most of what it
+  described — a ring-full recovery IDR kept for plain GOP, and a deadband on
+  the ring-fill clamp — was superseded outright: `0.19.0` removed both the
+  recovery IDR and the clamp.  Three things it introduced do survive, and are
+  in force as of `0.19.0`:
+  - **Rate-control writes no longer request an IDR.** `video0.bitrate`,
+    `video0.qpDelta` and `video0.maxIBytes`/`maxPBytes` no longer request one
+    after applying, on Star6E and Maruko.  A controller wanting a resync point
+    calls `/request/idr` (ch0) or `/api/v1/dual/idr` (ch1) explicitly.  CV610
+    never IDR'd on these paths.  Device-measured on a SSC338Q, 2026-08-23, ten
+    live writes spaced 300 ms, counted as IRAP access units in the encoder's
+    own bitstream: `qpDelta` and `maxIBytes` fell from 11 to 1, `bitrate`
+    stayed at 11.  The bitrate path is unchanged **on the wire** because
+    `MI_VENC_SetChnAttr` emits an IDR by itself and `MI_VENC_RcParam_t`
+    carries no bitrate field, leaving no rate-only actuator to switch to; what
+    the removal fixes there is the shared 100 ms IDR gate, which a bitrate
+    write used to consume — a genuine recovery request arriving inside that
+    window was swallowed — and `/api/v1/idr/stats`, which counted an IDR per
+    bitrate write that the write did not cause.
+  - Maruko's `/request/idr`, output-enable and server-change IDRs now go
+    through the shared per-channel gate, so every Maruko IDR source is paced
+    and counted in `/api/v1/idr/stats`.  Previously none of these were.
+  - Two corrections with no code change: the `/api/v1/dual/set` `bitrate` row
+    no longer claims venc requests an IDR (it never did), and the
+    `/api/v1/idr/stats` example reports `min_spacing_us: 100000`, matching
+    `IDR_RATE_LIMIT_MIN_SPACING_US`.
 - `0.18.6` (documentation + correctness; no shipped response changes):
   `GET /api/v1/intra/status` and `GET /api/v1/resilience/status` are now
   documented — both have been served for several releases and the CV610

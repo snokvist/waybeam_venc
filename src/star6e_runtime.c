@@ -390,25 +390,17 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 	return 0;
 }
 
-/* Scene-detector IDR: goes through the shared 100 ms limiter, and a
- * coalesced request is not an error — another is already in flight.  (The
- * ring-full recovery path that used to share this helper is gone; venc no
- * longer requests an IDR in response to its own egress.) */
 static void star6e_service_ring_low_water(Star6eOutput *output);
 
-static int star6e_ring_request_idr(void *ctx)
-{
-	int venc_chn = *(const int *)ctx;
-	if (!idr_rate_limit_allow(venc_chn))
-		return 0;
-	MI_VENC_RequestIdr(venc_chn, 1);
-	return 1;
-}
-
-/* Scene-detector form (SceneRequestIdrFn is void). */
+/* Scene-detector IDR: goes through the shared 100 ms limiter, and a
+ * coalesced request is not an error — another is already in flight.
+ * Mirrors maruko_scene_request_idr(). */
 static void star6e_scene_request_idr(void *ctx)
 {
-	(void)star6e_ring_request_idr(ctx);
+	int venc_chn = *(const int *)ctx;
+
+	if (idr_rate_limit_allow(venc_chn))
+		MI_VENC_RequestIdr(venc_chn, 1);
 }
 
 /* ── Runner context ────────────────────────────────────────────────────── */
@@ -922,7 +914,6 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		}
 		star6e_ts_recorder_init(&ps->ts_recorder, rate, ch, ts_codec);
 	}
-	ps->ts_recorder.request_idr = runtime_request_idr;
 	if (vcfg->record.max_seconds > 0)
 		ps->ts_recorder.max_seconds = vcfg->record.max_seconds;
 	if (vcfg->record.max_mb > 0)
@@ -1115,7 +1106,7 @@ static void star6e_service_ring_low_water(Star6eOutput *output)
 		 * reinit).  Drop the state so a later frame-shm run starts
 		 * from a fresh window. */
 		output->low_water_ready = 0;
-		output->low_water_slots = 0;
+		venc_ring_low_water_reset(&output->low_water, 0);
 		return;
 	}
 
@@ -1131,7 +1122,6 @@ static void star6e_service_ring_low_water(Star6eOutput *output)
 		uint16_t slots =
 			venc_ring_low_water_slots(&output->low_water);
 
-		output->low_water_slots = slots;
 		/* Publish into the ring header: a window in which the ring
 		 * never drained is direct evidence that the consumer's rate
 		 * model is optimistic (protocols/frame-shm.md). */
@@ -1451,7 +1441,8 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 			 * Absent when the ring drained — the common case
 			 * should stay uncluttered. */
 			char osd_ring[16];
-			unsigned int lw = ps->output.low_water_slots;
+			unsigned int lw = venc_ring_low_water_slots(
+				&ps->output.low_water);
 
 			osd_ring[0] = '\0';
 			if (lw > 1)
