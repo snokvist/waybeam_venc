@@ -464,19 +464,32 @@ static const FieldUi ui_slice_count = {
 	"the requested/applied mapping and validation tools report the VCL census. On Star6E, "
 	"1080p delivers only 1,2,3,4,5,6,9,17 and saturates at 17. Restart-only."
 };
+/* The caps do NOT request an IDR.  These two descriptors said they did,
+ * which has been wrong since 0.19.0 removed the request, and wrong in the
+ * one place it costs something: a controller shopping the capabilities
+ * surface for an IDR-free rate actuator would rule out the only one there
+ * is.  Measured on a SSC338Q, 2026-08-23 — ten spaced video0.maxIBytes
+ * writes, counted as IRAP access units in the encoder's own bitstream:
+ * eleven before the removal, one after (the recorder's own start IDR).
+ * See apply_max_frame_size() in src/star6e_controls.c.
+ *
+ * That measurement says the caps are free of keyframes.  It does NOT say
+ * they are a reliable way to shape the average bitrate — what rate a given
+ * cap actually delivers on SigmaStar is unmeasured, so the "hard ceiling"
+ * below is the vendor's per-frame claim (mi_venc_datatype.h), not ours. */
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"An IDR is requested after each apply. Applied live."
+	"Applied live, without an IDR."
 };
 static const FieldUi ui_max_p_bytes = {
 	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first so "
 	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"An IDR is requested after each apply. Applied live."
+	"Applied live, without an IDR."
 };
 
 /* UI descriptors for the snapshot subsystem.  The whole section was API-only
