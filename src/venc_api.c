@@ -474,7 +474,15 @@ static const FieldUi ui_slice_count = {
  * See apply_max_frame_size() in src/star6e_controls.c.
  *
  * That measurement says the caps are free of keyframes.  It does not say
- * they DO anything, and the follow-up says they do not.
+ * they impose the ceiling they name, and the follow-up says they do not.
+ *
+ * This is a confirmation, not a discovery: OpenIPC/waybeam_venc#111 probed
+ * the same thing on 2026-08-22 (IDRs an identical 42-44 KB with the caps at
+ * 2000, 26000 and 8, RC priority switch changing nothing).  Note its author
+ * later WITHDREW the "inert" wording on Maruko evidence, where maxIBytes
+ * =2000 moved the IDR median from 12195 to 5866 bytes.  So the caps do
+ * influence frame size on at least one backend; what they do not do is
+ * impose the requested value.  Below is the Star6E P-frame arm of that.
  *
  * Device-measured on .232 (SSC338Q, IMX335 1280x720@60, H.265 CBR, GDR via
  * the racing preset), 2026-08-28: video0.maxPBytes stepped 33144 -> 25000
@@ -490,7 +498,7 @@ static const FieldUi ui_slice_count = {
  *
  * At the 6000 B cap ALL 863 access units exceeded it, mean 40247 bytes —
  * 6.7x the cap.  CBR meanwhile held its 19092 kbps target to 98.8%, so the
- * rate controller was working; only MaxISize/MaxPSize were ignored.  The
+ * rate controller was working; only MaxISize/MaxPSize failed to bind.  The
  * encoder is plainly capable of the small frames the cap asks for: raising
  * video0.minQp to 30 on the same scene took it to ~490 bytes/frame.  So
  * this is not "the content would not fit" — the SDK accepts
@@ -498,26 +506,37 @@ static const FieldUi ui_slice_count = {
  * nothing.  Note libmi_venc.so also exports MI_VENC_GetRcPriority, which
  * this port never binds; a readback would have caught this years earlier.
  *
- * Scope: one SSC338Q, one SDK build, 720p60 H.265 CBR.  Maruko's cap path
- * is compile-tested only and CV610 does not implement the caps at all, so
- * neither is evidence either way. */
+ * Scope: one SSC338Q, one SDK build, 720p60 H.265 CBR, and P frames — the
+ * stream was GDR, so there were no I frames for maxIBytes to act on and
+ * this arm says nothing about it.  CV610 does not implement the caps at all.
+ *
+ * The parameter the SigmaStar CBR RC is reported to honour instead is
+ * u32MaxIPProp (OpenIPC/waybeam_venc#111, closed unmerged over a config
+ * validation hole, not over the evidence).  It caps I size as a proportion
+ * of P, so it can only bind where I > P — it is dead on a GDR craft like
+ * this one, and the regime it was meant for is 720p120 at ~11 Mbps, still
+ * unswept.  It bounds the cost of an IDR rather than replacing the bitrate
+ * knob, which is a different and possibly better answer to the same
+ * problem. */
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first; "
 	"both back to 0 restores bitrate-first. Applied live, without an IDR. "
-	"NOT ENFORCED on Star6E: measured 2026-08-28, caps from 33144 down to "
-	"6000 bytes moved the delivered rate by under 0.3% and every frame "
-	"exceeded the cap."
+	"NOT A RELIABLE CEILING: on Star6E, P-frame caps from 33144 down to "
+	"6000 bytes moved the delivered rate under 0.3%% and every frame "
+	"exceeded the cap. They influence frame size on some backends "
+	"without imposing the value you ask for."
 };
 static const FieldUi ui_max_p_bytes = {
 	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
 	"Per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
 	"When either cap is > 0 the RC priority switches to framebits-first; "
 	"both back to 0 restores bitrate-first. Applied live, without an IDR. "
-	"NOT ENFORCED on Star6E: measured 2026-08-28, caps from 33144 down to "
-	"6000 bytes moved the delivered rate by under 0.3% and every frame "
-	"exceeded the cap."
+	"NOT A RELIABLE CEILING: on Star6E, P-frame caps from 33144 down to "
+	"6000 bytes moved the delivered rate under 0.3%% and every frame "
+	"exceeded the cap. They influence frame size on some backends "
+	"without imposing the value you ask for."
 };
 
 /* UI descriptors for the snapshot subsystem.  The whole section was API-only
