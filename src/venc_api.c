@@ -473,23 +473,51 @@ static const FieldUi ui_slice_count = {
  * eleven before the removal, one after (the recorder's own start IDR).
  * See apply_max_frame_size() in src/star6e_controls.c.
  *
- * That measurement says the caps are free of keyframes.  It does NOT say
- * they are a reliable way to shape the average bitrate — what rate a given
- * cap actually delivers on SigmaStar is unmeasured, so the "hard ceiling"
- * below is the vendor's per-frame claim (mi_venc_datatype.h), not ours. */
+ * That measurement says the caps are free of keyframes.  It does not say
+ * they DO anything, and the follow-up says they do not.
+ *
+ * Device-measured on .232 (SSC338Q, IMX335 1280x720@60, H.265 CBR, GDR via
+ * the racing preset), 2026-08-28: video0.maxPBytes stepped 33144 -> 25000
+ * -> 16000 -> 10000 -> 6000 bytes, 15 s per step in one continuous
+ * recording, every step confirmed applied by this layer's own
+ * "priority=framebits" log line.  The delivered rate did not move:
+ *
+ *   cap 33144 B (pred 15909 kbps) -> 19333 kbps
+ *   cap 25000 B (pred 12000 kbps) -> 19319 kbps
+ *   cap 16000 B (pred  7680 kbps) -> 19285 kbps
+ *   cap 10000 B (pred  4800 kbps) -> 19319 kbps
+ *   cap  6000 B (pred  2880 kbps) -> 19327 kbps
+ *
+ * At the 6000 B cap ALL 863 access units exceeded it, mean 40247 bytes —
+ * 6.7x the cap.  CBR meanwhile held its 19092 kbps target to 98.8%, so the
+ * rate controller was working; only MaxISize/MaxPSize were ignored.  The
+ * encoder is plainly capable of the small frames the cap asks for: raising
+ * video0.minQp to 30 on the same scene took it to ~490 bytes/frame.  So
+ * this is not "the content would not fit" — the SDK accepts
+ * MI_VENC_SetRcParam and MI_VENC_SetRcPriority, returns success, and does
+ * nothing.  Note libmi_venc.so also exports MI_VENC_GetRcPriority, which
+ * this port never binds; a readback would have caught this years earlier.
+ *
+ * Scope: one SSC338Q, one SDK build, 720p60 H.265 CBR.  Maruko's cap path
+ * is compile-tested only and CV610 does not implement the caps at all, so
+ * neither is evidence either way. */
 static const FieldUi ui_max_i_bytes = {
 	"Video", "Max I-frame bytes", "number", 0, 2000000, 500, NULL,
-	"Hard per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
-	"When either cap is > 0 the RC priority switches to framebits-first so "
-	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"Applied live, without an IDR."
+	"Per-frame cap on the encoded I-frame size in bytes. 0 = unlimited. "
+	"When either cap is > 0 the RC priority switches to framebits-first; "
+	"both back to 0 restores bitrate-first. Applied live, without an IDR. "
+	"NOT ENFORCED on Star6E: measured 2026-08-28, caps from 33144 down to "
+	"6000 bytes moved the delivered rate by under 0.3% and every frame "
+	"exceeded the cap."
 };
 static const FieldUi ui_max_p_bytes = {
 	"Video", "Max P-frame bytes", "number", 0, 2000000, 500, NULL,
-	"Hard per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
-	"When either cap is > 0 the RC priority switches to framebits-first so "
-	"the cap becomes a hard ceiling; both back to 0 restores bitrate-first. "
-	"Applied live, without an IDR."
+	"Per-frame cap on the encoded P-frame size in bytes. 0 = unlimited. "
+	"When either cap is > 0 the RC priority switches to framebits-first; "
+	"both back to 0 restores bitrate-first. Applied live, without an IDR. "
+	"NOT ENFORCED on Star6E: measured 2026-08-28, caps from 33144 down to "
+	"6000 bytes moved the delivered rate by under 0.3% and every frame "
+	"exceeded the cap."
 };
 
 /* UI descriptors for the snapshot subsystem.  The whole section was API-only
