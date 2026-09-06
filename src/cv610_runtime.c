@@ -753,14 +753,31 @@ static void cv610_record_status_callback(VencRecordStatus *out)
 			/* Either recorder may hold the reason; a manual stop on
 			 * one does not mask a disk-full on the other. */
 			const char *reason = "manual";
+			const Star6eRecorderSnapshot *last = &ts_snap;
 			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
 
-			if (sr == RECORDER_STOP_MANUAL)
+			if (sr == RECORDER_STOP_MANUAL) {
 				sr = rec_snap.last_stop_reason;
+				last = &rec_snap;
+			}
 			if (sr == RECORDER_STOP_DISK_FULL)
 				reason = "disk_full";
 			else if (sr == RECORDER_STOP_WRITE_ERROR)
 				reason = "write_error";
+			else if (sr == RECORDER_STOP_SIZE_LIMIT)
+				reason = "size_limit";
+			/* Report what the finished recording produced, from the
+			 * same snapshot the reason came from.  This branch used
+			 * to leave them at zero, so a recorder that stopped on
+			 * its own answered {path:"", frames:0, bytes:0} -- the
+			 * operator lost both the file that was cut short and how
+			 * far it got, which is the whole diagnosis for any stop
+			 * that was not manual.  elapsed_ms stays out: the
+			 * snapshot zeroes it when inactive by contract. */
+			out->bytes_written = last->bytes_written;
+			out->frames_written = last->frames_written;
+			out->segments = last->segments;
+			snprintf(out->path, sizeof(out->path), "%s", last->path);
 			snprintf(out->stop_reason, sizeof(out->stop_reason),
 				"%s", reason);
 			snprintf(out->format, sizeof(out->format), "%s",
