@@ -132,6 +132,16 @@ typedef struct {
 	                            * >1 enables spatial loss concealment on the
 	                            * link RX (waybeam-link PROTOCOL.md §6.3b).
 	                            * Star6E, Maruko and CV610. */
+	/* Adaptive frame gate — pauses VENC frame intake while the frame-shm
+	 * egress ring is not draining.  "off" (default) | "on".  Only has an
+	 * effect on a frame-shm:// transport; every other transport lacks the
+	 * per-frame occupancy signal and the gate stays inert.  Refused at
+	 * load time when record.mode is "mirror", because there ch0 feeds the
+	 * recorder as well and gating it would punch holes in the SD file for
+	 * a radio problem.  See include/frame_gate.h. */
+	char frame_gate[8];              /* "off" | "on" */
+	uint32_t frame_gate_close_slots; /* 0 = FRAME_GATE_DEFAULT_CLOSE_SLOTS */
+	uint32_t frame_gate_max_closed_ms; /* 0 = default; the safety escape */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

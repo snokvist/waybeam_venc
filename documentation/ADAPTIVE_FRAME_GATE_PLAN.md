@@ -130,11 +130,22 @@ matching the header's own note that 2–3 slot spikes are normal at 100 fps with
 a healthy consumer. `ldy_sky` uses the same shape (single threshold at 2, or a
 9/15 Schmitt trigger in its other mode).
 
-**D5 — Stream channel only, never the record channel.** Gating the recorder
-would punch holes in the SD-card file for a *radio* problem. In dual/dual-stream
-the gate binds to the stream channel only; in mirror mode, where ch0 feeds both
-stream and recorder, the gate is refused at config-validation time rather than
-silently corrupting recordings.
+**D5 — Stream channel only, and closes suppressed while a mirror-mode
+recording is in flight.** *(Revised during Phase 2.)* The plan called for
+refusing the gate outright when `record.mode` is `"mirror"`. Implementation
+found that `mirror` is the **default** record mode
+(`src/venc_config.c:169`), so a blanket refusal would make the feature
+unreachable for most users — the plan's assumption was wrong, not just
+conservative.
+
+What shipped instead: the gate binds to the stream channel only (ch0 on both
+SigmaStar backends; `dual`/`dual-stream` put the recorder on ch1 and are
+unaffected), and when the recorder shares ch0 it suppresses **closes** while a
+recording is actually running — `star6e_record_wants_frame()`, already a
+host-linked predicate. Reopens are never suppressed, so a gate that was
+closed when a recording started still lets go. Net effect: the gate works by
+default when not recording, and steps out of the way when a recording would
+be damaged.
 
 **D6 — Off by default, and it does not move policy back in-daemon.** 0.69.0
 deliberately removed `throttle_permille` so waybeam-link owns the rate model.
@@ -191,19 +202,24 @@ nothing is lost. Must be verified: cycle the gate under `resilience=racing`
 (GDR) and `resilience=range` (SVC-T) and confirm the stripe cadence and layer
 structure survive.
 
-**R3 — Recorder starvation.** Covered by D5 for dual/mirror, but the refusal
-path needs a test.
+**R3 — Recorder starvation.** Covered by the revised D5: closes are
+suppressed while a mirror-mode recording runs. Needs bench confirmation that a
+recording started *while the gate is closed* still gets a clean file once the
+gate reopens.
 
 **R4 — Interaction with `idr_rate_limit` and the scene detector.** A reopen
 produces a large P-frame after a temporal gap; the scene detector may read that
 as a cut and request an IDR — re-introducing the keyframe the gate exists to
 avoid. May need a short suppression window after reopen.
 
-**R5 — CV610 parity.** `ldy_sky` proves `ss_mpi_venc_stop_chn`/`start_chn`
-exist and work on Hi3516CV610, but waybeam's CV610 backend builds against
-external public headers, so the symbol may not be exposed. Needs a check
-against `CV610_SDK_INC` before committing to three-backend parity; CV610 may
-ship in a follow-up.
+**R5 — CV610 parity: NOT IMPLEMENTED.** `ldy_sky` proves
+`ss_mpi_venc_stop_chn`/`start_chn` exist and work on Hi3516CV610, but
+waybeam's CV610 backend builds against external public headers that are not
+available in the authoring environment, so the wiring could not be
+compile-tested and was deliberately left out rather than pushed blind. The
+config fields are in the shared `VencConfig`, so CV610 parses and ignores
+them; `config/waybeam.default.cv610.json` deliberately does NOT advertise the
+knob. Star6E and Maruko are wired and both backends build.
 
 **R6 — Reopen livelock.** If `open_slots` is never reached because the consumer
 is permanently dead, the gate stays closed forever and the stream silently
@@ -221,3 +237,44 @@ the talking.
    delivered fps is not the configured fps. Cheap to add.
 3. Is per-frame evaluation too twitchy without a minimum *open* dwell as well
    as a minimum closed dwell? D4 only bounds the closed side.
+
+---
+
+## 9. Phase 2 findings (implementation)
+
+Things discovered while building it that the plan got wrong or did not know:
+
+1. **D5 inverted** — `record.mode` defaults to `"mirror"`, so the planned
+   config-time refusal would have made the gate unreachable by default.
+   Replaced with a runtime close-suppression. See D5.
+
+2. **D3 needed no timer.** The plan expected to have to add a timed wakeup for
+   the reopen path. Star6E's stream loop already reaches a `curPacks == 0`
+   branch that polls at ~1 ms, which is finer than any supported frame period
+   — the gate evaluation just goes there. No new thread, no timer.
+
+3. **Maruko needed two extra guards the plan did not anticipate:**
+   - Its idle path aborts the whole stream loop after
+     `MARUKO_IDLE_ABORT_US` = **20 s** with no encoder data, and warns at 1 s.
+     A closed gate looks exactly like a stalled encoder, so both are now
+     suppressed while gated (`maruko_pipeline_check_idle_abort(rt, gated)`).
+     Without this, a `frameGateMaxClosedMs` above 20000 would kill the stream.
+   - Its fd wait path polls with a **1 s** timeout, which would have become
+     the reopen latency. Dropped to 2 ms while the gate is closed.
+
+4. **No teardown change required.** Reinit is fork+exec
+   (`STAR6E_SINGLE_PID_REINIT_FINDINGS.md`), so no gate state survives, and a
+   gated channel holds no in-flight input frame — which is if anything safer
+   than the normal teardown case that the stop-before-unbind ordering exists
+   to protect.
+
+5. **`MUT_LIVE` was not worth it.** The live-apply machinery wants a
+   `LiveApplyGroup` and a backend callback per group. The gate's closest
+   analogues (`resilience`, `sliceCount`) are `MUT_RESTART`, and the gate is a
+   set-once knob rather than something swept in flight, so it is registered
+   restart-required and the whole live path is untouched.
+
+6. **`config/waybeam.default.json` is byte-for-byte round-trip tested**
+   (`layout_size_equal` in `tests/test_venc_config.c`), so any new
+   pretty-printed field must also be added to the shipped default. Caught by
+   the suite, noted here for the next person.

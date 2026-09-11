@@ -394,6 +394,8 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 }
 
 static void star6e_service_ring_low_water(Star6eOutput *output);
+static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
+	const FrameGate *g, uint32_t slot_count);
 
 /* Scene-detector IDR: goes through the shared 100 ms limiter, and a
  * coalesced request is not an error — another is already in flight.
@@ -1270,6 +1272,19 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	ps->output.request_idr = star6e_scene_request_idr;
 	ps->output.idr_ctx = &ps->venc_channel;
 
+	/* Adaptive frame gate.  Set up here, after star6e_output_init(), so the
+	 * ring exists and its slot_count can sanity-check the threshold. */
+	{
+		venc_frame_ring_fill_t gfill = {0};
+
+		(void)star6e_output_frame_ring_fill(&ps->output, &gfill);
+		star6e_report_frame_gate_setup(frame_gate_setup(&ps->frame_gate,
+			frame_gate_parse_mode(vcfg->video0.frame_gate),
+			vcfg->video0.frame_gate_close_slots,
+			vcfg->video0.frame_gate_max_closed_ms, gfill.slot_count),
+			&ps->frame_gate, gfill.slot_count);
+	}
+
 	star6e_recorder_init(&ps->recorder);
 	audio_ring_init(&ps->audio_ring);
 	{
@@ -1511,6 +1526,109 @@ static void star6e_service_ring_low_water(Star6eOutput *output)
 	}
 }
 
+/* Report what frame_gate_setup() made of the config.  The checks live in
+ * frame_gate.c so the two backends cannot drift; only the wording is local. */
+static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
+	const FrameGate *g, uint32_t slot_count)
+{
+	switch (st) {
+	case FRAME_GATE_SETUP_OFF:
+		return;
+	case FRAME_GATE_SETUP_NO_RING:
+		/* Every other transport lacks a per-frame occupancy signal, so
+		 * the gate would never fire.  Say so once instead of looking
+		 * enabled and doing nothing. */
+		fprintf(stderr, "WARNING: video0.frameGate=on needs a "
+			"frame-shm:// transport; gate inert on this output\n");
+		return;
+	case FRAME_GATE_SETUP_CLOSE_TOO_HIGH:
+		fprintf(stderr, "WARNING: frameGateCloseSlots %u exceeds the "
+			"ring's %u slots; gate can never close\n",
+			(unsigned)g->cfg.close_slots, (unsigned)slot_count);
+		return;
+	case FRAME_GATE_SETUP_READY:
+		printf("> frame gate on: close>=%u open<=%u escape=%ums "
+			"ring=%u slots\n",
+			(unsigned)g->cfg.close_slots, (unsigned)g->cfg.open_slots,
+			(unsigned)(g->cfg.max_closed_us / 1000u),
+			(unsigned)slot_count);
+		return;
+	}
+}
+
+/* ── Adaptive frame gate ─────────────────────────────────────────────────
+ *
+ * Pauses ch0's frame intake while the frame-shm egress ring is not draining,
+ * and resumes it when the consumer catches up.  This is the IDR-free way to
+ * shed load: MI_VENC_SetChnAttr (the only proportional rate actuator) emits a
+ * keyframe of its own, so reacting to congestion with a bitrate write puts
+ * the largest frame in the stream into an already overflowing link.
+ * MI_VENC_StopRecvPic changes no encoder state at all — see
+ * include/frame_gate.h and documentation/ADAPTIVE_FRAME_GATE_PLAN.md.
+ *
+ * Called from two places in the stream loop: after a frame is sent (the
+ * normal path) and from the "no packets yet" idle branch (the reopen path).
+ * The second matters — while the gate is closed no frames are produced, so
+ * the post-send call never runs and the gate could never let go.  The idle
+ * branch already polls at ~1 ms, which is finer than any frame period we
+ * support, so no timer and no extra thread are needed. */
+static void star6e_service_frame_gate(Star6ePipelineState *ps)
+{
+	venc_frame_ring_fill_t fill;
+	FrameGateAction action;
+	uint64_t now_us;
+	int ret;
+
+	if (!ps || !frame_gate_enabled(&ps->frame_gate))
+		return;
+
+	if (star6e_output_frame_ring_fill(&ps->output, &fill) != 0) {
+		/* Not a frame-shm transport, or the ring went away across a
+		 * reinit.  Release the gate rather than leaving intake off
+		 * with no signal that could ever reopen it. */
+		if (!frame_gate_is_open(&ps->frame_gate)) {
+			(void)MI_VENC_StartRecvPic(ps->venc_channel);
+			frame_gate_force_open(&ps->frame_gate,
+				wb_monotonic_us());
+		}
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+
+	/* In mirror/off mode ch0 feeds the recorder as well as the stream
+	 * (dual/dual-stream put the recorder on ch1), so closing the gate
+	 * would punch holes in the SD file for what is a radio problem.
+	 * Suppress closes — but keep evaluating, so a gate already closed
+	 * when a recording starts still reopens normally. */
+	if (!ps->dual && frame_gate_is_open(&ps->frame_gate) &&
+	    star6e_record_wants_frame(&ps->ts_recorder, &ps->recorder))
+		return;
+
+	action = frame_gate_observe(&ps->frame_gate, fill.used_slots, now_us);
+	if (action == FRAME_GATE_ACTION_NONE)
+		return;
+
+	if (action == FRAME_GATE_ACTION_CLOSE) {
+		ret = MI_VENC_StopRecvPic(ps->venc_channel);
+		if (ret != 0) {
+			/* The actuator refused.  Resynchronise the policy to
+			 * the hardware's actual state or it would sit thinking
+			 * it had closed and never re-issue the stop. */
+			fprintf(stderr,
+				"ERROR: frame gate StopRecvPic failed %d\n",
+				ret);
+			frame_gate_force_open(&ps->frame_gate, now_us);
+		}
+		return;
+	}
+
+	ret = MI_VENC_StartRecvPic(ps->venc_channel);
+	if (ret != 0)
+		fprintf(stderr, "ERROR: frame gate StartRecvPic failed %d\n",
+			ret);
+}
+
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter)
 {
@@ -1522,6 +1640,10 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 
 	ret = MI_VENC_Query(ps->venc_channel, &stat);
 	if (ret != 0) {
+		/* Also a reopen path: a Query that fails while the gate is
+		 * closed would otherwise never reach the curPacks branch, and
+		 * a gate that cannot reopen is a hung stream. */
+		star6e_service_frame_gate(ps);
 		if ((++(*idle_counter) % 60) == 0) {
 			printf("MI_VENC_Query failed %d\n", ret);
 			fflush(stdout);
@@ -1532,6 +1654,17 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	}
 
 	if (stat.curPacks == 0) {
+		/* Reopen path.  No frames are produced while the gate is
+		 * closed, so the post-send call below never runs and this is
+		 * the only place that can let go again. */
+		star6e_service_frame_gate(ps);
+		/* A closed gate is why there are no packets — say so instead of
+		 * reporting a stalled encoder, and do not count it as idle. */
+		if (!frame_gate_is_open(&ps->frame_gate)) {
+			star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
+			idle_wait(&ps->video.sidecar, 1);
+			return 0;
+		}
 		if ((++(*idle_counter) % 120) == 0) {
 			printf("waiting for encoder data...\n");
 			fflush(stdout);
@@ -1659,6 +1792,12 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * anyone is watching over HTTP) and costs two relaxed atomic
 		 * loads plus a compare per frame off frame-shm. */
 		star6e_service_ring_low_water(&ps->output);
+
+		/* Overload gate, off the same per-frame ring read.  Uses the
+		 * instantaneous occupancy rather than the 200 ms low-water
+		 * window published above: that window is the right cadence for
+		 * waybeam-link's rate model and far too slow to catch a burst. */
+		star6e_service_frame_gate(ps);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up

@@ -459,6 +459,31 @@ static const FieldUi ui_pause_stab = {
 
 /* UI descriptors for the RC QP bounds.  Rendered purely from capabilities —
  * these were API-only (no static SECTIONS rows). */
+static const char *const frame_gate_opts[] = { "off", "on", NULL };
+static const FieldUi ui_frame_gate = {
+	"Video", "Frame gate", "select", 0, 0, 0, frame_gate_opts,
+	"Pause encoder frame intake while the frame-shm egress ring is not "
+	"draining, instead of writing a lower bitrate. A bitrate write "
+	"implicitly emits an IDR on SigmaStar, which is the largest frame in "
+	"the stream and the worst thing to send into a congested link; the "
+	"gate changes no encoder state at all, so ROI and the CBR contract "
+	"are untouched. Only effective on a frame-shm:// transport. Requires "
+	"restart."
+};
+static const FieldUi ui_frame_gate_close_slots = {
+	"Video", "Frame gate close slots", "number", 0, 64, 1, NULL,
+	"Egress ring occupancy, in slots, at which the gate closes. 0 = "
+	"default 3. The ring's healthy idle occupancy is one frame, so 2 is "
+	"standing backlog and 3 leaves one slot of burst tolerance. Reopen is "
+	"pinned at <= 1. Requires restart."
+};
+static const FieldUi ui_frame_gate_max_closed_ms = {
+	"Video", "Frame gate max closed ms", "number", 0, 60000, 10, NULL,
+	"Safety escape: reopen unconditionally after this long closed, so a "
+	"dead consumer cannot stop the stream for good — the ring then "
+	"overflows and reports full_drops, which is diagnosable. 0 = default "
+	"500. Requires restart."
+};
 static const FieldUi ui_min_qp = {
 	"Video", "Min QP", "number", 0, 51, 1, NULL,
 	"RC QP floor. 0 = leave the SDK default. Raising the floor caps quality and saves bitrate; LOWERING it lets CBR actually spend its budget on a simple scene instead of undershooting the target. Applied live."
@@ -630,6 +655,14 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD_UI(video0, slice_count,  FT_UINT,   MUT_RESTART, &ui_slice_count),
+	/* Frame gate: restart-required like resilience/sliceCount.  It is a
+	 * set-once tuning knob, not something swept in flight, so it does not
+	 * earn a live-apply group. */
+	FIELD_UI(video0, frame_gate, FT_STRING, MUT_RESTART, &ui_frame_gate),
+	FIELD_UI(video0, frame_gate_close_slots, FT_UINT, MUT_RESTART,
+		&ui_frame_gate_close_slots),
+	FIELD_UI(video0, frame_gate_max_closed_ms, FT_UINT, MUT_RESTART,
+		&ui_frame_gate_max_closed_ms),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	FIELD_UI(video0, intra_refresh_qp, FT_UINT8, MUT_RESTART, &ui_intra_refresh_qp),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
@@ -758,6 +791,9 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "video0.sliceCount", "video0.slice_count" },
+	{ "video0.frameGate", "video0.frame_gate" },
+	{ "video0.frameGateCloseSlots", "video0.frame_gate_close_slots" },
+	{ "video0.frameGateMaxClosedMs", "video0.frame_gate_max_closed_ms" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
@@ -1258,6 +1294,25 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		}
 		if (cfg->video0.qp_delta < -12 || cfg->video0.qp_delta > 12)
 			return "qp_delta must be in range [-12, 12]";
+	}
+	if (strcmp(key, "video0.frame_gate") == 0) {
+		if (strcmp(cfg->video0.frame_gate, "off") != 0 &&
+		    strcmp(cfg->video0.frame_gate, "on") != 0)
+			return "video0.frame_gate must be \"off\" or \"on\"";
+		return NULL;
+	}
+	if (strcmp(key, "video0.frame_gate_close_slots") == 0) {
+		/* 0 = use the default.  The upper bound is the largest ring we
+		 * would ever build; a value above the live slot_count simply
+		 * never fires, and the runtime warns about that at bring-up. */
+		if (cfg->video0.frame_gate_close_slots > 64)
+			return "video0.frame_gate_close_slots must be 0-64";
+		return NULL;
+	}
+	if (strcmp(key, "video0.frame_gate_max_closed_ms") == 0) {
+		if (cfg->video0.frame_gate_max_closed_ms > 60000)
+			return "video0.frame_gate_max_closed_ms must be 0-60000";
+		return NULL;
 	}
 	if (strcmp(key, "video0.zoom_x") == 0) {
 		double v = cfg->video0.zoom_x;
