@@ -21,6 +21,7 @@
 #include "rtp_session.h"
 #include "rtp_sidecar.h"
 #include "timing.h"
+#include "frame_gate.h"
 #include "venc_frame_ring.h"
 #include "venc_ring.h"
 #include "venc_api.h"
@@ -124,6 +125,10 @@ typedef struct {
 	 * responsible for reacting. */
 	VencRingLowWater low_water;
 	int low_water_ready;
+	/* Adaptive frame gate over the single VENC channel.  See
+	 * include/frame_gate.h; ss_mpi_venc_stop_chn/start_chn are the
+	 * CV610 spelling of MI_VENC_Stop/StartRecvPic. */
+	FrameGate frame_gate;
 	/* Per-frame metadata channel (protocols/rtp-sidecar.md).  Bound once at
 	 * output start and closed unconditionally at output stop, like every
 	 * other CV610 resource: pipeline state here survives a respawn, so a
@@ -904,6 +909,97 @@ static int cv610_collect_transport(Cv610RunnerContext *ctx,
 	out->pressure_frames = __atomic_load_n(&ctx->pressure_frames,
 		__ATOMIC_RELAXED);
 	return 0;
+}
+
+/* CV610 wording for frame_gate_setup()'s verdict; the checks are shared in
+ * frame_gate.c so the three backends cannot drift. */
+static void cv610_report_frame_gate_setup(FrameGateSetupStatus st,
+	const FrameGate *g, uint32_t slot_count)
+{
+	switch (st) {
+	case FRAME_GATE_SETUP_OFF:
+		return;
+	case FRAME_GATE_SETUP_NO_RING:
+		fprintf(stderr, "WARNING: video0.frameGate=on needs a "
+			"frame-shm:// transport; gate inert on this output\n");
+		return;
+	case FRAME_GATE_SETUP_CLOSE_TOO_HIGH:
+		fprintf(stderr, "WARNING: frameGateCloseSlots %u exceeds the "
+			"ring's %u slots; gate can never close\n",
+			(unsigned)g->cfg.close_slots, (unsigned)slot_count);
+		return;
+	case FRAME_GATE_SETUP_READY:
+		printf("> frame gate on: close>=%u open<=%u escape=%ums "
+			"ring=%u slots\n",
+			(unsigned)g->cfg.close_slots, (unsigned)g->cfg.open_slots,
+			(unsigned)(g->cfg.max_closed_us / 1000u),
+			(unsigned)slot_count);
+		return;
+	}
+}
+
+/* Adaptive frame gate — the CV610 twin of star6e_service_frame_gate().  Same
+ * rationale (a bitrate write implicitly keyframes; stopping frame intake
+ * changes no encoder state) and the same signal, the instantaneous egress
+ * ring occupancy rather than the 200 ms low-water window.
+ *
+ * Called from the normal per-frame path AND from every branch of the stream
+ * loop that can be reached while the gate is closed — no frames are produced
+ * then, so the per-frame call never runs and a gate that cannot reopen is a
+ * hung stream. */
+static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
+{
+	venc_frame_ring_fill_t fill;
+	FrameGateAction action;
+	uint64_t now_us;
+
+	if (!ctx || !frame_gate_enabled(&ctx->frame_gate))
+		return;
+
+	if (!ctx->frame_ring ||
+	    venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0) {
+		if (!frame_gate_is_open(&ctx->frame_gate)) {
+			ot_venc_start_param sp;
+
+			memset(&sp, 0, sizeof(sp));
+			sp.recv_pic_num = -1;
+			(void)ss_mpi_venc_start_chn(CV610_VENC_CHN, &sp);
+			frame_gate_force_open(&ctx->frame_gate,
+				wb_monotonic_us());
+		}
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+
+	/* CV610 records in mirror mode only (the loop above refuses every
+	 * other record.mode), so the recorder always shares this channel:
+	 * suppress closes while a recording runs rather than punching holes
+	 * in the file for a radio problem.  Reopens are never suppressed. */
+	if (frame_gate_is_open(&ctx->frame_gate) &&
+	    star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
+		return;
+
+	action = frame_gate_observe(&ctx->frame_gate, fill.used_slots, now_us);
+	if (action == FRAME_GATE_ACTION_NONE)
+		return;
+
+	if (action == FRAME_GATE_ACTION_CLOSE) {
+		if (ss_mpi_venc_stop_chn(CV610_VENC_CHN) != TD_SUCCESS) {
+			fprintf(stderr, "ERROR: frame gate stop_chn failed\n");
+			frame_gate_force_open(&ctx->frame_gate, now_us);
+		}
+		return;
+	}
+
+	{
+		ot_venc_start_param sp;
+
+		memset(&sp, 0, sizeof(sp));
+		sp.recv_pic_num = -1;   /* unlimited, as at bring-up */
+		if (ss_mpi_venc_start_chn(CV610_VENC_CHN, &sp) != TD_SUCCESS)
+			fprintf(stderr, "ERROR: frame gate start_chn failed\n");
+	}
 }
 
 /* Star6E/Maruko parity — see star6e_service_ring_low_water().  venc measures
@@ -1976,6 +2072,20 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	if (ss_mpi_venc_start_chn(CV610_VENC_CHN, &start) != TD_SUCCESS)
 		return -1;
 	ctx->venc_started = 1;
+
+	/* Adaptive frame gate.  Set up once the channel is running and the
+	 * ring (if any) exists, so slot_count can sanity-check the threshold. */
+	{
+		venc_frame_ring_fill_t gfill = {0};
+
+		if (ctx->frame_ring)
+			(void)venc_frame_ring_get_fill(ctx->frame_ring, &gfill);
+		cv610_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
+			frame_gate_parse_mode(ctx->config.video0.frame_gate),
+			ctx->config.video0.frame_gate_close_slots,
+			ctx->config.video0.frame_gate_max_closed_ms,
+			gfill.slot_count), &ctx->frame_gate, gfill.slot_count);
+	}
 	source.mod_id = OT_ID_VPSS;
 	source.dev_id = CV610_VPSS_GRP;
 	source.chn_id = CV610_VPSS_CHN;
@@ -2441,7 +2551,12 @@ static int cv610_run(void *opaque)
 		ot_venc_chn_status status;
 		ot_venc_stream stream;
 		fd_set readfds;
-		struct timeval timeout = { 1, 0 };
+		/* 1 s normally; 2 ms while the gate is closed, where this
+		 * timeout would otherwise BE the reopen latency. */
+		struct timeval timeout =
+			frame_gate_is_open(&ctx->frame_gate)
+				? (struct timeval){ 1, 0 }
+				: (struct timeval){ 0, 2000 };
 		uint8_t *frame = NULL;
 		size_t frame_len = 0;
 		td_s32 ret;
@@ -2495,6 +2610,11 @@ static int cv610_run(void *opaque)
 		 * recvfrom and would otherwise clobber select's EINTR. */
 		if (ctx->sidecar.fd > 0)
 			rtp_sidecar_poll(&ctx->sidecar);
+		/* Reopen path.  While the gate is closed no frame ever
+		 * arrives, so select() always times out and the per-frame
+		 * call below never runs — this is the only thing that can
+		 * let go again. */
+		cv610_service_frame_gate(ctx);
 		if (ready < 0 && select_errno == EINTR)
 			continue;
 		if (ready < 0)
@@ -2657,6 +2777,7 @@ static int cv610_run(void *opaque)
 					&sc_fill) == 0)
 					sc_fillp = &sc_fill;
 				cv610_service_ring_low_water(ctx, sc_fillp);
+				cv610_service_frame_gate(ctx);
 			} else if (ctx->tx.output_enabled &&
 				ctx->tx.socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */

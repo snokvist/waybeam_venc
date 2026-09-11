@@ -2,9 +2,10 @@
 
 <!-- version: 1.0.0 -->
 
-For the Claude Code CLI session that finishes this. The code is written,
-both SigmaStar backends build, and the host suite passes — **but nothing has
-run on silicon.** This session had no device access.
+For the Claude Code CLI session that finishes this. All three backends are
+wired, Star6E and Maruko build and link, CV610 compiles, and the host suite
+passes — **but nothing has run on silicon.** This session had no device
+access.
 
 Branch: `claude/dazzling-goldberg-o49554`
 Design: `documentation/ADAPTIVE_FRAME_GATE_PLAN.md` (read §7 and §9 first)
@@ -25,7 +26,7 @@ congestion worse. The gate changes no encoder state at all.
 | Policy | `src/frame_gate.c` — pure state machine, no SDK types, 68 host assertions |
 | Star6E wiring | `src/star6e_runtime.c` — `star6e_service_frame_gate()` |
 | Maruko wiring | `src/maruko_pipeline.c` — `maruko_service_frame_gate()` |
-| CV610 | **not wired** — see §5 |
+| CV610 wiring | `src/cv610_runtime.c` — `cv610_service_frame_gate()`; compile-verified, not link-verified (see §5) |
 
 Defaults: close at `>= 3` slots, reopen at `<= 1` after a 20 ms debounce,
 safety escape at 500 ms.
@@ -79,6 +80,7 @@ Use SIGTERM, or sysrq-b for D-state recovery (`sysrq_b_zombie_recovery.md`).
 | 11 | Non-frame-shm transport | `frameGate=on` on udp:// warns at bring-up and stays inert |
 | 12 | Maruko parity | repeat 1–3 and 7 on `root@192.168.2.12` (imx415). Use `-o ConnectTimeout=10` — `feedback_maruko_ssh_timeout.md` |
 | 13 | Maruko idle-abort guard | gate closed > 20 s (set `frameGateMaxClosedMs=30000`) does **not** abort the stream loop. This guard is new and untested |
+| 14 | CV610 link + repeat 1–3, 7, 8 | first `make build SOC_BUILD=cv610` against real vendor libs (§5), then the same gates as Star6E |
 
 ## 3. Tuning to bring back
 
@@ -94,31 +96,51 @@ exposed over HTTP — plan §8 open question 2 asks whether they should be).
 ## 4. Known-weak spots — look here first if something is off
 
 - **Reopen paths.** Every path reachable with the gate closed must evaluate
-  it, or the stream hangs. There are four: Star6E `curPacks == 0` and
-  `Query`-failure; Maruko `!POLLIN` and `Query`-failure. If video stops and
-  never returns, one of these is the reason.
-- **Maruko poll latency.** Its fd wait drops from 1000 ms to 2 ms while
-  gated. If reopens feel sluggish on Maruko specifically, check that.
+  it, or the stream hangs. There are six: Star6E `curPacks == 0` and
+  `Query`-failure; Maruko `!POLLIN` and `Query`-failure; CV610 the `select()`
+  return and its `cur_packs == 0` / query-failure `continue`. If video stops
+  and never returns, one of these is the reason.
+- **Wait-timeout shortening.** Maruko's fd poll and CV610's `select()` both
+  drop from 1 s to 2 ms while gated, because that timeout would otherwise BE
+  the reopen latency. If reopens feel sluggish on either, check that.
 - **`star6e_record_wants_frame()` polarity.** Closes are suppressed while a
   mirror recording runs. If the gate never fires with recording off, the
   predicate is inverted.
 
-## 5. CV610 is not wired
+## 5. CV610: wired, compile-verified, never linked
 
-`ldy_sky` — the Artosyn/Hi3516CV610 vendor streamer this design came from —
-proves `ss_mpi_venc_stop_chn`/`start_chn` work on that silicon, passing
-`recv_pic_num = -1` on restart. But waybeam's CV610 backend builds against
-external public headers unavailable in the authoring environment, so the
-wiring could not be compile-tested and was deliberately not pushed blind.
+CV610 is now wired. It uses `ss_mpi_venc_stop_chn` /
+`ss_mpi_venc_start_chn(recv_pic_num = -1)` — the same primitive the SigmaStar
+backends reach as `MI_VENC_Stop/StartRecvPic`, and exactly what `ldy_sky`, the
+vendor FPV streamer for this silicon, does. Its `select()` wait drops from
+1 s to 2 ms while gated, for the same reason Maruko's poll does.
 
-To finish it: confirm the symbols in `CV610_SDK_INC`, add
-`cv610_service_frame_gate()` mirroring the Star6E one, add the three fields
-to `config/waybeam.default.cv610.json`, and build with
-`make build SOC_BUILD=cv610 CV610_CC=... CV610_SDK_INC=... CV610_SDK_LIB=...`.
+**What was verified here:** every CV610 object compiles against the real
+OpenHisilicon headers (`OpenIPC/openhisilicon`, cloned to
+`/home/user/openipc/openhisilicon`), `src/frame_gate.c` included.
+
+**What was NOT verified:** the link. The vendor `.so` set (`libss_mpi`,
+`libacs`, `libbnr`, `libldci`, `libsecurec`, `libot_osal`, …) is a firmware
+build output that was not available, so `make build SOC_BUILD=cv610` stops at
+`ld: cannot find -lacs`. Every `.o` is produced first. Link it yourself:
+
+```sh
+make build SOC_BUILD=cv610 \
+  CV610_SDK_INC=/path/to/openhisilicon \
+  CV610_SDK_LIB=/path/to/firmware/output/target/usr/lib
+```
+
+**CV610-specific bench notes.** It records in mirror mode only (the stream
+loop refuses every other `record.mode`), so the recorder always shares the
+gated channel and the close-suppression always applies — test 8 matters more
+here than on the SigmaStar backends. Its reopen paths are the `select()`
+timeout and the `cur_packs == 0` / query-failure `continue`; if video stops
+and never returns on CV610, look there first.
 
 ## 6. State of the tree
 
-- `make verify` passes: Star6E and Maruko both build.
+- `make verify` passes: Star6E and Maruko both build and link.
+- CV610 compiles (all 90 objects) but was not linked — see §5.
 - `make test-ci`: **3087 passed, 3 failed.** The three failures are
   `rotfail no file open` / `rotfail recording cleared` /
   `rotfail reason recorded` — recorder-rotation tests that were **already

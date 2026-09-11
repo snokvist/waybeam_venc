@@ -212,19 +212,13 @@ produces a large P-frame after a temporal gap; the scene detector may read that
 as a cut and request an IDR — re-introducing the keyframe the gate exists to
 avoid. May need a short suppression window after reopen.
 
-**R5 — CV610 parity: NOT IMPLEMENTED.** `ldy_sky` proves
-`ss_mpi_venc_stop_chn`/`start_chn` exist and work on Hi3516CV610, but
-waybeam's CV610 backend builds against external public headers that are not
-available in the authoring environment, so the wiring could not be
-compile-tested and was deliberately left out rather than pushed blind. The
-config fields are in the shared `VencConfig`, so CV610 parses and ignores
-them; `config/waybeam.default.cv610.json` deliberately does NOT advertise the
-knob. Star6E and Maruko are wired and both backends build.
-
-**R6 — Reopen livelock.** If `open_slots` is never reached because the consumer
-is permanently dead, the gate stays closed forever and the stream silently
-stops. Needs a max-closed-dwell escape that reopens and lets `full_drops` do
-the talking.
+**R5 — CV610 parity: implemented, link untested.** Wired using
+`ss_mpi_venc_stop_chn` / `ss_mpi_venc_start_chn(recv_pic_num = -1)`, confirmed
+present in `OpenIPC/openhisilicon`
+(`kernel/include/hi3516cv6xx/ss_mpi_venc.h:19-20`) and matching what `ldy_sky`
+does on the same silicon. All 90 objects compile against the real headers, but
+the vendor `.so` set is a firmware build output that was unavailable, so the
+final link was never exercised. See the handoff §5.
 
 ## 8. Open questions
 

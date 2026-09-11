@@ -59,7 +59,7 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
 - BMI270 IMU driver with frame-synced FIFO (Star6E and Maruko) — compiled in,
   disabled by default, ready for telemetry/sidecar consumers
 - Adaptive frame gate: sheds load by pausing encoder intake when the egress
-  ring backs up — no IDR, unlike a bitrate write (Star6E and Maruko, opt-in)
+  ring backs up — no IDR, unlike a bitrate write (all three backends, opt-in)
 - Intra-refresh (GDR-style rolling stripe) for fast loss recovery on FPV links
 - Scene-change-triggered IDR (Star6E) for clean stream join under packet loss
 - Inline QR scanning (Star6E): overlay-free VPE port1 luma tap + isolated
@@ -659,7 +659,7 @@ cleanly; the key is silently ignored.
 | `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
 | `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). All three backends. Collapses the stream once it binds — see below |
 | `video0.max_qp` | uint | live | QP ceiling, i.e. a **bit floor** (0 = driver default). All three backends. Overshoots the target once it binds — see below |
-| `video0.frame_gate` | string | restart | Adaptive frame gate: `off` (default) or `on`. Pauses encoder frame intake while the frame-shm egress ring is not draining. Star6E and Maruko; frame-shm transports only — see below |
+| `video0.frame_gate` | string | restart | Adaptive frame gate: `off` (default) or `on`. Pauses encoder frame intake while the frame-shm egress ring is not draining. All three backends; frame-shm transports only — see below |
 | `video0.frame_gate_close_slots` | uint | restart | Ring occupancy at which the gate closes (`0` = default 3, max 64). Reopen is pinned at `<= 1` |
 | `video0.frame_gate_max_closed_ms` | uint | restart | Safety escape — reopen unconditionally after this long closed (`0` = default 500, max 60000) |
 | `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
@@ -740,10 +740,12 @@ Scope and caveats:
 
 - **frame-shm transports only.** Every other transport lacks a per-frame
   occupancy signal; the daemon warns at bring-up and the gate stays inert.
-- **Star6E and Maruko.** CV610 is not wired yet.
+- **All three backends.** CV610 uses `ss_mpi_venc_stop_chn` /
+  `start_chn(recv_pic_num=-1)`, the same primitive under a different name.
 - **Recording.** In `dual` / `dual-stream` the recorder is on ch1 and is
-  unaffected. In `mirror` mode the recorder shares ch0, so the gate suppresses
-  *closes* while a recording is actually running — the stream rides out the
+  unaffected. In `mirror` mode the recorder shares ch0 (and CV610 records in
+  mirror mode only), so the gate suppresses *closes* while a recording is
+  actually running — the stream rides out the
   congestion unthrottled rather than putting holes in the file. Reopens are
   never suppressed.
 - **It does not replace waybeam-link.** The gate is a local overload reflex

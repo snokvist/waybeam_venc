@@ -93,7 +93,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
 	src/venc_jpeg.c src/venc_rec_writer.c $(RECORDER_SRC) \
 	src/venc_recordings.c src/codec_config.c src/pipeline_common.c \
-	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c \
+	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c src/frame_gate.c \
 	src/framing_kalman.c src/attitude_est.c src/debug_osd.c \
 	src/debug_osd_draw.c lib/cJSON.c \
 	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
