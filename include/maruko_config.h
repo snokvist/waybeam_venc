@@ -73,7 +73,6 @@ typedef struct {
 	/* Adaptive frame gate — mirrors video0.frame_gate* so the Maruko
 	 * pipeline, which sees MarukoBackendConfig rather than VencConfig,
 	 * can resolve the gate at bring-up.  See include/frame_gate.h. */
-	char frame_gate[8];
 	uint32_t frame_gate_close_slots;
 	uint32_t frame_gate_max_closed_ms;
 	/* Resilience preset name — mirror of video0.resilience.  Used by

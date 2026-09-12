@@ -394,9 +394,6 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 }
 
 static void star6e_service_ring_low_water(Star6eOutput *output);
-/* Pipeline the actuator switch needs in order to re-arm hardware (TEST HOOK). */
-static Star6ePipelineState *g_gate_switch_ctx;
-
 static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
 	const FrameGate *g, uint32_t slot_count);
 
@@ -1281,10 +1278,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		venc_frame_ring_fill_t gfill = {0};
 
 		(void)star6e_output_frame_ring_fill(&ps->output, &gfill);
-		g_gate_switch_ctx = ps;
-		frame_gate_init_actuator();
 		star6e_report_frame_gate_setup(frame_gate_setup(&ps->frame_gate,
-			frame_gate_parse_mode(vcfg->video0.frame_gate),
 			vcfg->video0.frame_gate_close_slots,
 			vcfg->video0.frame_gate_max_closed_ms, gfill.slot_count),
 			&ps->frame_gate, gfill.slot_count);
@@ -1537,8 +1531,6 @@ static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
 	const FrameGate *g, uint32_t slot_count)
 {
 	switch (st) {
-	case FRAME_GATE_SETUP_OFF:
-		return;
 	case FRAME_GATE_SETUP_NO_RING:
 		/* Every other transport lacks a per-frame occupancy signal, so
 		 * the gate would never fire.  Say so once instead of looking
@@ -1577,39 +1569,22 @@ static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
  * the post-send call never runs and the gate could never let go.  The idle
  * branch already polls at ~1 ms, which is finer than any frame period we
  * support, so no timer and no extra thread are needed. */
-void star6e_runtime_set_gate_drain_stall(int on)
-{
-	/* Switching actuator mid-run strands the channel unless the hardware is
-	 * left receiving: recv-stop may have issued StopRecvPic, and drain-stall
-	 * never issues the matching StartRecvPic, so the encoder would stay
-	 * stopped for good.  Re-arm hardware and policy on every switch. */
-	frame_gate_set_drain_stall(on);
-	if (g_gate_switch_ctx) {
-		(void)MI_VENC_StartRecvPic(g_gate_switch_ctx->venc_channel);
-		frame_gate_force_open(&g_gate_switch_ctx->frame_gate,
-			wb_monotonic_us());
-	}
-}
-
 static void star6e_service_frame_gate(Star6ePipelineState *ps)
 {
 	venc_frame_ring_fill_t fill;
-	FrameGateAction action;
 	uint64_t now_us;
-	int ret;
 
 	if (!ps || !frame_gate_enabled(&ps->frame_gate))
 		return;
 
 	if (star6e_output_frame_ring_fill(&ps->output, &fill) != 0) {
-		/* Not a frame-shm transport, or the ring went away across a
-		 * reinit.  Release the gate rather than leaving intake off
-		 * with no signal that could ever reopen it. */
-		if (!frame_gate_is_open(&ps->frame_gate)) {
-			(void)MI_VENC_StartRecvPic(ps->venc_channel);
+		/* The ring went away across a reinit.  Release the gate rather
+		 * than leaving the drain stopped with no occupancy signal that
+		 * could ever reopen it.  No SDK call: intake was never
+		 * stopped, only the drain. */
+		if (!frame_gate_is_open(&ps->frame_gate))
 			frame_gate_force_open(&ps->frame_gate,
 				wb_monotonic_us());
-		}
 		return;
 	}
 
@@ -1624,35 +1599,14 @@ static void star6e_service_frame_gate(Star6ePipelineState *ps)
 	    star6e_record_wants_frame(&ps->ts_recorder, &ps->recorder))
 		return;
 
-	action = frame_gate_observe(&ps->frame_gate, fill.used_slots, now_us);
-	if (action == FRAME_GATE_ACTION_NONE)
-		return;
-
-	/* Drain-stall mode changes no SDK state; the policy flip alone is the
-	 * actuator, and process_stream() stops draining while it reads closed. */
-	if (frame_gate_drain_stall())
-		return;
-
-	if (action == FRAME_GATE_ACTION_CLOSE) {
-		ret = MI_VENC_StopRecvPic(ps->venc_channel);
-		if (ret != 0) {
-			/* The actuator refused.  Resynchronise the policy to
-			 * the hardware's actual state or it would sit thinking
-			 * it had closed and never re-issue the stop. */
-			fprintf(stderr,
-				"ERROR: frame gate StopRecvPic failed %d\n",
-				ret);
-			frame_gate_force_open(&ps->frame_gate, now_us);
-		}
-		return;
-	}
-
-	ret = MI_VENC_StartRecvPic(ps->venc_channel);
-	if (ret != 0) {
-		fprintf(stderr, "ERROR: frame gate StartRecvPic failed %d\n",
-			ret);
-		frame_gate_restore_closed(&ps->frame_gate, now_us);
-	}
+	/* The policy flip IS the actuator, so the returned action needs no
+	 * handling here: process_stream() stops draining while the gate reads
+	 * closed and VENC's own output FIFO applies the backpressure.  Nothing
+	 * is issued to the SDK deliberately — MI_VENC_StopRecvPic/StartRecvPic
+	 * emit an IRAP on every resume, one per cycle on this board and ~4.6
+	 * per second against a real capacity-limited link, which is precisely
+	 * the keyframe this feature exists to avoid. */
+	(void)frame_gate_observe(&ps->frame_gate, fill.used_slots, now_us);
 }
 
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
@@ -1664,12 +1618,10 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	MI_VENC_Stream_t stream = {0};
 	int ret;
 
-	/* TEST HOOK: drain-stall actuator.  Leave the encoded frame sitting in
-	 * VENC's output FIFO rather than issuing StopRecvPic.  The gate is still
-	 * evaluated every pass, off the egress ring's own occupancy, so the
-	 * reopen path does not depend on draining. */
-	if (frame_gate_drain_stall() &&
-	    !frame_gate_is_open(&ps->frame_gate)) {
+	/* Gated: leave the encoded frame in VENC's output FIFO rather than
+	 * draining it.  The gate is still serviced every pass, off the egress
+	 * ring's own occupancy, so the reopen path never depends on draining. */
+	if (!frame_gate_is_open(&ps->frame_gate)) {
 		star6e_service_frame_gate(ps);
 		star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
 		idle_wait(&ps->video.sidecar, 1);
@@ -1909,10 +1861,10 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * spread past a full frame period at 120 fps. */
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
-	/* StopRecvPic is rejected with MI_ERR_VENC_BUSY while an acquired
-	 * stream is outstanding on SSC338Q.  Evaluate the gate only after
-	 * ReleaseStream; the helper takes a fresh instantaneous ring reading,
-	 * so moving it here does not weaken the burst response. */
+	/* Evaluate the gate after ReleaseStream, so a close takes effect from
+	 * the next drain rather than stranding an acquired stream.  The helper
+	 * takes a fresh instantaneous ring reading, so this placement does not
+	 * weaken the burst response. */
 	star6e_service_frame_gate(ps);
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the

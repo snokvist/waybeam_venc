@@ -266,7 +266,7 @@ omitted fields keep their compiled-in defaults.
     "qpDelta": -12,
     "sceneThreshold": 0, "sceneHoldoff": 2,
     "sliceCount": 1,
-    "frameGate": "off", "frameGateCloseSlots": 0, "frameGateMaxClosedMs": 0,
+    "frameGateCloseSlots": 0, "frameGateMaxClosedMs": 0,
     "resilience": "off",
     "framing": "off", "zoomX": 0.5, "zoomY": 0.5
   },
@@ -659,7 +659,6 @@ cleanly; the key is silently ignored.
 | `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
 | `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). All three backends. Collapses the stream once it binds — see below |
 | `video0.max_qp` | uint | live | QP ceiling, i.e. a **bit floor** (0 = driver default). All three backends. Overshoots the target once it binds — see below |
-| `video0.frame_gate` | string | restart | Adaptive frame gate: `off` (default) or `on`. Pauses encoder frame intake while the frame-shm egress ring is not draining. All three backends; frame-shm transports only — see below |
 | `video0.frame_gate_close_slots` | uint | restart | Ring occupancy at which the gate closes (`0` = default 3, max 64). Reopen is pinned at `<= 1` |
 | `video0.frame_gate_max_closed_ms` | uint | restart | Safety escape — reopen unconditionally after this long closed (`0` = default 500, max 60000) |
 | `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
@@ -710,7 +709,7 @@ Note the sign: `s32IPQPDelta` is not the I QP offset in the direction most
 people assume. Negative values raise the I-frame's QP relative to P, making
 I-frames **smaller**.
 
-**`frame_gate` — shed load without emitting a keyframe.**
+**Adaptive frame gate — shed load without emitting a keyframe.**
 
 A bitrate write is the only proportional rate actuator on the SigmaStar
 backends, and `MI_VENC_SetChnAttr` emits an IDR of its own — measured on a
@@ -720,10 +719,23 @@ stream into the link that is already overflowing.
 
 There is no IDR-free *proportional* substitute. `qpDelta` writes
 `s32IPQPDelta` and only shifts bits between I and P, and `min_qp` is a cliff
-rather than a dial (table below). The frame gate takes the other route: it
-pauses the encoder's frame intake (`MI_VENC_StopRecvPic`) and resumes it when
-the ring drains, changing **no encoder state at all**. ROI keeps its gradient,
-CBR keeps its contract, and nothing keyframes.
+rather than a dial (table below).
+
+The frame gate takes the other route: while the egress ring is backed up the
+backend **stops draining the encoder's output FIFO**, and resumes when the
+consumer catches up. No SDK call is made in either direction, which is the
+entire design. Pausing intake instead — `MI_VENC_StopRecvPic`/`StartRecvPic`,
+or `ss_mpi_venc_stop_chn`/`start_chn` on CV610 — emits an IRAP on every
+resume: measured at one per cycle on Star6E, three on Maruko, and **~4.6
+keyframes per second** against a real capacity-limited RF link, which is
+exactly the pathology this exists to avoid. Letting the FIFO backpressure
+instead changes no encoder state, so ROI keeps its gradient, CBR keeps its
+contract, and nothing keyframes.
+
+Under sustained partial congestion it settles at the link rate rather than
+oscillating: against a rate-limited consumer the delivered rate tracked 20,
+40, 60 and 80 fps with a spread of at most one frame per second, holding the
+ring at ~1.5 of 8 slots — so the shedding costs no queueing latency.
 
 Sensor, ISP and 3A keep running at full rate — only the scaler→encoder handoff
 is gated — so AE/AWB never see a frame-rate step and there is no exposure pump
@@ -731,17 +743,19 @@ when the gate reopens. What you give up is smoothness: throttling is a duty
 cycle, and the first frame after a reopen is a fatter P-frame because it sits
 further from its reference.
 
-```sh
-# Enable (restart-required; frame-shm output only)
-curl "http://<craft>/api/v1/set?video0.frameGate=on"
-```
+There is **no switch**. The gate arms itself whenever the output is a frame
+ring, because the ring is the occupancy signal it runs on and no other
+transport has one — "enabled" and "has a frame ring" were the same question
+asked twice. Only the two thresholds are configurable.
 
 Scope and caveats:
 
 - **frame-shm transports only.** Every other transport lacks a per-frame
   occupancy signal; the daemon warns at bring-up and the gate stays inert.
-- **All three backends.** CV610 uses `ss_mpi_venc_stop_chn` /
-  `start_chn(recv_pic_num=-1)`, the same primitive under a different name.
+- **All three backends**, sharing one actuator: while the gate is closed the
+  backend simply stops draining the encoder's output FIFO. No SDK call is
+  made, which is the whole point — `MI_VENC_StopRecvPic`/`StartRecvPic` and
+  `ss_mpi_venc_stop_chn`/`start_chn` all emit an IRAP on resume.
 - **Recording.** In `dual` / `dual-stream` the recorder is on ch1 and is
   unaffected. In `mirror` mode the recorder shares ch0 (and CV610 records in
   mirror mode only), so the gate suppresses *closes* while a recording is

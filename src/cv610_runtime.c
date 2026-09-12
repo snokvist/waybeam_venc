@@ -917,8 +917,6 @@ static void cv610_report_frame_gate_setup(FrameGateSetupStatus st,
 	const FrameGate *g, uint32_t slot_count)
 {
 	switch (st) {
-	case FRAME_GATE_SETUP_OFF:
-		return;
 	case FRAME_GATE_SETUP_NO_RING:
 		fprintf(stderr, "WARNING: video0.frameGate=on needs a "
 			"frame-shm:// transport; gate inert on this output\n");
@@ -984,10 +982,9 @@ static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
 	if (action == FRAME_GATE_ACTION_NONE)
 		return;
 
-	/* Drain-stall changes no SDK state; the policy flip is the actuator and
-	 * the loop below stops pulling while it reads closed. */
-	if (frame_gate_drain_stall())
-		return;
+	/* The policy flip IS the actuator: nothing is issued to the SDK, and
+	 * the loop below stops pulling while the gate reads closed. */
+	return;
 
 	if (action == FRAME_GATE_ACTION_CLOSE) {
 		if (ss_mpi_venc_stop_chn(CV610_VENC_CHN) != TD_SUCCESS) {
@@ -2367,9 +2364,7 @@ static int cv610_init(void *opaque)
 
 		if (ctx->frame_ring)
 			(void)venc_frame_ring_get_fill(ctx->frame_ring, &gfill);
-		frame_gate_init_actuator();
 		cv610_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
-			frame_gate_parse_mode(ctx->config.video0.frame_gate),
 			ctx->config.video0.frame_gate_close_slots,
 			ctx->config.video0.frame_gate_max_closed_ms,
 			gfill.slot_count), &ctx->frame_gate, gfill.slot_count);
@@ -2630,8 +2625,7 @@ static int cv610_run(void *opaque)
 		 * output FIFO rather than issuing stop_chn.  The gate is still
 		 * serviced above, off the ring's own occupancy, so the reopen
 		 * path never depends on draining. */
-		if (frame_gate_drain_stall() &&
-		    !frame_gate_is_open(&ctx->frame_gate))
+		if (!frame_gate_is_open(&ctx->frame_gate))
 			continue;
 		if (ready < 0 && select_errno == EINTR)
 			continue;

@@ -39,7 +39,6 @@
     "sceneThreshold": 0,
     "sceneHoldoff": 2,
     "sliceCount": 1,
-    "frameGate": "off",
     "frameGateCloseSlots": 0,
     "frameGateMaxClosedMs": 0,
     "resilience": "off",

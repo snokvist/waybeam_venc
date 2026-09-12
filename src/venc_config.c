@@ -183,8 +183,6 @@ void venc_config_defaults(VencConfig *cfg)
 
 	/* Adaptive frame gate (video0) — off by default; 0 selects the
 	 * frame_gate.h defaults for both knobs. */
-	safe_strcpy(cfg->video0.frame_gate,
-		sizeof(cfg->video0.frame_gate), "off");
 	cfg->video0.frame_gate_close_slots = 0;
 	cfg->video0.frame_gate_max_closed_ms = 0;
 
@@ -674,10 +672,6 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	 * way frame_gate_parse_mode() does, so a typo disables the gate
 	 * rather than half-enabling it. */
 	{
-		const char *gname = json_get_string(obj, "frameGate",
-			v->frame_gate);
-		safe_strcpy(v->frame_gate, sizeof(v->frame_gate),
-			frame_gate_mode_name(frame_gate_parse_mode(gname)));
 
 		/* Clamp in signed space so a negative cannot wrap to a huge
 		 * unsigned; 0 means "use the frame_gate.h default". */
@@ -1459,7 +1453,6 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_uint(p,   2, "sliceCount",     cfg->video0.slice_count,     0);
-	pp_field_string(p, 2, "frameGate",      cfg->video0.frame_gate,      0);
 	pp_field_uint(p,   2, "frameGateCloseSlots",
 		cfg->video0.frame_gate_close_slots, 0);
 	pp_field_uint(p,   2, "frameGateMaxClosedMs",
@@ -1720,7 +1713,6 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddNumberToObject(vid, "sliceCount", cfg->video0.slice_count);
-		cJSON_AddStringToObject(vid, "frameGate", cfg->video0.frame_gate);
 		cJSON_AddNumberToObject(vid, "frameGateCloseSlots",
 			cfg->video0.frame_gate_close_slots);
 		cJSON_AddNumberToObject(vid, "frameGateMaxClosedMs",

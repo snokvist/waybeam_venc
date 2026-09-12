@@ -28,9 +28,6 @@ int star6e_controls_apply_qp_delta(int delta);
 
 
 
-/** Select the frame-gate actuator at runtime, re-arming the encoder so a
- *  pending recv-stop cannot strand the channel.  See frame_gate.h. */
-void star6e_runtime_set_gate_drain_stall(int on);
 
 /** Service a pending detector live model-swap request on the pipeline thread.
  *  Called once per encode-loop iteration; a no-op when no swap is pending. */

@@ -2912,9 +2912,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		venc_frame_ring_fill_t gfill = {0};
 
 		(void)maruko_output_frame_ring_fill(&ctx->output, &gfill);
-		frame_gate_init_actuator();
 		maruko_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
-			frame_gate_parse_mode(ctx->cfg.frame_gate),
 			ctx->cfg.frame_gate_close_slots,
 			ctx->cfg.frame_gate_max_closed_ms, gfill.slot_count),
 			&ctx->frame_gate, gfill.slot_count);
@@ -3941,8 +3939,6 @@ static void maruko_report_frame_gate_setup(FrameGateSetupStatus st,
 	const FrameGate *g, uint32_t slot_count)
 {
 	switch (st) {
-	case FRAME_GATE_SETUP_OFF:
-		return;
 	case FRAME_GATE_SETUP_NO_RING:
 		fprintf(stderr, "WARNING: [maruko] video0.frameGate=on needs a "
 			"frame-shm:// transport; gate inert\n");
@@ -3998,8 +3994,7 @@ static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 	 * output FIFO instead of issuing StopRecvPic.  The gate is still
 	 * serviced every pass off the egress ring's own occupancy, so the
 	 * reopen path never depends on draining. */
-	if (frame_gate_drain_stall() &&
-	    !frame_gate_is_open(&ctx->frame_gate)) {
+	if (!frame_gate_is_open(&ctx->frame_gate)) {
 		maruko_service_frame_gate(ctx);
 		usleep(2000);
 		return maruko_pipeline_check_idle_abort(rt,
@@ -4500,10 +4495,9 @@ static void maruko_service_frame_gate(MarukoBackendContext *ctx)
 	if (action == FRAME_GATE_ACTION_NONE)
 		return;
 
-	/* Drain-stall changes no SDK state; the policy flip alone is the
-	 * actuator and the drain loop stops pulling while it reads closed. */
-	if (frame_gate_drain_stall())
-		return;
+	/* The policy flip IS the actuator: nothing is issued to the SDK, and
+	 * the drain loop stops pulling while the gate reads closed. */
+	return;
 
 	if (action == FRAME_GATE_ACTION_CLOSE) {
 		ret = maruko_mi_venc_stop_recv(ctx->venc_device,

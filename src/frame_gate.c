@@ -4,10 +4,9 @@
 #include <string.h>
 #include <strings.h>
 
-static void frame_gate_resolve(FrameGateMode mode, uint32_t close_slots,
+static void frame_gate_resolve(uint32_t close_slots,
 	uint32_t max_closed_ms, FrameGateConfig *out)
 {
-	out->mode = mode;
 	out->open_slots = FRAME_GATE_OPEN_SLOTS;
 	out->min_closed_us = FRAME_GATE_MIN_CLOSED_US;
 
@@ -28,24 +27,25 @@ static void frame_gate_resolve(FrameGateMode mode, uint32_t close_slots,
 		out->max_closed_us = out->min_closed_us;
 }
 
-FrameGateSetupStatus frame_gate_setup(FrameGate *g, FrameGateMode mode,
+FrameGateSetupStatus frame_gate_setup(FrameGate *g,
 	uint32_t close_slots, uint32_t max_closed_ms, uint32_t slot_count)
 {
 	if (!g)
-		return FRAME_GATE_SETUP_OFF;
+		return FRAME_GATE_SETUP_NO_RING;
 
 	memset(g, 0, sizeof(*g));
-	frame_gate_resolve(mode, close_slots, max_closed_ms, &g->cfg);
+	frame_gate_resolve(close_slots, max_closed_ms, &g->cfg);
 	/* Start open.  A gate that began closed could never reopen on a
 	 * backend whose idle path only runs while frames flow. */
 	g->open = 1;
 
-	if (mode == FRAME_GATE_OFF)
-		return FRAME_GATE_SETUP_OFF;
+	/* Arm only against a real frame ring: the ring is the occupancy signal
+	 * the policy runs on, and no other transport has one. */
 	if (slot_count == 0)
 		return FRAME_GATE_SETUP_NO_RING;
 	if (g->cfg.close_slots > slot_count)
 		return FRAME_GATE_SETUP_CLOSE_TOO_HIGH;
+	g->enabled = 1;
 	return FRAME_GATE_SETUP_READY;
 }
 
@@ -74,15 +74,6 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 
 	if (!g)
 		return FRAME_GATE_ACTION_NONE;
-
-	if (g->cfg.mode == FRAME_GATE_OFF) {
-		/* A live switch to "off" must not strand a closed gate. */
-		if (!g->open) {
-			frame_gate_force_open(g, now_us);
-			return FRAME_GATE_ACTION_OPEN;
-		}
-		return FRAME_GATE_ACTION_NONE;
-	}
 
 	if (g->open) {
 		if (used_slots < g->cfg.close_slots) {
@@ -132,40 +123,4 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	return FRAME_GATE_ACTION_OPEN;
 }
 
-FrameGateMode frame_gate_parse_mode(const char *s)
-{
-	if (s && strcasecmp(s, "on") == 0)
-		return FRAME_GATE_ON;
-	return FRAME_GATE_OFF;
-}
 
-const char *frame_gate_mode_name(FrameGateMode m)
-{
-	return (m == FRAME_GATE_ON) ? "on" : "off";
-}
-
-/* Actuator selection.  Plain int: written by a control thread, read by the
- * encode loop, where a stale read costs at most one frame of the old mode. */
-static int g_drain_stall;
-
-void frame_gate_init_actuator(void)
-{
-	const char *e = getenv("WB_GATE_DRAIN_STALL");
-
-	g_drain_stall = (e && *e == '1') ? 1 : 0;
-}
-
-int frame_gate_drain_stall(void)
-{
-	return __atomic_load_n(&g_drain_stall, __ATOMIC_RELAXED);
-}
-
-void frame_gate_set_drain_stall(int on)
-{
-	__atomic_store_n(&g_drain_stall, on ? 1 : 0, __ATOMIC_RELAXED);
-}
-
-const char *frame_gate_actuator_name(void)
-{
-	return frame_gate_drain_stall() ? "drainstall" : "recvstop";
-}

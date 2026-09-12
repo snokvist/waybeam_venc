@@ -36,11 +36,6 @@
  * decisions.  See documentation/ADAPTIVE_FRAME_GATE_PLAN.md.
  */
 
-typedef enum {
-	FRAME_GATE_OFF = 0,
-	FRAME_GATE_ON,
-} FrameGateMode;
-
 /* Reopen threshold, in slots.  Pinned, not configurable: the ring's healthy
  * idle occupancy is one frame and not zero — the producer samples just after
  * writing — so "<= 1" is the documented healthy band and ">= 2" is standing
@@ -75,7 +70,6 @@ typedef enum {
 #define FRAME_GATE_MIN_OPEN_US 20000u
 
 typedef struct {
-	FrameGateMode mode;
 	uint32_t close_slots;    /* close when used_slots >= this */
 	uint32_t open_slots;     /* reopen when used_slots <= this */
 	uint32_t min_closed_us;  /* debounce floor while closed */
@@ -90,6 +84,7 @@ typedef enum {
 
 typedef struct {
 	FrameGateConfig cfg;
+	int      enabled;            /* armed: the output is a frame ring */
 	int      open;               /* 1 = intake enabled (the initial state) */
 	uint64_t closed_since_us;    /* valid only while !open */
 	uint64_t closed_total_us;    /* cumulative time gated, for duty cycle */
@@ -102,14 +97,18 @@ typedef struct {
  * checks live here so both backends cannot drift on what counts as a
  * misconfiguration. */
 typedef enum {
-	FRAME_GATE_SETUP_OFF = 0,        /* not requested — say nothing */
-	FRAME_GATE_SETUP_READY,          /* armed */
+	FRAME_GATE_SETUP_READY = 0,      /* armed */
 	FRAME_GATE_SETUP_NO_RING,        /* transport has no occupancy signal */
 	FRAME_GATE_SETUP_CLOSE_TOO_HIGH, /* threshold above the ring's capacity */
 } FrameGateSetupStatus;
 
 /* Resolve the config, initialise the gate open, and sanity-check the
- * threshold against the ring.  `slot_count` is the egress ring's capacity,
+ * threshold against the ring.
+ *
+ * There is no enable switch.  The gate arms itself whenever the output is a
+ * frame ring, because the ring IS the signal it needs and every other
+ * transport lacks one — so "enabled" and "has a frame ring" were always the
+ * same question asked twice.  `slot_count` is the egress ring's capacity,
  * or 0 when this transport has no frame ring at all.
  *
  * `close_slots` 0 and `max_closed_ms` 0 select the defaults above.
@@ -118,7 +117,7 @@ typedef enum {
  *
  * A non-READY status still leaves a valid, inert gate — the caller only has
  * to log it. */
-FrameGateSetupStatus frame_gate_setup(FrameGate *g, FrameGateMode mode,
+FrameGateSetupStatus frame_gate_setup(FrameGate *g,
 	uint32_t close_slots, uint32_t max_closed_ms, uint32_t slot_count);
 
 /* Feed one observation.  `used_slots` is the instantaneous egress ring
@@ -151,43 +150,8 @@ static inline int frame_gate_is_open(const FrameGate *g)
 
 static inline int frame_gate_enabled(const FrameGate *g)
 {
-	return g && g->cfg.mode != FRAME_GATE_OFF;
+	return g && g->enabled;
 }
 
-FrameGateMode frame_gate_parse_mode(const char *s);
-
-/* Which actuator the backends drive when the policy says CLOSE.
- *
- * RECV_STOP issues the SDK's stop/start-receive pair.  DRAIN_STALL issues
- * nothing at all: the backend simply stops draining the encoder's output FIFO
- * while the gate reads closed.  That distinction is why this lives here rather
- * than three times over — the choice is policy, and the only per-backend part
- * is where the drain loop returns early.
- *
- * Measured 2026-09-12 on all three backends: RECV_STOP costs one IRAP per
- * reopen on Star6E, three on Maruko and 0.6 on CV610, and against a real
- * capacity-limited RF link it reached ~4.4 keyframes per second.  DRAIN_STALL
- * measured zero on every board and on the live link. */
-typedef enum {
-	FRAME_GATE_ACTUATOR_RECV_STOP = 0,
-	FRAME_GATE_ACTUATOR_DRAIN_STALL,
-} FrameGateActuator;
-
-/** Read the actuator choice once, from WB_GATE_DRAIN_STALL.  Call at gate
- *  setup: the gate can close within the first frames, long before any runtime
- *  request could arrive. */
-void frame_gate_init_actuator(void);
-
-/** Non-zero when the drain-stall actuator is selected. */
-int frame_gate_drain_stall(void);
-
-/** Select the actuator at runtime.  Callers MUST leave the encoder receiving:
- *  recv-stop may have issued a stop that drain-stall will never undo, which
- *  strands the channel for good. */
-void frame_gate_set_drain_stall(int on);
-
-/** "drainstall" or "recvstop", for bring-up reporting. */
-const char *frame_gate_actuator_name(void);
-const char   *frame_gate_mode_name(FrameGateMode m);
 
 #endif /* FRAME_GATE_H */

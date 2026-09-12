@@ -139,7 +139,6 @@ typedef struct {
 	 * load time when record.mode is "mirror", because there ch0 feeds the
 	 * recorder as well and gating it would punch holes in the SD file for
 	 * a radio problem.  See include/frame_gate.h. */
-	char frame_gate[8];              /* "off" | "on" */
 	uint32_t frame_gate_close_slots; /* 0 = FRAME_GATE_DEFAULT_CLOSE_SLOTS */
 	uint32_t frame_gate_max_closed_ms; /* 0 = default; the safety escape */
 	/* Derived from `resilience` preset only.  Not part of the JSON

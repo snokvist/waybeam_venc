@@ -2,35 +2,54 @@
 
 ## [0.85.0] - 2026-09-12
 
-An IDR-free way to shed load. `contract_version` stays **0.31.0** — three new
+An IDR-free way to shed load. `contract_version` stays **0.31.0** — two new
 restart-required `video0` fields, no endpoint or payload change.
 
-**Bench-verified on CV610/IMX662 at 1280x720, 100 fps, `resilience=racing`.**
-Stopping the frame-shm consumer closed intake at three queued slots; the
-500 ms escape emitted one frame per pulse, and normal 100 fps delivery resumed
-after the consumer returned. A direct AU consumer saw 542 clean, monotonic GDR
-frames across a three-second gate interval, including seven escape frames, and
-**zero IDR/IRAP frames**. The x86 ground receiver measured the delivered rate
-falling from ~100 fps to 1.6 fps and recovering to ~100 fps without an
-incomplete frame, decoder wait-for-IDR, recovery request, or source switch.
-Star6E also paused and recovered without D-state, but its
-`MI_VENC_StopRecvPic` returned `0xA0022012`; that secondary backend still needs
-follow-up before it can be called supported. Maruko remains code-level only.
+**Device-verified on all three backends and over a real RF link.** Star6E
+(SSC338Q, 720p100, `resilience=racing`), Maruko (ssc378qe, 1080p30) and CV610
+(IMX662, 720p100), each with proven stall cycles; then `.232` transmitting to
+an x86 ground that latched and claimed the craft, with the link's MCS pinned
+and its bitrate controller disabled so the offered rate genuinely exceeded
+what the radio could carry.
 
-- **Adaptive frame gate (`video0.frameGate`, default `off`).** Pauses the
-  stream channel's frame intake via `MI_VENC_StopRecvPic` while the frame-shm
-  egress ring is not draining, and resumes on `MI_VENC_StartRecvPic` when the
-  consumer catches up. The point is what it does *not* do: a bitrate write is
-  the only proportional rate actuator on SigmaStar and `MI_VENC_SetChnAttr`
-  keyframes on its own (measured on SSC338Q: ten spaced `video0.bitrate`
-  writes, eleven IRAP access units), so the standard response to congestion
-  injects the largest frame in the stream into the link that is already
-  overflowing. The gate changes no encoder state at all, so ROI keeps its
-  relative QP gradient and CBR keeps its contract.
+- **Adaptive frame gate, always on for frame-shm outputs.** While the egress
+  ring is backed up the backend stops draining the encoder's output FIFO, and
+  resumes when the consumer catches up. **No SDK call is made in either
+  direction**, and that is the whole design.
+- **Pausing intake instead emits a keyframe on every resume.** Measured, one
+  IRAP picture per reopen on Star6E (`MI_VENC_StopRecvPic`/`StartRecvPic`),
+  three on Maruko, and 0.6 on CV610 (`ss_mpi_venc_stop_chn`/`start_chn`) —
+  against a natural background of about one per 40 s. On a real
+  capacity-limited link it reached **~4.6 keyframes per second**, which is the
+  craft firing its largest frame into a saturated radio several times a
+  second: the exact pathology the feature exists to prevent. Letting the FIFO
+  backpressure instead measured **zero** induced keyframes on every backend
+  and on the live link.
+- **There is no enable switch.** `video0.frameGate` is gone. The gate arms
+  itself whenever the output is a frame ring, because the ring is the
+  occupancy signal it runs on and no other transport has one. Only
+  `frameGateCloseSlots` and `frameGateMaxClosedMs` remain.
+- **Under partial congestion it settles at the link rate.** Against a
+  rate-limited consumer the delivered rate tracked 20, 40, 60 and 80 fps with
+  a spread of at most one frame per second, holding the ring at ~1.5 of 8
+  slots — graceful degradation with no queueing latency, not 0/100 judder.
+- **The safety escape needed a dwell to work at all.** It reopened while
+  occupancy was still above the close threshold, so the next observation —
+  1 ms later on Star6E, against a 10 ms frame period — closed again before the
+  admitted frame could exist. A dead consumer therefore stopped the stream
+  with *every drop counter at zero*. `FRAME_GATE_MIN_OPEN_US` holds the escape
+  pulse open for 20 ms, and only the pulse, so burst response is unchanged:
+  `transportDrops` now climbs instead of the stream going quiet.
+- **A bitrate write is the only proportional rate actuator on SigmaStar and
+  `MI_VENC_SetChnAttr` keyframes on its own** (measured on SSC338Q: ten spaced
+  `video0.bitrate` writes, eleven IRAP access units), so the standard response
+  to congestion injects the largest frame in the stream into the link that is
+  already overflowing. The gate changes no encoder state at all, so ROI keeps
+  its relative QP gradient and CBR keeps its contract.
 - **No IDR-free proportional QP lever exists to substitute**, which is why
   this is a gate and not a rate write: `qpDelta` writes `s32IPQPDelta` and
   only redistributes bits between I and P, and `min_qp` abandons CBR at a
-  cliff (19.58 Mbps → 0.63 between 20 and 24 on the README bench) rather than
+  cliff (19.58 Mbps -> 0.63 between 20 and 24 on the README bench) rather than
   scaling.
 - **Signal is the instantaneous per-frame ring occupancy, not the published
   `low_water_slots`** — that is a 200 ms window, right for waybeam-link's rate
@@ -56,8 +75,15 @@ follow-up before it can be called supported. Maruko remains code-level only.
   exactly like a stalled encoder — so both are suppressed while gated. And its
   fd wait polls at 1 s, which would have become the reopen latency; that drops
   to 2 ms while closed.
+- **Two SDK routes were tried and measured dead**, and are not shipped:
+  `MI_VENC_EnableIdr(false)` does not suppress the resume keyframe (12 IRAP
+  NALs with it on, 12 with it off), and `MI_VENC_SetFrameLostStrategy` is
+  inert on both SigmaStar boards — a 1 kbit/s threshold against a live
+  7 Mbit/s stream changed nothing, and Maruko returns success while doing
+  nothing.
 - `src/frame_gate.c` is a pure state machine with no SDK types, unit-tested on
-  the host (68 new assertions) like `src/intra_refresh.c`.
+  the host like `src/intra_refresh.c`, and it now also owns the actuator so
+  the three backends cannot drift.
 - **All three backends.** CV610 uses `ss_mpi_venc_stop_chn` /
   `ss_mpi_venc_start_chn(recv_pic_num=-1)` — the same primitive the SigmaStar
   backends reach as `MI_VENC_Stop/StartRecvPic`, and exactly what the `ldy_sky`

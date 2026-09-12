@@ -10,8 +10,7 @@
 
 static void gate_on(FrameGate *g, uint32_t close_slots, uint32_t max_closed_ms)
 {
-	(void)frame_gate_setup(g, FRAME_GATE_ON, close_slots, max_closed_ms,
-		RING);
+	(void)frame_gate_setup(g, close_slots, max_closed_ms, RING);
 }
 
 int test_frame_gate(void)
@@ -19,19 +18,9 @@ int test_frame_gate(void)
 	int failures = 0;
 	FrameGate g;
 
-	/* ── parse / name round-trip ─────────────────────────────────── */
-	CHECK("parse_off",   frame_gate_parse_mode("off") == FRAME_GATE_OFF);
-	CHECK("parse_on",    frame_gate_parse_mode("on")  == FRAME_GATE_ON);
-	CHECK("parse_upper", frame_gate_parse_mode("ON")  == FRAME_GATE_ON);
-	CHECK("parse_null",  frame_gate_parse_mode(NULL)  == FRAME_GATE_OFF);
-	CHECK("parse_empty", frame_gate_parse_mode("")    == FRAME_GATE_OFF);
-	CHECK("parse_bogus", frame_gate_parse_mode("yes") == FRAME_GATE_OFF);
-	CHECK("name_off", strcmp(frame_gate_mode_name(FRAME_GATE_OFF), "off") == 0);
-	CHECK("name_on",  strcmp(frame_gate_mode_name(FRAME_GATE_ON),  "on")  == 0);
-
 	/* ── setup: resolution + sanity checks ──────────────────────── */
 	CHECK("setup_default_ready",
-		frame_gate_setup(&g, FRAME_GATE_ON, 0, 0, RING)
+		frame_gate_setup(&g, 0, 0, RING)
 			== FRAME_GATE_SETUP_READY);
 	CHECK("setup_default_close",
 		g.cfg.close_slots == FRAME_GATE_DEFAULT_CLOSE_SLOTS);
@@ -43,49 +32,46 @@ int test_frame_gate(void)
 
 	/* close_slots must stay strictly above open_slots or the gate
 	 * chatters on a single slot arriving and leaving. */
-	(void)frame_gate_setup(&g, FRAME_GATE_ON, 1, 0, RING);
+	(void)frame_gate_setup(&g, 1, 0, RING);
 	CHECK("setup_clamps_equal", g.cfg.close_slots == g.cfg.open_slots + 1u);
-	(void)frame_gate_setup(&g, FRAME_GATE_ON, 8, 0, RING);
+	(void)frame_gate_setup(&g, 8, 0, RING);
 	CHECK("setup_honours_explicit", g.cfg.close_slots == 8);
 
 	/* An escape below the debounce would make every close an escape. */
-	(void)frame_gate_setup(&g, FRAME_GATE_ON, 0, 1, RING);
+	(void)frame_gate_setup(&g, 0, 1, RING);
 	CHECK("setup_escape_floor",
 		g.cfg.max_closed_us == FRAME_GATE_MIN_CLOSED_US);
 
-	/* Status reporting: off is silent, no ring and an unreachable
-	 * threshold are both flagged, and each still leaves an inert gate. */
-	CHECK("setup_status_off",
-		frame_gate_setup(&g, FRAME_GATE_OFF, 0, 0, RING)
-			== FRAME_GATE_SETUP_OFF);
+	/* Status reporting: no ring and an unreachable threshold are both
+	 * flagged, and each still leaves a valid, inert gate. */
 	CHECK("setup_status_no_ring",
-		frame_gate_setup(&g, FRAME_GATE_ON, 0, 0, 0)
+		frame_gate_setup(&g, 0, 0, 0)
 			== FRAME_GATE_SETUP_NO_RING);
 	CHECK("setup_no_ring_open", frame_gate_is_open(&g));
+	/* No enable switch: a frame ring arms the gate and nothing else does. */
+	CHECK("setup_no_ring_not_enabled", !frame_gate_enabled(&g));
+	CHECK("setup_ring_arms",
+		(frame_gate_setup(&g, 0, 0, RING) == FRAME_GATE_SETUP_READY &&
+		 frame_gate_enabled(&g)));
+	CHECK("setup_too_high_not_enabled",
+		(frame_gate_setup(&g, 9, 0, 8) == FRAME_GATE_SETUP_CLOSE_TOO_HIGH
+		 && !frame_gate_enabled(&g)));
 	CHECK("setup_status_close_too_high",
-		frame_gate_setup(&g, FRAME_GATE_ON, 9, 0, 8)
+		frame_gate_setup(&g, 9, 0, 8)
 			== FRAME_GATE_SETUP_CLOSE_TOO_HIGH);
 	CHECK("setup_too_high_open", frame_gate_is_open(&g));
 	/* Exactly at capacity is legitimate, not an error. */
 	CHECK("setup_close_at_capacity",
-		frame_gate_setup(&g, FRAME_GATE_ON, 8, 0, 8)
+		frame_gate_setup(&g, 8, 0, 8)
 			== FRAME_GATE_SETUP_READY);
 
 	/* Counters must not survive a re-setup. */
 	gate_on(&g, 3, 500);
 	(void)frame_gate_observe(&g, 5, 0);
 	CHECK("setup_resets_counters",
-		(frame_gate_setup(&g, FRAME_GATE_ON, 3, 500, RING),
+		(frame_gate_setup(&g, 3, 500, RING),
 		 g.close_events == 0 && g.closed_total_us == 0 &&
 		 frame_gate_is_open(&g)));
-
-	/* ── off mode is inert ───────────────────────────────────────── */
-	(void)frame_gate_setup(&g, FRAME_GATE_OFF, 0, 0, RING);
-	CHECK("off_starts_open", frame_gate_is_open(&g));
-	CHECK("off_not_enabled", !frame_gate_enabled(&g));
-	CHECK("off_never_closes",
-		frame_gate_observe(&g, 99, 1000) == FRAME_GATE_ACTION_NONE);
-	CHECK("off_still_open", frame_gate_is_open(&g));
 
 	/* ── basic close / reopen ────────────────────────────────────── */
 	gate_on(&g, 3, 500);
@@ -157,17 +143,6 @@ int test_frame_gate(void)
 		frame_gate_observe(&g, 8, 500 * MS + FRAME_GATE_MIN_OPEN_US)
 			== FRAME_GATE_ACTION_CLOSE);
 
-	/* ── live switch to off must release a closed gate ───────────── */
-	gate_on(&g, 3, 500);
-	CHECK("liveoff_close",
-		frame_gate_observe(&g, 5, 0) == FRAME_GATE_ACTION_CLOSE);
-	g.cfg.mode = FRAME_GATE_OFF;
-	CHECK("liveoff_releases",
-		frame_gate_observe(&g, 5, 1 * MS) == FRAME_GATE_ACTION_OPEN);
-	CHECK("liveoff_open", frame_gate_is_open(&g));
-	CHECK("liveoff_then_inert",
-		frame_gate_observe(&g, 99, 2 * MS) == FRAME_GATE_ACTION_NONE);
-
 	/* ── clock regression (reinit hands over a fresh epoch) ──────── */
 	gate_on(&g, 3, 500);
 	CHECK("clockback_close",
@@ -206,7 +181,7 @@ int test_frame_gate(void)
 		FrameGate e;
 		uint64_t t = 1000 * MS;
 
-		frame_gate_setup(&e, FRAME_GATE_ON, 0, 0, RING);
+		frame_gate_setup(&e, 0, 0, RING);
 		/* Close on a backed-up ring, then let the escape fire. */
 		CHECK("pulse_closes",
 			frame_gate_observe(&e, 5, t) == FRAME_GATE_ACTION_CLOSE);
@@ -234,14 +209,14 @@ int test_frame_gate(void)
 
 		/* A normal close is NOT debounced by the open dwell: burst
 		 * response must be unchanged. */
-		frame_gate_setup(&e, FRAME_GATE_ON, 0, 0, RING);
+		frame_gate_setup(&e, 0, 0, RING);
 		CHECK("normal_close_not_delayed",
 			frame_gate_observe(&e, 5, 1 * MS)
 				== FRAME_GATE_ACTION_CLOSE);
 
 		/* A drain during the dwell clears it, so the next backlog
 		 * closes immediately rather than inheriting a stale pulse. */
-		frame_gate_setup(&e, FRAME_GATE_ON, 0, 0, RING);
+		frame_gate_setup(&e, 0, 0, RING);
 		t = 2000 * MS;
 		(void)frame_gate_observe(&e, 5, t);
 		t += e.cfg.max_closed_us;
@@ -261,8 +236,8 @@ int test_frame_gate(void)
 	CHECK("null_enabled_false", !frame_gate_enabled(NULL));
 	frame_gate_force_open(NULL, 0);          /* must not crash */
 	CHECK("null_setup",
-		frame_gate_setup(NULL, FRAME_GATE_ON, 0, 0, RING)
-			== FRAME_GATE_SETUP_OFF);
+		frame_gate_setup(NULL, 0, 0, RING)
+			== FRAME_GATE_SETUP_NO_RING);
 
 	return failures;
 }
