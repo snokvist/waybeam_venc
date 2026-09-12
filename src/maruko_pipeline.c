@@ -64,6 +64,9 @@ static void maruko_recorder_start_idr(MarukoBackendContext *ctx);
 /* Rate-limited forced IDR — defined next to the scene detector that was its
  * first caller, and also wired as MarukoOutput::request_idr in
  * bind_maruko_pipeline(). */
+static void maruko_report_frame_gate_setup(FrameGateSetupStatus st,
+	const FrameGate *g, uint32_t slot_count);
+
 static void maruko_scene_request_idr(void *ctx_ptr);
 
 /* Grace for a mid-run record/stop.  Waiting out a stalled disk on the encode
@@ -2207,6 +2210,16 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	if (g_stab_fill_graph)
 		return 0;
 
+	/* Cap the bitstream buffer before encoding starts — see
+	 * FRAME_GATE_STREAM_BUF_FRAMES.  Advisory: a refusal leaves the SDK
+	 * default depth, which costs latency while gated and nothing else. */
+	if (!g_mi_venc.fnSetMaxStreamCnt ||
+	    g_mi_venc.fnSetMaxStreamCnt(venc_dev, *chn,
+		    FRAME_GATE_STREAM_BUF_FRAMES) != 0)
+		fprintf(stderr, "WARNING: [maruko] SetMaxStreamCnt(%u) "
+			"refused; keeping the SDK default depth\n",
+			FRAME_GATE_STREAM_BUF_FRAMES);
+
 	ret = maruko_mi_venc_start_recv(venc_dev, *chn);
 	if (ret != 0) {
 		fprintf(stderr,
@@ -2903,6 +2916,18 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 	ctx->output.request_idr = maruko_scene_request_idr;
 	ctx->output.idr_ctx = ctx;
 
+	/* Adaptive frame gate — set up after the output exists so the ring's
+	 * slot_count can sanity-check the close threshold. */
+	{
+		venc_frame_ring_fill_t gfill = {0};
+
+		(void)maruko_output_frame_ring_fill(&ctx->output, &gfill);
+		maruko_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
+			ctx->cfg.frame_gate_close_slots,
+			ctx->cfg.frame_gate_max_closed_ms, gfill.slot_count),
+			&ctx->frame_gate, gfill.slot_count);
+	}
+
 	return 0;
 }
 
@@ -3124,25 +3149,6 @@ static void *maruko_dual_stream_thread(void *arg)
 
 		(void)maruko_mi_venc_release_stream(ctx->venc_device,
 			d->channel, &stream);
-
-		/* Rotation asked for a keyframe.  Serviced after the release so
-		 * the SDK call is outside the GetStream/ReleaseStream window,
-		 * COALESCED because a periodic rotation is not a bootstrap
-		 * event, and on ch1 — the channel that actually feeds this
-		 * file.  A shared hook would have aimed it at ch0 and keyframed
-		 * the live stream instead. */
-		if (d->ts_recorder &&
-		    star6e_ts_recorder_take_idr_request(d->ts_recorder)) {
-			/* take_idr_request() has already cleared the flag, so a
-			 * request the limiter swallows must be put back or the
-			 * rotation is lost -- and its budget already spent. */
-			if (idr_rate_limit_allow(d->channel))
-				(void)maruko_mi_venc_request_idr(
-					ctx->venc_device, d->channel, 1);
-			else
-				star6e_ts_recorder_requeue_idr_request(
-					d->ts_recorder);
-		}
 
 		total_count++;
 		if (stat.curPacks >= 2)
@@ -3722,11 +3728,19 @@ int maruko_pipeline_configure_graph(MarukoBackendContext *ctx)
 	}
 	star6e_recorder_init(&ctx->recorder);
 	mk_mirror_record_locks_init(ctx);
-	if (ctx->cfg.record.max_seconds > 0)
-		ctx->ts_recorder.max_seconds = ctx->cfg.record.max_seconds;
-	if (ctx->cfg.record.max_mb > 0)
-		ctx->ts_recorder.max_bytes =
+	/* Both recorders: the rotation thresholds are the operator's,
+	 * not the format's, and only one recorder is ever active. */
+	if (ctx->cfg.record.max_seconds > 0) {
+		ctx->ts_recorder.rot.max_seconds = ctx->cfg.record.max_seconds;
+		ctx->recorder.rot.max_seconds = ctx->cfg.record.max_seconds;
+	}
+	if (ctx->cfg.record.max_mb > 0) {
+		uint64_t max_bytes =
 			(uint64_t)ctx->cfg.record.max_mb * 1024 * 1024;
+
+		ctx->ts_recorder.rot.max_bytes = max_bytes;
+		ctx->recorder.rot.max_bytes = max_bytes;
+	}
 
 	/* Phase 7: dual VENC chn 1.  Started AFTER bind_maruko_pipeline
 	 * succeeds — the Phase 7 SDK probe confirmed CreateChn(dev,1,...)
@@ -3927,9 +3941,49 @@ static void maruko_pipeline_cleanup_streaming(MarukoBackendContext *ctx,
 	rtp_sidecar_sender_close(&rt->sidecar);
 }
 
-static int maruko_pipeline_check_idle_abort(MarukoStreamRuntime *rt)
+static void maruko_service_frame_gate(MarukoBackendContext *ctx);
+static void maruko_service_ring_low_water(MarukoOutput *output);
+
+/* Maruko wording for frame_gate_setup()'s verdict; the checks themselves are
+ * shared in frame_gate.c. */
+static void maruko_report_frame_gate_setup(FrameGateSetupStatus st,
+	const FrameGate *g, uint32_t slot_count)
+{
+	switch (st) {
+	case FRAME_GATE_SETUP_NO_RING:
+		fprintf(stderr, "WARNING: [maruko] video0.frameGate=on needs a "
+			"frame-shm:// transport; gate inert\n");
+		return;
+	case FRAME_GATE_SETUP_CLOSE_TOO_HIGH:
+		fprintf(stderr, "WARNING: [maruko] frameGateCloseSlots %u exceeds "
+			"the ring's %u slots; gate can never close\n",
+			(unsigned)g->cfg.close_slots, (unsigned)slot_count);
+		return;
+	case FRAME_GATE_SETUP_READY:
+		printf("> [maruko] frame gate on: close>=%u open<=%u escape=%ums "
+			"ring=%u slots\n",
+			(unsigned)g->cfg.close_slots, (unsigned)g->cfg.open_slots,
+			(unsigned)(g->cfg.max_closed_us / 1000u),
+			(unsigned)slot_count);
+		return;
+	}
+}
+
+/* `gated` suppresses both the warning and the abort: a closed frame gate is
+ * the reason there is no encoder data, and a 20 s gate (reachable via
+ * frameGateMaxClosedMs) would otherwise tear the stream loop down for doing
+ * exactly what it was told to do. */
+static int maruko_pipeline_check_idle_abort(MarukoStreamRuntime *rt, int gated)
 {
 	uint64_t now_us = wb_monotonic_us();
+
+	if (gated) {
+		/* Keep the clocks moving so neither timer fires the moment
+		 * the gate reopens. */
+		rt->last_activity_us = now_us;
+		rt->last_warn_us = now_us;
+		return 0;
+	}
 	if (now_us - rt->last_warn_us >= MARUKO_IDLE_WARN_US) {
 		printf("> [maruko] waiting for encoder data...\n");
 		rt->last_warn_us = now_us;
@@ -3947,12 +4001,32 @@ static int maruko_pipeline_check_idle_abort(MarukoStreamRuntime *rt)
 static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, i6c_venc_stat *stat)
 {
+	/* Gated: leave the encoded frame in VENC's output FIFO rather than
+	 * draining it.  The gate is still serviced every pass, off the egress
+	 * ring's own occupancy, so the reopen path never depends on the
+	 * drain. */
+	if (!frame_gate_is_open(&ctx->frame_gate)) {
+		maruko_service_frame_gate(ctx);
+		/* Keep publishing egress pressure while gated — see the Star6E
+		 * twin; freezing it hides the congestion that closed the gate. */
+		maruko_service_ring_low_water(&ctx->output);
+		usleep(2000);
+		return maruko_pipeline_check_idle_abort(rt,
+			!frame_gate_is_open(&ctx->frame_gate));
+	}
+
 	if (rt->venc_fd >= 0) {
 		/* 1 s timeout caps the g_maruko_running cancellation latency
 		 * without wasting cycles on short periodic wakes.  Frames at
 		 * ≥60 fps arrive well within this. */
 		struct pollfd pfd = { .fd = rt->venc_fd, .events = POLLIN };
-		(void)poll(&pfd, 1, 1000);
+		/* While the gate is closed no frame will ever arrive, so the
+		 * 1 s cancellation poll becomes the reopen latency.  Drop to
+		 * 2 ms so the gate can let go promptly; Star6E's idle branch
+		 * already polls at 1 ms. */
+		int poll_ms = frame_gate_is_open(&ctx->frame_gate) ? 1000 : 2;
+
+		(void)poll(&pfd, 1, poll_ms);
 		/* POLLERR/POLLHUP/POLLNVAL: the SDK closed the fd under us
 		 * (BSP quirk, pipeline reinit, VPE unbind).  Fall back to the
 		 * Query+usleep path for the rest of the loop's lifetime. */
@@ -3963,8 +4037,12 @@ static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 			usleep(1000);
 			return 0;
 		}
-		if (!(pfd.revents & POLLIN))
-			return maruko_pipeline_check_idle_abort(rt);
+		if (!(pfd.revents & POLLIN)) {
+			/* Reopen path: nothing else runs while gated. */
+			maruko_service_frame_gate(ctx);
+			return maruko_pipeline_check_idle_abort(rt,
+				!frame_gate_is_open(&ctx->frame_gate));
+		}
 	}
 
 	memset(stat, 0, sizeof(*stat));
@@ -3972,6 +4050,7 @@ static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 		ctx->venc_channel, stat);
 	if (ret != 0) {
 		if (ret == -EAGAIN || ret == EAGAIN) {
+			maruko_service_frame_gate(ctx);
 			usleep(100);
 			return 0;
 		}
@@ -3981,7 +4060,11 @@ static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 	}
 
 	if (stat->curPacks == 0) {
-		int rc = maruko_pipeline_check_idle_abort(rt);
+		int rc;
+
+		maruko_service_frame_gate(ctx);
+		rc = maruko_pipeline_check_idle_abort(rt,
+			!frame_gate_is_open(&ctx->frame_gate));
 		if (rc != 0)
 			return rc;
 		/* On the fd path this means spurious POLLIN (rare).  On the
@@ -4053,7 +4136,8 @@ static void mk_mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
 		(void)star6e_ts_recorder_write_video(&ctx->ts_recorder, au, len,
 			pts_90khz, is_idr);
 	else
-		(void)star6e_recorder_write_au(&ctx->recorder, au, len);
+		(void)star6e_recorder_write_au(&ctx->recorder, au, len,
+			is_idr);
 }
 
 /* Initialised before anything can reach it — the status callback runs on the
@@ -4387,6 +4471,47 @@ static void maruko_recorder_start_idr(MarukoBackendContext *ctx)
  * (src/star6e_runtime.c star6e_service_ring_low_water), state on the output
  * for the same reason.  Both backends share one definition on purpose: a
  * per-backend divergence in shared behaviour is a standing drift trap here. */
+/* Adaptive frame gate over chn 0 — the Maruko twin of
+ * star6e_service_frame_gate().  Same rationale (a bitrate write implicitly
+ * keyframes, StopRecvPic changes no encoder state) and the same signal, the
+ * instantaneous egress-ring occupancy rather than the 200 ms low-water
+ * window.  See include/frame_gate.h. */
+static void maruko_service_frame_gate(MarukoBackendContext *ctx)
+{
+	venc_frame_ring_fill_t fill;
+	uint64_t now_us;
+
+	if (!ctx || !frame_gate_enabled(&ctx->frame_gate))
+		return;
+
+	if (maruko_output_frame_ring_fill(&ctx->output, &fill) != 0) {
+		/* The ring went away across a reinit.  Release the gate rather
+		 * than leaving the drain stopped with no occupancy signal that
+		 * could ever reopen it.  No SDK call: intake was never
+		 * stopped, only the drain. */
+		if (!frame_gate_is_open(&ctx->frame_gate))
+			frame_gate_force_open(&ctx->frame_gate,
+				wb_monotonic_us());
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+
+	/* Mirror mode (!ctx->dual) puts the recorder on chn 0 as well, so a
+	 * close would punch holes in the file for a radio problem.  Suppress
+	 * closes only — an already-closed gate must still be able to reopen. */
+	if (!ctx->dual && frame_gate_is_open(&ctx->frame_gate) &&
+	    star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
+		return;
+
+	/* The policy flip IS the actuator, so the returned action needs no
+	 * handling: the drain loop stops pulling while the gate reads closed
+	 * and VENC's own output FIFO applies the backpressure.  Nothing is
+	 * issued to the SDK deliberately — stop_recv/start_recv emit an IRAP on
+	 * every resume, measured at three per reopen on this board. */
+	(void)frame_gate_observe(&ctx->frame_gate, fill.used_slots, now_us);
+}
+
 static void maruko_service_ring_low_water(MarukoOutput *output)
 {
 	venc_frame_ring_fill_t fill;
@@ -4826,26 +4951,18 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	(void)maruko_mi_venc_release_stream(ctx->venc_device,
 		ctx->venc_channel, &stream);
 
-	/* Rotation asked for a keyframe.  After the release, coalesced, on the
-	 * channel feeding this file.  Dual mode services its own recorder on
-	 * the ch1 thread. */
-	if (!ctx->dual &&
-	    star6e_ts_recorder_take_idr_request(&ctx->ts_recorder)) {
-		/* Re-queue a coalesced ask -- see the ch1 site above. */
-		if (idr_rate_limit_allow(ctx->venc_channel))
-			(void)maruko_mi_venc_request_idr(ctx->venc_device,
-				ctx->venc_channel, 1);
-		else
-			star6e_ts_recorder_requeue_idr_request(
-				&ctx->ts_recorder);
-	}
+	/* SigmaStar refuses StopRecvPic with MI_ERR_VENC_BUSY while an acquired
+	 * stream is outstanding.  The helper reads current ring occupancy, so
+	 * evaluating immediately after ReleaseStream preserves the same signal
+	 * while respecting the SDK lifetime contract. */
+	maruko_service_frame_gate(ctx);
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is:
-	 * inside the GetStream/ReleaseStream window this would hold the
+	 * AFTER the release, because inside the GetStream/ReleaseStream window
+	 * this would hold the
 	 * encoder's output slot and stall the LIVE stream — precisely the
 	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
 	 * itself no longer ends in an unbounded join: past its deadline the

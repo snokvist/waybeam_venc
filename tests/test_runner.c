@@ -37,6 +37,7 @@ extern int test_idr_rate_limit(void);
 extern int test_backend(void);
 extern int test_debug_osd(void);
 extern int test_intra_refresh(void);
+extern int test_frame_gate(void);
 extern int test_venc_jpeg(void);
 extern int test_mdns_beacon(void);
 extern int test_framing_kalman(void);
@@ -146,6 +147,9 @@ int main(void)
 
 	printf("\n--- test_intra_refresh ---\n");
 	failures += test_intra_refresh();
+
+	printf("\n--- test_frame_gate ---\n");
+	failures += test_frame_gate();
 
 	printf("\n--- test_venc_jpeg ---\n");
 	failures += test_venc_jpeg();

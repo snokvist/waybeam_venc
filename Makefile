@@ -59,9 +59,22 @@ VENC_VERSION := $(shell cat VERSION 2>/dev/null || echo unknown)
 # -MMD -MP emits per-object .d files so a one-line change rebuilds just
 # that object + relink, instead of every source under the sun.  -s is in
 # LDFLAGS only (it's a link-time strip flag; not valid during -c).
-COMMON_CFLAGS := -Os -Iinclude -Ilib -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -MMD -MP
+#
+# _FILE_OFFSET_BITS=64 is not optional on the 32-bit targets.  Without it
+# glibc leaves off_t 32-bit and open() does not set O_LARGEFILE, so the
+# kernel refuses any write past 2^31-1 with EFBIG whatever the filesystem
+# allows -- reported on SSC338Q as a recording dying at exactly 2147483647
+# bytes on exFAT, which has no such limit of its own, and reproduced here
+# against the recorder core on a 58 GB FAT32 card.  It also fixes
+# stat()/fstat(), which return
+# EOVERFLOW for a >2 GB file and would otherwise hide such a recording from
+# the listing and the download path.  musl targets (maruko, cv610) are
+# already 64-bit off_t and ignore this; it is here for all of them because
+# the flag must be identical across every translation unit -- a partial
+# application silently mixes two struct stat/off_t layouts across a link.
+COMMON_CFLAGS := -Os -Iinclude -Ilib -DVENC_VERSION=\"$(VENC_VERSION)\" -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -MMD -MP
 CONFIG_SRC := src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c lib/cJSON.c
-HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_rec_writer.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
+HELPER_SRC := src/backend.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/codec_config.c src/pipeline_common.c src/scene_detector.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/intra_refresh.c src/frame_gate.c src/isp_runtime.c src/rtp_session.c src/stream_metrics.c src/rtp_sidecar.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd.c src/debug_osd_draw.c src/imu_bmi270.c src/audio_codec.c src/venc_jpeg.c src/venc_rec_writer.c src/venc_respawn.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_wire.c
 MARUKO_ONLY_SRC := src/maruko_mi.c src/maruko_config.c src/maruko_video.c src/maruko_controls.c src/maruko_output.c src/maruko_pipeline.c src/maruko_runtime.c src/maruko_iq.c src/maruko_cus3a.c src/maruko_ts_recorder.c src/maruko_recorder.c src/maruko_audio.c src/maruko_jpeg.c src/maruko_stabfill_probe.c src/maruko_ipu_yolo.c src/maruko_scl_ports.c
 STAR6E_ONLY_SRC := src/star6e_output.c src/star6e_audio.c src/star6e_hevc_rtp.c src/star6e_video.c src/star6e_pipeline.c src/star6e_controls.c src/star6e_runtime.c src/star6e_cus3a.c src/star6e_iq.c src/star6e_jpeg.c src/star6e_ipu.c src/star6e_ipu_yolo.c src/star6e_vpe_ports.c src/star6e_luma_tap.c src/star6e_awb.c
 # Shared recorder core: the state machine, the TS mux and the contiguous-AU
@@ -80,7 +93,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
 	src/venc_jpeg.c src/venc_rec_writer.c $(RECORDER_SRC) \
 	src/venc_recordings.c src/codec_config.c src/pipeline_common.c \
-	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c \
+	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c src/frame_gate.c \
 	src/framing_kalman.c src/attitude_est.c src/debug_osd.c \
 	src/debug_osd_draw.c lib/cJSON.c \
 	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
@@ -409,7 +422,9 @@ print-config:
 # ── Host-native unit tests (x86_64, no cross-compiler needed) ────────
 
 HOST_CC      := cc
-HOST_CFLAGS  := -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE \
+# _FILE_OFFSET_BITS=64 mirrors COMMON_CFLAGS: a no-op on x86_64, where off_t
+# is already 64-bit, but it keeps the tested ABI the same as the shipped one.
+HOST_CFLAGS  := -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
                 -Iinclude -Ilib -Itests -Itools/qr -Itools/qr/quirc \
                 $(QR_MATH_CFLAGS)
 TEST_RUNNER  := tests/test_runner
@@ -436,6 +451,7 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_backend.c \
                 tests/test_debug_osd.c \
                 tests/test_intra_refresh.c \
+                tests/test_frame_gate.c \
                 tests/test_venc_jpeg.c \
                 tests/test_mdns_beacon.c \
                 tests/test_framing_kalman.c \
@@ -452,14 +468,14 @@ TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
 TEST_LIB_SRCS := src/qr_scan.c tools/qr/waybeam_qr_format.c \
 	tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
 	tools/qr/quirc/identify.c tools/qr/quirc/version_db.c \
-	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/isp_runtime.c src/maruko_config.c src/maruko_video.c src/maruko_output.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/venc_rec_writer.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
+	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/frame_gate.c src/isp_runtime.c src/maruko_config.c src/maruko_video.c src/maruko_output.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/venc_rec_writer.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
 
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) tests/test_helpers.h include/backend.h include/venc_api.h include/h26x_param_sets.h include/hevc_rtp.h include/isp_runtime.h include/maruko_config.h include/pipeline_common.h include/rtp_packetizer.h include/rtp_session.h include/rtp_sidecar.h include/star6e_audio.h include/star6e_hevc_rtp.h include/star6e_output.h include/star6e_recorder.h include/star6e_ts_recorder.h include/ts_mux.h include/audio_ring.h include/star6e_video.h include/stream_metrics.h include/venc_frame_ring.h
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
 
 $(CV610_VALIDATION_TEST): tests/test_cv610_validation.c src/cv610_validation.c \
 		src/cv610_modes.c \
-		src/cv610_encoder_config.c src/intra_refresh.c \
+		src/cv610_encoder_config.c src/intra_refresh.c src/frame_gate.c \
 		src/venc_config.c src/codec_config.c lib/cJSON.c
 	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -lm -o $@
 

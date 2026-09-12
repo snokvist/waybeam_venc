@@ -394,6 +394,8 @@ static uint8_t star6e_scene_is_idr(const MI_VENC_Stream_t *s)
 }
 
 static void star6e_service_ring_low_water(Star6eOutput *output);
+static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
+	const FrameGate *g, uint32_t slot_count);
 
 /* Scene-detector IDR: goes through the shared 100 ms limiter, and a
  * coalesced request is not an error — another is already in flight.
@@ -529,7 +531,8 @@ static void mirror_record_sink(void *opaque, const uint8_t *au, size_t len,
 		(void)star6e_ts_recorder_write_video(&ps->ts_recorder, au, len,
 			pts_90khz, is_idr);
 	else
-		(void)star6e_recorder_write_au(&ps->recorder, au, len);
+		(void)star6e_recorder_write_au(&ps->recorder, au, len,
+			is_idr);
 }
 
 /* Initialised before anything can reach it.  This runs ahead of
@@ -821,23 +824,50 @@ static void record_status_callback(VencRecordStatus *out)
 			snprintf(out->format, sizeof(out->format), "hevc");
 			out->bytes_written = rec_snap.bytes_written;
 			out->frames_written = rec_snap.frames_written;
+			/* Meaningful since this recorder rotates: it read 0
+			 * while 16 segments were on disk, device-measured. */
+			out->segments = rec_snap.segments;
 			out->elapsed_ms = rec_snap.elapsed_ms;
 			snprintf(out->path, sizeof(out->path), "%s",
 				rec_snap.path);
 			snprintf(out->stop_reason, sizeof(out->stop_reason),
 				"none");
 		} else {
-			/* Either recorder may hold the reason; a manual stop on
-			 * one does not mask a disk-full on the other. */
+			/* Which recorder ran is decided by record.format, and
+			 * that field is MUT_RESTART -- so within one process only
+			 * ONE of these two can ever have recorded, and the other
+			 * snapshot is zeroed.  Select on the format.
+			 *
+			 * The previous rule ("take the TS reason unless it is
+			 * manual") guessed from a value that says nothing about
+			 * which session ended last: a TS write_error retained
+			 * from an earlier run would outrank a later, cleanly
+			 * stopped hevc recording and now, with the counters
+			 * following the reason, would name that older file's
+			 * path and byte count too. */
 			const char *reason = "manual";
-			Star6eRecorderStopReason sr = ts_snap.last_stop_reason;
+			const Star6eRecorderSnapshot *last =
+				(strcmp(g_runner_ctx->vcfg.record.format, "hevc") == 0) ? &rec_snap : &ts_snap;
+			Star6eRecorderStopReason sr = last->last_stop_reason;
 
-			if (sr == RECORDER_STOP_MANUAL)
-				sr = rec_snap.last_stop_reason;
 			if (sr == RECORDER_STOP_DISK_FULL)
 				reason = "disk_full";
 			else if (sr == RECORDER_STOP_WRITE_ERROR)
 				reason = "write_error";
+			else if (sr == RECORDER_STOP_SIZE_LIMIT)
+				reason = "size_limit";
+			/* Report what the finished recording produced, from the
+			 * same snapshot the reason came from.  This branch used
+			 * to leave them at zero, so a recorder that stopped on
+			 * its own answered {path:"", frames:0, bytes:0} -- the
+			 * operator lost both the file that was cut short and how
+			 * far it got, which is the whole diagnosis for any stop
+			 * that was not manual.  elapsed_ms stays out: the
+			 * snapshot zeroes it when inactive by contract. */
+			out->bytes_written = last->bytes_written;
+			out->frames_written = last->frames_written;
+			out->segments = last->segments;
+			snprintf(out->path, sizeof(out->path), "%s", last->path);
 			snprintf(out->stop_reason, sizeof(out->stop_reason),
 				"%s", reason);
 			snprintf(out->format, sizeof(out->format), "%s",
@@ -857,21 +887,6 @@ static int runtime_request_idr_on(int chn)
 {
 	idr_rate_limit_force(chn);
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
-}
-
-/* Segment rotation's request, as distinct from the bootstrap one above.
- * COALESCED, not forced: a periodic rotation is not a bootstrap event, and
- * forcing would also re-arm the rate limiter and swallow a scene-detector or
- * operator keyframe arriving in the next 100 ms.
- *
- * Returns 1 when the IDR was actually requested, 0 when the shared limiter
- * coalesced it away, -1 on SDK failure.  Callers servicing a rotation request
- * MUST re-queue on 0 -- see star6e_ts_recorder_requeue_idr_request(). */
-static int runtime_rotate_idr_on(int chn)
-{
-	if (!idr_rate_limit_allow(chn))
-		return 0;
-	return MI_VENC_RequestIdr(chn, 1) == 0 ? 1 : -1;
 }
 
 /* Mirror-mode recorder: the file is fed by the main channel. */
@@ -1107,14 +1122,6 @@ static void *dual_rec_thread_fn(void *arg)
 
 		MI_VENC_ReleaseStream(d->channel, &stream);
 
-		/* ch1 feeds this recorder, so ch1 is the channel to ask.  The
-		 * shared record-start path already learned this the hard way
-		 * (see the comment above runtime_request_idr_on's ch1 caller):
-		 * aimed at ch0 it keyframes the LIVE stream and the recording
-		 * still rotates on nothing. */
-		if (star6e_ts_recorder_take_idr_request(d->ts_recorder) &&
-		    runtime_rotate_idr_on(d->channel) == 0)
-			star6e_ts_recorder_requeue_idr_request(d->ts_recorder);
 		total_count++;
 
 		/* Backpressure signal: the pre-GetStream Query found >= 2
@@ -1265,6 +1272,18 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 	ps->output.request_idr = star6e_scene_request_idr;
 	ps->output.idr_ctx = &ps->venc_channel;
 
+	/* Adaptive frame gate.  Set up here, after star6e_output_init(), so the
+	 * ring exists and its slot_count can sanity-check the threshold. */
+	{
+		venc_frame_ring_fill_t gfill = {0};
+
+		(void)star6e_output_frame_ring_fill(&ps->output, &gfill);
+		star6e_report_frame_gate_setup(frame_gate_setup(&ps->frame_gate,
+			vcfg->video0.frame_gate_close_slots,
+			vcfg->video0.frame_gate_max_closed_ms, gfill.slot_count),
+			&ps->frame_gate, gfill.slot_count);
+	}
+
 	star6e_recorder_init(&ps->recorder);
 	audio_ring_init(&ps->audio_ring);
 	{
@@ -1284,10 +1303,19 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 		}
 		star6e_ts_recorder_init(&ps->ts_recorder, rate, ch, ts_codec);
 	}
-	if (vcfg->record.max_seconds > 0)
-		ps->ts_recorder.max_seconds = vcfg->record.max_seconds;
-	if (vcfg->record.max_mb > 0)
-		ps->ts_recorder.max_bytes = (uint64_t)vcfg->record.max_mb * 1024 * 1024;
+	/* Both recorders: the rotation thresholds are the operator's,
+	 * not the format's, and only one recorder is ever active. */
+	if (vcfg->record.max_seconds > 0) {
+		ps->ts_recorder.rot.max_seconds = vcfg->record.max_seconds;
+		ps->recorder.rot.max_seconds = vcfg->record.max_seconds;
+	}
+	if (vcfg->record.max_mb > 0) {
+		uint64_t max_bytes =
+			(uint64_t)vcfg->record.max_mb * 1024 * 1024;
+
+		ps->ts_recorder.rot.max_bytes = max_bytes;
+		ps->recorder.rot.max_bytes = max_bytes;
+	}
 
 	/* Both recorders now hold fd == -1, so record/status can no longer read
 	 * a calloc'd fd == 0 as an open file, and a stop can no longer close
@@ -1497,6 +1525,149 @@ static void star6e_service_ring_low_water(Star6eOutput *output)
 	}
 }
 
+/* Report what frame_gate_setup() made of the config.  The checks live in
+ * frame_gate.c so the two backends cannot drift; only the wording is local. */
+static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
+	const FrameGate *g, uint32_t slot_count)
+{
+	switch (st) {
+	case FRAME_GATE_SETUP_NO_RING:
+		/* Every other transport lacks a per-frame occupancy signal, so
+		 * the gate would never fire.  Say so once instead of looking
+		 * enabled and doing nothing. */
+		fprintf(stderr, "NOTE: frame gate inert — this output is not "
+			"frame-shm, so it has no occupancy signal\n");
+		return;
+	case FRAME_GATE_SETUP_CLOSE_TOO_HIGH:
+		fprintf(stderr, "WARNING: frameGateCloseSlots %u exceeds the "
+			"ring's %u slots; gate can never close\n",
+			(unsigned)g->cfg.close_slots, (unsigned)slot_count);
+		return;
+	case FRAME_GATE_SETUP_READY:
+		printf("> frame gate on: close>=%u open<=%u escape=%ums "
+			"ring=%u slots\n",
+			(unsigned)g->cfg.close_slots, (unsigned)g->cfg.open_slots,
+			(unsigned)(g->cfg.max_closed_us / 1000u),
+			(unsigned)slot_count);
+		return;
+	}
+}
+
+/* ── Adaptive frame gate ─────────────────────────────────────────────────
+ *
+ * Pauses ch0's frame intake while the frame-shm egress ring is not draining,
+ * and resumes it when the consumer catches up.  This is the IDR-free way to
+ * shed load: MI_VENC_SetChnAttr (the only proportional rate actuator) emits a
+ * keyframe of its own, so reacting to congestion with a bitrate write puts
+ * the largest frame in the stream into an already overflowing link.
+ * MI_VENC_StopRecvPic changes no encoder state at all — see
+ * include/frame_gate.h and documentation/ADAPTIVE_FRAME_GATE_PLAN.md.
+ *
+ * Called from two places in the stream loop: after a frame is sent (the
+ * normal path) and from the "no packets yet" idle branch (the reopen path).
+ * The second matters — while the gate is closed no frames are produced, so
+ * the post-send call never runs and the gate could never let go.  The idle
+ * branch already polls at ~1 ms, which is finer than any frame period we
+ * support, so no timer and no extra thread are needed. */
+static void star6e_service_frame_gate(Star6ePipelineState *ps)
+{
+	venc_frame_ring_fill_t fill;
+	uint64_t now_us;
+
+	if (!ps || !frame_gate_enabled(&ps->frame_gate))
+		return;
+
+	if (star6e_output_frame_ring_fill(&ps->output, &fill) != 0) {
+		/* The ring went away across a reinit.  Release the gate rather
+		 * than leaving the drain stopped with no occupancy signal that
+		 * could ever reopen it.  No SDK call: intake was never
+		 * stopped, only the drain. */
+		if (!frame_gate_is_open(&ps->frame_gate))
+			frame_gate_force_open(&ps->frame_gate,
+				wb_monotonic_us());
+		return;
+	}
+
+	now_us = wb_monotonic_us();
+
+	/* In mirror/off mode ch0 feeds the recorder as well as the stream
+	 * (dual/dual-stream put the recorder on ch1), so closing the gate
+	 * would punch holes in the SD file for what is a radio problem.
+	 * Suppress closes — but keep evaluating, so a gate already closed
+	 * when a recording starts still reopens normally. */
+	if (!ps->dual && frame_gate_is_open(&ps->frame_gate) &&
+	    star6e_record_wants_frame(&ps->ts_recorder, &ps->recorder))
+		return;
+
+	/* The policy flip IS the actuator, so the returned action needs no
+	 * handling here: process_stream() stops draining while the gate reads
+	 * closed and VENC's own output FIFO applies the backpressure.  Nothing
+	 * is issued to the SDK deliberately — MI_VENC_StopRecvPic/StartRecvPic
+	 * emit an IRAP on every resume, one per cycle on this board and ~4.6
+	 * per second against a real capacity-limited link, which is precisely
+	 * the keyframe this feature exists to avoid. */
+	(void)frame_gate_observe(&ps->frame_gate, fill.used_slots, now_us);
+}
+
+/* HTTP record start/stop, lifted so the gated drain path can service it
+ * too.  Maruko and CV610 already handle record flags at the top of their
+ * loops; on Star6E this block sat below the drain, so while the gate was
+ * closed a record command waited for the next escape pulse. */
+static void star6e_service_record_control(Star6ePipelineState *ps,
+	const VencConfig *vcfg)
+{
+	/* Check HTTP record control flags.
+	 *
+	 * Mirror mode: act on the ts_recorder / hevc recorder directly here.
+	 *
+	 * Dual mode (not dual-stream): forward the request to the dual
+	 * recording thread, which owns the ts_recorder exclusively.  This
+	 * keeps the recorder single-threaded; the dual thread acts on the
+	 * request between frame writes.
+	 *
+	 * Dual-stream mode: ch1 is sent over RTP, no on-disk recorder —
+	 * consume and ignore the flag.
+	 */
+	{
+		char rec_dir[256];
+		int start_pending = venc_api_get_record_start(rec_dir,
+			sizeof(rec_dir));
+		int stop_pending = venc_api_get_record_stop();
+
+		if (start_pending) {
+			if (ps->dual && !ps->dual->is_dual_stream) {
+				if (vcfg->audio.enabled)
+					ps->audio.rec_ring = &ps->audio_ring;
+				snprintf(ps->dual->rec_req_start_dir,
+					sizeof(ps->dual->rec_req_start_dir),
+					"%s", rec_dir);
+				/* Set start flag last so the dual thread sees the
+				 * dir already populated when it consumes the flag. */
+				ps->dual->rec_req_stop = 0;
+				ps->dual->rec_req_start = 1;
+			} else if (!ps->dual) {
+				/* Mirror mode: act directly on the recorders.
+				 * mirror_record_open() closes any live
+				 * recording first, joining its writer, so the
+				 * old file's queued tail cannot land in the new
+				 * one. */
+				mirror_record_open(ps, vcfg, rec_dir);
+			}
+			/* dual-stream: nothing to do */
+		}
+		if (stop_pending) {
+			if (ps->dual && !ps->dual->is_dual_stream) {
+				ps->audio.rec_ring = NULL;
+				ps->dual->rec_req_start = 0;
+				ps->dual->rec_req_stop = 1;
+			} else if (!ps->dual) {
+				mirror_record_close(ps, MIRROR_REC_STOP_GRACE_MS);
+			}
+			/* dual-stream: nothing to do */
+		}
+	}
+}
+
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter)
 {
@@ -1506,8 +1677,32 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	MI_VENC_Stream_t stream = {0};
 	int ret;
 
+	/* Gated: leave the encoded frame in VENC's output FIFO rather than
+	 * draining it.  The gate is still serviced every pass, off the egress
+	 * ring's own occupancy, so the reopen path never depends on draining. */
+	if (!frame_gate_is_open(&ps->frame_gate)) {
+		star6e_service_frame_gate(ps);
+		/* Keep publishing egress pressure while gated.  This is the
+		 * 200 ms low_water_slots export waybeam-link's rate model reads;
+		 * freezing it for the whole closed interval would hide exactly
+		 * the congestion that closed the gate. */
+		star6e_service_ring_low_water(&ps->output);
+		/* HTTP record start/stop must not wait for the gate to reopen;
+		 * with a dead consumer that is one escape pulse away.  Maruko
+		 * and CV610 already service record flags at the top of their
+		 * loops. */
+		star6e_service_record_control(ps, vcfg);
+		star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
+		idle_wait(&ps->video.sidecar, 1);
+		return 0;
+	}
+
 	ret = MI_VENC_Query(ps->venc_channel, &stat);
 	if (ret != 0) {
+		/* Also a reopen path: a Query that fails while the gate is
+		 * closed would otherwise never reach the curPacks branch, and
+		 * a gate that cannot reopen is a hung stream. */
+		star6e_service_frame_gate(ps);
 		if ((++(*idle_counter) % 60) == 0) {
 			printf("MI_VENC_Query failed %d\n", ret);
 			fflush(stdout);
@@ -1518,6 +1713,17 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	}
 
 	if (stat.curPacks == 0) {
+		/* Reopen path.  No frames are produced while the gate is
+		 * closed, so the post-send call below never runs and this is
+		 * the only place that can let go again. */
+		star6e_service_frame_gate(ps);
+		/* A closed gate is why there are no packets — say so instead of
+		 * reporting a stalled encoder, and do not count it as idle. */
+		if (!frame_gate_is_open(&ps->frame_gate)) {
+			star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
+			idle_wait(&ps->video.sidecar, 1);
+			return 0;
+		}
 		if ((++(*idle_counter) % 120) == 0) {
 			printf("waiting for encoder data...\n");
 			fflush(stdout);
@@ -1645,6 +1851,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * anyone is watching over HTTP) and costs two relaxed atomic
 		 * loads plus a compare per frame off frame-shm. */
 		star6e_service_ring_low_water(&ps->output);
+
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up
@@ -1723,21 +1930,18 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * spread past a full frame period at 120 fps. */
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
 
-	/* Rotation asked for a keyframe.  Serviced HERE, after the release, so
-	 * the SDK call never lands inside the GetStream/ReleaseStream window,
-	 * and aimed at the channel that actually feeds this file.  Dual mode
-	 * services its own recorder on the ch1 thread instead. */
-	if (!ps->dual &&
-	    star6e_ts_recorder_take_idr_request(&ps->ts_recorder) &&
-	    runtime_rotate_idr_on(ps->venc_channel) == 0)
-		star6e_ts_recorder_requeue_idr_request(&ps->ts_recorder);
+	/* Evaluate the gate after ReleaseStream, so a close takes effect from
+	 * the next drain rather than stranding an acquired stream.  The helper
+	 * takes a fresh instantaneous ring reading, so this placement does not
+	 * weaken the burst response. */
+	star6e_service_frame_gate(ps);
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and
 	 * the gate above would go on queueing into a dead writer indefinitely.
 	 *
-	 * AFTER the release, for the same reason the IDR request above is:
-	 * inside the GetStream/ReleaseStream window this would hold the
+	 * AFTER the release, because inside the GetStream/ReleaseStream window
+	 * this would hold the
 	 * encoder's output slot and stall the LIVE stream — precisely the
 	 * coupling the writer thread exists to remove.  Since 0.73.2 the stop
 	 * itself no longer ends in an unbounded join: past its deadline the
@@ -1748,56 +1952,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	    !star6e_record_wants_frame(&ps->ts_recorder, &ps->recorder))
 		mirror_record_close(ps, MIRROR_REC_STOP_GRACE_MS);
 
-	/* Check HTTP record control flags.
-	 *
-	 * Mirror mode: act on the ts_recorder / hevc recorder directly here.
-	 *
-	 * Dual mode (not dual-stream): forward the request to the dual
-	 * recording thread, which owns the ts_recorder exclusively.  This
-	 * keeps the recorder single-threaded; the dual thread acts on the
-	 * request between frame writes.
-	 *
-	 * Dual-stream mode: ch1 is sent over RTP, no on-disk recorder —
-	 * consume and ignore the flag.
-	 */
-	{
-		char rec_dir[256];
-		int start_pending = venc_api_get_record_start(rec_dir,
-			sizeof(rec_dir));
-		int stop_pending = venc_api_get_record_stop();
-
-		if (start_pending) {
-			if (ps->dual && !ps->dual->is_dual_stream) {
-				if (vcfg->audio.enabled)
-					ps->audio.rec_ring = &ps->audio_ring;
-				snprintf(ps->dual->rec_req_start_dir,
-					sizeof(ps->dual->rec_req_start_dir),
-					"%s", rec_dir);
-				/* Set start flag last so the dual thread sees the
-				 * dir already populated when it consumes the flag. */
-				ps->dual->rec_req_stop = 0;
-				ps->dual->rec_req_start = 1;
-			} else if (!ps->dual) {
-				/* Mirror mode: act directly on the recorders.
-				 * mirror_record_open() closes any live
-				 * recording first, joining its writer, so the
-				 * old file's queued tail cannot land in the new
-				 * one. */
-				mirror_record_open(ps, vcfg, rec_dir);
-			}
-			/* dual-stream: nothing to do */
-		}
-		if (stop_pending) {
-			if (ps->dual && !ps->dual->is_dual_stream) {
-				ps->audio.rec_ring = NULL;
-				ps->dual->rec_req_start = 0;
-				ps->dual->rec_req_stop = 1;
-			} else if (!ps->dual) {
-				mirror_record_close(ps, MIRROR_REC_STOP_GRACE_MS);
-			}
-			/* dual-stream: nothing to do */
-		}
-	}
+	star6e_service_record_control(ps, vcfg);
 
 	if (vcfg->system.verbose && ps->imu) {
 		struct timespec imu_now;

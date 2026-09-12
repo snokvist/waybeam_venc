@@ -84,8 +84,8 @@ Status response:
 | `mode` | string | `"mirror"` | Recording mode (see Gemini Mode below) |
 | `dir` | string | `"/mnt/mmcblk0p1"` | Output directory (must exist and be writable) |
 | `format` | string | `"ts"` | `"ts"` (MPEG-TS with audio) or `"hevc"` (raw NAL stream) |
-| `maxSeconds` | uint | `300` | Rotate to new file after this many seconds (0 = no time limit) |
-| `maxMB` | uint | `500` | Rotate to new file after this many MB (0 = no size limit) |
+| `maxSeconds` | uint | `300` | Rotate to new file after this many seconds (0 = keep the built-in 300) |
+| `maxMB` | uint | `500` | Rotate to new file after this many MB (0 = keep the built-in 500) |
 | `bitrate` | uint | `0` | Dual mode: ch1 bitrate in kbps (0 = same as video0) |
 | `fps` | uint | `0` | Dual mode: ch1 fps (0 = sensor max) |
 | `gopSize` | double | `0` | Dual mode: ch1 GOP in seconds (0 = same as video0) |
@@ -183,18 +183,68 @@ frame rates.
 
 ## File Rotation
 
+Rotation applies to **both** formats. `format: "hevc"` rotates on the same
+thresholds and the same IRAP boundary as `ts`; the only difference is what a
+segment is — a `.ts` with fresh PAT/PMT, or a `.hevc` elementary stream, which
+needs no header of its own because every IRAP access unit carries its own
+VPS/SPS/PPS.
+
 When `maxSeconds` or `maxMB` thresholds are reached, the recorder:
 
-1. Waits for the next IDR (keyframe) boundary
+1. Waits for the next point a decoder can start from — an IRAP, or the
+   parameter sets that head a refresh wave (see below). It never asks the
+   encoder to produce one.
 2. Closes and fsyncs the current segment
-3. Opens a new `.ts` file with fresh PAT/PMT
-4. Resets continuity counters (each segment is self-contained)
+3. Opens the next file — a `.ts` with fresh PAT/PMT, or a `.hevc` elementary
+   stream, which needs no header of its own because the cut point carries the
+   parameter sets in-band
+4. Resets continuity counters (each `.ts` segment is self-contained)
 
-File naming: `rec_<HH>h<MM>m<SS>s_<rand>.ts` based on system uptime.
+File naming: `rec_<HH>h<MM>m<SS>s_<rand>.ts` (or `.hevc`) based on system
+uptime. Each rotation draws a fresh name.
 
-Both `maxSeconds` and `maxMB` can be active simultaneously. Set either to `0`
-to disable that dimension. Setting both to `0` produces a single file until
-manually stopped or disk full.
+Both `maxSeconds` and `maxMB` can be active simultaneously, and rotation
+happens on whichever is reached first.
+
+`0` does **not** disable a dimension. The runtime only overrides the
+recorder's built-in threshold when the configured value is greater than zero,
+so `maxSeconds: 0` records 300-second segments and `maxMB: 0` records 500 MB
+ones -- the compiled-in defaults. There is no "single file until stopped"
+setting; to approximate one, set the thresholds high rather than to zero.
+
+A segment must open somewhere a decoder can start, so a crossed threshold
+makes rotation *due* and the next such point is where the cut lands. Two
+kinds qualify, and the encoder produces one or the other without being asked:
+
+- an **IRAP** (`IDR_W_RADL` / `IDR_N_LP`), on a keyframing stream;
+- a **parameter-set boundary** (VPS/SPS/PPS), which an intra-refresh stream
+  (`resilience=racing`/`range`) emits once per GOP at the head of a refresh
+  wave. A raw `.hevc` has no container to hold codec config, so this is also
+  the only place such a segment can begin and still decode. The picture
+  converges over one refresh wave — the same thing the ground does on every
+  tune-in.
+
+**Rotation never asks the encoder for a keyframe.** An IDR is a large frame,
+and manufacturing one per segment raises the bitrate the link has to carry —
+on an intra-refresh craft that undoes exactly what the mode is for, and in
+`record.mode=mirror` the recorder taps the live channel, so the spike would go
+out over the air for the benefit of a file.
+
+A consequence worth planning around: on an intra-refresh craft the cut point
+arrives once per GOP, so **segment granularity is one GOP**. With
+`gopSize: 2.0` a `maxMB` far below one GOP of data still yields ~2 s segments;
+the threshold decides *whether* to rotate, the wave head decides *when*.
+Measured on Star6E (`resilience=racing`, `gopSize 2.0`, 100 fps, `maxMB=2`):
+10 segments in 20 s, each opening `VPS, SPS, PPS` and containing exactly 1206
+slice NALs — 201 frames x 6 slices, one wave — and **zero** IRAPs.
+
+If a stream produces neither kind of point, rotation waits rather than forcing
+one, and logs that it is waiting so the situation is visible instead of silent.
+
+Segment size is additionally capped by the largest offset the binary can
+write. That is unlimited on every shipped target (all of them are built with
+64-bit `off_t`), and the cap only becomes visible on a build that lost
+`-D_FILE_OFFSET_BITS=64`, where it is 2 GB.
 
 ## Disk Safety
 
@@ -205,6 +255,13 @@ manually stopped or disk full.
 - **Periodic fsync**: `fdatasync()` every 900 frames (~30s at 30fps) to flush
   kernel buffers to SD card.
 - **Short write handling**: the write loop retries on partial writes and EINTR.
+
+`stop_reason` values: `none` (recording), `manual`, `disk_full`,
+`size_limit` (a file-size ceiling, not a fault -- the file is intact and
+closed on a frame boundary), and `write_error` (an I/O failure). When a
+recording stops on its own, the status keeps the path, byte count, frame
+count and segment count of the recording that ended, so `GET
+/api/v1/record/status` still names the file that was cut short.
 
 ## Concurrent Streaming + Recording
 

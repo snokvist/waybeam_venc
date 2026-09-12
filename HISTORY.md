@@ -1,5 +1,247 @@
 # History
 
+## [0.85.0] - 2026-09-12
+
+An IDR-free way to shed load. `contract_version` **0.31.0 -> 0.32.0**: the
+`video0.frameGate` switch is removed (so `/api/v1/set` now rejects it and
+`/api/v1/config` no longer carries it), and `/api/v1/transport/status` gains
+four `gate*` fields on frame-shm outputs. Two restart-required `video0` fields
+remain.
+
+**Device-verified on all three backends and over a real RF link.** Star6E
+(SSC338Q, 720p100, `resilience=racing`), Maruko (ssc378qe, 1080p30) and CV610
+(IMX662, 720p100), each with proven stall cycles; then `.232` transmitting to
+an x86 ground that latched and claimed the craft, with the link's MCS pinned
+and its bitrate controller disabled so the offered rate genuinely exceeded
+what the radio could carry.
+
+- **Adaptive frame gate, always on for frame-shm outputs.** While the egress
+  ring is backed up the backend stops draining the encoder's output FIFO, and
+  resumes when the consumer catches up. **No SDK call is made in either
+  direction**, and that is the whole design.
+- **Pausing intake instead emits a keyframe on every resume.** Measured, one
+  IRAP picture per reopen on Star6E (`MI_VENC_StopRecvPic`/`StartRecvPic`),
+  three on Maruko, and 0.6 on CV610 (`ss_mpi_venc_stop_chn`/`start_chn`) —
+  against a natural background of about one per 40 s. On a real
+  capacity-limited link it reached **~4.6 keyframes per second**, which is the
+  craft firing its largest frame into a saturated radio several times a
+  second: the exact pathology the feature exists to prevent. Letting the FIFO
+  backpressure instead measured **zero** induced keyframes on every backend
+  and on the live link.
+- **The gate is observable.** `/api/v1/transport/status` reports `gateClosed`,
+  `gateCloseEvents`, `gateEscapeEvents` and `gateClosedMs` on frame-shm
+  outputs. Without them "cycling normally under load", "escape firing against
+  a dead consumer" and "stream stopped" are indistinguishable from outside;
+  `gateEscapeEvents` climbing on its own is the dead-consumer signature.
+- **There is no enable switch.** `video0.frameGate` is gone. The gate arms
+  itself whenever the output is a frame ring, because the ring is the
+  occupancy signal it runs on and no other transport has one. Only
+  `frameGateCloseSlots` and `frameGateMaxClosedMs` remain.
+- **It trades latency for continuity, and that is visible.** Nothing is
+  dropped while gated — frames accumulate in VENC's output FIFO — so the image
+  stays clean and continuous but runs several hundred ms behind on a heavily
+  oversubscribed link (operator-confirmed). Attributed: the delay is the
+  encoder's bitstream buffer depth times the consumer's frame period — a
+  near-constant ~5.2 consumer-frame-intervals, 4.1 ms ungated, 170 ms at a
+  30 fps drain, 538 ms at 10 fps, of which the ring holds only 1.5 frames.
+  The encoder's bitstream buffer is now capped at 2 frames
+  (`FRAME_GATE_STREAM_BUF_FRAMES`, SDK default 3), which takes a 10 fps drain
+  from 534 to 436 ms. It is continuity-safe because the SDK drops the pending
+  image *before* encoding, and 2 rather than 1 keeps one slot of tolerance for
+  a consumer that stalls — mirror-mode recordings share the channel. Verified
+  on an SD card: 128 s at 100.0 fps, 0 dropped frames, writer never backed up,
+  and the file decodes with zero errors.
+- **Under partial congestion it settles at the link rate.** Against a
+  rate-limited consumer the delivered rate tracked 20, 40, 60 and 80 fps with
+  a spread of at most one frame per second, holding the ring at ~1.5 of 8
+  slots — graceful degradation with no queueing latency, not 0/100 judder.
+- **The safety escape needed a dwell to work at all.** It reopened while
+  occupancy was still above the close threshold, so the next observation —
+  1 ms later on Star6E, against a 10 ms frame period — closed again before the
+  admitted frame could exist. A dead consumer therefore stopped the stream
+  with *every drop counter at zero*. `FRAME_GATE_MIN_OPEN_US` holds the escape
+  pulse open for 20 ms, and only the pulse, so burst response is unchanged:
+  `transportDrops` now climbs instead of the stream going quiet.
+- **A bitrate write is the only proportional rate actuator on SigmaStar and
+  `MI_VENC_SetChnAttr` keyframes on its own** (measured on SSC338Q: ten spaced
+  `video0.bitrate` writes, eleven IRAP access units), so the standard response
+  to congestion injects the largest frame in the stream into the link that is
+  already overflowing. The gate changes no encoder state at all, so ROI keeps
+  its relative QP gradient and CBR keeps its contract.
+- **No IDR-free proportional QP lever exists to substitute**, which is why
+  this is a gate and not a rate write: `qpDelta` writes `s32IPQPDelta` and
+  only redistributes bits between I and P, and `min_qp` abandons CBR at a
+  cliff (19.58 Mbps -> 0.63 between 20 and 24 on the README bench) rather than
+  scaling.
+- **Signal is the instantaneous per-frame ring occupancy, not the published
+  `low_water_slots`** — that is a 200 ms window, right for waybeam-link's rate
+  model and far too slow to catch a burst. The existing per-frame ring read in
+  the stream loop already owns the VENC channel, so the gate needs no poller
+  and no extra thread. The 200 ms export is unchanged; rate policy still lives
+  in waybeam-link and the gate only covers the transients between its
+  decisions.
+- **Hysteresis is closed-biased:** close at `>= 3` slots, reopen at `<= 1`
+  (pinned — the ring's healthy idle occupancy is one frame, not zero) after a
+  20 ms debounce, with a `frameGateMaxClosedMs` safety escape (default 500 ms)
+  so a dead consumer cannot stop the stream for good. On escape the ring
+  overflows and reports `full_drops`, which is diagnosable; a silently stopped
+  stream is not.
+- **Mirror-mode recordings are protected.** Where the recorder shares ch0,
+  closes are suppressed while a recording is actually running, so congestion
+  never punches holes in the SD file. Reopens are never suppressed.
+  `dual`/`dual-stream` put the recorder on ch1 and are unaffected. (The plan
+  called for refusing the gate outright in mirror mode; `mirror` turned out to
+  be the *default* record mode, which would have made the feature unreachable.)
+- **Maruko needed two guards Star6E did not.** Its idle path aborts the stream
+  loop after 20 s without encoder data and warns at 1 s — a closed gate looks
+  exactly like a stalled encoder — so both are suppressed while gated. And its
+  fd wait polls at 1 s, which would have become the reopen latency; that drops
+  to 2 ms while closed.
+- **Two SDK routes were tried and measured dead**, and are not shipped:
+  `MI_VENC_EnableIdr(false)` does not suppress the resume keyframe (12 IRAP
+  NALs with it on, 12 with it off), and `MI_VENC_SetFrameLostStrategy` is
+  inert on both SigmaStar boards — a 1 kbit/s threshold against a live
+  7 Mbit/s stream changed nothing, and Maruko returns success while doing
+  nothing.
+- `src/frame_gate.c` is a pure state machine with no SDK types, unit-tested on
+  the host like `src/intra_refresh.c`, and it now also owns the actuator so
+  the three backends cannot drift.
+- **All three backends.** CV610 uses `ss_mpi_venc_stop_chn` /
+  `ss_mpi_venc_start_chn(recv_pic_num=-1)` — the same primitive the SigmaStar
+  backends reach as `MI_VENC_Stop/StartRecvPic`, and exactly what the `ldy_sky`
+  vendor streamer does on the same silicon. Its `select()` wait drops from 1 s
+  to 2 ms while gated for the same reason Maruko's poll does. CV610 records in
+  mirror mode only, so the recorder always shares the gated channel and the
+  close-suppression always applies there.
+- **CV610 is linked and confirmed on device.** Hardware verification found and
+  fixed an initialization-order defect: gate setup ran before
+  `cv610_output_start()` created the frame ring, so every frame-shm gate was
+  incorrectly declared inert. Setup now runs immediately after output creation.
+
+## [0.84.0] - 2026-09-06
+
+`record.format="hevc"` now rotates, and **neither recorder forces a keyframe
+to do it any more**. `contract_version` moves to **0.31.0**: `segments` is
+meaningful on the raw path for the first time.
+
+- **The raw recorder ignored `maxSeconds` and `maxMB` entirely.** It had no
+  rotation code at all — no segment counter, no threshold check, no second
+  `open()` — so a raw recording was one file that grew until the card filled,
+  silently. It is also why the "lower `maxMB`" workaround for the 2 GB ceiling
+  did not generalise: on that path there was no threshold to lower.
+- **Rotation no longer requests an IDR, on either recorder.** Since 0.70.0 the
+  TS recorder asked the encoder for a keyframe when a threshold was crossed
+  and none was coming. That works, but an IDR is a large frame and one per
+  segment raises the bitrate the link must carry — on an intra-refresh craft
+  it undoes precisely what the mode exists for, and under
+  `record.mode=mirror` the recorder taps the live channel, so the spike went
+  out over the air for the benefit of a file. The whole ask — the pacing, the
+  bound, the `take`/`requeue` hand-off at six sites across three backends — is
+  deleted.
+- **A segment now opens on a point the stream already produces:** an IRAP
+  where one exists, or the VPS/SPS/PPS that head each refresh wave under
+  intra-refresh. Both cases are measured on Star6E, not assumed. At
+  `resilience=off`, 601 frames: 4 parameter-set groups, 4 IRAP access units,
+  and **0/4** groups detached from an IDR — so normal GOP recording still cuts
+  on its IRAP, which is where it has to cut. At `resilience=racing`, 800
+  frames: ONE IRAP at startup and never again, with parameter sets every ~200
+  frames decoupled from it — so there the wave head is the only point that
+  ever arrives.
+- **Segment granularity on an intra-refresh craft is one GOP.** The threshold
+  decides whether to rotate; the wave head decides when. Verified on Star6E
+  (`gopSize 2.0`, 100 fps, `maxMB=2`): 10 segments in 20 s, each opening
+  `VPS, SPS, PPS`, each holding exactly 1206 slice NALs (201 frames x 6
+  slices = one wave), and **zero IRAPs in any of them**.
+- **The rotation policy is shared rather than copied.** `RecorderRotation` in
+  `star6e_recorder.h` holds the decision once; each recorder supplies only its
+  own open/close, which is the only place they differ.
+- **`segments` is reported for `hevc`.** The three backends disagreed: two
+  left it `0` while segments were on disk, and Maruko hardcoded `1`.
+- **Maruko's own writer rotates too.** `maruko_recorder_write_frame()` — the
+  dual and synchronous-fallback path on that backend — bypassed the rotation
+  policy entirely, so `format="hevc"` there would still have grown one
+  unbounded file. It now takes the same shared cut, and Maruko's TS adapter
+  accepts parameter-set boundaries as well, without which rotation stayed
+  inert on an intra-refresh craft there.
+- **A rotation can no longer overwrite an existing recording.** The segment
+  name carries only uptime seconds plus 16 bits from the nanosecond clock, and
+  after a reboot the uptime restarts — so a name can repeat. Opening with
+  `O_TRUNC` destroyed whatever was there; segments now open `O_EXCL` and retry
+  with a fresh name, at start as well as on rotation. Rotation multiplied the
+  exposure, since it is now one name per segment rather than one per
+  recording.
+- **A rotation that cannot reopen because the card filled now reports
+  `disk_full`.** The space check only runs every 300 frames, so a card that
+  fills in between surfaces as `ENOSPC` from the segment `open()`; it was
+  reported as a write error, sending the operator after the media instead of
+  the space.
+- **Maruko's raw recorder clears its own producer gate when it stops itself.**
+  A disk-full or write-error stop closed the file but left `recording` set, so
+  the status reported that recording as active indefinitely, naming a file
+  nothing was being written to.
+- **A segment that fails to finalise is no longer reported as a clean
+  rotation.** `fdatasync()` and `close()` results were discarded, so a delayed
+  write surfacing at the end of a segment left a possibly short file and no
+  indication of it. Both are checked; a failure stops the recorder the same
+  way a failed reopen does.
+- If a stream produces neither cut point, rotation waits rather than forcing
+  anything, and says so once instead of growing the file in silence.
+
+## [0.83.0] - 2026-09-06
+
+Recording no longer stops at 2 GB. The ceiling was in the binary, not the
+card: a 32-bit `off_t` build refuses any write past 2^31-1 with `EFBIG`
+whatever the filesystem allows. `contract_version` moves to **0.30.0** — the
+`stop_reason` enum gains `"size_limit"` and the inactive record status now
+carries the counters of the recording that ended.
+
+- **Built with `-D_FILE_OFFSET_BITS=64`.** Without it, glibc leaves `off_t`
+  32-bit and `open()` does not set `O_LARGEFILE`, so the kernel caps every
+  recording at 2147483647 bytes — reported on SSC338Q as a recording dying at
+  exactly that count on exFAT, which has no such limit of its own. It also
+  fixes `stat()`/`fstat()`, which returned `EOVERFLOW` for a file over 2 GB
+  and would have hidden such a recording from `/api/v1/recordings` and its
+  download even once the write succeeded. musl targets (Maruko, CV610) were
+  never affected — they are 64-bit `off_t` and force `O_LARGEFILE` regardless
+  — and are unchanged by the flag. **A CFLAGS change does not invalidate
+  objects: this needs a clean build.**
+- **Segment rotation is bounded by what `off_t` can reach.** A configured
+  `record.maxMB` above the ceiling now produces more segments instead of a
+  dead recorder. Inert on every shipped target.
+- **A segment that cannot be cut stops cleanly.** Rotation can only happen on
+  an IRAP and the IDR request is bounded, so a GDR stream can carry a segment
+  past any threshold. Rather than walk into an `EFBIG` that truncates
+  mid-access-unit, the recorder now stops on the frame boundary with the file
+  intact and reports `stop_reason: "size_limit"`.
+- **`EFBIG` is no longer reported as `"write_error"`.** All three recorders
+  name it, and the raw (`format: "hevc"`) recorder says in the log that it
+  does not rotate. Calling a size ceiling a write error sent the original
+  report looking at the SD card.
+- **The record status keeps its counters after a self-stop.** `GET
+  /api/v1/record/status` answered `{"path":"","frames":0,"bytes":0}` for any
+  stop the recorder made on its own — losing both the file that was cut short
+  and how far it got, which is the whole diagnosis. It now reports the path,
+  bytes, frames and segments of the recording that ended, taken from the
+  recorder `record.format` selects. The previous rule picked between the two
+  recorders by asking whether the TS one had stopped manually, which says
+  nothing about which session ended last: a retained `write_error` from an
+  earlier run would have outranked a later, cleanly stopped recording — and
+  with the counters now following the reason, named that older file too.
+- **A write that fails part-way through an access unit is rolled back.** The
+  TS recorder had no equivalent of the raw recorder's truncate-to-frame-
+  boundary, so a ceiling below the `off_t` one — FAT32 stops at 4 GB — left a
+  half-written access unit at the end of the file. Measured on an unpatched
+  build: the recorder's own counter stopped at 2147464968 while the file on
+  disk was 2147483647, so 18679 bytes of partial AU stayed behind. The file
+  now ends on a whole number of TS packets, which is what `size_limit`
+  claiming an intact file requires.
+- **Docs: `maxSeconds`/`maxMB` of `0` never meant "no limit".** The runtime
+  overrides its compiled-in threshold only when the value is greater than
+  zero, so `0` records 300-second / 500 MB segments. `documentation/
+  SD_CARD_RECORDING.md` said the opposite. It now also states that rotation
+  is `format: "ts"` only — `"hevc"` ignores both thresholds, which is tracked
+  separately.
+
 ## [0.82.0] - 2026-09-06
 
 A destination that cannot be brought up no longer destroys a working output,

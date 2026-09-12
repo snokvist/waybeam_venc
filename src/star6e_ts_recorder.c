@@ -10,6 +10,8 @@
 #include "star6e_output.h"
 #endif
 
+#include "h26x_util.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -18,6 +20,15 @@
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
+
+/* TS packet buffer — sized for worst case:
+ * PAT/PMT (2 × 188) + video (128KB → ~713 packets × 188) +
+ * audio (~8 frames × 5 packets × 188) = ~142KB.
+ * Round up to 800 packets for margin. */
+/* 512KB video = ~2783 TS packets + PAT/PMT + audio = ~2900 packets */
+/* Declared here rather than above its only consumer because check_rotation()
+ * reserves one buffer of headroom below the off_t ceiling. */
+#define TS_BUF_SIZE (3000 * TS_PACKET_SIZE)
 
 /* ── Helpers (shared patterns from star6e_recorder.c) ────────────────── */
 
@@ -92,6 +103,8 @@ static const char *stop_reason_str(Star6eRecorderStopReason reason)
 		return "disk full";
 	if (reason == RECORDER_STOP_WRITE_ERROR)
 		return "write error";
+	if (reason == RECORDER_STOP_SIZE_LIMIT)
+		return "size limit";
 	return "manual";
 }
 
@@ -108,9 +121,6 @@ static void stop_with_reason(Star6eTsRecorderState *state,
 	ts_status_lock(state);
 	__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
 	ts_status_unlock(state);
-	/* Drop any rotation ask still in flight; the recording it was for is
-	 * ending, and a re-queued one would otherwise fire into the next. */
-	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
 	if (state->fd < 0)
 		return;
 
@@ -136,8 +146,10 @@ void star6e_ts_recorder_init(Star6eTsRecorderState *state,
 	memset(state, 0, sizeof(*state));
 	state->fd = -1;
 	state->sync_interval_frames = RECORDER_SYNC_DEFAULT_FRAMES;
-	state->max_seconds = TS_RECORDER_DEFAULT_MAX_SECONDS;
-	state->max_bytes = TS_RECORDER_DEFAULT_MAX_BYTES;
+	state->rot.max_seconds = TS_RECORDER_DEFAULT_MAX_SECONDS;
+	state->rot.max_bytes = TS_RECORDER_DEFAULT_MAX_BYTES;
+	/* One muxed frame is the most this recorder writes in one call. */
+	state->rot.write_headroom = TS_BUF_SIZE;
 	ts_mux_init(&state->mux, audio_rate, audio_channels, audio_codec);
 	if (pthread_mutex_init(&state->status_lock, NULL) == 0)
 		state->status_lock_ready = 1;
@@ -157,12 +169,38 @@ static int open_new_segment(Star6eTsRecorderState *state)
 	 * below must not run under the lock anyway. */
 	build_ts_path(newpath, sizeof(newpath), state->dir, &state->mux);
 
-	state->fd = open(newpath,
-		O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-	if (state->fd < 0) {
-		fprintf(stderr, "[ts_recorder] open %s failed: %s\n",
-			newpath, strerror(errno));
-		return -1;
+	/* O_EXCL, not O_TRUNC: the name carries only uptime seconds plus 16 bits
+	 * from the nanosecond clock, and after a reboot the uptime restarts, so
+	 * it can reproduce a name an earlier session left behind.  Truncating
+	 * would silently destroy that recording.  Retry with a fresh name. */
+	{
+		int attempt;
+
+		for (attempt = 0; attempt < 8; attempt++) {
+			state->fd = open(newpath,
+				O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+			if (state->fd >= 0)
+				break;
+			if (errno != EEXIST) {
+				int saved_errno = errno;
+
+				fprintf(stderr,
+					"[ts_recorder] open %s failed: %s\n",
+					newpath, strerror(saved_errno));
+				/* fprintf may clobber errno and the caller
+				 * classifies the stop on it. */
+				errno = saved_errno;
+				return -1;
+			}
+			build_ts_path(newpath, sizeof(newpath), state->dir,
+				&state->mux);
+		}
+		if (state->fd < 0) {
+			fprintf(stderr,
+				"[ts_recorder] could not find an unused segment "
+				"name in %s\n", state->dir);
+			return -1;
+		}
 	}
 
 	/* Reset CCs and set discontinuity for segment-independent playback */
@@ -180,10 +218,9 @@ static int open_new_segment(Star6eTsRecorderState *state)
 			return -1;
 		}
 		pat_bytes = (uint64_t)ret;
-		state->segment_bytes = pat_bytes;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &state->segment_start_time);
+	recorder_rotation_segment_opened(&state->rot, pat_bytes);
 
 	/* ONE publish: path, segment count and byte total change together, so
 	 * a poll mid-rotation cannot report the new file with the old count. */
@@ -227,14 +264,11 @@ int star6e_ts_recorder_start(Star6eTsRecorderState *state, const char *dir,
 	state->frames_since_sync = 0;
 	state->space_check_countdown = RECORDER_SPACE_CHECK_INTERVAL;
 	state->last_stop_reason = RECORDER_STOP_MANUAL;
-	state->segment_bytes = 0;
-	/* Part of the per-recording reset like everything above it: a stop and
-	 * restart inside the same second must not inherit the old recording's
-	 * pacing anchor and suppress the new one's first rotation request. */
-	state->idr_request_last_sec = 0;
-	state->idr_requests_unanswered = 0;
-	state->rotation_due_since = 0;
-	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
+	state->rot.segment_bytes = 0;
+	/* Part of the per-recording reset: a restart must not inherit the old
+	 * recording's "threshold has been crossed since" anchor. */
+	state->rot.rotation_due_since = 0;
+	state->rot.warned_no_cut_point = 0;
 	clock_gettime(CLOCK_MONOTONIC, &state->start_time);
 	ts_status_unlock(state);
 
@@ -272,96 +306,76 @@ static int check_disk_space(Star6eTsRecorderState *state)
 	return 0;
 }
 
-static int check_rotation(Star6eTsRecorderState *state, int is_idr)
+/* Can a new segment open on this access unit?  An IRAP, or the parameter sets
+ * that head a refresh wave -- see RecorderRotation.
+ *
+ * Scans every NAL, not just the first: the SDK-pack scanners do, and an access
+ * unit may legitimately lead with an AUD or a prefix SEI before its VPS.
+ * Checking only the leading NAL would make rotation inert on any backend whose
+ * flattened access unit is shaped that way. */
+static int au_has_cut_point(const uint8_t *au, size_t len)
 {
-	struct timespec now;
-	unsigned long elapsed;
-	int should_rotate = 0;
+	size_t cursor = 0;
+	const uint8_t *nal;
+	size_t nal_len;
 
-	/* Check time-based rotation */
-	if (state->max_seconds > 0) {
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		elapsed = (unsigned long)(now.tv_sec - state->segment_start_time.tv_sec);
-		if (elapsed >= state->max_seconds)
-			should_rotate = 1;
+	if (!au)
+		return 0;
+	while (h26x_util_annexb_next(au, len, &cursor, &nal, &nal_len)) {
+		if (recorder_nal_is_cut_point(
+			    (unsigned int)h26x_util_hevc_nalu_type(nal, nal_len)))
+			return 1;
 	}
+	return 0;
+}
 
-	/* Check size-based rotation */
-	if (state->max_bytes > 0 && state->segment_bytes >= state->max_bytes)
-		should_rotate = 1;
-
-	if (!should_rotate)
+static int check_rotation(Star6eTsRecorderState *state, int is_cut_point)
+{
+	/* The WHEN lives in recorder_rotation_due() -- thresholds and the
+	 * boundary a segment may open on -- shared with the raw recorder.  What
+	 * stays here is the WHAT: a .ts segment is cut with fdatasync/close and
+	 * opened with fresh PAT/PMT. */
+	if (!recorder_rotation_due(&state->rot, is_cut_point))
 		return 0;
 
-	/* A segment has to OPEN on an IRAP or it decodes from nothing, so the
-	 * cut can only happen on one.  The original code enforced that by
-	 * returning early on !is_idr — correct, but it silently assumed the
-	 * stream produces IDRs on its own.  A GDR craft (resilience=racing)
-	 * never does: device-measured on CV610, max_seconds=15 yielded ONE
-	 * segment after 50 s under racing and THREE under resilience=off.
-	 * max_seconds/max_mb were simply inert, and the file grew unbounded.
-	 *
-	 * So ask for one instead of waiting for one that is never coming, and
-	 * rotate on the IDR that answers.  Rate-limited to one request per
-	 * second: the threshold stays crossed until the cut actually happens,
-	 * and this must not become a per-frame IDR request — that would be the
-	 * automatic keyframing 0.69.0 removed, reintroduced through the back
-	 * door.  This is operator-configured rotation, not a congestion
-	 * response, and it is the only thing that asks. */
-	if (!is_idr) {
-		/* Bounded: an unanswered ask degrades back to waiting for a
-		 * natural keyframe rather than becoming a permanent 1 Hz
-		 * keyframe tax on the live link. */
-		if (state->idr_requests_unanswered >= TS_RECORDER_MAX_IDR_REQUESTS)
-			return 0;
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		/* Give a keyframing stream a chance to rotate on its own before
-		 * asking for anything.  Costs at most one second of overshoot
-		 * on a GDR craft; saves a keyframe per rotation on every stream
-		 * that never needed the request. */
-		if (state->rotation_due_since == 0) {
-			state->rotation_due_since = now.tv_sec;
-			return 0;
+	/* Close current segment, open new one.  Finalising the old one can fail
+	 * -- a delayed write surfacing at fdatasync(), or close() reporting one
+	 * -- and calling that a clean rotation would hide a possibly short
+	 * segment, so it is a stop just like a failed reopen. */
+	{
+		int finalise_failed = (fdatasync(state->fd) != 0);
+
+		if (close(state->fd) != 0)
+			finalise_failed = 1;
+		state->fd = -1;
+		if (finalise_failed) {
+			fprintf(stderr,
+				"[ts_recorder] segment %u (%s) failed to "
+				"finalise: %s\n", state->segments, state->path,
+				strerror(errno));
+			ts_status_lock(state);
+			__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
+			state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+			ts_status_unlock(state);
+			return -1;
 		}
-		if (now.tv_sec - state->rotation_due_since < 1)
-			return 0;
-		/* An elapsed-interval test, not "a different second": X.999 and
-		 * X+1.001 are different seconds 2 ms apart, and on a backend
-		 * whose request path is un-coalesced that is two back-to-back
-		 * keyframes.  `unanswered == 0` doubles as the never-asked
-		 * sentinel, so tv_sec == 0 in the first second after boot is
-		 * not mistaken for one. */
-		if (state->idr_requests_unanswered == 0 ||
-		    now.tv_sec - state->idr_request_last_sec >= 1) {
-			state->idr_request_last_sec = now.tv_sec;
-			state->idr_requests_unanswered++;
-			__atomic_store_n(&state->idr_request_pending, 1,
-				__ATOMIC_RELAXED);
-		}
-		return 0;
 	}
-
-	/* An IRAP arrived, so any outstanding ask was answered.  Clear the
-	 * pending flag too: since a coalesced ask is now re-queued rather than
-	 * dropped, one can still be in flight here, and issuing it after the
-	 * rotation would keyframe the live channel for nothing. */
-	__atomic_store_n(&state->idr_request_pending, 0, __ATOMIC_RELAXED);
-	state->idr_request_last_sec = 0;
-	state->idr_requests_unanswered = 0;
-	state->rotation_due_since = 0;
-
-	/* Close current segment, open new one */
-	fdatasync(state->fd);
-	close(state->fd);
-	state->fd = -1;
-	state->segment_bytes = 0;
+	state->rot.segment_bytes = 0;
 
 	if (open_new_segment(state) != 0) {
 		/* A rotation that cannot reopen is a stop, not a gap: clear the
-		 * recording flag so producers stop handing over frames. */
+		 * recording flag so producers stop handing over frames.  Keep
+		 * the reason honest -- the space check only runs every
+		 * RECORDER_SPACE_CHECK_INTERVAL frames, so a card that filled in
+		 * between arrives here as ENOSPC and must not read as a media
+		 * error.  This is the default recording format, so it is the
+		 * likelier of the two paths to hit it. */
+		int reopen_errno = errno;
+
 		ts_status_lock(state);
 		__atomic_store_n(&state->recording, 0, __ATOMIC_RELEASE);
-		state->last_stop_reason = RECORDER_STOP_WRITE_ERROR;
+		state->last_stop_reason = (reopen_errno == ENOSPC)
+			? RECORDER_STOP_DISK_FULL : RECORDER_STOP_WRITE_ERROR;
 		ts_status_unlock(state);
 		return -1;
 	}
@@ -371,12 +385,81 @@ static int check_rotation(Star6eTsRecorderState *state, int is_idr)
 	return 0;
 }
 
-/* TS packet buffer — sized for worst case:
- * PAT/PMT (2 × 188) + video (128KB → ~713 packets × 188) +
- * audio (~8 frames × 5 packets × 188) = ~142KB.
- * Round up to 800 packets for margin. */
-/* 512KB video = ~2783 TS packets + PAT/PMT + audio = ~2900 packets */
-#define TS_BUF_SIZE (3000 * TS_PACKET_SIZE)
+/* Write one muxed frame, classifying the ways it can fail.
+ *
+ * Split out of star6e_ts_recorder_write_video(), which AGENTS.md wants under
+ * ~80 lines: muxing is that function's job, and this is the file-ceiling and
+ * error-classification half of it.
+ *
+ * Returns the byte count, or -1 having already stopped the recorder. */
+static ssize_t ts_write_muxed(Star6eTsRecorderState *state,
+	const uint8_t *ts_buf, size_t ts_len)
+{
+	ssize_t written;
+
+	/* The rotation clamp cuts before the ceiling, but only on a cut point,
+	 * and rotation never asks for one -- so a stream that produces neither
+	 * an IRAP nor a parameter-set boundary carries the segment past the
+	 * threshold with no cut in sight.  Walking
+	 * into the resulting EFBIG would truncate the file mid-AU at an
+	 * arbitrary byte.  Stop on this frame boundary instead: nothing has
+	 * been written, so the .ts ends on its last complete access unit and
+	 * the status names a size ceiling rather than a write error.  Inert on
+	 * a 64-bit off_t build. */
+	if ((uint64_t)ts_len > RECORDER_OFF_T_CEILING - state->rot.segment_bytes) {
+		fprintf(stderr,
+			"[ts_recorder] segment at %llu bytes cannot grow past the "
+			"32-bit file ceiling and the stream produced no IRAP to "
+			"rotate on; stopping\n",
+			(unsigned long long)state->rot.segment_bytes);
+		stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
+		return -1;
+	}
+
+	written = write_all(state->fd, ts_buf, ts_len);
+	if (written >= 0) {
+		/* The rollback below and the whole size-rotation test read this,
+		 * so it MUST advance here: it is the offset of the last complete
+		 * frame.  Extracting this function out of write_video() once
+		 * dropped this line, which silently disabled maxMB for .ts and
+		 * made the rollback truncate the entire segment. */
+		state->rot.segment_bytes += (uint64_t)written;
+		return written;
+	}
+
+	{
+		int saved_errno = errno;
+
+		/* A failure can follow a PARTIAL successful write -- measured:
+		 * an unpatched recorder's own counter stopped at 2147464968
+		 * while the file on disk was 2147483647, so 18679 bytes of a
+		 * half-written access unit stayed behind.  segment_bytes IS the
+		 * offset of the last complete frame (the segment opened at 0
+		 * and only completed writes are added), so rolling back to it
+		 * costs no lseek and leaves whole TS packets only. */
+		(void)ftruncate(state->fd, (off_t)state->rot.segment_bytes);
+		errno = saved_errno;
+	}
+
+	if (errno == ENOSPC) {
+		fprintf(stderr, "[ts_recorder] disk full (ENOSPC)\n");
+		stop_with_reason(state, RECORDER_STOP_DISK_FULL);
+	} else if (errno == EFBIG) {
+		/* A ceiling below the off_t one -- FAT32 stops at 4 GB -- so the
+		 * guard above could not have anticipated it.  Name it: "write
+		 * error" sent the original report hunting the SD card. */
+		fprintf(stderr,
+			"[ts_recorder] file size limit reached at %llu bytes "
+			"(EFBIG) -- lower record.maxMB\n",
+			(unsigned long long)state->rot.segment_bytes);
+		stop_with_reason(state, RECORDER_STOP_SIZE_LIMIT);
+	} else {
+		fprintf(stderr, "[ts_recorder] write error: %s\n",
+			strerror(errno));
+		stop_with_reason(state, RECORDER_STOP_WRITE_ERROR);
+	}
+	return -1;
+}
 
 int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 	const uint8_t *video_data, size_t video_len,
@@ -393,7 +476,8 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 		return 0;
 
 	/* Check rotation (only at IDR boundaries) */
-	if (check_rotation(state, is_idr) != 0)
+	if (check_rotation(state, is_idr ||
+		    au_has_cut_point(video_data, video_len)) != 0)
 		return -1;
 
 	/* 1. Emit video TS packets first (ensures IDR is right after PAT/PMT
@@ -423,19 +507,9 @@ int star6e_ts_recorder_write_video(Star6eTsRecorderState *state,
 
 	/* 3. Write to file */
 	if (ts_len > 0) {
-		written = write_all(state->fd, ts_buf, ts_len);
-		if (written < 0) {
-			if (errno == ENOSPC) {
-				fprintf(stderr, "[ts_recorder] disk full (ENOSPC)\n");
-				stop_with_reason(state, RECORDER_STOP_DISK_FULL);
-			} else {
-				fprintf(stderr, "[ts_recorder] write error: %s\n",
-					strerror(errno));
-				stop_with_reason(state, RECORDER_STOP_WRITE_ERROR);
-			}
+		written = ts_write_muxed(state, ts_buf, ts_len);
+		if (written < 0)
 			return -1;
-		}
-		state->segment_bytes += (uint64_t)written;
 	} else {
 		written = 0;
 	}
@@ -520,7 +594,12 @@ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 				    len > (pack->length - off))
 					continue;
 
-				/* Check for IDR (both IDR_W_RADL=19 and IDR_N_LP=20) */
+				/* IRAP only.  This value also becomes the TS
+				 * random_access_indicator, so widening it to
+				 * parameter-set boundaries would change the
+				 * wire format.  Rotation does not need it to:
+				 * write_video() scans the flattened access unit
+				 * for cut points itself. */
 				unsigned int nalu = (unsigned int)
 					pack->packetInfo[k].packType.h265Nalu;
 				if (nalu == 19 || nalu == 20)
