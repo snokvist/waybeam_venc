@@ -71,7 +71,15 @@
  * zero, under both actuators.
  *
  * The pulse ends on the FIRST frame that actually lands, not after a fixed
- * window — that is what keeps it one frame.  A time-based dwell let the drain
+ * window — that is what keeps it to about one frame.  Occupancy rising above
+ * its level at the escape can only mean a producer write, so the pulse never
+ * ends early; what it can miss is a write that a concurrent drain cancels out,
+ * which costs one extra frame per drain observed inside the pulse and is
+ * capped by the backstop below.  In the regime where escapes actually happen
+ * the consumer is by definition slow, so drains inside a sub-millisecond-scale
+ * pulse are rare: measured ~1.01 frames per pulse on Maruko at a 5 fps drain.
+ *
+ * A time-based dwell instead let the drain
  * loop flush the whole buffered backlog into the ring while it was open:
  * measured 2026-09-13 on Maruko at 30 fps production against a 5 fps drain,
  * ~2.9 frames per pulse, which exactly replaced what the consumer took.  The

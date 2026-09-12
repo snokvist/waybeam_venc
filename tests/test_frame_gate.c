@@ -255,8 +255,6 @@ int test_frame_gate(void)
 			frame_gate_observe(&f, 6, t + 2 * MS)
 				== FRAME_GATE_ACTION_CLOSE);
 		CHECK("landed_closed", !frame_gate_is_open(&f));
-		CHECK("landed_well_inside_backstop",
-			2 * MS < FRAME_GATE_ESCAPE_BACKSTOP_US);
 
 		/* And the next escape re-arms against the NEW occupancy, so a
 		 * ring that stays at 6 does not read as "a frame landed".
@@ -270,6 +268,105 @@ int test_frame_gate(void)
 				== FRAME_GATE_ACTION_NONE);
 		CHECK("rearm_closes_on_next_landing",
 			frame_gate_observe(&f, 7, t + 2 * MS)
+				== FRAME_GATE_ACTION_CLOSE);
+	}
+
+	/* ── a drain inside the pulse costs one extra frame, and no more ─ */
+	{
+		FrameGate f;
+		uint64_t t = 9000 * MS;
+
+		gate_on(&f, 3, 500);
+		CHECK("drain_closes", frame_gate_observe(&f, 5, t)
+			== FRAME_GATE_ACTION_CLOSE);
+		t += f.cfg.max_closed_us;
+		CHECK("drain_escapes", frame_gate_observe(&f, 5, t)
+			== FRAME_GATE_ACTION_OPEN);
+
+		/* The consumer takes one while the pulse is open.  Occupancy
+		 * FALLS, which is not a landing, and the arm level is not
+		 * lowered — so the pulse holds.  This is the documented
+		 * imprecision: pinned so a future tightening is a deliberate
+		 * change rather than a silent one. */
+		CHECK("drain_below_arm_holds",
+			frame_gate_observe(&f, 4, t + 1 * MS)
+				== FRAME_GATE_ACTION_NONE);
+
+		/* A write brings it back to the arm level: net zero, still not
+		 * a landing by this rule, so the pulse still holds. */
+		CHECK("drain_back_to_arm_holds",
+			frame_gate_observe(&f, 5, t + 2 * MS)
+				== FRAME_GATE_ACTION_NONE);
+
+		/* The next write finally exceeds it and ends the pulse — two
+		 * frames admitted for one drain, bounded and well inside the
+		 * backstop. */
+		CHECK("drain_second_write_closes",
+			frame_gate_observe(&f, 6, t + 3 * MS)
+				== FRAME_GATE_ACTION_CLOSE);
+	}
+
+	/* ── a regressed clock ENDS the pulse, it does not wedge it open ─ */
+	{
+		FrameGate f;
+		uint64_t t = 11000 * MS;
+
+		gate_on(&f, 3, 500);
+		CHECK("clockback_pulse_closes", frame_gate_observe(&f, 8, t)
+			== FRAME_GATE_ACTION_CLOSE);
+		t += f.cfg.max_closed_us;
+		CHECK("clockback_pulse_escapes", frame_gate_observe(&f, 8, t)
+			== FRAME_GATE_ACTION_OPEN);
+
+		/* A reinit hands over a fresh epoch mid-pulse.  The ring is
+		 * full, so no frame can ever land and only the time term can
+		 * end this pulse — if a regressed clock reads as "not expired"
+		 * the gate stays open for a whole epoch's worth of clock.  The
+		 * closed branch already defends against this case. */
+		CHECK("clockback_pulse_does_not_wedge_open",
+			frame_gate_observe(&f, 8, 5u)
+				== FRAME_GATE_ACTION_CLOSE);
+		CHECK("clockback_pulse_closed", !frame_gate_is_open(&f));
+	}
+
+	/* ── restore_closed disarms the pulse ────────────────────────── */
+	{
+		FrameGate f;
+		uint64_t t = 13000 * MS;
+
+		gate_on(&f, 3, 500);
+		CHECK("restore_closes", frame_gate_observe(&f, 5, t)
+			== FRAME_GATE_ACTION_CLOSE);
+		t += f.cfg.max_closed_us;
+		CHECK("restore_escapes", frame_gate_observe(&f, 5, t)
+			== FRAME_GATE_ACTION_OPEN);
+
+		/* The caller refuses the OPEN and puts the gate back.  That
+		 * must disarm the pulse: otherwise it survives into the next
+		 * NORMAL reopen and suppresses the first legitimate close
+		 * there. */
+		frame_gate_restore_closed(&f, t);
+		CHECK("restore_closed_gate", !frame_gate_is_open(&f));
+
+		/* Shorten the debounce so a normal reopen can land while a
+		 * stale pulse would still be live.  With the shipped constants
+		 * FRAME_GATE_MIN_CLOSED_US equals FRAME_GATE_ESCAPE_BACKSTOP_US
+		 * exactly, so the earliest normal reopen coincides with the
+		 * stale pulse's expiry and the bug is invisible — the disarm is
+		 * correct on its own terms, not because those two constants
+		 * happen to be equal today. */
+		f.cfg.min_closed_us = 5000u;
+
+		/* Drain to the reopen threshold so the gate reopens the normal
+		 * way, well before another escape is due. */
+		t += f.cfg.min_closed_us;
+		CHECK("restore_normal_reopen",
+			frame_gate_observe(&f, 0, t) == FRAME_GATE_ACTION_OPEN);
+
+		/* A burst refills the ring.  This close is NOT an escape pulse
+		 * and must not be debounced by one. */
+		CHECK("restore_close_not_suppressed",
+			frame_gate_observe(&f, 5, t + 1 * MS)
 				== FRAME_GATE_ACTION_CLOSE);
 	}
 

@@ -64,6 +64,10 @@ void frame_gate_restore_closed(FrameGate *g, uint64_t now_us)
 		return;
 	g->open = 0;
 	g->closed_since_us = now_us;
+	/* The gate is closed again, so any escape pulse is over.  Leaving it
+	 * armed would let a stale pulse suppress the next legitimate close
+	 * after a NORMAL reopen. */
+	g->escape_open_us = 0;
 }
 
 FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
@@ -81,9 +85,12 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 		}
 		/* An escape pulse is still open.  End it on the FIRST frame
 		 * that lands — occupancy rising above what it was at the escape
-		 * — so exactly one frame is admitted.  Holding for a fixed
-		 * window instead let the drain loop flush its whole backlog
-		 * through, which is what pinned Maruko's ring near full.
+		 * — so about one frame is admitted.  Occupancy can only rise on
+		 * a producer write, so this never ends the pulse early; a drain
+		 * that cancels out a write costs one extra frame, bounded by
+		 * the backstop.  Holding for a fixed window instead let the
+		 * drain loop flush its whole backlog through, which is what
+		 * pinned Maruko's ring near full.
 		 *
 		 * The backstop covers the frame that never arrives: a stopped
 		 * encoder, or a full ring where the write is dropped rather
@@ -91,7 +98,12 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 		 * exists to produce, so closing again is correct. */
 		if (g->escape_open_us) {
 			int landed = used_slots > g->escape_used_slots;
-			int expired = now_us >= g->escape_open_us &&
+			/* A reinit can hand us a fresh epoch, the same case the
+			 * closed branch below defends against.  Count it as
+			 * expired: ending the pulse re-closes a gate that is
+			 * doing its job, while holding it open would leave the
+			 * stream ungated for a whole epoch's worth of clock. */
+			int expired = now_us < g->escape_open_us ||
 				(now_us - g->escape_open_us) >=
 					FRAME_GATE_ESCAPE_BACKSTOP_US;
 
