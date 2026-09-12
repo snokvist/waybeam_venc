@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 12.0.0 -->
+<!-- version: 13.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1138,3 +1138,76 @@ Not retired: this was a **TX-side** measurement with no ground station
 receiving, so nothing here exercises ARQ, retransmission, or a receiver's
 recovery-IDR requests. A ground in the loop could ask for keyframes for its own
 reasons, which is a separate source from the actuator and was not measured.
+
+---
+
+## 20. Reproduced with a ground receiving and claiming the craft
+
+### Bring-up
+
+The ground is `sudo systemctl start waybeam-hub` on the x86 dev host
+(`/etc/waybeam_hub/waybeam_ground.conf`, three auto adapters, control on
+`:8092`). Claiming a craft is not a dedicated endpoint — the hub WebUI's
+"claim craft" button is literally:
+
+```sh
+c=$(curl -sS http://127.0.0.1:8092/api/v1/link/selection | sed -n 's/.*"channel":\([0-9]*\).*/\1/p')
+curl -sS -X POST -d "{\"mhz\":$c}" http://127.0.0.1:8092/api/v1/csa
+```
+
+The ground CSAs *itself* onto the selected craft's channel, and the claim
+falls out of the latch. Two gotchas cost time:
+
+- `/api/v1/channel` answers "endpoint not available in this mode"; `/api/v1/csa`
+  is the retune path, and it refuses with *"no craft selected (nothing latched,
+  no claim)"* until something is latched. Chicken-and-egg: the way in is
+  `POST /api/v1/scout/start`, then `/api/v1/scout/results` for candidates, then
+  `POST /api/v1/scout/quickconnect {"originator":N}`.
+- A ground restart reverts to its configured channel, so the CSA must be
+  re-issued afterwards, and quickconnect refuses a candidate from before a
+  craft reboot ("stale candidate — re-scout").
+
+Scout also made the bench legible: originator 17 = `.232` on 5540,
+18 = `.233` on 5825, 19 = `.181` on 5700. `.181` was claimed by this ground and
+had **followed its CSA onto 5540**, putting two crafts co-channel; its hub was
+stopped for the measurement and restarted afterwards.
+
+### Result: the §19 numbers reproduce with a real receiver
+
+Craft `.232`, MCS pinned (`min_profile = max_profile = 1`), waybeam-link's
+bitrate controller off, `video0.bitrate` overdriven to 20000, ground latched
+and **`claimed_by: 9`**, eight 5-second samples per arm:
+
+| | drain-stall | recv-stop |
+|---|---|---|
+| Craft `idr_frames` | **2 -> 2** (zero induced) | **127 -> 289** |
+| Implied keyframe rate | **0 /s** | **~4.6 /s** |
+| Craft delivered | ~50 fps | ~87 fps |
+| Craft ring | 1-3 / 8 | 0-3 / 8 |
+| Ground `frame_bytes` | ~9.5 Mbit/s | ~9.0 Mbit/s |
+| Ground `frames_unrecoverable` | **0** | 0 |
+| Ground `idr_frames` | **1, flat** | 1 -> 2 |
+
+§19 measured ~4.4 IDR/s TX-side with nothing receiving; with a ground latched,
+claiming, and decoding it is ~4.6 IDR/s. The result is not an artifact of
+transmitting into an empty channel.
+
+Note the two `idr_frames` counters are not the same quantity. The craft's
+counts keyframes it *emitted* and was validated against the bitstream in §10;
+the ground's counts far fewer and did not track the craft's, so it is
+evidently not a received-IDR tally. Do not use the ground counter to judge the
+actuator — the craft-side one is the validated channel.
+
+### What is still not covered
+
+The ground-side half of the recv-stop arm is only four samples: the ground hub
+was stopped mid-run by a **second Claude session using the same adapters**,
+which is also the orderly "Deactivated successfully" in its journal. Nothing
+here is a fault. ARQ and receiver-requested recovery IDRs remain unexercised —
+`frames_with_arq` stayed 0 throughout, so the uplink path was never stressed.
+
+### Bench returned
+
+`.232` craft.json restored (`max_profile 4`, `venc.enabled true`), venc gate
+off and bitrate 5754, supervised start, hub up. `.181` hub restarted. The
+ground hub was left **stopped**, the state the other session had put it in.
