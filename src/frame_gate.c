@@ -79,12 +79,25 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 			g->escape_open_us = 0;
 			return FRAME_GATE_ACTION_NONE;
 		}
-		/* An escape pulse is still serving its dwell: refuse to close
-		 * so the admitted frame has time to reach the ring. */
-		if (g->escape_open_us &&
-		    now_us >= g->escape_open_us &&
-		    (now_us - g->escape_open_us) < FRAME_GATE_MIN_OPEN_US)
-			return FRAME_GATE_ACTION_NONE;
+		/* An escape pulse is still open.  End it on the FIRST frame
+		 * that lands — occupancy rising above what it was at the escape
+		 * — so exactly one frame is admitted.  Holding for a fixed
+		 * window instead let the drain loop flush its whole backlog
+		 * through, which is what pinned Maruko's ring near full.
+		 *
+		 * The backstop covers the frame that never arrives: a stopped
+		 * encoder, or a full ring where the write is dropped rather
+		 * than landing.  Both are the diagnosable outcome the escape
+		 * exists to produce, so closing again is correct. */
+		if (g->escape_open_us) {
+			int landed = used_slots > g->escape_used_slots;
+			int expired = now_us >= g->escape_open_us &&
+				(now_us - g->escape_open_us) >=
+					FRAME_GATE_ESCAPE_BACKSTOP_US;
+
+			if (!landed && !expired)
+				return FRAME_GATE_ACTION_NONE;
+		}
 		g->escape_open_us = 0;
 		g->open = 0;
 		g->closed_since_us = now_us;
@@ -105,10 +118,12 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	if (elapsed_us >= g->cfg.max_closed_us) {
 		g->escape_events++;
 		frame_gate_force_open(g, now_us);
-		/* Hold this one open long enough for a frame to actually land,
-		 * or the escape reopens and re-closes without ever letting the
-		 * ring report a drop.  See FRAME_GATE_MIN_OPEN_US. */
+		/* Hold open until one frame lands, or the escape re-closes
+		 * before the ring can report anything.  Remember the occupancy
+		 * so "a frame landed" is observable.  See
+		 * FRAME_GATE_ESCAPE_BACKSTOP_US. */
 		g->escape_open_us = now_us ? now_us : 1u;
+		g->escape_used_slots = used_slots;
 		return FRAME_GATE_ACTION_OPEN;
 	}
 
