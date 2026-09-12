@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 10.0.0 -->
+<!-- version: 11.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -980,3 +980,90 @@ reach 8: that is the overflow-and-report behaviour §16.2 restored.
 - **Not yet measured:** behaviour against the real waybeam-link consumer rather
   than an emulated rate limiter, and whether the ~1.5-slot steady-state ring
   occupancy holds when the consumer's drain is bursty rather than evenly paced.
+
+---
+
+## 17. CV610: one mechanism for all three backends
+
+### §8's "CV610 is keyframe-free" was measured on one interval, not on cycles
+
+§8 recorded 542 frames across a **single** three-second gate interval with zero
+IDR, and that result stands. It does not generalise to repeated cycling, which
+is what a congested link actually produces.
+
+`.181`, 1280x720 @100 fps, `resilience=racing`, 8-slot ring, five **proven**
+cycles per arm (2 s stalled / 3 s running, `usedSlots` at 8 each time), both
+actuators on the same binary:
+
+| Actuator | Frames | **IDR** | Integrity |
+|---|---|---|---|
+| recv-stop (`ss_mpi_venc_stop_chn`/`start_chn`) | 3443 | **3** | clean |
+| drain-stall (skip `ss_mpi_venc_get_stream`) | 3768 | **0** | clean |
+
+So CV610's shipped actuator is *better* than SigmaStar's (3 per five cycles
+rather than one per cycle) but it is **not** keyframe-free, and drain-stall
+removes the remainder. It also delivered ~9 % more frames over the same window.
+
+Under partial congestion the two are indistinguishable, which is the expected
+result — the escape never fires while a consumer drains, so the actuator is
+never exercised:
+
+| Link | recv-stop | drain-stall |
+|---|---|---|
+| 30 fps | 30.7, spread 1, ring 1.49 | 30.5, spread 1, ring 1.55 |
+| 60 fps | 60.6, spread 1, ring 1.14 | 60.6, spread 1, ring 1.50 |
+
+### Verdict: yes, share one mechanism
+
+Drain-stall is now measured as the best actuator on **all three** backends:
+
+| Backend | recv-stop IDR/cycle | drain-stall IDR |
+|---|---|---|
+| Star6E `.232` | 1.0 | 0 |
+| Maruko `.233` | 3.0 | 0 |
+| CV610 `.181` | 0.6 | 0 |
+
+It also makes no SDK call, which is why it is portable: there is no
+`Stop`/`StartRecvPic` versus `stop_chn`/`start_chn` divergence to maintain, no
+BUSY path, and the per-backend reopen paths collapse into one early return.
+`frame_gate_observe()` and its 77 host assertions are already shared; after the
+swap the only per-backend code is *where* the drain loop returns early.
+
+Build note: CV610 headers live at `$HOME/dev/hisilicon/oh` (not
+`$HOME/dev/hisilicon`), and the vendor `.so` set is stashed at
+`out/cv610/lib` — 53 libraries, enough to link. Both paths must be passed to
+`make lint` as well as `make build`, or the SDK gate fails before the compiler
+runs.
+
+## 18. The RF question is blocked on the craft, not on the gate
+
+The proposed end-to-end test — pin `min`/`max` MCS to one value, disable
+adaptive bitrate, overdrive `video0.bitrate` so the radio genuinely cannot
+carry it, and watch the gate against the real waybeam-link consumer — is the
+right test, and it is **not runnable as the bench stands**:
+
+- `/usr/bin/waybeam-link` **is not installed** on `.232`.
+- There is no boot symlink (`S9xwaybeam-link`), and the daemon is not running.
+- `/sys/class/net` has only `eth0` and `lo`: no wireless interface exists. The
+  8812EU is present on USB (`0bda:a81a`) and the `8812eu` module is loaded
+  against `cfg80211`, but nothing has put it into monitor mode.
+- `/etc/waybeam-link/` still holds craft configs, so the craft *was* a link TX
+  at some point — consistent with the integrated-hub migration.
+
+What exists to make it runnable: a prebuilt vehicle binary at
+`waybeam-link/build/ssc338q-au/waybeam-link`, and three radios on the dev host
+(`0bda:c812` 8812AU, `0e8d:0616` MT7612U, `0bda:f72b` 8733BU) for the ground
+end.
+
+So the remaining work is a link bring-up — deploy the craft binary, start it in
+monitor mode, stand up a ground node — and only then the gate measurement.
+That is an RF arm on a shared bench and needs its own go-ahead; it is not a
+continuation of the venc work.
+
+**What the emulator already covers, and what it cannot.** §16.1's rate-limited
+consumer reproduces the *shape* of a capacity-limited link exactly, and the
+producer settled at the link rate at every capacity tested. What it cannot
+reproduce is a consumer whose drain is **bursty** rather than evenly paced —
+waybeam-link drains in FEC-block groups, not one frame per fixed interval — so
+the ~1.5-slot steady-state occupancy is the number most likely to move under
+the real consumer. That is the open risk the RF test would retire.
