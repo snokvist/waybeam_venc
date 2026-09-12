@@ -58,6 +58,14 @@ void frame_gate_force_open(FrameGate *g, uint64_t now_us)
 	g->closed_since_us = 0;
 }
 
+void frame_gate_restore_closed(FrameGate *g, uint64_t now_us)
+{
+	if (!g || !g->open)
+		return;
+	g->open = 0;
+	g->closed_since_us = now_us;
+}
+
 FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	uint64_t now_us)
 {

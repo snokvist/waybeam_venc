@@ -180,6 +180,17 @@ int test_frame_gate(void)
 	frame_gate_force_open(&g, 60 * MS);
 	CHECK("force_open_idempotent", g.closed_total_us == 50 * MS);
 
+	/* ── failed OPEN rolls policy back so the actuator is retried ─── */
+	frame_gate_restore_closed(&g, 70 * MS);
+	CHECK("restore_closed_closes", !frame_gate_is_open(&g));
+	CHECK("restore_closed_debounces",
+		frame_gate_observe(&g, 0, 70 * MS + FRAME_GATE_MIN_CLOSED_US - 1)
+			== FRAME_GATE_ACTION_NONE);
+	CHECK("restore_closed_retries_open",
+		frame_gate_observe(&g, 0, 70 * MS + FRAME_GATE_MIN_CLOSED_US)
+			== FRAME_GATE_ACTION_OPEN);
+	frame_gate_restore_closed(NULL, 0);       /* must not crash */
+
 	/* ── NULL safety ─────────────────────────────────────────────── */
 	CHECK("null_observe",
 		frame_gate_observe(NULL, 5, 0) == FRAME_GATE_ACTION_NONE);

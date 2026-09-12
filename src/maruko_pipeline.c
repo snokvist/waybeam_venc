@@ -4499,9 +4499,11 @@ static void maruko_service_frame_gate(MarukoBackendContext *ctx)
 	}
 
 	ret = maruko_mi_venc_start_recv(ctx->venc_device, ctx->venc_channel);
-	if (ret != 0)
+	if (ret != 0) {
 		fprintf(stderr, "ERROR: [maruko] frame gate start_recv "
 			"failed %d\n", (int)ret);
+		frame_gate_restore_closed(&ctx->frame_gate, now_us);
+	}
 }
 
 static void maruko_service_ring_low_water(MarukoOutput *output)
@@ -4872,7 +4874,6 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	 * first frame after re-enable closed a "200 ms window" built from one
 	 * sample.  Star6E reaches its reset branch every frame regardless. */
 	maruko_service_ring_low_water(&ctx->output);
-	maruko_service_frame_gate(ctx);
 
 	/* Mirror mode: write chn 0 frames to whichever recorder is active
 	 * before the stream is released.  In dual mode the chn 1 drain
@@ -4943,6 +4944,12 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	unsigned int pack_count = stream.count;
 	(void)maruko_mi_venc_release_stream(ctx->venc_device,
 		ctx->venc_channel, &stream);
+
+	/* SigmaStar refuses StopRecvPic with MI_ERR_VENC_BUSY while an acquired
+	 * stream is outstanding.  The helper reads current ring occupancy, so
+	 * evaluating immediately after ReleaseStream preserves the same signal
+	 * while respecting the SDK lifetime contract. */
+	maruko_service_frame_gate(ctx);
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and

@@ -997,8 +997,10 @@ static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
 
 		memset(&sp, 0, sizeof(sp));
 		sp.recv_pic_num = -1;   /* unlimited, as at bring-up */
-		if (ss_mpi_venc_start_chn(CV610_VENC_CHN, &sp) != TD_SUCCESS)
+		if (ss_mpi_venc_start_chn(CV610_VENC_CHN, &sp) != TD_SUCCESS) {
 			fprintf(stderr, "ERROR: frame gate start_chn failed\n");
+			frame_gate_restore_closed(&ctx->frame_gate, now_us);
+		}
 	}
 }
 
@@ -2780,7 +2782,6 @@ static int cv610_run(void *opaque)
 					&sc_fill) == 0)
 					sc_fillp = &sc_fill;
 				cv610_service_ring_low_water(ctx, sc_fillp);
-				cv610_service_frame_gate(ctx);
 			} else if (ctx->tx.output_enabled &&
 				ctx->tx.socket_handle >= 0) {
 				/* cv610_output_write owns per-datagram drop accounting. */
@@ -2930,6 +2931,11 @@ static int cv610_run(void *opaque)
 		}
 		ret = ss_mpi_venc_release_stream(CV610_VENC_CHN, &stream);
 		free(stream.pack);
+
+		/* Keep the gate transition outside the acquired-stream lifetime on
+		 * every backend.  CV610 tolerated stop_chn before release, but the
+		 * shared ordering avoids depending on that vendor-specific accident. */
+		cv610_service_frame_gate(ctx);
 
 		/* A recorder that stopped ITSELF (disk full, write error) does
 		 * so on the writer thread, so nothing but this loop is

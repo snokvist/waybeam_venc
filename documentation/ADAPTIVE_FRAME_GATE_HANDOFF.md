@@ -1,15 +1,16 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 2.1.0 -->
+<!-- version: 3.0.0 -->
 
-Written for a **Claude Code CLI session on the local machine** taking over
-from the cloud session that wrote this feature. Updated after the 2026-09-12
-bench pass: CV610 is linked and hardware-confirmed; Star6E has preliminary
-hardware results; Maruko remains code-level only. See §8 for exact status.
+Written for a local agent taking over PR #287. Updated at the 2026-09-12
+checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
+device was modified during this final checkpoint. See §8 and §9 for exact
+state and next commands.
 
 | | |
 |---|---|
-| Branch | `claude/dazzling-goldberg-o49554` |
+| Local branch/worktree | `verify/pr-287` in `.claude/worktrees/pr-287-verify` |
+| Remote PR branch | `origin/claude/dazzling-goldberg-o49554` (not pushed) |
 | PR | snokvist/waybeam_venc#287 |
 | Design | `documentation/ADAPTIVE_FRAME_GATE_PLAN.md` — read §7 (risks) and §9 (Phase 2 findings) |
 
@@ -18,9 +19,9 @@ hardware results; Maruko remains code-level only. See §8 for exact status.
 ## 0. Start here
 
 ```sh
-git fetch origin claude/dazzling-goldberg-o49554
-git checkout claude/dazzling-goldberg-o49554
-make test-ci          # expect 3112 passed / 0 failed
+cd /home/snokvist/dev/waybeam-coordination/waybeam_venc/.claude/worktrees/pr-287-verify
+git status --short --branch
+make test-ci          # expect 3115 passed / 0 failed
 make verify           # Star6E + Maruko; toolchains auto-download on first run
 ```
 
@@ -30,8 +31,8 @@ unchecked recording/config transitions and the secondary SigmaStar matrix.
 ### The four things only this machine can do
 
 1. Link CV610 — needs `~/dev/hisilicon` and the firmware lib output (§5).
-2. Reach the bench devices — Star6E `root@192.168.1.13` (imx335), Maruko
-   `root@192.168.2.12` (imx415).
+2. Reach the current benches — Star6E `root@192.168.2.232`, Maruko
+   `root@192.168.2.233`, CV610 `root@192.168.2.181`.
 3. Prove R1 (`StopRecvPic` under a full egress ring) — §3.
 4. Measure the defaults, which were reasoned rather than benched — §6.
 
@@ -59,8 +60,12 @@ relative QP gradient and CBR keeps its contract.
 Actuator per backend: `MI_VENC_Stop/StartRecvPic` on SigmaStar,
 `ss_mpi_venc_stop_chn` / `ss_mpi_venc_start_chn(recv_pic_num = -1)` on CV610.
 
-Defaults: close at `>= 3` slots, reopen at `<= 1` after a 20 ms debounce,
-safety escape at 500 ms.
+Defaults: close at `>= 3` slots, reopen at `<= 1` after a 20 ms minimum closed
+dwell, safety escape at 500 ms. Normal reopening is **not** tied to 500 ms:
+Star6E reads occupancy every ~1 ms while closed; Maruko and CV610 every ~2 ms.
+Expected drain-to-video latency is that poll plus SDK start latency and about
+one frame interval. The 500 ms path only admits a safety-pulse frame while a
+dead/stalled consumer leaves occupancy above the reopen threshold.
 
 ## 2. What the cloud session did and did not verify
 
@@ -196,7 +201,7 @@ yes, that is a small `/api/v1/status` addition and a `contract_version` bump.
 - `make verify` passes: Star6E and Maruko build and link.
 - CV610 compiles and links against the firmware vendor libraries. The linked
   0.85.0 binary is confirmed on `192.168.2.181`.
-- `make test-ci`: **3112 passed, 0 failed** after rebasing onto upstream.
+- `make test-ci`: **3115 passed, 0 failed** at the current checkpoint.
 - **CV610 primary gate path confirmed on device:** 1280x720 at 100 fps,
   `resilience=racing`, frame-shm ring with eight slots. A stopped consumer
   closed intake at three slots; the 500 ms safety escape admitted one frame per
@@ -222,24 +227,65 @@ yes, that is a small `/api/v1/status` addition and a `contract_version` bump.
   creation, and startup reports `frame gate on ... ring=8 slots` rather than
   declaring the gate inert.
 - **Star6E preliminary:** the consumer-stall test paused and recovered without
-  D-state, but `MI_VENC_StopRecvPic` returned `0xA0022012`. Treat Star6E support
-  as unresolved until that return-code/state mismatch is understood.
-- **Maruko:** code-level only; no device trial yet.
+  D-state, but `MI_VENC_StopRecvPic` returned `0xA0022012`. This decodes as
+  `MI_ERR_VENC_BUSY`: the normal-path call was made before `ReleaseStream`.
+  The local checkpoint moves it after release, but that fix is not yet tested
+  on device.
+- **Maruko:** code-level only. The same pre-release ordering existed and is
+  moved after release locally; `.233` is now available but untested.
 - Rebased on upstream 0.84.0; version bumped to 0.85.0. The
   `contract_version` remains at upstream's 0.31.0 because the frame gate adds
   three restart-required fields without changing an endpoint or payload.
 - The local verification branch contains the rebased PR plus the CV610
-  initialization-order fix and these bench results; update the PR branch only
-  after reviewing that diff.
+  initialization-order fix, bench results, post-release ordering, and reopen
+  retry hardening. The remote PR branch has not been rewritten. A future push
+  needs explicit authorization and `--force-with-lease` because of the rebase.
 
 ## 9. When it passes
 
-1. Tick the runtime smoke-check boxes in the PR and note which backends were
-   exercised.
-2. Fold any default changes from §6 into `include/frame_gate.h`.
-3. Complete the two mirror-recording rows on a CV610 with writable media, then
-   decide whether CV610 confirmation is sufficient to merge with SigmaStar
-   still experimental.
+### Exact next-agent sequence
+
+1. The checkpoint binaries are current: `make verify`, the full CV610 vendor
+   link, strict lint for all three backends, and the host suite all passed.
+   Re-run them after the next edit, not before deploying this checkpoint.
+2. Deploy only to `.232`, `.233`, and `.181`; stop the vehicle-local
+   `S97waybeam-hub` consumer during the stall interval. The x86 receiver is
+   deliberately paused and must not be part of the evidence.
+3. On each vehicle, run `tools/frame_shm_consumer_test` locally, SIGSTOP it long
+   enough to close the gate, then SIGCONT it. Confirm no `BUSY`, D-state, fault,
+   unexpected IDR/IRAP, bad Annex-B framing, or PTS regression. Measure
+   drain-to-first-new-frame latency; it should be milliseconds, not 500 ms.
+4. Repeat with the consumer left stalled for >500 ms to distinguish the safety
+   pulse from normal drain-triggered reopening. Restore the vehicle-local hub
+   after every trial.
+5. Only after all three pass, make frame gating automatic for frame-shm and
+   remove the public `video0.frameGate` switch. Keep the two tuning fields
+   (`frameGateCloseSlots`, `frameGateMaxClosedMs`) unless evidence says they
+   should also become constants. Removing the switch touches all config layers:
+   `include/venc_config.h`, defaults/parser/printer/cJSON in `src/venc_config.c`,
+   field/alias/UI in `src/venc_api.c`, all three default JSON files, backend
+   setup calls, tests, README/HISTORY, and the HTTP contract.
+6. Re-run `make test-ci`, `make verify`, the CV610 link, a config-layout grep,
+   and the three vehicle trials with configs that do not contain `frameGate`.
+7. Tick the PR runtime checks and report each result as **confirmed on device**
+   or **code-level only**.
+
+### Local code changes at this checkpoint
+
+- All normal-path gate evaluations now occur after the acquired stream is
+  released. Idle-path calls remain in place; they are the fast reopen path.
+- `frame_gate_restore_closed()` rolls policy back after a refused OPEN so the
+  actuator retries after 20 ms. Previously all three backends could believe
+  they were open while hardware stayed stopped. A host test covers the retry.
+- No protocol bytes changed. Do not add a reverse futex in this PR: frame-shm
+  v2 only wakes consumer-from-producer; a drain wake would require coordinated
+  changes to every consumer for little gain over the current 1–2 ms polling.
+- Coordination `protocols/frame-shm.md` is stale versus upstream ring v2
+  (`low_water_slots`/`other_drops`). That pre-existing drift is out of this PR's
+  implementation scope, but should be corrected separately.
+
+If the post-release call still returns BUSY on either SigmaStar board, capture
+the exact code and logs and stop default-on work. Do not treat BUSY as success.
 
 If R1 fails, close the PR with the finding rather than reworking it — and
 keep the plan and this document, because the measurement is the valuable part.

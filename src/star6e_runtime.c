@@ -1624,9 +1624,11 @@ static void star6e_service_frame_gate(Star6ePipelineState *ps)
 	}
 
 	ret = MI_VENC_StartRecvPic(ps->venc_channel);
-	if (ret != 0)
+	if (ret != 0) {
 		fprintf(stderr, "ERROR: frame gate StartRecvPic failed %d\n",
 			ret);
+		frame_gate_restore_closed(&ps->frame_gate, now_us);
+	}
 }
 
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
@@ -1793,11 +1795,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * loads plus a compare per frame off frame-shm. */
 		star6e_service_ring_low_water(&ps->output);
 
-		/* Overload gate, off the same per-frame ring read.  Uses the
-		 * instantaneous occupancy rather than the 200 ms low-water
-		 * window published above: that window is the right cadence for
-		 * waybeam-link's rate model and far too slow to catch a burst. */
-		star6e_service_frame_gate(ps);
 	}
 
 	/* Orientation (image.flip / image.mirror) is applied once at bring-up
@@ -1875,6 +1872,12 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * work (stdout printf, OSD draw) that can otherwise push send
 	 * spread past a full frame period at 120 fps. */
 	MI_VENC_ReleaseStream(ps->venc_channel, &stream);
+
+	/* StopRecvPic is rejected with MI_ERR_VENC_BUSY while an acquired
+	 * stream is outstanding on SSC338Q.  Evaluate the gate only after
+	 * ReleaseStream; the helper takes a fresh instantaneous ring reading,
+	 * so moving it here does not weaken the burst response. */
+	star6e_service_frame_gate(ps);
 
 	/* A recorder that stopped ITSELF (disk full, write error) does so on the
 	 * writer thread, so nothing but this loop is positioned to notice, and

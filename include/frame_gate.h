@@ -111,14 +111,20 @@ FrameGateSetupStatus frame_gate_setup(FrameGate *g, FrameGateMode mode,
  * cadence for an external rate controller and far too slow to catch a burst.
  *
  * Returns the action the caller must apply.  The gate's own state is updated
- * before returning, so a caller that fails to apply the action must call
- * frame_gate_force_open() to resynchronise. */
+ * before returning, so a caller whose actuator refuses the action must roll
+ * it back with frame_gate_force_open() (failed CLOSE) or
+ * frame_gate_restore_closed() (failed OPEN). */
 FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	uint64_t now_us);
 
 /* Drop back to the open state without emitting an action.  For teardown, for
  * a reinit, and for a caller whose actuator refused the last CLOSE. */
 void frame_gate_force_open(FrameGate *g, uint64_t now_us);
+
+/* Restore the closed policy state after the actuator refused an OPEN.  The
+ * next observation retries after min_closed_us instead of leaving policy
+ * open while encoder intake is still stopped. */
+void frame_gate_restore_closed(FrameGate *g, uint64_t now_us);
 
 static inline int frame_gate_is_open(const FrameGate *g)
 {
