@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 11.0.0 -->
+<!-- version: 12.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1067,3 +1067,74 @@ reproduce is a consumer whose drain is **bursty** rather than evenly paced —
 waybeam-link drains in FEC-block groups, not one frame per fixed interval — so
 the ~1.5-slot steady-state occupancy is the number most likely to move under
 the real consumer. That is the open risk the RF test would retire.
+
+---
+
+## 19. Correction to §18, and the RF result
+
+### §18 was wrong: waybeam-link is already running on `.232`
+
+`/usr/bin/waybeam-link` does not exist on the craft and no wireless interface
+appears in `/sys/class/net`, which is what §18 concluded from. Both are true and
+both are misleading: **`.232` runs the link as an in-process node inside
+`waybeam_hub`** (`mod_wblink`), and the hub holds the 8812EU directly through
+devourer — `/proc/<hub pid>/fd` points at `/dev/bus/usb/001/002` and
+`/tmp/devourer-usb-1-1.lock`. That is why a second `waybeam-link` process is
+refused with "USB adapter in use", and why there is no `wlanX`: devourer claims
+the device from userspace, so the kernel never creates an interface.
+
+The tell that would have short-circuited the whole detour: `:8091` answers
+`/api/v1/stats` with `"tx":true` and a live `auto0-8812eu` adapter. **Check the
+control plane before concluding a daemon is absent** — a missing binary on
+`$PATH` says nothing when the feature has been folded into another process.
+`waybeam_hub.conf` names it outright: `wblink.config_path` points at
+`/etc/waybeam-link/craft.json`, the same file the craft is actually running.
+
+### Setup
+
+- `policy.select.min_profile = max_profile = 1` — MCS pinned, no adaptation.
+- `venc.enabled = false` — waybeam-link's bitrate controller disabled, so
+  nothing walks the rate back down.
+- `video0.bitrate = 20000` — offered rate far above what MCS 1 can carry.
+- Consumer is the **real** in-process wblink node reading `venc_frame`, not an
+  emulator. Keyframes counted by the link's own `idr_frames`.
+
+### Result: recv-stop is catastrophic here, drain-stall is clean
+
+Eight 5-second samples per arm:
+
+| | drain-stall | recv-stop |
+|---|---|---|
+| `idr_frames` across 40 s | **1 -> 1** (zero induced) | **61 -> 215** |
+| Implied keyframe rate | **0 /s** | **~4.4 /s** |
+| Delivered | ~47 fps | ~83 fps |
+| Ring occupancy | 2-3 / 8 | 0-2 / 8 |
+| `transportDrops` | frozen at 153 | 0 |
+| Air throughput | ~9.2 Mbit/s | ~8.8 Mbit/s |
+
+The SIGSTOP tests understated this badly. They cycled the gate once every five
+seconds; a genuinely capacity-limited link cycles it **many times per second**,
+and recv-stop pays one keyframe per cycle. At 4.4 IDR/s the craft is firing the
+largest frame in the stream into an already-saturated link several times a
+second — the exact pathology the feature was written to avoid, delivered by the
+feature itself.
+
+Drain-stall induced **zero** keyframes over the same window while holding the
+ring at 2-3 slots and taking no ring overflow at all.
+
+The fps difference is not a defect on either side: recv-stop delivers more
+frames but spends the air budget on keyframes, and both arms moved almost
+identical bytes. Which is preferable is a picture-quality question for the
+operator, not a correctness one — but 4.4 IDR/s on a congested link is not a
+defensible operating point.
+
+### What this retires and what it does not
+
+Retired: the open risk in §16 that a **bursty** consumer would not hold the
+~1.5-slot steady state. The real node drains in FEC-block groups and the ring
+still sat at 2-3 of 8.
+
+Not retired: this was a **TX-side** measurement with no ground station
+receiving, so nothing here exercises ARQ, retransmission, or a receiver's
+recovery-IDR requests. A ground in the loop could ask for keyframes for its own
+reasons, which is a separate source from the actuator and was not measured.
