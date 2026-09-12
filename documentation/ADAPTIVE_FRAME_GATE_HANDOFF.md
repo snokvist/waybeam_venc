@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 9.0.0 -->
+<!-- version: 10.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -878,3 +878,105 @@ Remaining caveats, all still open:
 - The §10 secondary finding still stands: with recv-stop, a dead consumer stops
   the stream silently. Drain-stall does not fix that — it changes which
   keyframes are emitted, not the escape's defeat.
+
+---
+
+## 16. Partial congestion, and the open points closed
+
+### 16.1 It is a smooth partial stall, not 0/100 judder
+
+The SIGSTOP consumer used throughout §10-§15 is a **binary** load — the link is
+either at full capacity or dead. The FPV case is neither. `tools/frame_shm_rate_consumer.c`
+drains at most N frames per second, emulating a link that has degraded to a
+fraction of capacity and stayed there, and reports the per-second series rather
+than a mean, because a producer alternating full-rate and zero gives the same
+mean as one that settles.
+
+Star6E `.232`, 100 fps production, drain-stall armed from boot:
+
+| Link capacity | Delivered | Spread | Mean ring | IDR |
+|---|---|---|---|---|
+| 20 fps | 20.5 | 1 | 1.57 / 8 | 0 |
+| 40 fps | 40.6 | 1 | 1.52 / 8 | 0 |
+| 60 fps | 61.0 | **0** | 1.50 / 8 | 0 |
+| 80 fps | 80.4 | 1 | 1.50 / 8 | 0 |
+
+A representative 40 fps series: `41 40 41 41 40 41 40 41 40 40 41 41 40 41 41 41 41`.
+
+**The producer settles at the link rate.** Spread is at most one frame per
+second across every capacity tested, so there is no judder — and the ring sits
+at ~1.5 of 8 slots throughout, so the shedding costs no queueing latency. That
+is the behaviour an FPV link wants: degrade the frame rate smoothly and keep
+the buffer shallow.
+
+Maruko `.233`, 30 fps production, same actuator: 10 fps -> 10.7, 15 -> 15.8,
+25 -> 25.5, spread 1 at every point, mean ring 1.50-1.74.
+
+The mechanism is self-pacing and needs no controller: the gate closes the
+instant occupancy reaches the threshold and reopens as soon as the consumer
+takes a slot, so the duty cycle lands wherever the capacity ratio puts it.
+
+### 16.2 Open point: the escape defeat — FIXED
+
+§10 found the 500 ms safety escape defeated on Star6E, and §15 confirmed
+drain-stall inherits it: with no consumer the stream stopped with **every drop
+counter at zero**. Silent, which is precisely what the escape's own comment
+says it exists to prevent.
+
+Root cause: `frame_gate_observe()` debounced only closed->open. The escape
+reopened while occupancy was still above `close_slots`, so the very next
+observation closed again — 1 ms later on Star6E's idle path, against a 10 ms
+frame period at 100 fps. The admitted frame never existed.
+
+Fix: `FRAME_GATE_MIN_OPEN_US` (20 ms, two frame periods at 100 fps), applied
+**only** to the pulse that follows an escape, so normal closes keep their
+burst response. Nine new host assertions cover the dwell, the drain that
+clears it, and the unchanged normal close.
+
+Device proof with a control, no consumer attached:
+
+| Escape setting | `transportDrops` | `framesSent` | ring |
+|---|---|---|---|
+| 60 s (effectively disabled) | **0** | 3, frozen | 3 |
+| 500 ms + dwell | **climbing ~9/s** | 8 | 8 |
+
+A dead consumer now overflows the ring and reports it, instead of stopping the
+stream in silence. Re-running §16.1 with the dwell in place changed nothing
+(40.6 mean, spread 1, ring 1.52): escapes never fire while a consumer drains.
+
+One existing test, `escape_recloses`, asserted a re-close 1 ms after the
+escape — it had encoded the defect as the contract. It is migrated, not
+deleted, with the reason recorded in place.
+
+### 16.3 Open point: Maruko — PORTED and measured
+
+`maruko_pipeline_process_stream` now carries the same actuator, armed by the
+same `WB_GATE_DRAIN_STALL` env. Five proven cycles on `.233`: **0 IDR frames**
+in 1097 frames, `bad_meta`/`bad_startcode`/`pts_regress` all zero — against
+**22 IDR for six cycles** (three per reopen) with recv-stop in §10.
+
+### 16.4 Open point: ring overshoot — explained, not a defect
+
+Under full stop the ring overshoots the close threshold (3) to 6-8 slots,
+because the close is only observed on the following pass. Under **partial**
+congestion — the regime that matters — mean occupancy is 1.50-1.57 slots and
+never approaches the threshold, so the overshoot is an artifact of the binary
+test load. With the escape dwell in place a full stop is now *supposed* to
+reach 8: that is the overflow-and-report behaviour §16.2 restored.
+
+### 16.5 Still open
+
+- **The warmup floor (`WB_GATE_WARMUP_FRAMES`) is dead code.** It was built to
+  bisect a boundary that turned out not to exist once the §15 artifact was
+  removed. It is inert at 0 and every passing run had it at 0. Delete it.
+- **The test hooks are not merge candidates** (§13.5): `/api/v1/idr/enable`,
+  `/api/v1/frmlost`, `/api/v1/gatemode`, the env vars, and the
+  `EnableIdr`/`FrameLostStrategy` bindings. The actuator choice should be a
+  config field or a build-time decision, not a live HTTP toggle — a live
+  switch has to re-arm hardware or it strands the channel, which is the trap
+  §15 documents.
+- **CV610 is untouched by any of this.** It keeps the recv-stop gate, which
+  measured keyframe-free there (§8).
+- **Not yet measured:** behaviour against the real waybeam-link consumer rather
+  than an emulated rate limiter, and whether the ~1.5-slot steady-state ring
+  occupancy holds when the consumer's drain is bursty rather than evenly paced.

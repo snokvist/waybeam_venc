@@ -142,10 +142,20 @@ int test_frame_gate(void)
 		frame_gate_observe(&g, 8, 500 * MS) == FRAME_GATE_ACTION_OPEN);
 	CHECK("escape_open", frame_gate_is_open(&g));
 	CHECK("escape_counted", g.escape_events == 1);
-	/* Still congested, so it closes again immediately — the escape is a
-	 * pressure valve, not a latch. */
-	CHECK("escape_recloses",
-		frame_gate_observe(&g, 8, 501 * MS) == FRAME_GATE_ACTION_CLOSE);
+	/* Still congested, so it closes again — the escape is a pressure valve,
+	 * not a latch.  But NOT within the dwell: this assertion used to demand
+	 * a re-close at 501 ms, one millisecond after the escape, which is the
+	 * behaviour that made the escape useless on device.  Occupancy is still
+	 * above close_slots at that instant, so an immediate re-close beat the
+	 * encoder to the punch and no frame ever reached the ring — a dead
+	 * consumer froze the stream with every drop counter at zero.  The valve
+	 * has to stay open long enough to pass one frame; see
+	 * FRAME_GATE_MIN_OPEN_US. */
+	CHECK("escape_holds_within_dwell",
+		frame_gate_observe(&g, 8, 501 * MS) == FRAME_GATE_ACTION_NONE);
+	CHECK("escape_recloses_after_dwell",
+		frame_gate_observe(&g, 8, 500 * MS + FRAME_GATE_MIN_OPEN_US)
+			== FRAME_GATE_ACTION_CLOSE);
 
 	/* ── live switch to off must release a closed gate ───────────── */
 	gate_on(&g, 3, 500);
@@ -190,6 +200,59 @@ int test_frame_gate(void)
 		frame_gate_observe(&g, 0, 70 * MS + FRAME_GATE_MIN_CLOSED_US)
 			== FRAME_GATE_ACTION_OPEN);
 	frame_gate_restore_closed(NULL, 0);       /* must not crash */
+
+	/* ── escape pulse must survive long enough to land a frame ────── */
+	{
+		FrameGate e;
+		uint64_t t = 1000 * MS;
+
+		frame_gate_setup(&e, FRAME_GATE_ON, 0, 0, RING);
+		/* Close on a backed-up ring, then let the escape fire. */
+		CHECK("pulse_closes",
+			frame_gate_observe(&e, 5, t) == FRAME_GATE_ACTION_CLOSE);
+		t += e.cfg.max_closed_us;
+		CHECK("pulse_escapes",
+			frame_gate_observe(&e, 5, t) == FRAME_GATE_ACTION_OPEN);
+
+		/* The consumer is dead, so occupancy is still above close_slots.
+		 * Without a dwell the very next observation re-closes and the
+		 * admitted frame never reaches the ring — the silent stop
+		 * measured on device.  It must refuse to close here. */
+		CHECK("pulse_holds_open_at_1ms",
+			frame_gate_observe(&e, 5, t + 1 * MS)
+				== FRAME_GATE_ACTION_NONE);
+		CHECK("pulse_still_open_just_under_dwell",
+			frame_gate_observe(&e, 5,
+				t + FRAME_GATE_MIN_OPEN_US - 1)
+				== FRAME_GATE_ACTION_NONE);
+		CHECK("pulse_open_during_dwell", frame_gate_is_open(&e));
+
+		/* Once the dwell is served the gate closes again normally. */
+		CHECK("pulse_closes_after_dwell",
+			frame_gate_observe(&e, 5, t + FRAME_GATE_MIN_OPEN_US)
+				== FRAME_GATE_ACTION_CLOSE);
+
+		/* A normal close is NOT debounced by the open dwell: burst
+		 * response must be unchanged. */
+		frame_gate_setup(&e, FRAME_GATE_ON, 0, 0, RING);
+		CHECK("normal_close_not_delayed",
+			frame_gate_observe(&e, 5, 1 * MS)
+				== FRAME_GATE_ACTION_CLOSE);
+
+		/* A drain during the dwell clears it, so the next backlog
+		 * closes immediately rather than inheriting a stale pulse. */
+		frame_gate_setup(&e, FRAME_GATE_ON, 0, 0, RING);
+		t = 2000 * MS;
+		(void)frame_gate_observe(&e, 5, t);
+		t += e.cfg.max_closed_us;
+		(void)frame_gate_observe(&e, 5, t);
+		CHECK("drain_clears_pulse",
+			frame_gate_observe(&e, 0, t + 1 * MS)
+				== FRAME_GATE_ACTION_NONE);
+		CHECK("close_immediate_after_drain",
+			frame_gate_observe(&e, 5, t + 2 * MS)
+				== FRAME_GATE_ACTION_CLOSE);
+	}
 
 	/* ── NULL safety ─────────────────────────────────────────────── */
 	CHECK("null_observe",

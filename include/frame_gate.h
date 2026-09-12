@@ -57,6 +57,23 @@ typedef enum {
  * has had a realistic chance to drain a slot. */
 #define FRAME_GATE_MIN_CLOSED_US 20000u
 
+/* Minimum time the gate stays open after a SAFETY ESCAPE, and only then.
+ *
+ * The escape exists so a dead consumer cannot stop the stream for good: it
+ * reopens, lets a frame through, and the ring reports full_drops — a
+ * diagnosable failure rather than a silent one.  Without a dwell it cannot do
+ * that.  Occupancy is still above close_slots at the instant it reopens, so
+ * the very next observation closes again, and on Star6E the idle path polls
+ * every 1 ms while a frame takes 10 ms at 100 fps.  The escape therefore
+ * re-closed before the encoder could deliver anything: measured 2026-09-12,
+ * a dead consumer froze framesSent with every drop counter at zero, under
+ * both the recv-stop and drain-stall actuators.
+ *
+ * 20 ms is two frame periods at 100 fps, so at least one frame reaches the
+ * ring and is counted.  Normal closes are NOT debounced by this — only the
+ * pulse that follows an escape, so burst response is unchanged. */
+#define FRAME_GATE_MIN_OPEN_US 20000u
+
 typedef struct {
 	FrameGateMode mode;
 	uint32_t close_slots;    /* close when used_slots >= this */
@@ -77,6 +94,7 @@ typedef struct {
 	uint64_t closed_since_us;    /* valid only while !open */
 	uint64_t closed_total_us;    /* cumulative time gated, for duty cycle */
 	uint32_t close_events;       /* closes since setup */
+	uint64_t escape_open_us;     /* when an escape reopened; 0 = not an escape */
 	uint32_t escape_events;      /* reopens forced by max_closed_us */
 } FrameGate;
 

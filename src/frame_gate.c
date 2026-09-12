@@ -84,8 +84,17 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	}
 
 	if (g->open) {
-		if (used_slots < g->cfg.close_slots)
+		if (used_slots < g->cfg.close_slots) {
+			g->escape_open_us = 0;
 			return FRAME_GATE_ACTION_NONE;
+		}
+		/* An escape pulse is still serving its dwell: refuse to close
+		 * so the admitted frame has time to reach the ring. */
+		if (g->escape_open_us &&
+		    now_us > g->escape_open_us &&
+		    (now_us - g->escape_open_us) < FRAME_GATE_MIN_OPEN_US)
+			return FRAME_GATE_ACTION_NONE;
+		g->escape_open_us = 0;
 		g->open = 0;
 		g->closed_since_us = now_us;
 		g->close_events++;
@@ -105,6 +114,10 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	if (elapsed_us >= g->cfg.max_closed_us) {
 		g->escape_events++;
 		frame_gate_force_open(g, now_us);
+		/* Hold this one open long enough for a frame to actually land,
+		 * or the escape reopens and re-closes without ever letting the
+		 * ring report a drop.  See FRAME_GATE_MIN_OPEN_US. */
+		g->escape_open_us = now_us ? now_us : 1u;
 		return FRAME_GATE_ACTION_OPEN;
 	}
 
