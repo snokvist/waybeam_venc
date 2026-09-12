@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 5.0.0 -->
+<!-- version: 6.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -479,3 +479,101 @@ closed loop driven by ring occupancy rather than a fixed QP table.
    same scene, `.232` 2026-08-03); they are not in the 0.85.0 config surface.
    Re-exposing them is the natural next step and should be measured for IDR
    behaviour the same way.
+
+---
+
+## 12. The real vendor SDK — three purpose-built mechanisms
+
+`/home/snokvist/dev/SDK_IPCAM` holds the actual SigmaStar releases, and they
+answer this far better than the reverse-engineered HAL headers in §11:
+
+- Star6E: `star6e_SDK/project-Pudding-ILC02V009/project/release/include/` —
+  `mi_venc.h`, `mi_venc_datatype.h`, `mi_venc_user_rc.h`
+- Maruko: `Maruko/SourceCode/project/project/release/include/` — same set
+- Official docs: `SGS_IPU_SDK/.../API 说明文档/API/MI_VENC_API.pdf`
+  (MI VENC API v2.12); extract with `pdftotext -layout`
+
+The in-repo OpenIPC HAL binds ~20 VENC calls. **The real SDK exposes 80**, and
+the ones that matter here were simply never bound. All layouts below are
+**identical on Star6E and Maruko**, and all six symbols are **exported by the
+shipped `/usr/lib/libmi_venc.so` on both `.232` and `.233`** (verified
+2026-09-12), so none of this needs a firmware change.
+
+### 12.1 `MI_VENC_SetFrameLostStrategy` — the purpose-built primitive
+
+```c
+typedef struct {
+    MI_BOOL                 bFrmLostOpen;      /* switch */
+    MI_U32                  u32FrmLostBpsThr;  /* threshold, bit/s */
+    MI_VENC_FrameLostMode_e eFrmLostMode;      /* NORMAL | PSKIP */
+    MI_U32                  u32EncFrmGaps;     /* spread evenly, not in bursts */
+} MI_VENC_ParamFrameLost_t;
+```
+
+This *is* the frame gate, built into the SDK: "配置瞬时码率超出阈值时丢帧策略"
+— shed load when the instantaneous bitrate exceeds a threshold. The doc says a
+call during encoding "takes effect at the next frame", and `u32EncFrmGaps`
+spreads the shedding evenly instead of dropping a burst.
+
+`E_MI_VENC_FRMLOST_PSKIP` is the important mode: instead of dropping the frame,
+the encoder emits a **P-skip frame** — a few bytes saying "same as reference".
+So the bitstream has **no gap**, PTS stays continuous, the decoder never
+starves, the GDR wave keeps advancing, and it is a P frame, so **no IDR**. That
+is every property the gate wanted, natively, with a threshold in bit/s that a
+ring-occupancy controller can drive directly.
+
+### 12.2 `MI_VENC_EnableIdr` — suppress the resume keyframe outright
+
+```c
+MI_S32 MI_VENC_EnableIdr(MI_VENC_CHN VeChn, MI_BOOL bEnableIdr);
+```
+
+Doc, §1.3.19: *"若不使能 IDR 帧，则在下一帧之后都编不出 IDR 帧或 I 帧，直到再次使能为止"*
+— with IDR disabled, no IDR or I frame is encoded from the next frame onward
+until it is re-enabled. H.264/H.265 only.
+
+That is a direct answer to §10: bracket the gate's reopen with
+`EnableIdr(FALSE)` / `StartRecvPic` / `EnableIdr(TRUE)` and the resume keyframe
+should never be emitted. It keeps the existing gate design intact. Two things
+to prove on device: that it actually suppresses *this* IDR (the SDK may treat a
+receive-restart keyframe as mandatory), and where to re-enable — too early and
+the IDR returns, too late and a genuine recovery request is swallowed.
+
+### 12.3 `MI_VENC_SetSuperFrameCfg` — attack the super-frame directly
+
+```c
+typedef struct {
+    MI_VENC_SuperFrmMode_e eSuperFrmMode;        /* NONE | DISCARD | REENCODE */
+    MI_U32 u32SuperIFrmBitsThr;
+    MI_U32 u32SuperPFrmBitsThr;
+    MI_U32 u32SuperBFrmBitsThr;
+} MI_VENC_SuperFrameCfg_t;
+```
+
+§1's complaint is that the response to congestion sends *the largest frame in
+the stream* into an already-overflowing link. This caps that case at its
+source: any frame over the per-type bit threshold is discarded or re-encoded.
+
+### 12.4 Also unbound and worth knowing
+
+`MI_VENC_SetRcPriority` (`BITRATE_FIRST` vs `FRAMEBITS_FIRST`),
+`MI_VENC_SetRoiBgFrameRate` (background frame rate outside ROI),
+`MI_VENC_AllocCustomMap`/`ApplyCustomMap` (per-CTU QP map),
+`MI_VENC_SetAdvCustRcAttr` + `mi_venc_user_rc.h` (user-defined RC),
+`MI_VENC_StartRecvPicEx(chn, {s32RecvPicNum})` (meter intake by frame count —
+the direct analogue of CV610's `recv_pic_num`).
+
+### 12.5 Suggested order of attack
+
+1. **`FRMLOST_PSKIP`** — the native mechanism, no gap, no IDR, threshold in
+   bit/s. Bind it, drive `u32FrmLostBpsThr` from ring occupancy, and the frame
+   gate's whole state machine becomes unnecessary on SigmaStar.
+2. **`EnableIdr(FALSE)` around the reopen** — smallest change if the gate as
+   built is worth keeping; needs the two device proofs in §12.2.
+3. **`SetRcParam`** (§11) — already measured IDR-free, already wired, good
+   fallback and useful as the slow outer loop.
+4. **`SuperFrameCfg`** — complementary to any of the above.
+
+Measure each the same way §10 did: gate the bitstream through
+`tools/frame_shm_consumer_test`, count IDRs against a no-change control, and
+never trust `/api/v1/idr/stats` for this question.
