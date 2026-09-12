@@ -155,6 +155,39 @@ static inline int frame_gate_enabled(const FrameGate *g)
 }
 
 FrameGateMode frame_gate_parse_mode(const char *s);
+
+/* Which actuator the backends drive when the policy says CLOSE.
+ *
+ * RECV_STOP issues the SDK's stop/start-receive pair.  DRAIN_STALL issues
+ * nothing at all: the backend simply stops draining the encoder's output FIFO
+ * while the gate reads closed.  That distinction is why this lives here rather
+ * than three times over — the choice is policy, and the only per-backend part
+ * is where the drain loop returns early.
+ *
+ * Measured 2026-09-12 on all three backends: RECV_STOP costs one IRAP per
+ * reopen on Star6E, three on Maruko and 0.6 on CV610, and against a real
+ * capacity-limited RF link it reached ~4.4 keyframes per second.  DRAIN_STALL
+ * measured zero on every board and on the live link. */
+typedef enum {
+	FRAME_GATE_ACTUATOR_RECV_STOP = 0,
+	FRAME_GATE_ACTUATOR_DRAIN_STALL,
+} FrameGateActuator;
+
+/** Read the actuator choice once, from WB_GATE_DRAIN_STALL.  Call at gate
+ *  setup: the gate can close within the first frames, long before any runtime
+ *  request could arrive. */
+void frame_gate_init_actuator(void);
+
+/** Non-zero when the drain-stall actuator is selected. */
+int frame_gate_drain_stall(void);
+
+/** Select the actuator at runtime.  Callers MUST leave the encoder receiving:
+ *  recv-stop may have issued a stop that drain-stall will never undo, which
+ *  strands the channel for good. */
+void frame_gate_set_drain_stall(int on);
+
+/** "drainstall" or "recvstop", for bring-up reporting. */
+const char *frame_gate_actuator_name(void);
 const char   *frame_gate_mode_name(FrameGateMode m);
 
 #endif /* FRAME_GATE_H */

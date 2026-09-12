@@ -26,21 +26,11 @@ int star6e_controls_apply_roi_qp(int qp);
 /** Apply relative I/P QP delta to the running encoder. */
 int star6e_controls_apply_qp_delta(int delta);
 
-/** TEST HOOK (PR #287): toggle MI_VENC_EnableIdr on the stream channel.
- *  Returns 0 on success, -1 if unsupported by the running SDK. */
-int star6e_controls_enable_idr(int on);
 
-/** TEST HOOK (PR #287): MI_VENC_SetFrameLostStrategy on the stream channel.
- *  Returns 0 on success, -1 if unsupported by the running SDK. */
-int star6e_controls_frame_lost(int on, uint32_t bps_thr, int pskip,
-	uint32_t gaps);
 
-/** TEST HOOK (PR #287): select the frame-gate actuator.
- *  0 = MI_VENC_Stop/StartRecvPic, 1 = stop draining MI_VENC_GetStream. */
+/** Select the frame-gate actuator at runtime, re-arming the encoder so a
+ *  pending recv-stop cannot strand the channel.  See frame_gate.h. */
 void star6e_runtime_set_gate_drain_stall(int on);
-/** TEST HOOK (PR #287): read WB_GATE_WARMUP_FRAMES; gate may not arm below it. */
-void star6e_runtime_init_gate_warmup(void);
-int star6e_runtime_gate_drain_stall(void);
 
 /** Service a pending detector live model-swap request on the pipeline thread.
  *  Called once per encode-loop iteration; a no-op when no swap is pending. */

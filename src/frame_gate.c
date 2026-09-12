@@ -1,5 +1,6 @@
 #include "frame_gate.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -141,4 +142,30 @@ FrameGateMode frame_gate_parse_mode(const char *s)
 const char *frame_gate_mode_name(FrameGateMode m)
 {
 	return (m == FRAME_GATE_ON) ? "on" : "off";
+}
+
+/* Actuator selection.  Plain int: written by a control thread, read by the
+ * encode loop, where a stale read costs at most one frame of the old mode. */
+static int g_drain_stall;
+
+void frame_gate_init_actuator(void)
+{
+	const char *e = getenv("WB_GATE_DRAIN_STALL");
+
+	g_drain_stall = (e && *e == '1') ? 1 : 0;
+}
+
+int frame_gate_drain_stall(void)
+{
+	return __atomic_load_n(&g_drain_stall, __ATOMIC_RELAXED);
+}
+
+void frame_gate_set_drain_stall(int on)
+{
+	__atomic_store_n(&g_drain_stall, on ? 1 : 0, __ATOMIC_RELAXED);
+}
+
+const char *frame_gate_actuator_name(void)
+{
+	return frame_gate_drain_stall() ? "drainstall" : "recvstop";
 }

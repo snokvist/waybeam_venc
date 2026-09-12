@@ -2912,7 +2912,7 @@ static int bind_maruko_pipeline(MarukoBackendContext *ctx)
 		venc_frame_ring_fill_t gfill = {0};
 
 		(void)maruko_output_frame_ring_fill(&ctx->output, &gfill);
-		maruko_runtime_init_gate_mode();
+		frame_gate_init_actuator();
 		maruko_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
 			frame_gate_parse_mode(ctx->cfg.frame_gate),
 			ctx->cfg.frame_gate_close_slots,
@@ -3934,8 +3934,6 @@ static void maruko_pipeline_cleanup_streaming(MarukoBackendContext *ctx,
 }
 
 static void maruko_service_frame_gate(MarukoBackendContext *ctx);
-/* TEST HOOK (PR #287): 1 = drain-stall actuator.  See maruko_runtime_init_gate_mode. */
-static int g_maruko_gate_drain_stall;
 
 /* Maruko wording for frame_gate_setup()'s verdict; the checks themselves are
  * shared in frame_gate.c. */
@@ -4000,7 +3998,7 @@ static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 	 * output FIFO instead of issuing StopRecvPic.  The gate is still
 	 * serviced every pass off the egress ring's own occupancy, so the
 	 * reopen path never depends on draining. */
-	if (g_maruko_gate_drain_stall &&
+	if (frame_gate_drain_stall() &&
 	    !frame_gate_is_open(&ctx->frame_gate)) {
 		maruko_service_frame_gate(ctx);
 		usleep(2000);
@@ -4469,26 +4467,6 @@ static void maruko_recorder_start_idr(MarukoBackendContext *ctx)
  * keyframes, StopRecvPic changes no encoder state) and the same signal, the
  * instantaneous egress-ring occupancy rather than the 200 ms low-water
  * window.  See include/frame_gate.h. */
-/* TEST HOOK (PR #287): Star6E's drain-stall actuator, ported.  0 = the shipped
- * MI_VENC_Stop/StartRecvPic gate, 1 = stop draining MI_VENC_GetStream instead
- * so no SDK call is made and the resume cannot keyframe.  Armed at boot
- * (WB_GATE_DRAIN_STALL=1) because the gate can close within the first frames,
- * long before an HTTP request could arrive. */
-void maruko_runtime_init_gate_mode(void)
-{
-	const char *m = getenv("WB_GATE_DRAIN_STALL");
-
-	if (m && *m == '1')
-		g_maruko_gate_drain_stall = 1;
-	printf("> [maruko] frame gate actuator: %s\n",
-		g_maruko_gate_drain_stall ? "drainstall" : "recvstop");
-}
-
-int maruko_runtime_gate_drain_stall(void)
-{
-	return g_maruko_gate_drain_stall;
-}
-
 static void maruko_service_frame_gate(MarukoBackendContext *ctx)
 {
 	venc_frame_ring_fill_t fill;
@@ -4524,7 +4502,7 @@ static void maruko_service_frame_gate(MarukoBackendContext *ctx)
 
 	/* Drain-stall changes no SDK state; the policy flip alone is the
 	 * actuator and the drain loop stops pulling while it reads closed. */
-	if (g_maruko_gate_drain_stall)
+	if (frame_gate_drain_stall())
 		return;
 
 	if (action == FRAME_GATE_ACTION_CLOSE) {

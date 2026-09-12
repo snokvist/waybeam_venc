@@ -247,10 +247,6 @@ static int i6c_venc_load(maruko_venc_impl *venc)
 		int (*)(int, int, void *), "MI_VENC_SetChnAttr");
 	LOAD_SYM(venc, "libmi_venc.so", fnRequestIdr,
 		int (*)(int, int, int), "MI_VENC_RequestIdr");
-	LOAD_SYM(venc, "libmi_venc.so", fnEnableIdr,
-		int (*)(int, int, int), "MI_VENC_EnableIdr");
-	LOAD_SYM(venc, "libmi_venc.so", fnSetFrameLostStrategy,
-		int (*)(int, int, void *), "MI_VENC_SetFrameLostStrategy");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetRoiCfg,
 		int (*)(int, int, void *), "MI_VENC_SetRoiCfg");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetRoiCfg,

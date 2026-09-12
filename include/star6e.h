@@ -494,24 +494,6 @@ typedef struct {
 _Static_assert(sizeof(MI_VENC_ParamH265SliceSplit_t) == 8,
 	"MI_VENC_ParamH265SliceSplit_t layout changed — verify SDK match");
 
-/* Frame-lost strategy (mi_venc_datatype.h, identical layout on star6e and
- * maruko).  Sheds load when the instantaneous bitrate crosses a bit/s
- * threshold; PSKIP encodes a skip frame instead of dropping, so the
- * bitstream keeps a frame at every pts. */
-typedef enum {
-	E_MI_VENC_FRMLOST_NORMAL = 0,
-	E_MI_VENC_FRMLOST_PSKIP  = 1,
-} MI_VENC_FrameLostMode_e;
-
-typedef struct {
-	MI_BOOL                 bFrmLostOpen;
-	MI_U32                  u32FrmLostBpsThr;
-	MI_VENC_FrameLostMode_e eFrmLostMode;
-	MI_U32                  u32EncFrmGaps;
-} MI_VENC_ParamFrameLost_t;
-_Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
-	"MI_VENC_ParamFrameLost_t layout changed — verify SDK match");
-
 /* MI_VENC ----------------------------------------------------------------- */
 #if defined(PLATFORM_MARUKO)
 #define MI_VENC_CreateChn(chn, attr)  g_mi_venc.fnCreateChn(0, (chn), (attr))
@@ -526,12 +508,6 @@ _Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
 #define MI_VENC_GetChnAttr(chn, attr) g_mi_venc.fnGetChnAttr(0, (chn), (attr))
 #define MI_VENC_SetChnAttr(chn, attr) g_mi_venc.fnSetChnAttr(0, (chn), (attr))
 #define MI_VENC_RequestIdr(chn, inst) g_mi_venc.fnRequestIdr(0, (chn), (inst))
-/* Optional: absent on older libmi_venc.so, so callers must handle -1. */
-#define MI_VENC_EnableIdr(chn, en) \
-	(g_mi_venc.fnEnableIdr ? g_mi_venc.fnEnableIdr(0, (chn), (en)) : -1)
-#define MI_VENC_SetFrameLostStrategy(chn, p) \
-	(g_mi_venc.fnSetFrameLostStrategy ? \
-		g_mi_venc.fnSetFrameLostStrategy(0, (chn), (p)) : -1)
 #define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg(0, (chn), (cfg))
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg(0, (chn), (idx), (cfg))
 #define MI_VENC_GetRcParam(chn, param) g_mi_venc.fnGetRcParam(0, (chn), (param))
@@ -551,12 +527,6 @@ _Static_assert(sizeof(MI_VENC_ParamFrameLost_t) == 16,
 #define MI_VENC_GetRcParam(chn, p)    g_mi_venc.fnGetRcParam((chn), (p))
 #define MI_VENC_SetRcParam(chn, p)    g_mi_venc.fnSetRcParam((chn), (p))
 #define MI_VENC_RequestIdr(chn, inst) g_mi_venc.fnRequestIdr((chn), (inst))
-/* Optional: absent on older libmi_venc.so, so callers must handle -1. */
-#define MI_VENC_EnableIdr(chn, en) \
-	(g_mi_venc.fnEnableIdr ? g_mi_venc.fnEnableIdr((chn), (en)) : -1)
-#define MI_VENC_SetFrameLostStrategy(chn, p) \
-	(g_mi_venc.fnSetFrameLostStrategy ? \
-		g_mi_venc.fnSetFrameLostStrategy((chn), (p)) : -1)
 #define MI_VENC_SetRoiCfg(chn, cfg)   g_mi_venc.fnSetRoiCfg((chn), (cfg))
 #define MI_VENC_GetRoiCfg(chn, idx, cfg) g_mi_venc.fnGetRoiCfg((chn), (idx), (cfg))
 #define MI_VENC_GetChnDevid(chn, dev) g_mi_venc.fnGetChnDevid((chn), (dev))

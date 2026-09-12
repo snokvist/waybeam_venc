@@ -4084,58 +4084,11 @@ static int handle_dual_set(int fd, const HttpRequest *req, void *ctx)
 #endif /* HAVE_BACKEND_STAR6E */
 }
 
-/* TEST HOOK (PR #287 investigation, not for merge as-is).
- * GET /api/v1/frmlost?on=0|1&bps=<bit/s>&mode=pskip|normal&gaps=<n> */
-static int handle_frmlost(int fd, const HttpRequest *req, void *ctx)
-{
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
-	const char *q = req ? req->query : NULL;
-	const char *p;
-	int on = 1, pskip = 1;
-	unsigned long bps = 0, gaps = 0;
-	char buf[192];
-
-	(void)ctx;
-	if (q && strstr(q, "on=0"))
-		on = 0;
-	if (q && strstr(q, "mode=normal"))
-		pskip = 0;
-	if (q && (p = strstr(q, "bps=")))
-		bps = strtoul(p + 4, NULL, 10);
-	if (q && (p = strstr(q, "gaps=")))
-		gaps = strtoul(p + 5, NULL, 10);
-
-	{
-#if HAVE_BACKEND_STAR6E
-		int rc = star6e_controls_frame_lost(on, (uint32_t)bps, pskip,
-			(uint32_t)gaps);
-#else
-		int rc = maruko_controls_frame_lost(on, (uint32_t)bps, pskip,
-			(uint32_t)gaps);
-#endif
-		if (rc != 0) {
-			char emsg[128];
-			snprintf(emsg, sizeof(emsg),
-				"MI_VENC_SetFrameLostStrategy returned 0x%X",
-				(unsigned)rc);
-			return httpd_send_error(fd, 501, "not_supported", emsg);
-		}
-	}
-
-	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"open\":%s,\"bpsThr\":%lu,"
-		"\"mode\":\"%s\",\"encFrmGaps\":%lu}}",
-		on ? "true" : "false", bps, pskip ? "pskip" : "normal", gaps);
-	return httpd_send_json(fd, 200, buf);
-#else
-	(void)req; (void)ctx;
-	return httpd_send_error(fd, 501, "not_implemented",
-		"frame-lost test hook needs a SigmaStar backend");
-#endif
-}
-
-/* TEST HOOK (PR #287 investigation, not for merge as-is).
- * GET /api/v1/gatemode?mode=recvstop|drainstall */
+/* GET /api/v1/gatemode?mode=recvstop|drainstall
+ *
+ * Live A/B of the frame-gate actuator.  Star6E only, because it is the only
+ * backend whose setter re-arms the encoder: switching away from recv-stop
+ * while it holds a pending stop would strand the channel (see frame_gate.h). */
 static int handle_gatemode(int fd, const HttpRequest *req, void *ctx)
 {
 #if HAVE_BACKEND_STAR6E
@@ -4147,48 +4100,12 @@ static int handle_gatemode(int fd, const HttpRequest *req, void *ctx)
 	star6e_runtime_set_gate_drain_stall(stall);
 	snprintf(buf, sizeof(buf),
 		"{\"ok\":true,\"data\":{\"gateActuator\":\"%s\"}}",
-		stall ? "drainstall" : "recvstop");
+		frame_gate_actuator_name());
 	return httpd_send_json(fd, 200, buf);
 #else
 	(void)req; (void)ctx;
 	return httpd_send_error(fd, 501, "not_implemented",
 		"gate actuator test hook is star6e-only");
-#endif
-}
-
-/* TEST HOOK (PR #287 investigation, not for merge as-is).
- * GET /api/v1/idr/enable?on=0|1 -> MI_VENC_EnableIdr on the stream channel.
- * Lets the bench measure, from the bitstream, whether disabling IDR also
- * suppresses the implicit keyframe from StartRecvPic and from SetChnAttr. */
-static int handle_idr_enable(int fd, const HttpRequest *req, void *ctx)
-{
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO
-	const char *q = req ? req->query : NULL;
-	int on = 1;
-	int rc;
-	char buf[128];
-
-	(void)ctx;
-	if (q && strstr(q, "on=0"))
-		on = 0;
-
-#if HAVE_BACKEND_STAR6E
-	rc = star6e_controls_enable_idr(on);
-#else
-	rc = maruko_controls_enable_idr(on);
-#endif
-	if (rc != 0)
-		return httpd_send_error(fd, 501, "not_supported",
-			"MI_VENC_EnableIdr unavailable or refused");
-
-	snprintf(buf, sizeof(buf),
-		"{\"ok\":true,\"data\":{\"enableIdr\":%s}}",
-		on ? "true" : "false");
-	return httpd_send_json(fd, 200, buf);
-#else
-	(void)req; (void)ctx;
-	return httpd_send_error(fd, 501, "not_implemented",
-		"MI_VENC_EnableIdr test hook needs a SigmaStar backend");
 #endif
 }
 
@@ -4619,8 +4536,6 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
-	r |= venc_httpd_route("GET", "/api/v1/idr/enable",  handle_idr_enable, NULL);
-	r |= venc_httpd_route("GET", "/api/v1/frmlost",     handle_frmlost, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/gatemode",    handle_gatemode, NULL);
 #if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);

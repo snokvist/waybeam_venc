@@ -1282,7 +1282,7 @@ static int star6e_runtime_apply_startup_controls(Star6eRunnerContext *ctx)
 
 		(void)star6e_output_frame_ring_fill(&ps->output, &gfill);
 		g_gate_switch_ctx = ps;
-		star6e_runtime_init_gate_warmup();
+		frame_gate_init_actuator();
 		star6e_report_frame_gate_setup(frame_gate_setup(&ps->frame_gate,
 			frame_gate_parse_mode(vcfg->video0.frame_gate),
 			vcfg->video0.frame_gate_close_slots,
@@ -1577,70 +1577,18 @@ static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
  * the post-send call never runs and the gate could never let go.  The idle
  * branch already polls at ~1 ms, which is finer than any frame period we
  * support, so no timer and no extra thread are needed. */
-/* TEST HOOK (PR #287 investigation, not for merge as-is).
- *
- * Selects which actuator the frame gate drives:
- *   0 = recv-stop   MI_VENC_Stop/StartRecvPic (the shipped gate; §10 measured
- *                   one IDR on every reopen).
- *   1 = drain-stall stop calling MI_VENC_GetStream instead, letting VENC's
- *                   output FIFO fill.  No SDK state changes, so there is no
- *                   resume call that could keyframe.  This is the mechanism
- *                   outgoing.allowUnixEncoderStall documents as a hazard
- *                   (src/output_socket.c:49) — a blocked drain holding a VENC
- *                   output slot stalls capture — used deliberately.
- *
- * Read without a lock: a plain int written by the HTTP thread and read by the
- * encode loop, where a stale read costs at most one frame of the old mode. */
-static int g_gate_drain_stall;
-
-/* TEST HOOK (PR #287 investigation).  Frames successfully drained since the
- * channel started, and the warmup floor below which the gate may not arm.
- *
- * Measured 2026-09-12: a drain-stall that begins before the encoder is warm
- * wedges the channel permanently (curPacks == 0 forever, no fault, recoverable
- * only by restarting the daemon), while a warm channel survives the identical
- * condition — consumer gone outright, ring full at 8/8, 20 s — and recovers.
- * The warmup floor converts the fatal cold case into the case that always
- * recovers.  Set WB_GATE_WARMUP_FRAMES to bisect the boundary; 0 disables. */
-static unsigned long g_frames_drained;
-static unsigned long g_gate_warmup_frames;
-
-void star6e_runtime_init_gate_warmup(void)
-{
-	const char *e = getenv("WB_GATE_WARMUP_FRAMES");
-
-	const char *m = getenv("WB_GATE_DRAIN_STALL");
-
-	g_frames_drained = 0;
-	g_gate_warmup_frames = e ? strtoul(e, NULL, 10) : 0;
-	/* Selectable at boot as well as over HTTP: with a small warmup the gate
-	 * can arm inside 100 ms, far sooner than a request could arrive. */
-	if (m && *m == '1')
-		g_gate_drain_stall = 1;
-	printf("> frame gate: actuator=%s warmup=%lu frames\n",
-		g_gate_drain_stall ? "drainstall" : "recvstop",
-		g_gate_warmup_frames);
-}
-
 void star6e_runtime_set_gate_drain_stall(int on)
 {
 	/* Switching actuator mid-run strands the channel unless the hardware is
 	 * left receiving: recv-stop may have issued StopRecvPic, and drain-stall
 	 * never issues the matching StartRecvPic, so the encoder would stay
-	 * stopped for good.  That is what produced the "cold-start wedge" this
-	 * investigation chased for an hour — a hook artifact, not an SDK
-	 * property.  Re-arm the hardware and the policy on every switch. */
-	__atomic_store_n(&g_gate_drain_stall, on ? 1 : 0, __ATOMIC_RELAXED);
+	 * stopped for good.  Re-arm hardware and policy on every switch. */
+	frame_gate_set_drain_stall(on);
 	if (g_gate_switch_ctx) {
 		(void)MI_VENC_StartRecvPic(g_gate_switch_ctx->venc_channel);
 		frame_gate_force_open(&g_gate_switch_ctx->frame_gate,
 			wb_monotonic_us());
 	}
-}
-
-int star6e_runtime_gate_drain_stall(void)
-{
-	return __atomic_load_n(&g_gate_drain_stall, __ATOMIC_RELAXED);
 }
 
 static void star6e_service_frame_gate(Star6ePipelineState *ps)
@@ -1651,11 +1599,6 @@ static void star6e_service_frame_gate(Star6ePipelineState *ps)
 	int ret;
 
 	if (!ps || !frame_gate_enabled(&ps->frame_gate))
-		return;
-
-	/* Not warm yet: leave the gate open rather than arming it.  Nothing can
-	 * need reopening, because nothing has been allowed to close. */
-	if (g_gate_warmup_frames && g_frames_drained < g_gate_warmup_frames)
 		return;
 
 	if (star6e_output_frame_ring_fill(&ps->output, &fill) != 0) {
@@ -1687,7 +1630,7 @@ static void star6e_service_frame_gate(Star6ePipelineState *ps)
 
 	/* Drain-stall mode changes no SDK state; the policy flip alone is the
 	 * actuator, and process_stream() stops draining while it reads closed. */
-	if (star6e_runtime_gate_drain_stall())
+	if (frame_gate_drain_stall())
 		return;
 
 	if (action == FRAME_GATE_ACTION_CLOSE) {
@@ -1725,7 +1668,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * VENC's output FIFO rather than issuing StopRecvPic.  The gate is still
 	 * evaluated every pass, off the egress ring's own occupancy, so the
 	 * reopen path does not depend on draining. */
-	if (star6e_runtime_gate_drain_stall() &&
+	if (frame_gate_drain_stall() &&
 	    !frame_gate_is_open(&ps->frame_gate)) {
 		star6e_service_frame_gate(ps);
 		star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
@@ -1795,7 +1738,6 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		fprintf(stderr, "ERROR: MI_VENC_GetStream failed %d\n", ret);
 		return ret;
 	}
-	g_frames_drained++;
 	if (star6e_output_reject_incomplete_access_unit(&ps->output,
 	    &stream)) {
 		MI_VENC_ReleaseStream(ps->venc_channel, &stream);

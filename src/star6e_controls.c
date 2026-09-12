@@ -691,7 +691,6 @@ static int compute_horizontal_roi(uint32_t width, uint32_t height,
 	return 0;
 }
 
-
 static int apply_roi_qp(int qp)
 {
 	uint32_t width = g_star6e_control_ctx.frame_width;
@@ -1933,40 +1932,4 @@ int star6e_controls_apply_roi_qp(int qp)
 int star6e_controls_apply_qp_delta(int delta)
 {
 	return apply_qp_delta(delta);
-}
-
-/* TEST HOOK (PR #287 investigation, not for merge as-is).
- *
- * MI_VENC_EnableIdr(chn, FALSE) is documented to stop the encoder emitting
- * any IDR or I frame from the next frame onward until re-enabled (MI VENC API
- * v2.12 §1.3.19).  Exposed here so the bench can answer two questions the
- * bitstream alone can settle: whether it suppresses the keyframe that
- * MI_VENC_StartRecvPic emits on a frame-gate reopen, and whether it also
- * suppresses the one MI_VENC_SetChnAttr emits on a bitrate write.
- *
- * Returns -1 when the running libmi_venc.so does not export the symbol. */
-int star6e_controls_enable_idr(int on)
-{
-	return MI_VENC_EnableIdr(g_star6e_control_ctx.venc_chn, on ? 1 : 0);
-}
-
-/* TEST HOOK (PR #287 investigation, not for merge as-is).
- *
- * MI_VENC_SetFrameLostStrategy sheds load when the instantaneous bitrate
- * crosses u32FrmLostBpsThr.  PSKIP encodes a skip frame instead of dropping,
- * so every pts still carries a frame; u32EncFrmGaps spreads the shedding
- * instead of bursting it.  Takes effect at the next frame (MI VENC API v2.12
- * §1.3.62).  Returns -1 when the running libmi_venc.so lacks the symbol. */
-int star6e_controls_frame_lost(int on, uint32_t bps_thr, int pskip,
-	uint32_t gaps)
-{
-	MI_VENC_ParamFrameLost_t p;
-
-	memset(&p, 0, sizeof(p));
-	p.bFrmLostOpen     = on ? 1 : 0;
-	p.u32FrmLostBpsThr = bps_thr;
-	p.eFrmLostMode     = pskip ? E_MI_VENC_FRMLOST_PSKIP
-				   : E_MI_VENC_FRMLOST_NORMAL;
-	p.u32EncFrmGaps    = gaps;
-	return MI_VENC_SetFrameLostStrategy(g_star6e_control_ctx.venc_chn, &p);
 }

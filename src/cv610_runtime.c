@@ -947,23 +947,6 @@ static void cv610_report_frame_gate_setup(FrameGateSetupStatus st,
  * loop that can be reached while the gate is closed — no frames are produced
  * then, so the per-frame call never runs and a gate that cannot reopen is a
  * hung stream. */
-/* TEST HOOK (PR #287): the Star6E/Maruko drain-stall actuator, ported so all
- * three backends can share one mechanism.  0 = ss_mpi_venc_stop_chn/start_chn
- * (the shipped gate, already keyframe-free on this SoC), 1 = stop draining
- * ss_mpi_venc_get_stream instead, making no SDK call at all.  Armed at boot
- * via WB_GATE_DRAIN_STALL because the gate can close within the first frames. */
-static int g_cv610_gate_drain_stall;
-
-void cv610_runtime_init_gate_mode(void)
-{
-	const char *m = getenv("WB_GATE_DRAIN_STALL");
-
-	if (m && *m == '1')
-		g_cv610_gate_drain_stall = 1;
-	printf("> [cv610] frame gate actuator: %s\n",
-		g_cv610_gate_drain_stall ? "drainstall" : "recvstop");
-}
-
 static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
 {
 	venc_frame_ring_fill_t fill;
@@ -1003,7 +986,7 @@ static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
 
 	/* Drain-stall changes no SDK state; the policy flip is the actuator and
 	 * the loop below stops pulling while it reads closed. */
-	if (g_cv610_gate_drain_stall)
+	if (frame_gate_drain_stall())
 		return;
 
 	if (action == FRAME_GATE_ACTION_CLOSE) {
@@ -2384,7 +2367,7 @@ static int cv610_init(void *opaque)
 
 		if (ctx->frame_ring)
 			(void)venc_frame_ring_get_fill(ctx->frame_ring, &gfill);
-		cv610_runtime_init_gate_mode();
+		frame_gate_init_actuator();
 		cv610_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
 			frame_gate_parse_mode(ctx->config.video0.frame_gate),
 			ctx->config.video0.frame_gate_close_slots,
@@ -2647,7 +2630,7 @@ static int cv610_run(void *opaque)
 		 * output FIFO rather than issuing stop_chn.  The gate is still
 		 * serviced above, off the ring's own occupancy, so the reopen
 		 * path never depends on draining. */
-		if (g_cv610_gate_drain_stall &&
+		if (frame_gate_drain_stall() &&
 		    !frame_gate_is_open(&ctx->frame_gate))
 			continue;
 		if (ready < 0 && select_errno == EINTR)

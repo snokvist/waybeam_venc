@@ -279,10 +279,6 @@ static int i6e_venc_load(star6e_venc_impl *venc)
 		int (*)(int, void *), "MI_VENC_SetChnAttr");
 	LOAD_SYM(venc, "libmi_venc.so", fnRequestIdr,
 		int (*)(int, int), "MI_VENC_RequestIdr");
-	LOAD_SYM(venc, "libmi_venc.so", fnEnableIdr,
-		int (*)(int, int), "MI_VENC_EnableIdr");
-	LOAD_SYM(venc, "libmi_venc.so", fnSetFrameLostStrategy,
-		int (*)(int, void *), "MI_VENC_SetFrameLostStrategy");
 	LOAD_SYM(venc, "libmi_venc.so", fnSetRoiCfg,
 		int (*)(int, void *), "MI_VENC_SetRoiCfg");
 	LOAD_SYM(venc, "libmi_venc.so", fnGetRoiCfg,

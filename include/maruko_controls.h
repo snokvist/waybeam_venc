@@ -9,15 +9,7 @@
 /** Bind pipeline context to runtime control state. */
 void maruko_controls_bind(MarukoBackendContext *backend, VencConfig *vcfg);
 
-/** TEST HOOKS (PR #287): MI_VENC_EnableIdr / MI_VENC_SetFrameLostStrategy.
- *  Return 0 on success, non-zero SDK code, or -1 if the symbol is absent. */
-int maruko_controls_enable_idr(int on);
-int maruko_controls_frame_lost(int on, uint32_t bps_thr, int pskip,
-	uint32_t gaps);
 
-/** TEST HOOK (PR #287): arm the drain-stall actuator from WB_GATE_DRAIN_STALL. */
-void maruko_runtime_init_gate_mode(void);
-int maruko_runtime_gate_drain_stall(void);
 
 /** Return Maruko backend's live control callback table. */
 const VencApplyCallbacks *maruko_controls_callbacks(void);
