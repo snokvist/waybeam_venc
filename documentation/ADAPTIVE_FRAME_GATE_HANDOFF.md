@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 3.0.0 -->
+<!-- version: 4.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -289,3 +289,96 @@ the exact code and logs and stop default-on work. Do not treat BUSY as success.
 
 If R1 fails, close the PR with the finding rather than reworking it — and
 keep the plan and this document, because the measurement is the valuable part.
+
+---
+
+## 10. SigmaStar bench results — 2026-09-12, local takeover
+
+Run on `.232` (Star6E SSC338Q, 1280x720 @ 100 fps) and `.233` (Maruko
+ssc378qe, 1080p @ 30 fps), both `resilience=racing` (GDR), frame-shm ring
+of 8 slots, vehicle-local `S97waybeam-hub` stopped so
+`tools/frame_shm_consumer_test` was the only consumer. Stall = SIGSTOP the
+consumer; resume = SIGCONT.
+
+### R1 is answered: PASS
+
+`MI_VENC_StopRecvPic` does **not** hang and no longer returns BUSY.
+
+- `StopRecvPic` returned 0 on every close. The `0xA0022012`
+  (`MI_ERR_VENC_BUSY`) seen at the previous checkpoint is **fixed** by the
+  post-`ReleaseStream` ordering in `e483e37` — confirmed on device.
+- The daemon stayed `S`/`R` throughout; never `D`. No `MMU_Callback` storm,
+  no kernel fault, no wedge.
+- Gate closed at exactly `usedSlots == 3` and reopened on drain. `fps/live`
+  returned to 100, ring drained to 0, **all drop counters stayed 0**.
+
+Drain-to-reopen was prompt — recovery appeared in the consumer's very next
+1 s print, not after the 500 ms escape.
+
+### Row 3 FAILS on both SigmaStar boards — the feature's premise does not hold
+
+Row 3 is the one the plan calls decisive: *"if a cycle keyframes, it has no
+reason to exist."* Six identical stall cycles (2 s stalled / 3 s running)
+inside one 40 s consumer window, gate on versus gate off, nothing else
+changed:
+
+| Board | 6 cycles, `frameGate=on` | 6 cycles, `frameGate=off` (control) |
+|---|---|---|
+| `.232` Star6E | **7 IDR** / 39.5 s | **1 IDR** / 39.9 s |
+| `.233` Maruko | **22 IDR** / 39.2 s | **0 IDR** / 39.8 s |
+
+On Star6E every reopen produced exactly one IDR; on Maruko every reopen
+produced three. The controls show the natural rate in racing/GDR is ~1 IDR
+per 40 s or less, so the excess is entirely attributable to the gate.
+
+The reopen path calls **only** `MI_VENC_StartRecvPic()`
+(`src/star6e_runtime.c:1625`) — no IDR request, no attribute write. The
+keyframe is emitted by the SigmaStar SDK actuator itself, so no amount of
+policy tuning avoids it.
+
+**Consequence.** The gate was built because a bitrate write implicitly emits
+an IDR, so pausing intake was supposed to shed load without one. On
+SigmaStar, pausing intake emits an IDR too — while simply letting the ring
+drop on full (the `frameGate=off` behaviour that already ships) sheds the
+same load for **zero** IDRs, with `bad_meta=0`, `bad_startcode=0` and
+`pts_regress=0` across the whole control run. On these two backends the gate
+is therefore strictly worse than the status quo it was meant to improve.
+
+This does not touch the CV610 result in §8, which measured zero IDR across a
+gate interval — `ss_mpi_venc_start_chn()` evidently does not keyframe on
+resume. The feature is SDK-dependent, not universally dead.
+
+### Secondary findings
+
+- **The 500 ms safety escape is defeated on Star6E.** `frame_gate_observe()`
+  debounces only closed->open (`min_closed_us`, 20 ms); the open->closed
+  direction has no dwell at all (`src/frame_gate.c:92`). The escape opens the
+  gate, the idle path re-polls 1 ms later with occupancy still at the close
+  threshold, and re-closes before the encoder can deliver a frame (10 ms at
+  100 fps). Measured: `framesSent` advanced by exactly 300 per 5 s cycle —
+  3 s of frames — so **zero** frames were admitted across each 2 s closed
+  interval, and no `full_drops` were recorded either. A dead consumer
+  therefore stops the stream *silently*, which is the outcome the escape's
+  own comment says it exists to prevent. Maruko does pulse (~2-3 frames/s
+  leaking as `transportDrops`), so this is a Star6E-specific race.
+- **Maruko does not hold the ring at the close threshold.** Occupancy reached
+  7-8 slots during every stall rather than stopping at 3, so the close lands
+  late enough that the ring overflows anyway.
+- **`/api/v1/idr/stats` cannot answer row 3.** It reports `channels: []` on a
+  live stream because it counts only API-*requested* IDRs, not SDK-emitted
+  ones. The check as written in row 3 would have returned a false PASS. The
+  bitstream is the only truth; `tools/frame_shm_consumer_test` reads it.
+- **`tools/frame_shm_consumer_test` reports `VERDICT: FAIL` on any healthy
+  GDR stream.** Its `vcl_ok` requires `min_vcl == max_vcl`, but racing/GDR
+  varies slice count (6 on GDR frames, 12 on an IDR). Integrity was clean in
+  every run. Read the counters, not the verdict.
+
+### What was NOT done
+
+- Rows 4-6, 8-11, 13 were not reached: row 3 is the gate on the whole
+  feature, and it failed on both SigmaStar backends.
+- `.181` CV610 was not re-touched this session; its §8 results stand as the
+  previous session recorded them.
+- Both benches were restored: `.233` to its original 0.81.0 binary and
+  config, `.232` left on the 0.85.0 checkpoint build with `frameGate=off`
+  (its default). Hubs restarted, rings draining, `usedSlots` 0 on both.
