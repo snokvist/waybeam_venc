@@ -58,8 +58,9 @@ own copies of libs that stock OpenIPC Infinity6C firmware does not.
   ~24 % sys CPU at 120 fps with no visible AE quality loss
 - BMI270 IMU driver with frame-synced FIFO (Star6E and Maruko) — compiled in,
   disabled by default, ready for telemetry/sidecar consumers
-- Adaptive frame gate: sheds load by pausing encoder intake when the egress
-  ring backs up — no IDR, unlike a bitrate write (all three backends, opt-in)
+- Adaptive frame gate: sheds load by pausing the encoder's output drain when the egress
+  ring backs up — no IDR, unlike a bitrate write (all three backends, automatic
+  on frame-shm outputs)
 - Intra-refresh (GDR-style rolling stripe) for fast loss recovery on FPV links
 - Scene-change-triggered IDR (Star6E) for clean stream join under packet loss
 - Inline QR scanning (Star6E): overlay-free VPE port1 luma tap + isolated

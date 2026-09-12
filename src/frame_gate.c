@@ -1,8 +1,6 @@
 #include "frame_gate.h"
 
-#include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 static void frame_gate_resolve(uint32_t close_slots,
 	uint32_t max_closed_ms, FrameGateConfig *out)
@@ -83,7 +81,7 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 		/* An escape pulse is still serving its dwell: refuse to close
 		 * so the admitted frame has time to reach the ring. */
 		if (g->escape_open_us &&
-		    now_us > g->escape_open_us &&
+		    now_us >= g->escape_open_us &&
 		    (now_us - g->escape_open_us) < FRAME_GATE_MIN_OPEN_US)
 			return FRAME_GATE_ACTION_NONE;
 		g->escape_open_us = 0;

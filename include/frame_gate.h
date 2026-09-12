@@ -5,12 +5,18 @@
 
 /* Adaptive frame gate — an overload reflex for the stream VENC channel.
  *
- * When the frame-shm egress ring stops draining, the gate pauses the
- * encoder's frame intake (MI_VENC_StopRecvPic and its per-backend
- * equivalents) and resumes it when the consumer catches up.  Sensor, ISP,
- * 3A and the scaler keep running at full rate throughout — only the
- * scaler->VENC handoff is gated — so AE/AWB never see a frame-rate step
- * and there is no exposure pump on reopen.
+ * When the frame-shm egress ring stops draining, the backend stops draining
+ * the encoder's output FIFO, and resumes when the consumer catches up.  No
+ * SDK call is made in either direction, and that is the whole design: the
+ * intake pause this started as (MI_VENC_StopRecvPic and its per-backend
+ * equivalents) emits an IRAP on every resume — measured at one per cycle on
+ * Star6E, three on Maruko, 0.6 on CV610 and ~4.6 per second against a real
+ * capacity-limited RF link — which is the keyframe the feature exists to
+ * avoid.  Letting the FIFO backpressure changes no encoder state at all.
+ *
+ * There is no enable switch: the gate arms whenever the output is a frame
+ * ring, because the ring is the occupancy signal it runs on and no other
+ * transport has one.
  *
  * Why a gate and not a rate write.  video0.bitrate is the only proportional
  * rate actuator on the SigmaStar backends and MI_VENC_SetChnAttr implicitly
@@ -127,10 +133,10 @@ FrameGateSetupStatus frame_gate_setup(FrameGate *g,
  * a 200 ms window (VENC_RING_LOW_WATER_WINDOW_US), which is the right
  * cadence for an external rate controller and far too slow to catch a burst.
  *
- * Returns the action the caller must apply.  The gate's own state is updated
- * before returning, so a caller whose actuator refuses the action must roll
- * it back with frame_gate_force_open() (failed CLOSE) or
- * frame_gate_restore_closed() (failed OPEN). */
+ * Returns the action taken.  Backends need not apply it: the policy flip IS
+ * the actuator, since the drain loop consults frame_gate_is_open().  The
+ * return value and the force_open()/restore_closed() rollbacks remain for a
+ * backend that ever does drive hardware here. */
 FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	uint64_t now_us);
 
@@ -143,9 +149,13 @@ void frame_gate_force_open(FrameGate *g, uint64_t now_us);
  * open while encoder intake is still stopped. */
 void frame_gate_restore_closed(FrameGate *g, uint64_t now_us);
 
+/* The drain predicate.  An unarmed gate is OPEN, never closed: a zeroed or
+ * never-set-up FrameGate would otherwise read closed, and the backends would
+ * stop draining with no armed policy left to reopen them — a permanently hung
+ * stream from a struct that was merely uninitialised. */
 static inline int frame_gate_is_open(const FrameGate *g)
 {
-	return g ? g->open : 1;
+	return (g && g->enabled) ? g->open : 1;
 }
 
 static inline int frame_gate_enabled(const FrameGate *g)

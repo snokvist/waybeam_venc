@@ -3932,6 +3932,7 @@ static void maruko_pipeline_cleanup_streaming(MarukoBackendContext *ctx,
 }
 
 static void maruko_service_frame_gate(MarukoBackendContext *ctx);
+static void maruko_service_ring_low_water(MarukoOutput *output);
 
 /* Maruko wording for frame_gate_setup()'s verdict; the checks themselves are
  * shared in frame_gate.c. */
@@ -3990,12 +3991,15 @@ static int maruko_pipeline_check_idle_abort(MarukoStreamRuntime *rt, int gated)
 static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 	MarukoStreamRuntime *rt, i6c_venc_stat *stat)
 {
-	/* TEST HOOK: drain-stall actuator.  Leave the encoded frame in VENC's
-	 * output FIFO instead of issuing StopRecvPic.  The gate is still
-	 * serviced every pass off the egress ring's own occupancy, so the
-	 * reopen path never depends on draining. */
+	/* Gated: leave the encoded frame in VENC's output FIFO rather than
+	 * draining it.  The gate is still serviced every pass, off the egress
+	 * ring's own occupancy, so the reopen path never depends on the
+	 * drain. */
 	if (!frame_gate_is_open(&ctx->frame_gate)) {
 		maruko_service_frame_gate(ctx);
+		/* Keep publishing egress pressure while gated — see the Star6E
+		 * twin; freezing it hides the congestion that closed the gate. */
+		maruko_service_ring_low_water(&ctx->output);
 		usleep(2000);
 		return maruko_pipeline_check_idle_abort(rt,
 			!frame_gate_is_open(&ctx->frame_gate));
@@ -4465,20 +4469,19 @@ static void maruko_recorder_start_idr(MarukoBackendContext *ctx)
 static void maruko_service_frame_gate(MarukoBackendContext *ctx)
 {
 	venc_frame_ring_fill_t fill;
-	FrameGateAction action;
 	uint64_t now_us;
-	MI_S32 ret;
 
 	if (!ctx || !frame_gate_enabled(&ctx->frame_gate))
 		return;
 
 	if (maruko_output_frame_ring_fill(&ctx->output, &fill) != 0) {
-		if (!frame_gate_is_open(&ctx->frame_gate)) {
-			(void)maruko_mi_venc_start_recv(ctx->venc_device,
-				ctx->venc_channel);
+		/* The ring went away across a reinit.  Release the gate rather
+		 * than leaving the drain stopped with no occupancy signal that
+		 * could ever reopen it.  No SDK call: intake was never
+		 * stopped, only the drain. */
+		if (!frame_gate_is_open(&ctx->frame_gate))
 			frame_gate_force_open(&ctx->frame_gate,
 				wb_monotonic_us());
-		}
 		return;
 	}
 
@@ -4491,31 +4494,12 @@ static void maruko_service_frame_gate(MarukoBackendContext *ctx)
 	    star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
 		return;
 
-	action = frame_gate_observe(&ctx->frame_gate, fill.used_slots, now_us);
-	if (action == FRAME_GATE_ACTION_NONE)
-		return;
-
-	/* The policy flip IS the actuator: nothing is issued to the SDK, and
-	 * the drain loop stops pulling while the gate reads closed. */
-	return;
-
-	if (action == FRAME_GATE_ACTION_CLOSE) {
-		ret = maruko_mi_venc_stop_recv(ctx->venc_device,
-			ctx->venc_channel);
-		if (ret != 0) {
-			fprintf(stderr, "ERROR: [maruko] frame gate stop_recv "
-				"failed %d\n", (int)ret);
-			frame_gate_force_open(&ctx->frame_gate, now_us);
-		}
-		return;
-	}
-
-	ret = maruko_mi_venc_start_recv(ctx->venc_device, ctx->venc_channel);
-	if (ret != 0) {
-		fprintf(stderr, "ERROR: [maruko] frame gate start_recv "
-			"failed %d\n", (int)ret);
-		frame_gate_restore_closed(&ctx->frame_gate, now_us);
-	}
+	/* The policy flip IS the actuator, so the returned action needs no
+	 * handling: the drain loop stops pulling while the gate reads closed
+	 * and VENC's own output FIFO applies the backpressure.  Nothing is
+	 * issued to the SDK deliberately — stop_recv/start_recv emit an IRAP on
+	 * every resume, measured at three per reopen on this board. */
+	(void)frame_gate_observe(&ctx->frame_gate, fill.used_slots, now_us);
 }
 
 static void maruko_service_ring_low_water(MarukoOutput *output)

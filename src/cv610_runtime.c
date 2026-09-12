@@ -126,8 +126,8 @@ typedef struct {
 	VencRingLowWater low_water;
 	int low_water_ready;
 	/* Adaptive frame gate over the single VENC channel.  See
-	 * include/frame_gate.h; ss_mpi_venc_stop_chn/start_chn are the
-	 * CV610 spelling of MI_VENC_Stop/StartRecvPic. */
+	 * include/frame_gate.h.  Armed automatically whenever the output is a
+	 * frame ring; the drain loop below is the actuator. */
 	FrameGate frame_gate;
 	/* Per-frame metadata channel (protocols/rtp-sidecar.md).  Bound once at
 	 * output start and closed unconditionally at output stop, like every
@@ -918,8 +918,8 @@ static void cv610_report_frame_gate_setup(FrameGateSetupStatus st,
 {
 	switch (st) {
 	case FRAME_GATE_SETUP_NO_RING:
-		fprintf(stderr, "WARNING: video0.frameGate=on needs a "
-			"frame-shm:// transport; gate inert on this output\n");
+		fprintf(stderr, "NOTE: [cv610] frame gate inert — this output "
+			"is not frame-shm, so it has no occupancy signal\n");
 		return;
 	case FRAME_GATE_SETUP_CLOSE_TOO_HIGH:
 		fprintf(stderr, "WARNING: frameGateCloseSlots %u exceeds the "
@@ -948,7 +948,6 @@ static void cv610_report_frame_gate_setup(FrameGateSetupStatus st,
 static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
 {
 	venc_frame_ring_fill_t fill;
-	FrameGateAction action;
 	uint64_t now_us;
 
 	if (!ctx || !frame_gate_enabled(&ctx->frame_gate))
@@ -956,15 +955,10 @@ static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
 
 	if (!ctx->frame_ring ||
 	    venc_frame_ring_get_fill(ctx->frame_ring, &fill) != 0) {
-		if (!frame_gate_is_open(&ctx->frame_gate)) {
-			ot_venc_start_param sp;
-
-			memset(&sp, 0, sizeof(sp));
-			sp.recv_pic_num = -1;
-			(void)ss_mpi_venc_start_chn(CV610_VENC_CHN, &sp);
+		/* No SDK call: intake was never stopped, only the drain. */
+		if (!frame_gate_is_open(&ctx->frame_gate))
 			frame_gate_force_open(&ctx->frame_gate,
 				wb_monotonic_us());
-		}
 		return;
 	}
 
@@ -978,32 +972,12 @@ static void cv610_service_frame_gate(Cv610RunnerContext *ctx)
 	    star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
 		return;
 
-	action = frame_gate_observe(&ctx->frame_gate, fill.used_slots, now_us);
-	if (action == FRAME_GATE_ACTION_NONE)
-		return;
-
-	/* The policy flip IS the actuator: nothing is issued to the SDK, and
-	 * the loop below stops pulling while the gate reads closed. */
-	return;
-
-	if (action == FRAME_GATE_ACTION_CLOSE) {
-		if (ss_mpi_venc_stop_chn(CV610_VENC_CHN) != TD_SUCCESS) {
-			fprintf(stderr, "ERROR: frame gate stop_chn failed\n");
-			frame_gate_force_open(&ctx->frame_gate, now_us);
-		}
-		return;
-	}
-
-	{
-		ot_venc_start_param sp;
-
-		memset(&sp, 0, sizeof(sp));
-		sp.recv_pic_num = -1;   /* unlimited, as at bring-up */
-		if (ss_mpi_venc_start_chn(CV610_VENC_CHN, &sp) != TD_SUCCESS) {
-			fprintf(stderr, "ERROR: frame gate start_chn failed\n");
-			frame_gate_restore_closed(&ctx->frame_gate, now_us);
-		}
-	}
+	/* The policy flip IS the actuator, so the returned action needs no
+	 * handling: the loop below stops pulling while the gate reads closed
+	 * and VENC's own output FIFO applies the backpressure.  Nothing is
+	 * issued to the SDK deliberately — stop_chn/start_chn emit an IRAP on
+	 * resume here too, measured at three per five cycles on this board. */
+	(void)frame_gate_observe(&ctx->frame_gate, fill.used_slots, now_us);
 }
 
 /* Star6E/Maruko parity — see star6e_service_ring_low_water().  venc measures
@@ -2621,16 +2595,19 @@ static int cv610_run(void *opaque)
 		 * call below never runs — this is the only thing that can
 		 * let go again. */
 		cv610_service_frame_gate(ctx);
-		/* TEST HOOK: drain-stall leaves the encoded frame in VENC's
-		 * output FIFO rather than issuing stop_chn.  The gate is still
-		 * serviced above, off the ring's own occupancy, so the reopen
-		 * path never depends on draining. */
+		/* Gated: leave the encoded frame in VENC's output FIFO rather
+		 * than draining it.  The gate is serviced above, off the ring's
+		 * own occupancy, so the reopen path never depends on the
+		 * drain. */
+		/* A hard select() error is fatal whether or not the gate is
+		 * closed, and it does NOT consume the timeout — taking the
+		 * gated continue first would hot-spin until the escape. */
+		if (ready < 0 && select_errno != EINTR)
+			return -1;
 		if (!frame_gate_is_open(&ctx->frame_gate))
 			continue;
-		if (ready < 0 && select_errno == EINTR)
-			continue;
 		if (ready < 0)
-			return -1;
+			continue;
 		if (ready == 0)
 			continue;
 		memset(&status, 0, sizeof(status));

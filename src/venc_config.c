@@ -668,11 +668,9 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		v->slice_count = (uint32_t)sc;
 	}
 
-	/* Adaptive frame gate.  Unknown strings fall back to "off" the same
-	 * way frame_gate_parse_mode() does, so a typo disables the gate
-	 * rather than half-enabling it. */
+	/* Adaptive frame gate thresholds.  The gate itself has no switch — it
+	 * arms on any frame-shm transport; these only tune it. */
 	{
-
 		/* Clamp in signed space so a negative cannot wrap to a huge
 		 * unsigned; 0 means "use the frame_gate.h default". */
 		int cs = json_get_int(obj, "frameGateCloseSlots",

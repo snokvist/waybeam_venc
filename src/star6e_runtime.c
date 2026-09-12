@@ -1535,8 +1535,8 @@ static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
 		/* Every other transport lacks a per-frame occupancy signal, so
 		 * the gate would never fire.  Say so once instead of looking
 		 * enabled and doing nothing. */
-		fprintf(stderr, "WARNING: video0.frameGate=on needs a "
-			"frame-shm:// transport; gate inert on this output\n");
+		fprintf(stderr, "NOTE: frame gate inert — this output is not "
+			"frame-shm, so it has no occupancy signal\n");
 		return;
 	case FRAME_GATE_SETUP_CLOSE_TOO_HIGH:
 		fprintf(stderr, "WARNING: frameGateCloseSlots %u exceeds the "
@@ -1623,6 +1623,11 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	 * ring's own occupancy, so the reopen path never depends on draining. */
 	if (!frame_gate_is_open(&ps->frame_gate)) {
 		star6e_service_frame_gate(ps);
+		/* Keep publishing egress pressure while gated.  This is the
+		 * 200 ms low_water_slots export waybeam-link's rate model reads;
+		 * freezing it for the whole closed interval would hide exactly
+		 * the congestion that closed the gate. */
+		star6e_service_ring_low_water(&ps->output);
 		star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
 		idle_wait(&ps->video.sidecar, 1);
 		return 0;

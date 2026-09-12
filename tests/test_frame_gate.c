@@ -229,6 +229,46 @@ int test_frame_gate(void)
 				== FRAME_GATE_ACTION_CLOSE);
 	}
 
+	/* ── an unarmed gate must never read CLOSED ──────────────────── */
+	{
+		FrameGate z;
+
+		/* A zeroed struct is the shape a future caller could reach a
+		 * drain loop with.  is_open() is the drain predicate, so if a
+		 * zeroed gate read closed the backend would stop draining with
+		 * no armed policy able to reopen it — a permanently hung
+		 * stream from nothing worse than a missed setup. */
+		memset(&z, 0, sizeof(z));
+		CHECK("zeroed_gate_reads_open", frame_gate_is_open(&z));
+		CHECK("zeroed_gate_not_enabled", !frame_gate_enabled(&z));
+
+		/* Same for the two non-armed setup outcomes. */
+		(void)frame_gate_setup(&z, 0, 0, 0);
+		CHECK("no_ring_reads_open", frame_gate_is_open(&z));
+		(void)frame_gate_setup(&z, 9, 0, 8);
+		CHECK("close_too_high_reads_open", frame_gate_is_open(&z));
+	}
+
+	/* ── escape dwell boundary: equality must still hold it open ─── */
+	{
+		FrameGate b;
+		uint64_t t = 5000 * MS;
+
+		gate_on(&b, 3, 500);
+		CHECK("dwell_eq_closes", frame_gate_observe(&b, 5, t)
+			== FRAME_GATE_ACTION_CLOSE);
+		t += b.cfg.max_closed_us;
+		CHECK("dwell_eq_escapes", frame_gate_observe(&b, 5, t)
+			== FRAME_GATE_ACTION_OPEN);
+		/* Two observations at the same timestamp: the dwell has not
+		 * elapsed, so the pulse must survive.  A strict > comparison
+		 * would skip the dwell here and re-close instantly, which is
+		 * the exact defect the dwell was added to fix. */
+		CHECK("dwell_holds_at_equal_now",
+			frame_gate_observe(&b, 5, t) == FRAME_GATE_ACTION_NONE);
+		CHECK("dwell_open_at_equal_now", frame_gate_is_open(&b));
+	}
+
 	/* ── NULL safety ─────────────────────────────────────────────── */
 	CHECK("null_observe",
 		frame_gate_observe(NULL, 5, 0) == FRAME_GATE_ACTION_NONE);
