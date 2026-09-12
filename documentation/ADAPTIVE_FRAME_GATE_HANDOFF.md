@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 4.0.0 -->
+<!-- version: 5.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -382,3 +382,100 @@ resume. The feature is SDK-dependent, not universally dead.
 - Both benches were restored: `.233` to its original 0.81.0 binary and
   config, `.232` left on the 0.85.0 checkpoint build with `frameGate=off`
   (its default). Hubs restarted, rings draining, `usedSlots` 0 on both.
+
+---
+
+## 11. The way around it on SigmaStar: `MI_VENC_SetRcParam`
+
+Row 3 kills the *actuator*, not the *idea*. The ring-occupancy signal the gate
+computes is fine; what costs an IDR is `MI_VENC_StartRecvPic`. So the question
+became: is there another way to shed rate on SigmaStar that does not route
+through `MI_VENC_SetChnAttr` (implicit IDR, §1) or through intake stop/resume
+(implicit IDR, §10)?
+
+### What the SDK offers
+
+From the OpenIPC HAL bindings in `sdk/ssc338q/hal/star/` — `i6_venc.h`
+(Star6E) and `i6c_venc.h` (Maruko), both reverse-engineered against the real
+`libmi_venc.so`:
+
+- **`MI_VENC_StartRecvPicEx(chn, int *count)`** — present on both. Meters
+  intake by frame count, the same semantic as CV610's
+  `ss_mpi_venc_start_chn(recv_pic_num)`. Still a resume, so it was not
+  pursued ahead of the option below.
+- **`MI_VENC_SetInputSourceConfig(chn, src_conf*)`** — `NORMAL`, `RING_ONE`,
+  `RING_HALF` (Maruko adds `HW_SYNC`, `RING_DMA`). This selects the input ring
+  coupling mode for latency, not an intake throttle. Dead end.
+- **`MI_VENC_SetRcParam(chn, MI_VENC_RcParam_t*)`** — the one that matters.
+
+### `SetRcParam` does not keyframe — and this repo already knew
+
+`src/star6e_controls.c:442` states it outright: *"Unlike apply_bitrate() this
+is a real reduction — MI_VENC_SetRcParam does NOT implicitly keyframe."*
+Measured 2026-08-23, ten spaced `video0.qpDelta` writes went from eleven IRAP
+access units to one.
+
+Re-confirmed on the 0.85.0 checkpoint build, `.232`, 2026-09-12: **eleven
+distinct `SetRcParam` writes across five runs produced zero IDR frames**,
+and `fps/live` never left 100-101 — the stream is never interrupted at all.
+
+### It is a real lever, and it has a proportional band
+
+`.232`, 720p100, H.265 CBR, racing/GDR, static bench scene, 8 s samples,
+`video0.minQp` swept through `MI_VENC_SetRcParam`:
+
+| `minQp` | Mbit/s | vs unclamped | IDR |
+|---|---|---|---|
+| 0 (driver default) | 5.74 | 1.00x | 0 |
+| 20 | 2.67 | 0.47x | 0 |
+| 23 | 0.84 | 0.15x | 0 |
+| 26 | 0.35 | 0.06x | 0 |
+| 29 | 0.17 | 0.03x | 0 |
+| 30 | 0.17 | 0.03x | 0 |
+| 34-45 | 0.12-0.13 | 0.02x | 0 |
+
+Monotonic 16:1 through the 20-29 band, then saturated. The plan's §2 called
+`min_qp` "a cliff, usable only as a binary panic switch" — that is half right:
+it *is* steep (~6 dB per 3 QP steps, which is simply what QP does) and it
+saturates above 30, but 20-29 is a usable continuous band, not a cliff.
+
+### Why this beats the gate on SigmaStar
+
+| | frame gate | `SetRcParam` clamp |
+|---|---|---|
+| IDR per actuation | 1 (Star6E) / 3 (Maruko) | **0** |
+| fps while shedding | 0 (intake stopped) | **unchanged, ~100** |
+| Control shape | binary open/closed | proportional |
+| Failure modes | BUSY, D-state risk, six reopen paths, 500 ms escape | one call, no state |
+| GDR refresh wave | broken by the resume keyframe | continuous |
+
+Frames keep flowing, so the decoder never starves and the refresh wave is
+never interrupted — the gate's whole hazard surface (§7) disappears.
+
+**Caveat.** The absolute QP values are scene-dependent; this was a static
+bench scene and a moving scene will move the band
+(`feedback_moving_scene_required_for_venc_rate_tests`). That argues for a
+closed loop driven by ring occupancy rather than a fixed QP table.
+
+### Recommended shape
+
+1. **Keep the gate for CV610.** `ss_mpi_venc_start_chn()` measured zero IDR on
+   resume (§8), so the feature works as designed there. Scope `video0.frameGate`
+   to the CV610 backend and report it inert elsewhere.
+2. **On Star6E and Maruko, keep `frame_gate_observe()`'s occupancy signal but
+   change the actuator** — drive an RC clamp through `MI_VENC_SetRcParam`
+   instead of `Stop/StartRecvPic`. The policy, its thresholds and its 68 host
+   assertions survive; only the two backend `service_frame_gate()` bodies
+   change, and the six reopen paths and the safety escape all become
+   unnecessary.
+3. **Prefer a byte budget to a QP floor.** `MI_VENC_RcParam_t` carries
+   `u32MaxPSize` / `u32MaxISize` on both SigmaStar backends
+   (`include/star6e.h:395-440`), and `rc_commit_intent()` already does a
+   read-modify-write so they survive every other RC write. A per-frame byte cap
+   is scene-independent and is exactly the quantity a ring-occupancy controller
+   wants, where a QP floor has to be re-found per scene. These were exposed as
+   `video0.maxIBytes` / `video0.maxPBytes` in an earlier build and measured as
+   a hard proportional lever (4096 B cap = 4.9 Mbps, uncapped = 13.0 Mbps,
+   same scene, `.232` 2026-08-03); they are not in the 0.85.0 config surface.
+   Re-exposing them is the natural next step and should be measured for IDR
+   behaviour the same way.
