@@ -4135,6 +4135,28 @@ static int handle_frmlost(int fd, const HttpRequest *req, void *ctx)
 }
 
 /* TEST HOOK (PR #287 investigation, not for merge as-is).
+ * GET /api/v1/gatemode?mode=recvstop|drainstall */
+static int handle_gatemode(int fd, const HttpRequest *req, void *ctx)
+{
+#if HAVE_BACKEND_STAR6E
+	const char *q = req ? req->query : NULL;
+	int stall = (q && strstr(q, "mode=drainstall")) ? 1 : 0;
+	char buf[128];
+
+	(void)ctx;
+	star6e_runtime_set_gate_drain_stall(stall);
+	snprintf(buf, sizeof(buf),
+		"{\"ok\":true,\"data\":{\"gateActuator\":\"%s\"}}",
+		stall ? "drainstall" : "recvstop");
+	return httpd_send_json(fd, 200, buf);
+#else
+	(void)req; (void)ctx;
+	return httpd_send_error(fd, 501, "not_implemented",
+		"gate actuator test hook is star6e-only");
+#endif
+}
+
+/* TEST HOOK (PR #287 investigation, not for merge as-is).
  * GET /api/v1/idr/enable?on=0|1 -> MI_VENC_EnableIdr on the stream channel.
  * Lets the bench measure, from the bitstream, whether disabling IDR also
  * suppresses the implicit keyframe from StartRecvPic and from SetChnAttr. */
@@ -4599,6 +4621,7 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/idr/enable",  handle_idr_enable, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/frmlost",     handle_frmlost, NULL);
+	r |= venc_httpd_route("GET", "/api/v1/gatemode",    handle_gatemode, NULL);
 #if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/resilience/status",

@@ -1572,6 +1572,32 @@ static void star6e_report_frame_gate_setup(FrameGateSetupStatus st,
  * the post-send call never runs and the gate could never let go.  The idle
  * branch already polls at ~1 ms, which is finer than any frame period we
  * support, so no timer and no extra thread are needed. */
+/* TEST HOOK (PR #287 investigation, not for merge as-is).
+ *
+ * Selects which actuator the frame gate drives:
+ *   0 = recv-stop   MI_VENC_Stop/StartRecvPic (the shipped gate; §10 measured
+ *                   one IDR on every reopen).
+ *   1 = drain-stall stop calling MI_VENC_GetStream instead, letting VENC's
+ *                   output FIFO fill.  No SDK state changes, so there is no
+ *                   resume call that could keyframe.  This is the mechanism
+ *                   outgoing.allowUnixEncoderStall documents as a hazard
+ *                   (src/output_socket.c:49) — a blocked drain holding a VENC
+ *                   output slot stalls capture — used deliberately.
+ *
+ * Read without a lock: a plain int written by the HTTP thread and read by the
+ * encode loop, where a stale read costs at most one frame of the old mode. */
+static int g_gate_drain_stall;
+
+void star6e_runtime_set_gate_drain_stall(int on)
+{
+	__atomic_store_n(&g_gate_drain_stall, on ? 1 : 0, __ATOMIC_RELAXED);
+}
+
+int star6e_runtime_gate_drain_stall(void)
+{
+	return __atomic_load_n(&g_gate_drain_stall, __ATOMIC_RELAXED);
+}
+
 static void star6e_service_frame_gate(Star6ePipelineState *ps)
 {
 	venc_frame_ring_fill_t fill;
@@ -1609,6 +1635,11 @@ static void star6e_service_frame_gate(Star6ePipelineState *ps)
 	if (action == FRAME_GATE_ACTION_NONE)
 		return;
 
+	/* Drain-stall mode changes no SDK state; the policy flip alone is the
+	 * actuator, and process_stream() stops draining while it reads closed. */
+	if (star6e_runtime_gate_drain_stall())
+		return;
+
 	if (action == FRAME_GATE_ACTION_CLOSE) {
 		ret = MI_VENC_StopRecvPic(ps->venc_channel);
 		if (ret != 0) {
@@ -1639,6 +1670,18 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	MI_VENC_Stat_t stat = {0};
 	MI_VENC_Stream_t stream = {0};
 	int ret;
+
+	/* TEST HOOK: drain-stall actuator.  Leave the encoded frame sitting in
+	 * VENC's output FIFO rather than issuing StopRecvPic.  The gate is still
+	 * evaluated every pass, off the egress ring's own occupancy, so the
+	 * reopen path does not depend on draining. */
+	if (star6e_runtime_gate_drain_stall() &&
+	    !frame_gate_is_open(&ps->frame_gate)) {
+		star6e_service_frame_gate(ps);
+		star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
+		idle_wait(&ps->video.sidecar, 1);
+		return 0;
+	}
 
 	ret = MI_VENC_Query(ps->venc_channel, &stat);
 	if (ret != 0) {

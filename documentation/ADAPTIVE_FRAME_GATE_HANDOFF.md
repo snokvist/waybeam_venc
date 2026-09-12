@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 7.0.0 -->
+<!-- version: 8.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -701,3 +701,106 @@ backends, plus `star6e_controls_enable_idr()`,
 **These are investigation scaffolding, not merge candidates.** They are kept
 because they are what any re-measurement needs. Strip them, or gate them behind
 a debug build, before this branch goes near main.
+
+---
+
+## 14. Drain-stall: the unix-socket hazard used deliberately
+
+### The prior art
+
+`outgoing.allowUnixEncoderStall` (`include/venc_config.h:256`, default false)
+and the comment at `src/output_socket.c:49`: AF_UNIX SOCK_DGRAM has no
+fire-and-forget — when the peer's receive queue fills, **the sender sleeps**.
+Those sends are issued between `MI_VENC_GetStream` and `MI_VENC_ReleaseStream`,
+so the sleep holds a VENC output slot and stalls capture. Measured at up to
+**74 ms** against a wedged consumer. The repo treats this as a hazard and caps
+it with a 2 ms `SO_SNDTIMEO`.
+
+The idea worth testing: that stall pauses the encoder **without any SDK call**,
+so there is no `StartRecvPic` and therefore no resume keyframe. Generalised
+away from sockets, the actuator is simply *stop calling `MI_VENC_GetStream`
+while the gate is closed* and let VENC's output FIFO fill.
+
+Implemented as a second actuator behind `GET /api/v1/gatemode?mode=recvstop|drainstall`
+(`src/star6e_runtime.c`), reusing `frame_gate_observe()` unchanged.
+
+### It does reduce keyframes — about 4x
+
+Five **proven** cycles per arm (2 s stalled / 3 s running), proof being
+`usedSlots` at the close threshold and a `framesSent` delta of one cycle minus
+two seconds. Both channels read from the same run; IRAP counted as access
+units, not NALs:
+
+| Arm | pictures | metadata IDR | **IRAP pictures** | per cycle |
+|---|---|---|---|---|
+| recv-stop (`Stop`/`StartRecvPic`) | 3103 | 5 | **5** | 1.0 |
+| drain-stall (skip `GetStream`) | 5002 | 2 | **2** | 0.4 |
+
+Natural rate is roughly 1 IRAP per 40 s (§10 control), so of drain-stall's two,
+one or more is simply the baseline. Attributable reopen keyframes fall from
+about one per cycle to roughly one per five to ten cycles.
+
+Shedding is comparable: both suppress about 2 s of production per cycle.
+Drain-stall's ring overshoots to 6 slots rather than holding at 3, because the
+close is only observed on the following pass.
+
+### And it can permanently wedge the encoder
+
+Stall the drain **before flow is established** — gate on, no consumer ever
+attached, so the ring reaches the close threshold within the first three
+frames — and the channel never comes back:
+
+```
+framesSent: 3   usedSlots: 0   fps/live: 100
+/tmp/waybeam.log: "waiting for encoder data..." (repeating)
+```
+
+The gate reopens correctly, the drain resumes, `MI_VENC_Query` returns
+`curPacks == 0` forever, and the process stays `S` — no D-state, no crash, no
+log of a fault. Still dead 25 s later. Only a daemon restart recovers it.
+
+Mid-stream stalls recovered cleanly every time; it is the cold start that
+kills it. That asymmetry matters because a craft boots with no ground
+consumer attached, which is exactly the fatal case.
+
+### Pros and cons
+
+**Pros:** no SDK state change, so ~4x fewer reopen keyframes than recv-stop;
+no `StopRecvPic`, so no BUSY and no D-state; reuses the existing policy and its
+68 assertions; the actuator is a `return` rather than a call.
+
+**Cons:** does not reach zero keyframes — it reduces, and the residue is not
+yet explained. It can **permanently wedge the encoder** with no fault
+signature, and the trigger (stall before flow is established) is the normal
+boot condition for a vehicle. Recovery needs a process restart. It also
+inherits the hazard `output_socket.c` was written to bound, which is a strong
+prior that the SDK does not expect this.
+
+**Verdict:** the mechanism is real and the reduction is large, but a silent
+unrecoverable encoder wedge on cold boot is a worse failure than the IDR it
+avoids. Not shippable as-is. It would need a watchdog — no frames for N ms
+while the gate is open means kick the channel — and at that point the kick is
+a `StartRecvPic`, which reintroduces the keyframe it was avoiding.
+
+`SetRcParam` (§11) remains the recommendation: it sheds rate with **zero**
+keyframes, never stops the stream, and has no wedge state at all.
+
+### Method note
+
+Three drain-stall runs were discarded before this one, each because the
+stimulus never reached the device:
+
+1. `ps w | grep frame_shm_consumer | head -1` matched the **shell running the
+   loop**, so the script SIGSTOPped itself.
+2. A leftover probe consumer from an earlier command was matched instead of
+   the measurement consumer, which therefore ran unstalled at a clean 100 fps.
+3. A dump was pulled while the consumer was still writing it, so the NAL
+   histogram ran on a truncated file.
+
+Each produced a plausible-looking result — "1 IRAP for 6 cycles" — that was an
+artifact. `ps w | awk '$4=="/tmp/frame_shm_consumer"'` resolves the pid without
+matching the shell, and **every** cycle must publish its own proof
+(`usedSlots` at threshold, `framesSent` delta) or the run is void.
+This is `feedback_drive_device_verification_manually` and
+`feedback_assert_the_effect_not_the_stimulus` biting three times in one
+session.
