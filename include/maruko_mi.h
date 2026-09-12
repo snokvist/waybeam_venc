@@ -122,6 +122,8 @@ typedef struct {
 	int (*fnGetChnAttr)(int dev, int chn, void *attr);
 	int (*fnSetChnAttr)(int dev, int chn, void *attr);
 	int (*fnRequestIdr)(int dev, int chn, int instant);
+	int (*fnEnableIdr)(int dev, int chn, int enable);
+	int (*fnSetFrameLostStrategy)(int dev, int chn, void *param);
 	int (*fnSetRoiCfg)(int dev, int chn, void *cfg);
 	int (*fnGetRoiCfg)(int dev, int chn, uint32_t idx, void *cfg);
 	int (*fnGetRcParam)(int dev, int chn, void *param);

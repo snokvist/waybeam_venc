@@ -1711,3 +1711,34 @@ void maruko_controls_ae_osd_status(MarukoAeOsdStatus *out)
 		}
 	}
 }
+
+/* TEST HOOK (PR #287 investigation, not for merge as-is).  Maruko twins of
+ * the star6e_controls.c hooks; see those for what they measure. */
+int maruko_controls_enable_idr(int on)
+{
+	return (g_mi_venc.fnEnableIdr)
+		? g_mi_venc.fnEnableIdr(g_ctx.venc_dev, g_ctx.venc_chn,
+			on ? 1 : 0)
+		: -1;
+}
+
+int maruko_controls_frame_lost(int on, uint32_t bps_thr, int pskip,
+	uint32_t gaps)
+{
+	struct {
+		int32_t  bFrmLostOpen;
+		uint32_t u32FrmLostBpsThr;
+		int32_t  eFrmLostMode;
+		uint32_t u32EncFrmGaps;
+	} p;
+
+	if (!g_mi_venc.fnSetFrameLostStrategy)
+		return -1;
+	memset(&p, 0, sizeof(p));
+	p.bFrmLostOpen     = on ? 1 : 0;
+	p.u32FrmLostBpsThr = bps_thr;
+	p.eFrmLostMode     = pskip ? 1 : 0;
+	p.u32EncFrmGaps    = gaps;
+	return g_mi_venc.fnSetFrameLostStrategy(g_ctx.venc_dev,
+		g_ctx.venc_chn, &p);
+}

@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 6.0.0 -->
+<!-- version: 7.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -539,7 +539,7 @@ to prove on device: that it actually suppresses *this* IDR (the SDK may treat a
 receive-restart keyframe as mandatory), and where to re-enable — too early and
 the IDR returns, too late and a genuine recovery request is swallowed.
 
-### 12.3 `MI_VENC_SetSuperFrameCfg` — attack the super-frame directly
+### 12.3 `MI_VENC_SetSuperFrameCfg` — RULED OUT (latency)
 
 ```c
 typedef struct {
@@ -572,8 +572,132 @@ the direct analogue of CV610's `recv_pic_num`).
    built is worth keeping; needs the two device proofs in §12.2.
 3. **`SetRcParam`** (§11) — already measured IDR-free, already wired, good
    fallback and useful as the slow outer loop.
-4. **`SuperFrameCfg`** — complementary to any of the above.
+4. ~~`SuperFrameCfg`~~ — ruled out on latency grounds, see §12.3.
 
 Measure each the same way §10 did: gate the bitstream through
 `tools/frame_shm_consumer_test`, count IDRs against a no-change control, and
 never trust `/api/v1/idr/stats` for this question.
+
+---
+
+## 13. All four SigmaStar mechanisms, measured — pros and cons
+
+Everything in §12 was tried on hardware. Method throughout: gate the **wire**,
+not the metadata — `tools/frame_shm_consumer_test` with a raw Annex-B dump, NAL
+histogram via `scripts/hevc_analyze.py walk`, always against a no-change
+control. `SuperFrameCfg` was dropped on the operator's call: `REENCODE` adds a
+re-encode pass and `DISCARD` drops a whole frame, and neither belongs in a
+latency-critical FPV path.
+
+### Scoreboard
+
+| Mechanism | Star6E `.232` | Maruko `.233` | Verdict |
+|---|---|---|---|
+| Frame gate (`Stop`/`StartRecvPic`) | works, **1 IDR per reopen** | works, **3 IDR per reopen** | rejected — §10 |
+| `EnableIdr(FALSE)` | resume IDR **unchanged** | not retested | does not rescue the gate |
+| `FrameLostStrategy` PSKIP | **`E_MI_ERR_NOT_SUPPORT`** | accepted, **no-op** | unusable |
+| `FrameLostStrategy` NORMAL | accepted, **no-op** | accepted, **no-op** | unusable |
+| `SetRcParam` (QP) | **0 IDR, fps unbroken, 16:1** | not retested | **the one that works** |
+
+### 13.1 `MI_VENC_EnableIdr` — reduces parameter sets, does not stop keyframes
+
+The headline question was whether it also suppresses the IDR a bitrate write
+emits. Four spaced `video0.bitrate` writes per arm, 18 s captures, NAL
+histogram:
+
+| | `EnableIdr=TRUE` | `EnableIdr=FALSE` |
+|---|---|---|
+| IDR_W_RADL | 42 | 24 |
+| VPS / SPS / PPS | 12 each | 4 each |
+
+And on the path that actually matters, four gate cycles per arm:
+
+| | `EnableIdr=TRUE` | `EnableIdr=FALSE` |
+|---|---|---|
+| IDR_W_RADL | 12 | **12** |
+| VPS / SPS / PPS | 8 each | **2** each |
+
+**Pros:** cuts VPS/SPS/PPS re-emission consistently (12→4, 8→2), which is real
+if small bandwidth. Cheap, one call, no state.
+**Cons:** does **not** suppress the `StartRecvPic` resume keyframe at all —
+12 versus 12. On bitrate writes it roughly halves IRAPs but does not eliminate
+them, consistent with a CBR reconfiguration forcing a mandatory resync point
+the flag cannot override. And while disabled it would also swallow a genuine
+recovery IDR.
+**Verdict:** not the rescue. Worth keeping in mind only as a parameter-set
+trimmer.
+
+*Trap this exposed:* the consumer's `IDR frames` counter reads the producer's
+`VENC_FRAME_FLAG_IDR` metadata bit, not the bitstream. In the disabled arm the
+metadata still said "6 IDRs" while the parsed slice count fell from 12 to 6 —
+two observation channels disagreeing. Only the NAL histogram settles it.
+
+### 13.2 `MI_VENC_SetFrameLostStrategy` — exported, accepted, inert
+
+The most promising candidate on paper, and the biggest disappointment.
+
+- **Star6E:** `E_MI_VENC_FRMLOST_PSKIP` is refused outright with
+  `0xA0022008` = `E_MI_ERR_NOT_SUPPORT`. `NORMAL` is accepted and does nothing.
+- **Maruko:** both modes accepted, both do nothing.
+
+Pushed hard on both boards — `u32FrmLostBpsThr = 1000` (1 kbit/s) against a
+live 7 Mbit/s stream on Star6E and 19.6 Mbit/s on Maruko, with
+`u32EncFrmGaps` 0, 1 and 3:
+
+| Board | threshold | measured | fps |
+|---|---|---|---|
+| Star6E | 1 kbit/s | 7.03 Mbit/s | 101 |
+| Maruko | 1 kbit/s | 19.58 Mbit/s | 31 |
+
+Not a partial effect — no effect. The struct layout is right (the 16-byte
+`_Static_assert` passes and the SDK validates the enum, since it rejects PSKIP
+by *name* on Star6E). No demo in either vendor SDK calls this function; only
+the RTOS linker maps mention it.
+
+**Pros:** would have been ideal — threshold in bit/s, no gap in PSKIP mode, no
+IDR, effective at the next frame.
+**Cons:** it does not work on either board. Maruko is the worse failure of the
+two: it returns **success** for both modes and silently does nothing, so a
+return-code check alone would have shipped a dead actuator.
+**Verdict:** unusable. Do not build on it without re-measuring on the exact
+silicon, from the wire.
+
+### 13.3 `MI_VENC_SetRcParam` — still the only thing that works
+
+Unchanged from §11: eleven writes, zero IDRs, fps never left 100-101, and a
+monotonic 16:1 range through `minQp` 20-29.
+
+**Pros:** IDR-free; never interrupts the stream, so the decoder never starves
+and the GDR wave keeps advancing; proportional; one call; already wired and
+already unit-covered; no reopen paths, no escape, no BUSY, no D-state risk.
+**Cons:** QP is scene-dependent, so the usable band moves with content — the
+numbers above are from a static bench scene. It is steep (~6 dB per 3 QP) and
+saturates above QP 30. It trades quality for rate, where the gate traded
+frames for rate.
+**Verdict:** the recommendation stands, and it is now the *only* surviving
+candidate on SigmaStar.
+
+### 13.4 Where this leaves the PR
+
+- **CV610 keeps the frame gate.** `ss_mpi_venc_start_chn()` does not keyframe
+  on resume (§8), so the feature works there as designed.
+- **Star6E and Maruko get an RcParam clamp** driven by the same
+  `frame_gate_observe()` occupancy signal. The policy and its 68 host
+  assertions survive; the six reopen paths and the 500 ms escape do not.
+- **Next measurement, not yet done:** re-expose `u32MaxPSize` /
+  `u32MaxISize` (§11.3) and check from the wire whether a per-frame byte
+  budget is also IDR-free. It is the scene-independent quantity a
+  ring-occupancy controller actually wants, and unlike the two dead ends above
+  it is known to bind hard.
+
+### 13.5 Test hooks in this tree
+
+`GET /api/v1/idr/enable?on=0|1` and
+`GET /api/v1/frmlost?on=&bps=&mode=pskip|normal&gaps=` exist on both SigmaStar
+backends, plus `star6e_controls_enable_idr()`,
+`star6e_controls_frame_lost()` and their Maruko twins, and the
+`MI_VENC_EnableIdr` / `MI_VENC_SetFrameLostStrategy` bindings.
+
+**These are investigation scaffolding, not merge candidates.** They are kept
+because they are what any re-measurement needs. Strip them, or gate them behind
+a debug build, before this branch goes near main.
