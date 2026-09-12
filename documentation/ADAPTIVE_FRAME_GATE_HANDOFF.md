@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 8.0.0 -->
+<!-- version: 9.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -804,3 +804,77 @@ matching the shell, and **every** cycle must publish its own proof
 This is `feedback_drive_device_verification_manually` and
 `feedback_assert_the_effect_not_the_stimulus` biting three times in one
 session.
+
+---
+
+## 15. Correction: there is no cold-start wedge — drain-stall works from boot
+
+### §14's blocker was my own test hook
+
+The wedge in §14 was **not** a property of drain-stall. The sequence that
+produced it was:
+
+1. daemon restarts in `recvstop` (the default), the gate closes at three
+   frames and **`MI_VENC_StopRecvPic` is issued** — hardware now stopped;
+2. the actuator is switched to `drainstall` over HTTP;
+3. a consumer attaches, drains the ring, the gate reopens — but the
+   drain-stall guard returns *before* the actuator, so the matching
+   `StartRecvPic` is never issued and the hardware stays stopped for good.
+
+That is a hook artifact, and `star6e_runtime_set_gate_drain_stall()` now
+re-arms the hardware and forces the policy open on every switch.
+
+Two other hypotheses were tested and **falsified** on the way:
+
+- *Stall duration.* A **12 s** mid-stream stall recovered cleanly — ring full
+  at 8/8, then drained to 0 and production resumed. Duration is not the
+  variable.
+- *Absence of a consumer.* A warm channel with the consumer **killed outright**
+  for 20 s, ring full, recovered completely on reattach (6104 -> 6906 frames).
+  A missing consumer is not the variable either.
+
+### Armed from boot, drain-stall is keyframe-free
+
+The actuator is now selectable at boot (`WB_GATE_DRAIN_STALL=1`), because with
+any small warmup the gate can arm inside 100 ms — far sooner than a request
+could arrive. Cold boot, gate on, **no consumer at all** for 18 s, then a
+consumer attaches and twelve stall cycles run:
+
+| | recv-stop | drain-stall from boot |
+|---|---|---|
+| Cold start, no consumer | recovers | **recovers** |
+| Proven cycles | 5 | **12** |
+| Soak | — | **99.5 s** |
+| Frames | 3103 | 7647 |
+| **IRAP pictures** | **5** (1.0/cycle) | **0** |
+| `bad_meta` / `bad_startcode` / `pts_regress` | 0 | **0** |
+| Encoder state after | `S` | `S`, 100 fps, **zero errors logged** |
+
+Every cycle published its own proof (`usedSlots` at 6, `framesSent` short by
+two seconds). The raw dump is **0 bytes**, which is independent corroboration
+rather than a failure: `tools/frame_shm_consumer_test` only begins dumping on
+the first IDR (`tools/frame_shm_consumer_test.c:159`), so a zero-length file
+means no IRAP ever arrived — a second code path agreeing with the counter.
+
+### What this changes
+
+Drain-stall is now the **best** actuator measured on SigmaStar: it sheds the
+same load as recv-stop, costs **zero** keyframes rather than one per cycle,
+makes no SDK call at all, and survives a cold boot with no consumer. It beats
+the `SetRcParam` clamp (§11) too, because it drops frames rather than degrading
+every frame's quality.
+
+Remaining caveats, all still open:
+
+- The warmup floor (`WB_GATE_WARMUP_FRAMES`) was built for a bisection that
+  turned out to be unnecessary. It is inert at 0 and was **not** needed in any
+  passing run; keep it only if a future board shows an early-stall sensitivity.
+- The ring overshoots to 6 slots rather than holding at 3, because the close is
+  only observed on the following pass. Harmless here, but it means the
+  effective threshold is not the configured one.
+- Only Star6E. Maruko has the same `frame_gate_observe()` policy but its drain
+  loop is `maruko_pipeline_process_stream`, and the actuator swap is unported
+  and unmeasured there.
+- The §10 secondary finding still stands: with recv-stop, a dead consumer stops
+  the stream silently. Drain-stall does not fix that — it changes which
+  keyframes are emitted, not the escape's defeat.

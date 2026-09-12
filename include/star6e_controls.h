@@ -38,6 +38,8 @@ int star6e_controls_frame_lost(int on, uint32_t bps_thr, int pskip,
 /** TEST HOOK (PR #287): select the frame-gate actuator.
  *  0 = MI_VENC_Stop/StartRecvPic, 1 = stop draining MI_VENC_GetStream. */
 void star6e_runtime_set_gate_drain_stall(int on);
+/** TEST HOOK (PR #287): read WB_GATE_WARMUP_FRAMES; gate may not arm below it. */
+void star6e_runtime_init_gate_warmup(void);
 int star6e_runtime_gate_drain_stall(void);
 
 /** Service a pending detector live model-swap request on the pipeline thread.
