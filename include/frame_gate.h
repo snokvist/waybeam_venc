@@ -1,6 +1,7 @@
 #ifndef FRAME_GATE_H
 #define FRAME_GATE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Adaptive frame gate — an overload reflex for the stream VENC channel.
@@ -143,6 +144,19 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 /* Drop back to the open state without emitting an action.  For teardown, for
  * a reinit, and for a caller whose actuator refused the last CLOSE. */
 void frame_gate_force_open(FrameGate *g, uint64_t now_us);
+
+/* Render the gate's observability fields for a transport-status payload, as a
+ * leading-comma JSON fragment ready to splice before the closing braces.
+ *
+ * Without these the gate is invisible on device: "cycling normally under load",
+ * "escape firing against a dead consumer" and "stream stopped" all look alike
+ * from the outside.  Shared so the three backends cannot drift on names.
+ *
+ * `now_us` folds the in-progress closed interval into gateClosedMs, which
+ * closed_total_us alone omits.  Writes at most `cap` bytes including the NUL
+ * and always NUL-terminates; an unarmed gate yields an empty string. */
+void frame_gate_status_json(const FrameGate *g, uint64_t now_us,
+	char *out, size_t cap);
 
 /* Restore the closed policy state after the actuator refused an OPEN.  The
  * next observation retries after min_closed_us instead of leaving policy

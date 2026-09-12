@@ -2,8 +2,11 @@
 
 ## [0.85.0] - 2026-09-12
 
-An IDR-free way to shed load. `contract_version` stays **0.31.0** — two new
-restart-required `video0` fields, no endpoint or payload change.
+An IDR-free way to shed load. `contract_version` **0.31.0 -> 0.32.0**: the
+`video0.frameGate` switch is removed (so `/api/v1/set` now rejects it and
+`/api/v1/config` no longer carries it), and `/api/v1/transport/status` gains
+four `gate*` fields on frame-shm outputs. Two restart-required `video0` fields
+remain.
 
 **Device-verified on all three backends and over a real RF link.** Star6E
 (SSC338Q, 720p100, `resilience=racing`), Maruko (ssc378qe, 1080p30) and CV610
@@ -25,6 +28,11 @@ what the radio could carry.
   second: the exact pathology the feature exists to prevent. Letting the FIFO
   backpressure instead measured **zero** induced keyframes on every backend
   and on the live link.
+- **The gate is observable.** `/api/v1/transport/status` reports `gateClosed`,
+  `gateCloseEvents`, `gateEscapeEvents` and `gateClosedMs` on frame-shm
+  outputs. Without them "cycling normally under load", "escape firing against
+  a dead consumer" and "stream stopped" are indistinguishable from outside;
+  `gateEscapeEvents` climbing on its own is the dead-consumer signature.
 - **There is no enable switch.** `video0.frameGate` is gone. The gate arms
   itself whenever the output is a frame ring, because the ring is the
   occupancy signal it runs on and no other transport has one. Only

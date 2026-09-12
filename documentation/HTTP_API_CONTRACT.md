@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.31.0`
+- `contract_version`: `0.32.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -108,7 +108,7 @@ Response `200`:
   "ok": true,
   "data": {
     "app_version": "0.85.0",
-    "contract_version": "0.31.0",
+    "contract_version": "0.32.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1593,7 +1593,11 @@ Response `200` (frame-shm ring):
     "usedSlots": 2,
     "ringLowWaterSlots": 1,
     "otherDrops": 0,
-    "badAuDrops": 0
+    "badAuDrops": 0,
+    "gateClosed": false,
+    "gateCloseEvents": 0,
+    "gateEscapeEvents": 0,
+    "gateClosedMs": 0
   }
 }
 ```
@@ -1610,7 +1614,11 @@ Response `200` (UDP/Unix kernel-buffer fill_pct):
     "pressureDrops": 0,
     "transportDrops": 0,
     "packetsSent": 184523,
-    "badAuDrops": 0
+    "badAuDrops": 0,
+    "gateClosed": false,
+    "gateCloseEvents": 0,
+    "gateEscapeEvents": 0,
+    "gateClosedMs": 0
   }
 }
 ```
@@ -1634,6 +1642,10 @@ Field reference:
 | `oversizeDrops` | (SHM only) Frames rejected for exceeding slot capacity |
 | `slotCount` / `usedSlots` | (SHM only) Ring sizing; `usedSlots` is a snapshot |
 | `otherDrops` | (frame-shm only, all three backends) Frames the producer discarded for a reason **other than a full ring** — an access unit it could not build at all (oversize, or a malformed SDK packet table).  Kept apart from `transportDrops` on purpose: that one is congestion the consumer is causing and a rate controller should slow down for it, this one is not congestion and slowing down fixes nothing.  Mirrored into the ring header at offset 96 so the consumer sees it too |
+| `gateClosed` | Adaptive frame gate state right now. `true` means the backend is not draining the encoder's output FIFO because the egress ring is backed up. **frame-shm only** — the gate arms itself on a frame ring and nothing else, so these four fields are absent on every other transport |
+| `gateCloseEvents` | Gate closes since bring-up. A steadily climbing count under load is normal — that is the gate doing its job |
+| `gateEscapeEvents` | Reopens forced by the `frameGateMaxClosedMs` safety escape rather than by the consumer draining. Climbing on its own means the consumer is dead or wedged, not merely slow, and `transportDrops` should be climbing with it |
+| `gateClosedMs` | Cumulative time gated, including the interval in progress. Against `t_ms` this is the duty cycle |
 | `badAuDrops` | Access units discarded because the SDK's packet table was incomplete or invalid.  Transport-independent — this happens on RTP as well — and a subset of `otherDrops` on `frame-shm`.  **Star6E and Maruko only:** the CV610 stream path has no packet-table validation, so the field is absent there rather than reported as a permanent zero |
 | `ringLowWaterSlots` | (frame-shm only, all three backends) Lowest ring occupancy reached in the last 200 ms window, **in slots**.  `<= 1` is the healthy band and `>= 2` sustained is standing backlog — venc samples just after writing, so a consumer that is keeping up still leaves exactly one frame queued.  Raw slots rather than a fraction of `slotCount`, because whether a fraction round-trips that 1 depends on the geometry — at the 8 slots venc creates it does (125 permille exactly), at 16 it does not (62.5 truncates to 62, back to 0: a healthy ring indistinguishable from a drained one) — and the header does not fix `slotCount`.  A **measurement, not an actuator** — venc publishes it and changes nothing in response |
 

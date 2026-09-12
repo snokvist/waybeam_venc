@@ -1033,6 +1033,10 @@ static char *cv610_query_transport_status(void)
 	if (cv610_collect_transport(ctx, NULL, &ts) != 0)
 		return NULL;
 	if (ts.is_ring) {
+		char gate_json[128];
+
+		frame_gate_status_json(&ctx->frame_gate, wb_monotonic_us(),
+			gate_json, sizeof(gate_json));
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,\"transport\":\"frame-shm\","
@@ -1040,7 +1044,7 @@ static char *cv610_query_transport_status(void)
 			"\"transportDrops\":%llu,\"pressureDrops\":%u,"
 			"\"framesSent\":%llu,\"oversizeDrops\":%llu,"
 			"\"slotCount\":%u,\"usedSlots\":%u,"
-			"\"ringLowWaterSlots\":%u,\"otherDrops\":%llu}}",
+			"\"ringLowWaterSlots\":%u,\"otherDrops\":%llu%s}}",
 			(unsigned)ts.fill_pct,
 			ts.in_pressure ? "true" : "false",
 			(unsigned long long)ts.transport_drops,
@@ -1049,7 +1053,7 @@ static char *cv610_query_transport_status(void)
 			(unsigned long long)ts.oversize_drops,
 			(unsigned)ts.slot_count, (unsigned)ts.used_slots,
 			(unsigned)venc_ring_low_water_slots(&ctx->low_water),
-			(unsigned long long)ts.other_drops);
+			(unsigned long long)ts.other_drops, gate_json);
 	} else if (ts.active) {
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"

@@ -1,3 +1,4 @@
+#include "timing.h"
 #include "maruko_controls.h"
 
 #include "idr_rate_limit.h"
@@ -1401,11 +1402,14 @@ static char *maruko_query_transport_status(void)
 				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if (backend->output.frame_ring) {
 		venc_frame_ring_fill_t fill;
+		char gate_json[128];
 		int in_pressure;
 		if (venc_frame_ring_get_fill(backend->output.frame_ring,
 		    &fill) != 0)
 			return NULL;
 		in_pressure = fill.fill_pct >= VENC_PRESSURE_HIGH_WATER_PCT;
+		frame_gate_status_json(&backend->frame_gate, wb_monotonic_us(),
+			gate_json, sizeof(gate_json));
 		pos = snprintf(buf, sizeof(buf),
 			"{\"ok\":true,\"data\":{"
 			"\"active\":true,"
@@ -1420,7 +1424,7 @@ static char *maruko_query_transport_status(void)
 			"\"usedSlots\":%u,"
 			"\"ringLowWaterSlots\":%u,"
 			"\"otherDrops\":%llu,"
-			"\"badAuDrops\":%llu}}",
+			"\"badAuDrops\":%llu%s}}",
 			transport,
 			(unsigned)fill.fill_pct,
 			in_pressure ? "true" : "false",
@@ -1433,7 +1437,8 @@ static char *maruko_query_transport_status(void)
 			(unsigned)venc_ring_low_water_slots(&backend->output.low_water),
 			(unsigned long long)fill.other_drops,
 			(unsigned long long)__atomic_load_n(
-				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
+				&backend->output.bad_au_drops, __ATOMIC_RELAXED),
+			gate_json);
 	} else if ((backend->output.transport == VENC_OUTPUT_URI_UNIX ||
 	            backend->output.transport == VENC_OUTPUT_URI_UDP) &&
 	           backend->output.socket_handle >= 0) {

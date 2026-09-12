@@ -1609,6 +1609,65 @@ static void star6e_service_frame_gate(Star6ePipelineState *ps)
 	(void)frame_gate_observe(&ps->frame_gate, fill.used_slots, now_us);
 }
 
+/* HTTP record start/stop, lifted so the gated drain path can service it
+ * too.  Maruko and CV610 already handle record flags at the top of their
+ * loops; on Star6E this block sat below the drain, so while the gate was
+ * closed a record command waited for the next escape pulse. */
+static void star6e_service_record_control(Star6ePipelineState *ps,
+	const VencConfig *vcfg)
+{
+	/* Check HTTP record control flags.
+	 *
+	 * Mirror mode: act on the ts_recorder / hevc recorder directly here.
+	 *
+	 * Dual mode (not dual-stream): forward the request to the dual
+	 * recording thread, which owns the ts_recorder exclusively.  This
+	 * keeps the recorder single-threaded; the dual thread acts on the
+	 * request between frame writes.
+	 *
+	 * Dual-stream mode: ch1 is sent over RTP, no on-disk recorder —
+	 * consume and ignore the flag.
+	 */
+	{
+		char rec_dir[256];
+		int start_pending = venc_api_get_record_start(rec_dir,
+			sizeof(rec_dir));
+		int stop_pending = venc_api_get_record_stop();
+
+		if (start_pending) {
+			if (ps->dual && !ps->dual->is_dual_stream) {
+				if (vcfg->audio.enabled)
+					ps->audio.rec_ring = &ps->audio_ring;
+				snprintf(ps->dual->rec_req_start_dir,
+					sizeof(ps->dual->rec_req_start_dir),
+					"%s", rec_dir);
+				/* Set start flag last so the dual thread sees the
+				 * dir already populated when it consumes the flag. */
+				ps->dual->rec_req_stop = 0;
+				ps->dual->rec_req_start = 1;
+			} else if (!ps->dual) {
+				/* Mirror mode: act directly on the recorders.
+				 * mirror_record_open() closes any live
+				 * recording first, joining its writer, so the
+				 * old file's queued tail cannot land in the new
+				 * one. */
+				mirror_record_open(ps, vcfg, rec_dir);
+			}
+			/* dual-stream: nothing to do */
+		}
+		if (stop_pending) {
+			if (ps->dual && !ps->dual->is_dual_stream) {
+				ps->audio.rec_ring = NULL;
+				ps->dual->rec_req_start = 0;
+				ps->dual->rec_req_stop = 1;
+			} else if (!ps->dual) {
+				mirror_record_close(ps, MIRROR_REC_STOP_GRACE_MS);
+			}
+			/* dual-stream: nothing to do */
+		}
+	}
+}
+
 static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	struct timespec *cus3a_ts_last, unsigned int *idle_counter)
 {
@@ -1628,6 +1687,11 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 		 * freezing it for the whole closed interval would hide exactly
 		 * the congestion that closed the gate. */
 		star6e_service_ring_low_water(&ps->output);
+		/* HTTP record start/stop must not wait for the gate to reopen;
+		 * with a dead consumer that is one escape pulse away.  Maruko
+		 * and CV610 already service record flags at the top of their
+		 * loops. */
+		star6e_service_record_control(ps, vcfg);
 		star6e_pipeline_cus3a_tick(&g_sdk_quiet, cus3a_ts_last);
 		idle_wait(&ps->video.sidecar, 1);
 		return 0;
@@ -1888,56 +1952,7 @@ static int star6e_runtime_process_stream(Star6eRunnerContext *ctx,
 	    !star6e_record_wants_frame(&ps->ts_recorder, &ps->recorder))
 		mirror_record_close(ps, MIRROR_REC_STOP_GRACE_MS);
 
-	/* Check HTTP record control flags.
-	 *
-	 * Mirror mode: act on the ts_recorder / hevc recorder directly here.
-	 *
-	 * Dual mode (not dual-stream): forward the request to the dual
-	 * recording thread, which owns the ts_recorder exclusively.  This
-	 * keeps the recorder single-threaded; the dual thread acts on the
-	 * request between frame writes.
-	 *
-	 * Dual-stream mode: ch1 is sent over RTP, no on-disk recorder —
-	 * consume and ignore the flag.
-	 */
-	{
-		char rec_dir[256];
-		int start_pending = venc_api_get_record_start(rec_dir,
-			sizeof(rec_dir));
-		int stop_pending = venc_api_get_record_stop();
-
-		if (start_pending) {
-			if (ps->dual && !ps->dual->is_dual_stream) {
-				if (vcfg->audio.enabled)
-					ps->audio.rec_ring = &ps->audio_ring;
-				snprintf(ps->dual->rec_req_start_dir,
-					sizeof(ps->dual->rec_req_start_dir),
-					"%s", rec_dir);
-				/* Set start flag last so the dual thread sees the
-				 * dir already populated when it consumes the flag. */
-				ps->dual->rec_req_stop = 0;
-				ps->dual->rec_req_start = 1;
-			} else if (!ps->dual) {
-				/* Mirror mode: act directly on the recorders.
-				 * mirror_record_open() closes any live
-				 * recording first, joining its writer, so the
-				 * old file's queued tail cannot land in the new
-				 * one. */
-				mirror_record_open(ps, vcfg, rec_dir);
-			}
-			/* dual-stream: nothing to do */
-		}
-		if (stop_pending) {
-			if (ps->dual && !ps->dual->is_dual_stream) {
-				ps->audio.rec_ring = NULL;
-				ps->dual->rec_req_start = 0;
-				ps->dual->rec_req_stop = 1;
-			} else if (!ps->dual) {
-				mirror_record_close(ps, MIRROR_REC_STOP_GRACE_MS);
-			}
-			/* dual-stream: nothing to do */
-		}
-	}
+	star6e_service_record_control(ps, vcfg);
 
 	if (vcfg->system.verbose && ps->imu) {
 		struct timespec imu_now;

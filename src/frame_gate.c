@@ -1,5 +1,6 @@
 #include "frame_gate.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static void frame_gate_resolve(uint32_t close_slots,
@@ -121,4 +122,29 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	return FRAME_GATE_ACTION_OPEN;
 }
 
+void frame_gate_status_json(const FrameGate *g, uint64_t now_us,
+	char *out, size_t cap)
+{
+	uint64_t closed_us;
 
+	if (!out || cap == 0)
+		return;
+	out[0] = '\0';
+	if (!g || !g->enabled)
+		return;
+
+	/* closed_total_us only accrues on reopen, so a gate closed right now
+	 * would under-report by the whole current interval — and a caller polls
+	 * this precisely while congested, which is exactly when it is closed.
+	 * Fold the in-progress interval in. */
+	closed_us = g->closed_total_us;
+	if (!g->open && now_us > g->closed_since_us)
+		closed_us += now_us - g->closed_since_us;
+
+	(void)snprintf(out, cap,
+		",\"gateClosed\":%s,\"gateCloseEvents\":%u,"
+		"\"gateEscapeEvents\":%u,\"gateClosedMs\":%llu",
+		g->open ? "false" : "true",
+		(unsigned)g->close_events, (unsigned)g->escape_events,
+		(unsigned long long)(closed_us / 1000u));
+}
