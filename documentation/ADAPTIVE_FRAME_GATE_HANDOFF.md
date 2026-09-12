@@ -1,12 +1,11 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 2.0.0 -->
+<!-- version: 2.1.0 -->
 
 Written for a **Claude Code CLI session on the local machine** taking over
-from the cloud session that wrote this feature. All three backends are wired;
-Star6E and Maruko build and link; CV610 compiles. **Nothing has run on
-silicon, and CV610 has never been linked.** Both gaps need a machine with
-hardware and the vendor SDK — yours.
+from the cloud session that wrote this feature. Updated after the 2026-09-12
+bench pass: CV610 is linked and hardware-confirmed; Star6E has preliminary
+hardware results; Maruko remains code-level only. See §8 for exact status.
 
 | | |
 |---|---|
@@ -21,13 +20,12 @@ hardware and the vendor SDK — yours.
 ```sh
 git fetch origin claude/dazzling-goldberg-o49554
 git checkout claude/dazzling-goldberg-o49554
-make test-ci          # expect 3087 passed / 3 failed — see §8 before worrying
+make test-ci          # expect 3112 passed / 0 failed
 make verify           # Star6E + Maruko; toolchains auto-download on first run
 ```
 
-Then, in order: **link CV610** (§5), then **R1** (§3), then the matrix (§4).
-R1 is the one that can kill the whole approach, so do not sink time into
-tuning before it passes.
+CV610 linking and its primary R1/no-IDR trial are complete. Continue with the
+unchecked recording/config transitions and the secondary SigmaStar matrix.
 
 ### The four things only this machine can do
 
@@ -193,29 +191,55 @@ yes, that is a small `/api/v1/status` addition and a `contract_version` bump.
 - **Mirror is the default record mode.** Easy to forget when a gate that
   "should" close does not.
 
-## 8. State of the tree
+## 8. State of the tree and bench results
 
 - `make verify` passes: Star6E and Maruko build and link.
-- CV610 compiles (all 90 objects); not linked — §5.
-- `make test-ci`: **3087 passed, 3 failed.** The three are `rotfail no file
-  open` / `rotfail recording cleared` / `rotfail reason recorded` —
-  recorder-rotation tests **already failing at this branch point**, unrelated
-  to the gate. Baseline before any of this work was 3019/3. Do not attribute
-  them to this change, and do not let them mask a new one.
-- Version bumped 0.82.0 → 0.83.0; `contract_version` unchanged at 0.29.0
-  (three new restart-required fields, no endpoint or payload change).
-- Four commits on the branch: implementation, CV610 wiring, and two docs.
+- CV610 compiles and links against the firmware vendor libraries. The linked
+  0.85.0 binary is confirmed on `192.168.2.181`.
+- `make test-ci`: **3112 passed, 0 failed** after rebasing onto upstream.
+- **CV610 primary gate path confirmed on device:** 1280x720 at 100 fps,
+  `resilience=racing`, frame-shm ring with eight slots. A stopped consumer
+  closed intake at three slots; the 500 ms safety escape admitted one frame per
+  pulse; resuming drained the ring and restored ~100 fps without a D-state or
+  kernel fault.
+- **CV610 no-IDR and continuity confirmed:** a direct AU consumer observed 542
+  frames across a three-second gate interval, including seven safety-pulse
+  frames. All 542 were GDR, zero were IDR/IRAP, Annex-B framing was clean, and
+  PTS stayed monotonic. On the x86 ground hub the received rate fell from
+  ~100 fps to 1.6 fps, then returned to ~100 fps; `incomplete_frames` stayed
+  zero, `shm_waiting_for_idr` stayed false, and neither recovery requests nor
+  source switches increased.
+- **CV610 restart while gated confirmed:** graceful stop completed in one
+  second with the ring held at the close threshold; the replacement process
+  started with the consumer still stopped, exercised the safety escape, and
+  recovered normally when consumption resumed. No D-state or new kernel fault.
+- **CV610 mirror-recording rows are blocked by bench storage, not code:** the
+  device has no mounted recording medium and `/tmp` has only 28 MiB free, so
+  `/api/v1/record/start` correctly refused with `stop_reason=disk_full` even
+  after temporarily lowering `record.maxMB`. Rows 8 and 9 remain unverified.
+- Hardware verification found and fixed CV610 gate setup running before
+  `cv610_output_start()` created the ring. Setup now follows successful output
+  creation, and startup reports `frame gate on ... ring=8 slots` rather than
+  declaring the gate inert.
+- **Star6E preliminary:** the consumer-stall test paused and recovered without
+  D-state, but `MI_VENC_StopRecvPic` returned `0xA0022012`. Treat Star6E support
+  as unresolved until that return-code/state mismatch is understood.
+- **Maruko:** code-level only; no device trial yet.
+- Rebased on upstream 0.84.0; version bumped to 0.85.0. The
+  `contract_version` remains at upstream's 0.31.0 because the frame gate adds
+  three restart-required fields without changing an endpoint or payload.
+- The local verification branch contains the rebased PR plus the CV610
+  initialization-order fix and these bench results; update the PR branch only
+  after reviewing that diff.
 
 ## 9. When it passes
 
-1. Replace the bold **"Not yet bench-verified"** paragraph in the 0.83.0
-   `HISTORY.md` entry with what was actually measured — device, sensor,
-   resolution, fps, and the IDR count across gate cycles, in the style of the
-   surrounding entries.
-2. Tick the runtime smoke-check boxes in the PR and note which backends were
+1. Tick the runtime smoke-check boxes in the PR and note which backends were
    exercised.
-3. Fold any default changes from §6 into `include/frame_gate.h`.
-4. Then #287 is ready to merge.
+2. Fold any default changes from §6 into `include/frame_gate.h`.
+3. Complete the two mirror-recording rows on a CV610 with writable media, then
+   decide whether CV610 confirmation is sufficient to merge with SigmaStar
+   still experimental.
 
 If R1 fails, close the PR with the finding rather than reworking it — and
 keep the plan and this document, because the measurement is the valuable part.

@@ -1,5 +1,75 @@
 # History
 
+## [0.85.0] - 2026-09-12
+
+An IDR-free way to shed load. `contract_version` stays **0.31.0** — three new
+restart-required `video0` fields, no endpoint or payload change.
+
+**Bench-verified on CV610/IMX662 at 1280x720, 100 fps, `resilience=racing`.**
+Stopping the frame-shm consumer closed intake at three queued slots; the
+500 ms escape emitted one frame per pulse, and normal 100 fps delivery resumed
+after the consumer returned. A direct AU consumer saw 542 clean, monotonic GDR
+frames across a three-second gate interval, including seven escape frames, and
+**zero IDR/IRAP frames**. The x86 ground receiver measured the delivered rate
+falling from ~100 fps to 1.6 fps and recovering to ~100 fps without an
+incomplete frame, decoder wait-for-IDR, recovery request, or source switch.
+Star6E also paused and recovered without D-state, but its
+`MI_VENC_StopRecvPic` returned `0xA0022012`; that secondary backend still needs
+follow-up before it can be called supported. Maruko remains code-level only.
+
+- **Adaptive frame gate (`video0.frameGate`, default `off`).** Pauses the
+  stream channel's frame intake via `MI_VENC_StopRecvPic` while the frame-shm
+  egress ring is not draining, and resumes on `MI_VENC_StartRecvPic` when the
+  consumer catches up. The point is what it does *not* do: a bitrate write is
+  the only proportional rate actuator on SigmaStar and `MI_VENC_SetChnAttr`
+  keyframes on its own (measured on SSC338Q: ten spaced `video0.bitrate`
+  writes, eleven IRAP access units), so the standard response to congestion
+  injects the largest frame in the stream into the link that is already
+  overflowing. The gate changes no encoder state at all, so ROI keeps its
+  relative QP gradient and CBR keeps its contract.
+- **No IDR-free proportional QP lever exists to substitute**, which is why
+  this is a gate and not a rate write: `qpDelta` writes `s32IPQPDelta` and
+  only redistributes bits between I and P, and `min_qp` abandons CBR at a
+  cliff (19.58 Mbps → 0.63 between 20 and 24 on the README bench) rather than
+  scaling.
+- **Signal is the instantaneous per-frame ring occupancy, not the published
+  `low_water_slots`** — that is a 200 ms window, right for waybeam-link's rate
+  model and far too slow to catch a burst. The existing per-frame ring read in
+  the stream loop already owns the VENC channel, so the gate needs no poller
+  and no extra thread. The 200 ms export is unchanged; rate policy still lives
+  in waybeam-link and the gate only covers the transients between its
+  decisions.
+- **Hysteresis is closed-biased:** close at `>= 3` slots, reopen at `<= 1`
+  (pinned — the ring's healthy idle occupancy is one frame, not zero) after a
+  20 ms debounce, with a `frameGateMaxClosedMs` safety escape (default 500 ms)
+  so a dead consumer cannot stop the stream for good. On escape the ring
+  overflows and reports `full_drops`, which is diagnosable; a silently stopped
+  stream is not.
+- **Mirror-mode recordings are protected.** Where the recorder shares ch0,
+  closes are suppressed while a recording is actually running, so congestion
+  never punches holes in the SD file. Reopens are never suppressed.
+  `dual`/`dual-stream` put the recorder on ch1 and are unaffected. (The plan
+  called for refusing the gate outright in mirror mode; `mirror` turned out to
+  be the *default* record mode, which would have made the feature unreachable.)
+- **Maruko needed two guards Star6E did not.** Its idle path aborts the stream
+  loop after 20 s without encoder data and warns at 1 s — a closed gate looks
+  exactly like a stalled encoder — so both are suppressed while gated. And its
+  fd wait polls at 1 s, which would have become the reopen latency; that drops
+  to 2 ms while closed.
+- `src/frame_gate.c` is a pure state machine with no SDK types, unit-tested on
+  the host (68 new assertions) like `src/intra_refresh.c`.
+- **All three backends.** CV610 uses `ss_mpi_venc_stop_chn` /
+  `ss_mpi_venc_start_chn(recv_pic_num=-1)` — the same primitive the SigmaStar
+  backends reach as `MI_VENC_Stop/StartRecvPic`, and exactly what the `ldy_sky`
+  vendor streamer does on the same silicon. Its `select()` wait drops from 1 s
+  to 2 ms while gated for the same reason Maruko's poll does. CV610 records in
+  mirror mode only, so the recorder always shares the gated channel and the
+  close-suppression always applies there.
+- **CV610 is linked and confirmed on device.** Hardware verification found and
+  fixed an initialization-order defect: gate setup ran before
+  `cv610_output_start()` created the frame ring, so every frame-shm gate was
+  incorrectly declared inert. Setup now runs immediately after output creation.
+
 ## [0.84.0] - 2026-09-06
 
 `record.format="hevc"` now rotates, and **neither recorder forces a keyframe

@@ -2073,19 +2073,6 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 		return -1;
 	ctx->venc_started = 1;
 
-	/* Adaptive frame gate.  Set up once the channel is running and the
-	 * ring (if any) exists, so slot_count can sanity-check the threshold. */
-	{
-		venc_frame_ring_fill_t gfill = {0};
-
-		if (ctx->frame_ring)
-			(void)venc_frame_ring_get_fill(ctx->frame_ring, &gfill);
-		cv610_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
-			frame_gate_parse_mode(ctx->config.video0.frame_gate),
-			ctx->config.video0.frame_gate_close_slots,
-			ctx->config.video0.frame_gate_max_closed_ms,
-			gfill.slot_count), &ctx->frame_gate, gfill.slot_count);
-	}
 	source.mod_id = OT_ID_VPSS;
 	source.dev_id = CV610_VPSS_GRP;
 	source.chn_id = CV610_VPSS_CHN;
@@ -2363,6 +2350,22 @@ static int cv610_init(void *opaque)
 	}
 	if (cv610_output_start(ctx) != 0)
 		return -1;
+	/* Adaptive frame gate.  Output setup must run first: it creates the
+	 * frame-shm ring whose slot count enables the gate and validates the
+	 * configured close threshold.  Initialising this in cv610_venc_start()
+	 * made every CV610 frame-shm gate inert because ctx->frame_ring was
+	 * necessarily still NULL there. */
+	{
+		venc_frame_ring_fill_t gfill = {0};
+
+		if (ctx->frame_ring)
+			(void)venc_frame_ring_get_fill(ctx->frame_ring, &gfill);
+		cv610_report_frame_gate_setup(frame_gate_setup(&ctx->frame_gate,
+			frame_gate_parse_mode(ctx->config.video0.frame_gate),
+			ctx->config.video0.frame_gate_close_slots,
+			ctx->config.video0.frame_gate_max_closed_ms,
+			gfill.slot_count), &ctx->frame_gate, gfill.slot_count);
+	}
 	if (ctx->config.audio.enabled) {
 		/* Non-fatal, as on Star6E (star6e_pipeline.c discards the audio
 		 * init result): audio needs kernel modules the loader only stages
