@@ -2049,6 +2049,30 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	vui.vui_video_signal.matrix_coefficients = 1;
 	if (ss_mpi_venc_set_h265_vui(CV610_VENC_CHN, &vui) != TD_SUCCESS)
 		return -1;
+	/* Cap the bitstream buffer before encoding starts — see
+	 * FRAME_GATE_STREAM_BUF_FRAMES.  Read-modify-write: chn_param also
+	 * carries crop, frame rate and in_depth, none of which this owns.
+	 * Advisory: a refusal leaves the SDK default depth, which costs
+	 * latency while gated and nothing else. */
+	{
+		ot_venc_chn_param cp;
+
+		memset(&cp, 0, sizeof(cp));
+		if (ss_mpi_venc_get_chn_param(CV610_VENC_CHN, &cp)
+		    == TD_SUCCESS) {
+			cp.max_stream_cnt = FRAME_GATE_STREAM_BUF_FRAMES;
+			if (ss_mpi_venc_set_chn_param(CV610_VENC_CHN, &cp)
+			    != TD_SUCCESS)
+				fprintf(stderr, "WARNING: [cv610] "
+					"max_stream_cnt=%u refused; keeping "
+					"the SDK default depth\n",
+					FRAME_GATE_STREAM_BUF_FRAMES);
+		} else {
+			fprintf(stderr, "WARNING: [cv610] get_chn_param "
+				"failed; keeping the SDK default depth\n");
+		}
+	}
+
 	memset(&start, 0, sizeof(start));
 	start.recv_pic_num = -1;
 	if (ss_mpi_venc_start_chn(CV610_VENC_CHN, &start) != TD_SUCCESS)

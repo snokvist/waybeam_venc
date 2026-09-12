@@ -2210,6 +2210,16 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	if (g_stab_fill_graph)
 		return 0;
 
+	/* Cap the bitstream buffer before encoding starts — see
+	 * FRAME_GATE_STREAM_BUF_FRAMES.  Advisory: a refusal leaves the SDK
+	 * default depth, which costs latency while gated and nothing else. */
+	if (!g_mi_venc.fnSetMaxStreamCnt ||
+	    g_mi_venc.fnSetMaxStreamCnt(venc_dev, *chn,
+		    FRAME_GATE_STREAM_BUF_FRAMES) != 0)
+		fprintf(stderr, "WARNING: [maruko] SetMaxStreamCnt(%u) "
+			"refused; keeping the SDK default depth\n",
+			FRAME_GATE_STREAM_BUF_FRAMES);
+
 	ret = maruko_mi_venc_start_recv(venc_dev, *chn);
 	if (ret != 0) {
 		fprintf(stderr,

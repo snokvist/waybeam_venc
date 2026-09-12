@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 16.0.0 -->
+<!-- version: 17.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1415,3 +1415,36 @@ shows exactly what that costs: the recorder took **every** frame (100 fps,
 `transportDrops`. That is the documented trade — congestion punches holes in
 the radio stream rather than in the SD file — and it is the one case where the
 gate deliberately stops protecting the link.
+
+### 23.1 All three backends capped — and what is verified where
+
+The cap was Star6E-only when first written. It is now set on all three, since
+all three share the drain-stall actuator and therefore the same latency:
+
+| Backend | Call | Bring-up |
+|---|---|---|
+| Star6E | `MI_VENC_SetMaxStreamCnt(chn, 2)` | accepted, no warning |
+| Maruko | `MI_VENC_SetMaxStreamCnt(dev, chn, 2)` | accepted, no warning |
+| CV610 | `ss_mpi_venc_set_chn_param()` read-modify-write of `max_stream_cnt` | applied, no warning |
+
+CV610 has no `SetMaxStreamCnt` symbol; the same control lives in
+`ot_venc_chn_param.max_stream_cnt`, which also carries crop, frame rate and
+`in_depth` — hence the read-modify-write rather than a fresh struct.
+
+**Verification is uneven, and the difference matters:**
+
+- **Star6E — before/after measured.** 534 -> 436 ms at a 10 fps drain, plus
+  the SD mirror-recording runs above.
+- **CV610 — applied, gated delta measured, no control.** Healthy to gated at a
+  20 fps drain is +343 ms with the ring at 1.50 slots. There is no
+  before-measurement, so the cap's *contribution* on CV610 is unproven — only
+  that it is accepted and nothing regressed. Note CV610's `pts` epoch is far
+  enough from `CLOCK_MONOTONIC` that the 32-bit age subtraction wraps; only
+  run-to-run deltas are meaningful there.
+- **Maruko — applied, and largely beside the point.** At a 5 fps drain the age
+  is 1701 ms with the ring holding **6.28 of 8 slots**, so ~1256 ms of it is
+  ring residency. Maruko's gate closes late (§16.4's overshoot, far worse here
+  than Star6E's 1.5 slots), so the bitstream buffer is not its dominant term
+  and this cap barely moves it. The lever for Maruko is the close threshold,
+  not the buffer depth — `frameGateCloseSlots` is already exposed for it, and
+  that trade is untested.
