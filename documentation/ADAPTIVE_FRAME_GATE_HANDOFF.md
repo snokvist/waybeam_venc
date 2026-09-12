@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 17.0.0 -->
+<!-- version: 18.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1448,3 +1448,64 @@ CV610 has no `SetMaxStreamCnt` symbol; the same control lives in
   and this cap barely moves it. The lever for Maruko is the close threshold,
   not the buffer depth — `frameGateCloseSlots` is already exposed for it, and
   that trade is untested.
+
+---
+
+## 24. Maruko's ring overshoot explained: the escape pulse is a burst
+
+§16.4 wrote the overshoot off as an artifact of a binary test load. It is not.
+Under sustained deep over-subscription Maruko settles with the ring near full,
+and that — not the encoder buffer — is where its gated latency lives.
+
+### The counters name the mechanism
+
+`.233`, 30 fps production, consumer capped at 5 fps (6:1), gate armed, hub
+stopped so the rate consumer owns the ring:
+
+```
+framesSent   167 -> 247   (5.0 /s — exactly the consumer's drain)
+usedSlots    6            (of 8, steady)
+gateClosed   true
+closeEvents  181 -> 209   (1.75 /s)
+escapeEvents 180 -> 208   (1.75 /s)
+```
+
+`closeEvents` and `escapeEvents` advance **in lockstep, one apart**. Every
+close follows an escape, so the gate never reopens through the drain path at
+all — occupancy never returns to `open_slots`. It is running permanently on the
+500 ms safety pulse.
+
+Each pulse admits ~2.9 frames, not one. `FRAME_GATE_MIN_OPEN_US` is a 20 ms
+*time* dwell and Maruko's gated loop polls every 2 ms, so one dwell drains the
+whole buffered backlog out of VENC into the ring as a burst. The consumer takes
+5 frames/s, escapes return 5 frames/s, and the ring equilibrates wherever that
+balance lands — 6 of 8 — rather than draining to 1. Ring residency is then
+~1200 ms of the 1701 ms measured age.
+
+### Why neither available knob reaches it
+
+- **`FRAME_GATE_STREAM_BUF_FRAMES`** (this PR) caps the encoder buffer, the
+  smaller term. It bounds the burst, but the equilibrium is set by the balance.
+- **`frameGateCloseSlots`** moves the threshold linearly and no further: 3 -> 2
+  took occupancy from 7.0 to ~6.3. The residual is the burst, not the trigger.
+
+Star6E does not show this. Under RF congestion it closed ~27 times a second
+with `escapeEvents` flat — reopening normally, ring at 1.5. The difference is
+the ratio: 100 fps production against a 20-30 fps drain does fall back to the
+reopen threshold between bursts; 30 fps against 5 fps never does.
+
+### What would fix it, untested
+
+Make the escape admit **one frame**, not "whatever fits in 20 ms" — a
+frame-counted dwell rather than a time-based one. The gate already observes
+every write, so it can close again on the first frame that lands instead of
+waiting out a fixed window. That changes `frame_gate_observe()`'s escape branch
+for all three backends, so it wants its own measurement and review rather than
+being folded in here.
+
+### Assessment for this PR
+
+Not a regression and not a blocker. Maruko still gets the headline result —
+**zero keyframes** — and the escape is doing what §16.2 restored it to do:
+keeping a starved stream alive and diagnosable rather than silently stopped.
+What it costs on that board, under sustained deep congestion, is latency.
