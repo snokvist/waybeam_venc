@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 15.0.0 -->
+<!-- version: 16.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1356,3 +1356,62 @@ following P-frame — the v0.9.2 rollback already recorded in
 `include/venc_ring.h`. With GDR there is no periodic IRAP to recover at, so the
 damage would persist until the refresh wave painted it out. It is directly
 hostile to the continuity this feature exists to protect.
+
+---
+
+## 23. `maxStreamCnt = 2` shipped, and the mirror-recording risk cleared
+
+### Why 2 and not 1
+
+Latency while gated is the bitstream buffer depth times the **consumer's**
+frame period — measured at a 10 fps drain, each slot costs ~97 ms:
+
+| depth | gated @10 fps | gated @30 fps | ungated |
+|---|---|---|---|
+| 3 (SDK default) | 534 ms | 171 ms | 4.1 ms |
+| **2 (shipped)** | **436 ms** | — | 4.1 ms |
+| 1 | 341 ms | 105 ms | 4.1 ms |
+
+Each slot also buys one **producer** frame period (10 ms at 100 fps) of
+tolerance to a consumer that stalls. 2 keeps one slot of that headroom; 1
+leaves none, on a channel that in mirror mode also feeds an SD recorder where
+flash GC can stall a write — the same hazard that earned ch1 a 64-frame buffer
+(`star6e_pipeline.c:2898`). The ~95 ms that 1 would buy is not worth spending
+the last slot of margin.
+
+Set once, after `MI_VENC_CreateChn` and before `MI_VENC_StartRecvPic`, which is
+where the SDK says to set it; it advises against changing it live, so this is a
+constant rather than a config field. Advisory: a refusal or an older
+`libmi_venc.so` without the symbol leaves the SDK default of 3, which costs
+latency while gated and nothing else.
+
+### Mirror recording on SD — clean
+
+`.232`, `record.mode=mirror`, `record.dir=/mnt/mmcblk0p1` (58 GB card), gate
+armed, hub consuming:
+
+| Run | Frames | Elapsed | fps | `droppedFrames` | `writerPeakDepth` |
+|---|---|---|---|---|---|
+| 30 s | 2999 | 30006 ms | 99.9 | **0** | 2 |
+| 128 s | 12885 | 128878 ms | 100.0 | **0** | **1** |
+
+The 30 s file was pulled and decoded end to end: HEVC, `avg_frame_rate 100/1`,
+6885 frames read, **zero decoder errors**. (`ffmpeg -f null` also prints
+"non monotonically increasing dts" lines — those are the *null muxer*
+complaining about duplicate DTS at 100 fps, not decode failures; a decode-only
+run is silent.)
+
+`writerPeakDepth` of 1-2 says the SD writer never backed up, so the shallow
+buffer was never asked to absorb a stall. That is the honest limit of this
+test: it shows no regression at depth 2 under normal SD behaviour, not that
+depth 2 survives a 500 ms flash-GC stall. A recording that *did* hit GC would
+show it as a rising `writerPeakDepth` first.
+
+### The close-suppression interaction, observed
+
+While a mirror recording runs the gate suppresses closes, and the measurement
+shows exactly what that costs: the recorder took **every** frame (100 fps,
+0 dropped) while the *stream* ring sat full at 8/8 and shed ~51 fps to
+`transportDrops`. That is the documented trade — congestion punches holes in
+the radio stream rather than in the SD file — and it is the one case where the
+gate deliberately stops protecting the link.

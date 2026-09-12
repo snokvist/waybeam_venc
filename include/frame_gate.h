@@ -76,6 +76,27 @@
  * pulse that follows an escape, so burst response is unchanged. */
 #define FRAME_GATE_MIN_OPEN_US 20000u
 
+/* Depth of the encoder's bitstream buffer, in frames.
+ *
+ * This is a LATENCY control, not a gate threshold, and it belongs with the
+ * gate because the gate is what makes the depth visible.  Measured 2026-09-12
+ * on Star6E: while gated, a frame's age at the ring is the buffer depth times
+ * the CONSUMER's frame period, so at a 10 fps drain each slot costs ~97 ms —
+ * 534 ms at the SDK default of 3, 436 at 2, 341 at 1.  Ungated it is 4.1 ms
+ * at every depth, because nothing queues.
+ *
+ * Each slot also buys one PRODUCER frame period (10 ms at 100 fps) of
+ * tolerance to a consumer that stalls, which is why this is 2 and not 1: the
+ * recorder shares ch0 in mirror mode and SD flash GC can stall a write, so
+ * one slot of headroom is kept.  Dropping to 1 buys ~95 ms more and leaves
+ * none.
+ *
+ * The SDK drops the pending image BEFORE encoding when this buffer is full
+ * (MI VENC API v2.12 §1.3.16), so a shallow buffer can cost frames but can
+ * never break the reference chain.  It must be set after channel creation and
+ * before encoding starts; the SDK advises against changing it live. */
+#define FRAME_GATE_STREAM_BUF_FRAMES 2u
+
 typedef struct {
 	uint32_t close_slots;    /* close when used_slots >= this */
 	uint32_t open_slots;     /* reopen when used_slots <= this */

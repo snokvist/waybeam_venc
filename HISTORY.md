@@ -44,9 +44,13 @@ what the radio could carry.
   encoder's bitstream buffer depth times the consumer's frame period — a
   near-constant ~5.2 consumer-frame-intervals, 4.1 ms ungated, 170 ms at a
   30 fps drain, 538 ms at 10 fps, of which the ring holds only 1.5 frames.
-  Capping `MI_VENC_SetMaxStreamCnt` at 1 measured a 37-39 % cut at no cost to
-  delivered rate; it is continuity-safe because the SDK drops the pending image
-  before encoding. Not shipped here.
+  The encoder's bitstream buffer is now capped at 2 frames
+  (`FRAME_GATE_STREAM_BUF_FRAMES`, SDK default 3), which takes a 10 fps drain
+  from 534 to 436 ms. It is continuity-safe because the SDK drops the pending
+  image *before* encoding, and 2 rather than 1 keeps one slot of tolerance for
+  a consumer that stalls — mirror-mode recordings share the channel. Verified
+  on an SD card: 128 s at 100.0 fps, 0 dropped frames, writer never backed up,
+  and the file decodes with zero errors.
 - **Under partial congestion it settles at the link rate.** Against a
   rate-limited consumer the delivered rate tracked 20, 40, 60 and 80 fps with
   a spread of at most one frame per second, holding the ring at ~1.5 of 8
