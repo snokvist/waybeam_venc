@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 14.0.0 -->
+<!-- version: 15.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1268,3 +1268,91 @@ promise:
 
 Both are measurable with the same method used throughout: the craft's own
 `idr_frames` against a rate-limited or RF consumer. Neither is in this PR.
+
+---
+
+## 22. Latency attributed — and §21's explanation was wrong twice
+
+### Method
+
+`tools/frame_shm_rate_consumer.c` now records **age at read**: wall clock minus
+the frame's capture `pts` (`VencFrameMeta.pts`, µs). The pts epoch is the SDK's
+packet clock and need not match `CLOCK_MONOTONIC`, so the absolute value is not
+a latency — but the *difference* between a healthy run and a gated one is,
+because the offset cancels. No radio is involved: the craft's own encoder and
+ring are the whole measurement.
+
+**The measurement is only valid as the sole ring consumer.** frame-shm is
+SPSC. `waybeam_hub` on the craft is a live consumer *and is supervised*, so
+`S97waybeam-hub stop` must be verified to hold — an earlier sweep was silently
+invalidated by the hub sharing the ring, which reads as an impossibly empty
+ring and a delivered rate below the requested cap. Assert `hub procs: 0` and
+`Mean ring > 0` before believing any number here.
+
+### Result: the latency is the buffer depth times the consumer period
+
+| `maxStreamCnt` | Consumer cap | Delivered | Mean ring | **Age at read** |
+|---|---|---|---|---|
+| default (3) | 200 fps (healthy) | 100.1 | 0.00 | **4.1 ms** |
+| default (3) | 30 fps | 30.9 | 1.50 | **170.7 ms** |
+| default (3) | 10 fps | 10.4 | 1.50 | **538.0 ms** |
+| **1** | 200 fps (healthy) | 100.1 | — | **4.1 ms** |
+| **1** | 30 fps | 31.0 (spread **0**) | 1.50 | **104.5 ms** |
+| **1** | 10 fps | 10.4 | 1.50 | **341.2 ms** |
+
+Ungated latency is **4.1 ms** and the ring is empty — the encoder is not the
+problem. Gated, the age is a near-constant **~5.2 consumer-frame-intervals**
+(170.7/33.3 = 5.1; 538.0/100 = 5.4) while the ring holds only 1.50 of them. So
+the delay is not the ring and not downstream: **~3.7 frames sit inside VENC**,
+which is the default `maxStreamCnt` of 3 plus the frame in flight.
+
+That is why it looks like "hundreds of milliseconds" at low link rates and
+nothing at all when the link keeps up: the depth is fixed, the period is not.
+
+### §21 was wrong, and so was the correction to it
+
+§21 said the delay was frames accumulating in VENC's output FIFO. Then, reading
+that `MI_VENC_SetMaxStreamCnt` defaults to 3, I concluded the FIFO was far too
+shallow to hold ~500 ms and that the delay must be downstream of venc. **Both
+are wrong.** The FIFO *is* the buffer, and 3 frames *is* ~500 ms — when the
+consumer is draining at 10 fps. Depth in frames only becomes a latency once
+multiplied by the drain period, and I compared it against the 100 fps
+production period instead.
+
+### `MI_VENC_SetMaxStreamCnt` works: −38 % gated latency, no other cost
+
+Setting it to 1 at bring-up (accepted, returns 0):
+
+- 30 fps cap: 170.7 -> **104.5 ms** (−39 %)
+- 10 fps cap: 538.0 -> **341.2 ms** (−37 %)
+- Delivered rate unchanged, and *smoother* at 30 fps (spread 0 vs 1)
+- Healthy path untouched at 4.1 ms
+- Ring unchanged at 1.50 slots
+
+It is continuity-safe **by construction**: the SDK drops the pending image
+*before encoding* when the buffer is full (v2.12 §1.3.16,
+"直接丢掉不编码"), so it cannot break the reference chain the way discarding an
+encoded frame would. The doc also says to set it after channel creation and
+before encoding starts, not dynamically — which is exactly where the frame gate
+is already configured.
+
+**Not in this PR.** It is a one-call change with a measured win, but it is
+unreviewed, its effect on GDR continuity is argued from the doc rather than
+measured on the wire, and this PR is already large. It is the obvious immediate
+follow-up.
+
+### The remaining ~3.2 frames
+
+At `maxStreamCnt=1` the residue is ring (1.50) plus ~1.7 elsewhere. The ring
+half is already tunable by an operator today: `frameGateCloseSlots` defaults to
+3, and closing at 2 would trade a little shedding headroom for a slot of
+latency. That trade is untested.
+
+### Struck: discard stale frames on reopen
+
+Ruled out on the same evidence, not merely deprioritised. Discarding *encoded*
+frames is a post-encode drop, which breaks the reference chain for every
+following P-frame — the v0.9.2 rollback already recorded in
+`include/venc_ring.h`. With GDR there is no periodic IRAP to recover at, so the
+damage would persist until the refresh wave painted it out. It is directly
+hostile to the continuity this feature exists to protect.

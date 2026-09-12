@@ -56,6 +56,15 @@ int main(int argc, char **argv)
 	 * rather than hidden inside a mean. */
 	unsigned long series[600];
 	unsigned long fill_sum = 0, fill_n = 0, fill_max = 0;
+	/* Age at read = wall clock minus the frame's capture pts.  The pts is
+	 * the SDK's packet timestamp, whose epoch need not match
+	 * CLOCK_MONOTONIC, so the absolute value is not a latency.  The
+	 * DIFFERENCE between a healthy run and a gated one is, because the
+	 * offset cancels — that difference is what the gate adds on the venc
+	 * side, capture to ring exit. */
+	unsigned long long age_sum = 0;
+	unsigned long age_n = 0;
+	uint32_t age_min = 0xFFFFFFFFu, age_max = 0;
 
 	if (target_fps <= 0)
 		target_fps = 40;
@@ -109,6 +118,16 @@ int main(int argc, char **argv)
 			memcpy(&m, buf, VENC_FRAME_META_SIZE);
 			if (m.flags & VENC_FRAME_FLAG_IDR)
 				total_idr++;
+			{
+				/* 32-bit µs wraps every ~71 min; the subtraction
+				 * is correct across one wrap by construction. */
+				uint32_t age = (uint32_t)now_us() - m.pts;
+
+				age_sum += age;
+				age_n++;
+				if (age < age_min) age_min = age;
+				if (age > age_max) age_max = age;
+			}
 			total_frames++;
 			sec_frames++;
 			t_next += period_us;
@@ -142,6 +161,12 @@ int main(int argc, char **argv)
 	printf("Target fps:   %d\n", target_fps);
 	printf("Frames:       %lu\n", total_frames);
 	printf("IDR frames:   %lu\n", total_idr);
+	if (age_n) {
+		printf("Age at read:  mean %.1f ms  min %.1f  max %.1f"
+			"   (epoch-offset included; compare runs)\n",
+			(double)age_sum / (double)age_n / 1000.0,
+			(double)age_min / 1000.0, (double)age_max / 1000.0);
+	}
 	printf("Mean ring:    %.2f slots\n",
 		fill_n ? (double)fill_sum / (double)fill_n : 0.0);
 	printf("Series:      ");

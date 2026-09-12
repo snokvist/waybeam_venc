@@ -39,10 +39,14 @@ what the radio could carry.
   `frameGateCloseSlots` and `frameGateMaxClosedMs` remain.
 - **It trades latency for continuity, and that is visible.** Nothing is
   dropped while gated — frames accumulate in VENC's output FIFO — so the image
-  stays clean and continuous but runs **~500-1000 ms** behind on a heavily
-  oversubscribed link (operator-confirmed). Bounding it with
-  `MI_VENC_SetMaxStreamCnt`, or discarding stale frames on reopen, are the
-  untested routes to make the trade tunable.
+  stays clean and continuous but runs several hundred ms behind on a heavily
+  oversubscribed link (operator-confirmed). Attributed: the delay is the
+  encoder's bitstream buffer depth times the consumer's frame period — a
+  near-constant ~5.2 consumer-frame-intervals, 4.1 ms ungated, 170 ms at a
+  30 fps drain, 538 ms at 10 fps, of which the ring holds only 1.5 frames.
+  Capping `MI_VENC_SetMaxStreamCnt` at 1 measured a 37-39 % cut at no cost to
+  delivered rate; it is continuity-safe because the SDK drops the pending image
+  before encoding. Not shipped here.
 - **Under partial congestion it settles at the link rate.** Against a
   rate-limited consumer the delivered rate tracked 20, 40, 60 and 80 fps with
   a spread of at most one frame per second, holding the ring at ~1.5 of 8
