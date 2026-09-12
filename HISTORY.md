@@ -37,6 +37,12 @@ what the radio could carry.
   itself whenever the output is a frame ring, because the ring is the
   occupancy signal it runs on and no other transport has one. Only
   `frameGateCloseSlots` and `frameGateMaxClosedMs` remain.
+- **It trades latency for continuity, and that is visible.** Nothing is
+  dropped while gated — frames accumulate in VENC's output FIFO — so the image
+  stays clean and continuous but runs **~500-1000 ms** behind on a heavily
+  oversubscribed link (operator-confirmed). Bounding it with
+  `MI_VENC_SetMaxStreamCnt`, or discarding stale frames on reopen, are the
+  untested routes to make the trade tunable.
 - **Under partial congestion it settles at the link rate.** Against a
   rate-limited consumer the delivered rate tracked 20, 40, 60 and 80 fps with
   a spread of at most one frame per second, holding the ring at ~1.5 of 8

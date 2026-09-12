@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 13.0.0 -->
+<!-- version: 14.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1211,3 +1211,60 @@ here is a fault. ARQ and receiver-requested recovery IDRs remain unexercised —
 `.232` craft.json restored (`max_profile 4`, `venc.enabled true`), venc gate
 off and bitrate 5754, supervised start, hub up. `.181` hub restarted. The
 ground hub was left **stopped**, the state the other session had put it in.
+
+---
+
+## 21. Operator-confirmed run, and the latency it costs
+
+Ground `waybeam-hub` on the x86 host, scouted onto craft 17, latched and
+**`claimed_by: 9`**, MCS pinned at `min_profile = max_profile = 1` and
+waybeam-link's bitrate controller disabled. Three phases on the shipping build
+(gate always on, no switch, counters live):
+
+| Phase | Offered | `gateClosed` | `closeEvents` | `escapeEvents` | ring | `transportDrops` |
+|---|---|---|---|---|---|---|
+| Healthy | 5.7 Mbps | false | 9089, **frozen** | 33, frozen | 0 | 145, frozen |
+| **Stall** | 20 Mbps | **true** | 9089 -> 9633 (**~27/s**) | 33, **frozen** | 2-3 / 8 | 145, **frozen** |
+| Recovery | 5.7 Mbps | false | 9981, **frozen** | 33, frozen | 0 | 145, frozen |
+
+Ground-side across the whole run: `idr_frames` **0 before and 0 after**.
+
+The three columns together are the diagnosis, and none of them existed before
+this work:
+
+- **closes climbing, escapes flat** = consumer slow, gate working. Escapes
+  climbing *instead* is the dead-consumer signature (measured separately at
+  ~2/s with `transportDrops` climbing alongside).
+- **drops frozen at 145 through a 3.5x overload** — the gate throttled
+  production to what the radio could carry rather than overflowing the ring.
+- **ring held at 2-3 of 8** — it never fills, and it empties the moment the
+  offered rate drops back.
+
+### The cost: ~500-1000 ms of added latency while gated
+
+Operator observation on the live image, 2026-09-12: the picture stays clean
+and continuous under stall, at a visible **~500-1000 ms** delay versus the
+ungated stream. Their verdict — *"much better than the alternative of a broken
+stream"* — is the right trade for FPV, but the latency is a real cost and
+should not be filed as free.
+
+**Where it comes from, and why it is not the ring.** The ring holds 2-3 slots
+(~50 ms at the throttled rate), so it cannot account for it. Drain-stall works
+by letting frames accumulate **inside VENC's output FIFO**, which is exactly a
+latency buffer: nothing is dropped, so everything is delayed. That is the
+mechanism's defining trade — recv-stop and plain ring-overflow *drop* frames
+and stay low-latency; drain-stall *keeps* them and pays in delay.
+
+**It may not be inherent.** Two untested routes to bound it, in order of
+promise:
+
+1. `MI_VENC_SetMaxStreamCnt` (exported, unbound — §12.4) caps the output FIFO
+   depth, which directly caps the accumulated delay. A shallow FIFO turns the
+   tail of the backlog into ring drops rather than latency, making the trade
+   tunable instead of fixed.
+2. Discard stale frames on reopen rather than draining oldest-first, so a
+   recovering link shows current video immediately and takes one gap instead
+   of a second of lag.
+
+Both are measurable with the same method used throughout: the craft's own
+`idr_frames` against a rate-limited or RF consumer. Neither is in this PR.

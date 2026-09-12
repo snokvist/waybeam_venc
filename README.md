@@ -733,6 +733,12 @@ exactly the pathology this exists to avoid. Letting the FIFO backpressure
 instead changes no encoder state, so ROI keeps its gradient, CBR keeps its
 contract, and nothing keyframes.
 
+**What it costs: latency, not frames.** Nothing is dropped while gated — the
+frames accumulate in VENC's output FIFO — so the picture stays clean and
+continuous at the price of delay. Operator-confirmed at **~500-1000 ms** behind
+the ungated stream on a 3.5x-oversubscribed link. That is the defining trade
+against the alternatives, which stay low-latency by dropping frames instead.
+
 Under sustained partial congestion it settles at the link rate rather than
 oscillating: against a rate-limited consumer the delivered rate tracked 20,
 40, 60 and 80 fps with a spread of at most one frame per second, holding the
