@@ -59,22 +59,39 @@
  * has had a realistic chance to drain a slot. */
 #define FRAME_GATE_MIN_CLOSED_US 20000u
 
-/* Minimum time the gate stays open after a SAFETY ESCAPE, and only then.
+/* Backstop on how long the gate may stay open after a SAFETY ESCAPE.
  *
  * The escape exists so a dead consumer cannot stop the stream for good: it
- * reopens, lets a frame through, and the ring reports full_drops — a
- * diagnosable failure rather than a silent one.  Without a dwell it cannot do
- * that.  Occupancy is still above close_slots at the instant it reopens, so
- * the very next observation closes again, and on Star6E the idle path polls
- * every 1 ms while a frame takes 10 ms at 100 fps.  The escape therefore
- * re-closed before the encoder could deliver anything: measured 2026-09-12,
- * a dead consumer froze framesSent with every drop counter at zero, under
- * both the recv-stop and drain-stall actuators.
+ * reopens, lets ONE frame through, and the ring reports full_drops — a
+ * diagnosable failure rather than a silent one.  Without something holding it
+ * open it cannot even do that: occupancy is still above close_slots at the
+ * instant it reopens, so the very next observation closes again, and the gated
+ * idle path polls every 1-2 ms while a frame takes 10-33 ms.  Measured
+ * 2026-09-12, a dead consumer froze production with every drop counter at
+ * zero, under both actuators.
  *
- * 20 ms is two frame periods at 100 fps, so at least one frame reaches the
- * ring and is counted.  Normal closes are NOT debounced by this — only the
- * pulse that follows an escape, so burst response is unchanged. */
-#define FRAME_GATE_MIN_OPEN_US 20000u
+ * The pulse ends on the FIRST frame that actually lands, not after a fixed
+ * window — that is what keeps it to about one frame.  Occupancy rising above
+ * its level at the escape can only mean a producer write, so the pulse never
+ * ends early; what it can miss is a write that a concurrent drain cancels out,
+ * which costs one extra frame per drain observed inside the pulse and is
+ * capped by the backstop below.  In the regime where escapes actually happen
+ * the consumer is by definition slow, so drains inside a sub-millisecond-scale
+ * pulse are rare: measured ~1.01 frames per pulse on Maruko at a 5 fps drain.
+ *
+ * A time-based dwell instead let the drain
+ * loop flush the whole buffered backlog into the ring while it was open:
+ * measured 2026-09-13 on Maruko at 30 fps production against a 5 fps drain,
+ * ~2.9 frames per pulse, which exactly replaced what the consumer took.  The
+ * gate then never reached its reopen threshold again — close and escape
+ * counters advanced in lockstep — and the ring equilibrated near full, making
+ * ring residency the dominant latency term on that board.
+ *
+ * This constant is only the backstop for the case where the admitted frame
+ * never arrives at all (encoder stopped, or the ring is full so the write is
+ * dropped).  20 ms is two frame periods at 100 fps.  Normal closes are not
+ * debounced by any of this — only the pulse that follows an escape. */
+#define FRAME_GATE_ESCAPE_BACKSTOP_US 20000u
 
 /* Depth of the encoder's bitstream buffer, in frames.
  *
@@ -118,6 +135,7 @@ typedef struct {
 	uint64_t closed_total_us;    /* cumulative time gated, for duty cycle */
 	uint32_t close_events;       /* closes since setup */
 	uint64_t escape_open_us;     /* when an escape reopened; 0 = not an escape */
+	uint32_t escape_used_slots;  /* occupancy at that instant; +1 ends the pulse */
 	uint32_t escape_events;      /* reopens forced by max_closed_us */
 } FrameGate;
 

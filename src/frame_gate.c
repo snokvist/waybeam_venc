@@ -64,6 +64,10 @@ void frame_gate_restore_closed(FrameGate *g, uint64_t now_us)
 		return;
 	g->open = 0;
 	g->closed_since_us = now_us;
+	/* The gate is closed again, so any escape pulse is over.  Leaving it
+	 * armed would let a stale pulse suppress the next legitimate close
+	 * after a NORMAL reopen. */
+	g->escape_open_us = 0;
 }
 
 FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
@@ -79,12 +83,33 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 			g->escape_open_us = 0;
 			return FRAME_GATE_ACTION_NONE;
 		}
-		/* An escape pulse is still serving its dwell: refuse to close
-		 * so the admitted frame has time to reach the ring. */
-		if (g->escape_open_us &&
-		    now_us >= g->escape_open_us &&
-		    (now_us - g->escape_open_us) < FRAME_GATE_MIN_OPEN_US)
-			return FRAME_GATE_ACTION_NONE;
+		/* An escape pulse is still open.  End it on the FIRST frame
+		 * that lands — occupancy rising above what it was at the escape
+		 * — so about one frame is admitted.  Occupancy can only rise on
+		 * a producer write, so this never ends the pulse early; a drain
+		 * that cancels out a write costs one extra frame, bounded by
+		 * the backstop.  Holding for a fixed window instead let the
+		 * drain loop flush its whole backlog through, which is what
+		 * pinned Maruko's ring near full.
+		 *
+		 * The backstop covers the frame that never arrives: a stopped
+		 * encoder, or a full ring where the write is dropped rather
+		 * than landing.  Both are the diagnosable outcome the escape
+		 * exists to produce, so closing again is correct. */
+		if (g->escape_open_us) {
+			int landed = used_slots > g->escape_used_slots;
+			/* A reinit can hand us a fresh epoch, the same case the
+			 * closed branch below defends against.  Count it as
+			 * expired: ending the pulse re-closes a gate that is
+			 * doing its job, while holding it open would leave the
+			 * stream ungated for a whole epoch's worth of clock. */
+			int expired = now_us < g->escape_open_us ||
+				(now_us - g->escape_open_us) >=
+					FRAME_GATE_ESCAPE_BACKSTOP_US;
+
+			if (!landed && !expired)
+				return FRAME_GATE_ACTION_NONE;
+		}
 		g->escape_open_us = 0;
 		g->open = 0;
 		g->closed_since_us = now_us;
@@ -105,10 +130,12 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	if (elapsed_us >= g->cfg.max_closed_us) {
 		g->escape_events++;
 		frame_gate_force_open(g, now_us);
-		/* Hold this one open long enough for a frame to actually land,
-		 * or the escape reopens and re-closes without ever letting the
-		 * ring report a drop.  See FRAME_GATE_MIN_OPEN_US. */
+		/* Hold open until one frame lands, or the escape re-closes
+		 * before the ring can report anything.  Remember the occupancy
+		 * so "a frame landed" is observable.  See
+		 * FRAME_GATE_ESCAPE_BACKSTOP_US. */
 		g->escape_open_us = now_us ? now_us : 1u;
+		g->escape_used_slots = used_slots;
 		return FRAME_GATE_ACTION_OPEN;
 	}
 

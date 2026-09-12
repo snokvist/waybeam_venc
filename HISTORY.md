@@ -1,5 +1,39 @@
 # History
 
+## [0.85.1] - 2026-09-13
+
+A latency fix for the adaptive frame gate shipped in 0.85.0. No contract
+change — `contract_version` stays **0.32.0**, and no endpoint, payload or
+field changes.
+
+**Device-verified A/B on all three backends**, pre-fix and fixed binaries
+built from the same tree and identified by md5 at the device, with the
+rate-limited frame-shm consumer as the sole ring reader.
+
+- **The safety escape now admits one frame, not a burst.** When the gate has
+  been closed for `max_closed_ms` it force-opens so a frame reaches the ring
+  and `full_drops` reports a dead consumer instead of a silent stall. That
+  pulse used to stay open for a fixed 20 ms, which on a slow producer let the
+  drain loop flush its entire buffered backlog through as a burst. The pulse
+  now ends on the first frame that actually lands.
+- **Maruko, 30 fps against a 5 fps drain:** mean ring occupancy 6.29 -> 1.64
+  slots and minimum frame age 1460 -> 726 ms. The gate had been running
+  permanently on the safety pulse — close and escape counters advanced in
+  lockstep, one apart — because each pulse admitted ~2.9 frames, exactly
+  replacing what the consumer took, so occupancy never fell back to the
+  reopen threshold. Escapes are now flat while closes continue normally.
+- **Delivered rate and judder are unchanged** (5.6 /s at spread 1 in both
+  arms), and both arms emit **zero keyframes**. The improvement is latency,
+  not throughput.
+- **Star6E and CV610 are unaffected**, as expected: both reach the reopen
+  threshold through the normal drain path, so the escape branch is almost
+  never taken. Ring occupancy 1.52 -> 1.52 at 100->25 fps and 1.55 -> 1.54 at
+  100->15 fps.
+- `FRAME_GATE_MIN_OPEN_US` is renamed `FRAME_GATE_ESCAPE_BACKSTOP_US`: it is
+  now a maximum rather than a minimum, covering only the case where the
+  admitted frame never arrives (stopped encoder, or a full ring that drops
+  the write).
+
 ## [0.85.0] - 2026-09-12
 
 An IDR-free way to shed load. `contract_version` **0.31.0 -> 0.32.0**: the

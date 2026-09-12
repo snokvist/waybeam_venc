@@ -1,6 +1,6 @@
 # Adaptive Frame Gate — Local Takeover Handoff
 
-<!-- version: 18.0.0 -->
+<!-- version: 19.0.0 -->
 
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
@@ -1509,3 +1509,92 @@ Not a regression and not a blocker. Maruko still gets the headline result —
 **zero keyframes** — and the escape is doing what §16.2 restored it to do:
 keeping a starved stream alive and diagnosable rather than silently stopped.
 What it costs on that board, under sustained deep congestion, is latency.
+
+## 25. The frame-counted escape, measured on all three boards
+
+§24 predicted that ending the escape pulse on the first frame that lands —
+rather than after a fixed 20 ms — would decouple `escapeEvents` from
+`closeEvents` and drop Maruko's ring toward the close threshold. Measured
+2026-09-13 on all three backends. It does, and it costs nothing on the two
+boards that were already healthy.
+
+### Method
+
+A/B in one session per board: the pre-fix binary is `a8cc58d^`, the fixed one
+`a8cc58d`, built from the same tree minutes apart and identified by md5 at the
+device before each arm. Load is `tools/frame_shm_rate_consumer.c` as the SOLE
+ring reader — the supervised hub is stopped and the stop VERIFIED to hold,
+because frame-SHM is SPSC and a second reader silently invalidates the run.
+Each arm runs a warm-up then a matched measurement from the same starting
+state.
+
+### Maruko `.233` — 30 fps production, 5 fps drain (6:1)
+
+The board the fix targets.
+
+| | before (20 ms time dwell) | after (frame-counted) |
+|---|---|---|
+| Mean ring | 6.29 slots | **1.64** |
+| Frame age, min | 1460.1 ms | **725.9 ms** |
+| Frame age, mean | 2488.4 ms | **1226.4 ms** |
+| `closeEvents` | 1.75 /s | 2.5 /s |
+| `escapeEvents` | 1.75 /s (lockstep) | **flat** |
+| IDR frames | 0 | **0** |
+| Delivered | 5.6 /s, spread 1 | 5.6 /s, spread 1 |
+
+Counter samples 10 s apart make the decoupling unambiguous:
+
+```
+before:  close 80 -> 97 -> 115    escape 79 -> 96 -> 114   (one apart, always)
+after:   close 44 -> 69 -> 94     escape 34 -> 34 -> 34    (frozen)
+```
+
+`transportDrops` also stops creeping (205->208->211 before, flat at 75 after):
+the gate is no longer overrunning the ring on every pulse. Delivered rate and
+judder are unchanged — the consumer still gets its full 5.6 /s at spread 1 —
+so the ~734 ms comes off latency, not off throughput.
+
+### Star6E `.232` — 100 fps production, 25 fps drain (4:1)
+
+| | before | after |
+|---|---|---|
+| Mean ring | 1.52 slots | 1.52 |
+| Frame age, min | 149.3 ms | 153.7 ms |
+| `escapeEvents` | flat (64) | flat (25) |
+| IDR frames | 0 | 0/1 |
+
+A no-op, as predicted: this board reopens through the normal drain path, so the
+escape branch is almost never taken. Lifetime counters show the ratio directly
+— 2611 closes against 64 escapes.
+
+### CV610 `.181` — 100 fps production, 15 fps drain (6.7:1)
+
+| | before | after |
+|---|---|---|
+| Mean ring | 1.55 slots | **1.54** |
+| `escapeEvents` | flat (49) | flat (34) |
+| Delivered | 15.6 /s, spread 1 | 15.6 /s, spread 1 |
+
+Also a no-op. Note CV610 reaches the reopen threshold even at 6.7:1, so deep
+over-subscription alone is not what produced Maruko's equilibrium — Maruko's
+combination of a low production rate and a 2 ms gated poll interval is.
+
+`Age at read` is unusable on CV610: its pts epoch is far enough from
+`CLOCK_MONOTONIC` that the 32-bit microsecond subtraction wraps (mean reads
+~4.23e6 ms, just under 2^32 us). Ring occupancy is the sound metric there.
+
+### What this changes about §24
+
+§24's "what would fix it, untested" is now tested and is the shipped
+behaviour. Its claim that `FRAME_GATE_STREAM_BUF_FRAMES` and
+`frameGateCloseSlots` could not reach the residual was right, and the reason
+is confirmed: the residual was the burst, and the burst is what the
+frame-counted dwell removes.
+
+### Bench note
+
+`.232` is shared. During one Star6E run the supervised hub restarted
+mid-measurement and the resulting numbers were discarded — the tell is the
+documented one, an impossibly empty ring (0.00 slots) with delivered rate
+BELOW the consumer's cap (23.3 against 25). Re-verify the stop before every
+arm, not just once per session.
