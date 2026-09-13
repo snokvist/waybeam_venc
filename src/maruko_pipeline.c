@@ -60,6 +60,7 @@ static int  mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir);
 static void mk_mirror_record_close(MarukoBackendContext *ctx, unsigned grace_ms);
 static void mk_mirror_record_locks_init(MarukoBackendContext *ctx);
 static void maruko_recorder_start_idr(MarukoBackendContext *ctx);
+static void maruko_service_record_control(MarukoBackendContext *ctx);
 
 /* Rate-limited forced IDR — defined next to the scene detector that was its
  * first caller, and also wired as MarukoOutput::request_idr in
@@ -4010,7 +4011,17 @@ static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 		/* Keep publishing egress pressure while gated — see the Star6E
 		 * twin; freezing it hides the congestion that closed the gate. */
 		maruko_service_ring_low_water(&ctx->output);
-		usleep(2000);
+		/* The two things that otherwise run only inside
+		 * maruko_pipeline_process_stream(), which this branch returns
+		 * before: an HTTP record command, and the sidecar's
+		 * subscription/clock-sync traffic.  Neither may wait for the
+		 * next escape pulse -- with frameGateMaxClosedMs allowed to
+		 * 60 s that is a minute of an unresponsive API.  Star6E lifted
+		 * the same pair; CV610 services record control at the top of
+		 * its loop.  idle_wait() polls the sidecar and sleeps only the
+		 * remainder, so the reopen latency stays 2 ms. */
+		maruko_service_record_control(ctx);
+		idle_wait(&rt->sidecar, 2);
 		return maruko_pipeline_check_idle_abort(rt,
 			!frame_gate_is_open(&ctx->frame_gate));
 	}
@@ -4020,13 +4031,10 @@ static int maruko_pipeline_await_frame(MarukoBackendContext *ctx,
 		 * without wasting cycles on short periodic wakes.  Frames at
 		 * ≥60 fps arrive well within this. */
 		struct pollfd pfd = { .fd = rt->venc_fd, .events = POLLIN };
-		/* While the gate is closed no frame will ever arrive, so the
-		 * 1 s cancellation poll becomes the reopen latency.  Drop to
-		 * 2 ms so the gate can let go promptly; Star6E's idle branch
-		 * already polls at 1 ms. */
-		int poll_ms = frame_gate_is_open(&ctx->frame_gate) ? 1000 : 2;
 
-		(void)poll(&pfd, 1, poll_ms);
+		/* The gate-closed case is handled above this poll, so the 1 s
+		 * cancellation latency applies only to the frame wait. */
+		(void)poll(&pfd, 1, 1000);
 		/* POLLERR/POLLHUP/POLLNVAL: the SDK closed the fd under us
 		 * (BSP quirk, pipeline reinit, VPE unbind).  Fall back to the
 		 * Query+usleep path for the rest of the loop's lifetime. */
@@ -4372,6 +4380,50 @@ static int mk_mirror_record_open(MarukoBackendContext *ctx, const char *dir)
 	 * coalesces away yields a file with no IRAP anywhere in it. */
 	maruko_recorder_start_idr(ctx);
 	return 1;
+}
+
+/* HTTP record control: drain the start/stop request flags so they never
+ * accumulate across reinit, then act only when this runtime actually owns the
+ * recorder.  Maruko's chn 1 drain thread (dual mode) writes the file directly
+ * -- same race rationale as the `if (!ctx->dual)` guard on the chn 0 write.
+ * Format dispatch mirrors the config-driven start path.
+ *
+ * Called from maruko_pipeline_process_stream() AND from the gated branch of
+ * maruko_pipeline_await_frame(): while the gate is closed the stream path
+ * never runs, so servicing it only there made a record command wait for an
+ * escape pulse (up to frameGateMaxClosedMs) instead of being acted on. */
+static void maruko_service_record_control(MarukoBackendContext *ctx)
+{
+	char rec_dir[256];
+	int start_pending;
+	int stop_pending;
+	int is_hevc;
+	int is_ts;
+	int started = 0;
+
+	if (ctx->dual)
+		return;
+	start_pending = venc_api_get_record_start(rec_dir, sizeof(rec_dir));
+	stop_pending = venc_api_get_record_stop();
+	is_hevc = (strcmp(ctx->cfg.record.format, "hevc") == 0);
+	is_ts = (strcmp(ctx->cfg.record.format, "ts") == 0);
+
+	if ((start_pending || stop_pending) && !is_ts && !is_hevc) {
+		fprintf(stderr,
+			"WARNING: [maruko] HTTP record control "
+			"ignored: format='%s' not supported "
+			"(ts|hevc)\n", ctx->cfg.record.format);
+		return;
+	}
+	if (start_pending) {
+		/* mk_mirror_record_open() closes any live recording first,
+		 * joining its writer, so the old file's queued tail cannot land
+		 * in the new one. */
+		started = mk_mirror_record_open(ctx, rec_dir);
+		(void)started;
+	}
+	if (stop_pending)
+		mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);
 }
 
 /* Process one ready frame: GetStream → per-frame work → ReleaseStream
@@ -4972,40 +5024,10 @@ static int maruko_pipeline_process_stream(MarukoBackendContext *ctx,
 	    !star6e_record_wants_frame(&ctx->ts_recorder, &ctx->recorder))
 		mk_mirror_record_close(ctx, MARUKO_REC_STOP_GRACE_MS);
 
-	/* HTTP record control: drain the start/stop request flags so they
-	 * never accumulate across reinit, then act only when this runtime
-	 * actually owns the recorder.  Maruko's chn 1 drain thread (dual
-	 * mode) writes the file directly — same race rationale as the
-	 * `if (!ctx->dual)` guard on the chn 0 write above.  Format
-	 * dispatch mirrors the config-driven start path. */
-	if (!ctx->dual) {
-		char rec_dir[256];
-		int start_pending = venc_api_get_record_start(rec_dir,
-			sizeof(rec_dir));
-		int stop_pending = venc_api_get_record_stop();
-		int is_hevc = (strcmp(ctx->cfg.record.format, "hevc") == 0);
-		int started = 0;
-		int is_ts   = (strcmp(ctx->cfg.record.format, "ts") == 0);
-
-		if ((start_pending || stop_pending) && !is_ts && !is_hevc) {
-			fprintf(stderr,
-				"WARNING: [maruko] HTTP record control "
-				"ignored: format='%s' not supported "
-				"(ts|hevc)\n", ctx->cfg.record.format);
-		} else {
-			if (start_pending) {
-				/* mk_mirror_record_open() closes any live
-				 * recording first, joining its writer, so the
-				 * old file's queued tail cannot land in the new
-				 * one. */
-				started = mk_mirror_record_open(ctx, rec_dir);
-				(void)started;
-			}
-			if (stop_pending)
-				mk_mirror_record_close(ctx,
-					MARUKO_REC_STOP_GRACE_MS);
-		}
-	}
+	/* HTTP record control.  Also called from the gated path in
+	 * maruko_pipeline_await_frame(); the flags are drained there so a
+	 * command does not wait for a frame while the gate is closed. */
+	maruko_service_record_control(ctx);
 
 	if (sidecar_subscribed) {
 		RtpSidecarTransportInfo tinfo;

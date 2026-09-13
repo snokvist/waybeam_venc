@@ -49,6 +49,7 @@ extern int test_detect_wire(void);
 extern int test_star6e_vpe_ports(void);
 extern int test_maruko_scl_ports(void);
 extern int test_qr_scan(void);
+extern int test_cv610_pq_bin_load(void);
 
 int main(void)
 {
@@ -180,6 +181,10 @@ int main(void)
 
 	printf("\n--- test_maruko_scl_ports ---\n");
 	failures += test_maruko_scl_ports();
+
+	printf("\n--- test_cv610_pq_bin_load ---\n");
+	failures += test_cv610_pq_bin_load();
+
 	failures += test_qr_scan();
 
 	printf("\n=== Results: %d passed, %d failed ===\n",

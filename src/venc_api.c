@@ -980,6 +980,15 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size",
 			"video0.slice_count", "video0.resilience",
+			/* Read by cv610_runtime.c's frame_gate_setup() -- the
+			 * gate is armed whenever the output is a frame ring
+			 * (frame-shm://, the CV610 default), so both knobs are
+			 * fields this backend genuinely reads.  The shared table
+			 * already marks them MUT_RESTART, which is what the
+			 * backend wants too: the gate is built once at pipeline
+			 * start and re-read across a respawn. */
+			"video0.frame_gate_close_slots",
+			"video0.frame_gate_max_closed_ms",
 			/* video0.qp_delta is deliberately ABSENT.  CV610's CBR rate
 			 * controller stores gop_attr.normal_p.ip_qp_delta and ignores
 			 * it (measured; README), and the register that does move
