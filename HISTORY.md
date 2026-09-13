@@ -1,5 +1,40 @@
 # History
 
+## [0.85.4] - 2026-09-13
+
+Fixes the first three findings of the two-week adversarial review. No contract
+change — `contract_version` stays **0.32.0**.
+
+- **CV610 `.bin` import could read past its heap buffer.** The 3DNR half is
+  gated on the section length `OT_PQ_GetStructParamLen()` reports, but the
+  vendor reader (`PQ_BIN_SetNRDataV2`, `memcpy_s` at `0x12fc`) copies a fixed
+  1298 bytes from an offset that grows with a per-file count: the 36-byte
+  `OT_PQ_BIN_NRX` sub-header plus `12 + 4*count`, so it reaches up to 1410
+  bytes from the section start — 60 more than that gate's 1350. A section that
+  passed the gate could therefore let the reader end up to 60 bytes past the
+  allocation and feed those bytes to `ss_mpi_vi_set_pipe_3dnr_param`. The file
+  loader now allocates `CV610_PQ_NRX_VENDOR_MAX` (the reader's 1410-byte reach)
+  of zeroed slack past the file (`src/cv610_pq_bin_load.c`), so the bound holds
+  whatever the gate reports; the gate itself is unchanged, so valid tunes are
+  not rejected. New `test_cv610_pq_bin_load` performs the reader's worst-case
+  copy out of the loaded buffer, which `make test-asan` / CI catch as a
+  heap-buffer-overflow on an under-sized allocation.
+- **Maruko starved record control and the sidecar while the frame gate was
+  closed.** Both were serviced only inside
+  `maruko_pipeline_process_stream()`, which the gated branch of
+  `maruko_pipeline_await_frame()` returns before, so a `record/start` waited for
+  an escape pulse (up to `frameGateMaxClosedMs`). The record-control block is
+  now `maruko_service_record_control()`, called from both paths, and the gated
+  branch wakes on the sidecar via `idle_wait()` instead of a bare `usleep`.
+- **CV610 advertised the frame-gate tunables as unsupported.** `cv610_runtime.c`
+  feeds both to `frame_gate_setup()` but neither was in the CV610 allowlist, so
+  `/api/v1/set` returned 501 and the dashboard greyed controls the backend
+  reads. `test_venc_api` now asserts them on CV610 (with star6e/maruko crosses)
+  and `scripts/api_test_suite.sh` checks them on a live CV610.
+- Host verification and the hardware procedures for all three are in
+  `documentation/REVIEW_FIX_VERIFICATION.md`; the benches were offline when the
+  fixes landed, so the hardware steps are unrun.
+
 ## [0.85.3] - 2026-09-13
 
 Completes the 0.85.2 build fix, which closed only part of the hole it

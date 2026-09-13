@@ -521,6 +521,27 @@ static int test_field_support_by_backend(void)
 	CHECK("slice count supported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.sliceCount") == 1);
+	/* The adaptive frame gate is wired on CV610: cv610_runtime.c passes
+	 * both tunables to frame_gate_setup().  Greyed controls here while a
+	 * hand-edited config was honoured is the parity gap this guards. */
+	CHECK("frame gate close slots supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.frame_gate_close_slots") == 1);
+	CHECK("frame gate max closed supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.frame_gate_max_closed_ms") == 1);
+	CHECK("frame gate close slots alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.frameGateCloseSlots") == 1);
+	CHECK("frame gate max closed alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.frameGateMaxClosedMs") == 1);
+	CHECK("frame gate close slots supported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.frame_gate_close_slots") == 1);
+	CHECK("frame gate max closed supported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.frame_gate_max_closed_ms") == 1);
 	CHECK("opus config API unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"audio.codec") == 0);
