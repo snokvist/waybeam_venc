@@ -197,6 +197,42 @@ void frame_gate_force_open(FrameGate *g, uint64_t now_us);
 void frame_gate_status_json(const FrameGate *g, uint64_t now_us,
 	char *out, size_t cap);
 
+/* Buffer size that always holds the fragment above with every counter
+ * saturated: 115 bytes today including the NUL, and the margin absorbs another
+ * field or two before this has to be revisited.
+ *
+ * It lives here, not at the call sites, because the length is a property of
+ * the format string in frame_gate.c.  Three backends declare this buffer, and
+ * a field added to that format string would otherwise overrun a stale local
+ * constant in each of them — silently, because snprintf truncates and the
+ * caller discards its return.  The previous 128-byte locals were 13 bytes from
+ * that. */
+#define FRAME_GATE_STATUS_JSON_CAP 192u
+
+/* Reading the gate on a live device.
+ *
+ * There is no counter for "the escape pulse ended without a frame landing",
+ * because two fields already on /api/v1/transport/status say it between them:
+ * the ring counts a frame in framesSent only when the write actually lands, so
+ * a full ring increments transportDrops and leaves framesSent alone
+ * (include/venc_frame_ring.h).  Therefore, over any interval:
+ *
+ *   framesSent rising, gateEscapeEvents flat     -> healthy; the gate is
+ *                                                   reopening through the
+ *                                                   normal drain path
+ *   framesSent rising, gateEscapeEvents rising   -> starved but alive; pulses
+ *                                                   are landing their frame
+ *   framesSent FLAT,   gateEscapeEvents rising   -> dead consumer; pulses are
+ *                                                   firing and nothing gets
+ *                                                   through.  transportDrops
+ *                                                   rising narrows it to a
+ *                                                   full ring, flat to a
+ *                                                   stopped encoder
+ *
+ * gateCloseEvents and gateEscapeEvents advancing in LOCKSTEP, one apart, is
+ * the separate pathology fixed in 0.85.1: every close follows an escape, so
+ * the gate never reopens through the drain path at all. */
+
 /* Restore the closed policy state after the actuator refused an OPEN.  The
  * next observation retries after min_closed_us instead of leaving policy
  * open while encoder intake is still stopped. */

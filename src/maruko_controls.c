@@ -1402,7 +1402,7 @@ static char *maruko_query_transport_status(void)
 				&backend->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if (backend->output.frame_ring) {
 		venc_frame_ring_fill_t fill;
-		char gate_json[128];
+		char gate_json[FRAME_GATE_STATUS_JSON_CAP];
 		int in_pressure;
 		if (venc_frame_ring_get_fill(backend->output.frame_ring,
 		    &fill) != 0)
