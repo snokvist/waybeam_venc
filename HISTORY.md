@@ -1,5 +1,37 @@
 # History
 
+## [0.85.2] - 2026-09-13
+
+Two latent build and buffer faults found while evaluating a new gate counter.
+No behaviour change on device, and no contract change — `contract_version`
+stays **0.32.0**.
+
+- **The gate status buffer was sized by three hand-copied constants.** All
+  three backends declared `char gate_json[128]` for the fragment
+  `frame_gate_status_json()` writes, whose worst case is 115 bytes including
+  the NUL — a 13-byte margin, held in a different file from the format string
+  that determines it. One more field would have overrun all three at once,
+  silently, because `snprintf` truncates and every caller discards its return.
+  `FRAME_GATE_STATUS_JSON_CAP` now lives beside the format string, and a test
+  saturates every counter and asserts the last field survives intact.
+- **The test runner depended on a hand-picked list of headers.** It named 20
+  and was missing 34 of the headers its sources include, `include/frame_gate.h`
+  among them. The tests build as one compiler invocation, so no `.d` files
+  cover this the way `-MMD` does for the cross builds. The failure mode is a
+  **false PASS**: change only a header and the suite runs against the previous
+  code and reports green. Measured on the fix itself — an undersized-buffer
+  mutation reported "3147 passed, 0 failed" before and "3146 passed, 1 failed"
+  after, from the identical edit.
+- **First test coverage of the status fragment**, which previously had none,
+  including the leading comma the three callers splice on.
+- **Documented how to read the gate on a live device.** A `gateEscapeBackstops`
+  counter was considered and rejected as redundant: the ring counts a frame in
+  `framesSent` only when the write lands, so `framesSent` flat while
+  `gateEscapeEvents` rises already means "escape pulses firing, nothing getting
+  through", and `transportDrops` then separates a full ring from a stopped
+  encoder. Verified on `.232` by transitioning a live craft in both
+  directions.
+
 ## [0.85.1] - 2026-09-13
 
 A latency fix for the adaptive frame gate shipped in 0.85.0. No contract
