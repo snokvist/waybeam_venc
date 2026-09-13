@@ -470,14 +470,26 @@ TEST_LIB_SRCS := src/qr_scan.c tools/qr/waybeam_qr_format.c \
 	tools/qr/quirc/identify.c tools/qr/quirc/version_db.c \
 	src/backend.c src/venc_config.c src/venc_api.c src/venc_httpd.c src/venc_webui.c src/venc_recordings.c src/sensor_select.c src/venc_ring.c src/venc_frame_ring.c src/file_util.c src/h26x_util.c src/h26x_param_sets.c src/intra_refresh.c src/frame_gate.c src/isp_runtime.c src/maruko_config.c src/maruko_video.c src/maruko_output.c src/codec_config.c src/pipeline_common.c src/rtp_session.c src/sdk_quiet.c src/rtp_packetizer.c src/hevc_rtp.c src/star6e_hevc_rtp.c src/star6e_output.c src/star6e_audio.c src/audio_codec.c src/star6e_video.c src/star6e_recorder.c src/star6e_ts_recorder.c src/ts_mux.c src/venc_rec_writer.c src/rtp_sidecar.c src/stream_metrics.c src/output_socket.c src/timing.c src/idr_rate_limit.c src/debug_osd_draw.c src/venc_jpeg.c src/mdns_wire.c src/mdns_beacon.c src/device_id.c src/framing_kalman.c src/attitude_est.c src/detect_dequant.c src/detect_wire.c src/star6e_vpe_ports.c src/maruko_scl_ports.c lib/cJSON.c
 
-# Every header, not a hand-picked list.  The tests build as one compiler
-# invocation, so there are no .d files to drive this the way -MMD does for the
-# cross builds -- and a hand-maintained list silently ships a STALE test binary
-# when a header-only change is not on it.  That is a false PASS: the suite runs
-# against the previous code and reports green.  The list this replaces named 20
-# headers and was missing 34, include/frame_gate.h among them.  A full rebuild
-# is ~9 s, which is far cheaper than one undetected stale run.
-TEST_HEADERS := $(wildcard include/*.h) tests/test_helpers.h
+# Every header the test oracles can reach, not a hand-picked list.  They build
+# as one compiler invocation each, so there are no .d files to drive this the
+# way -MMD does for the cross builds -- and a hand-maintained list silently
+# runs a STALE test binary when a header-only change is not on it.  That is a
+# false PASS: the suite runs against the previous code and reports green,
+# which is strictly worse than a build error because it is indistinguishable
+# from success.
+#
+# Every tree the tests compile from must be here.  0.85.2 replaced a 20-header
+# list with include/*.h alone and still left five reachable headers uncovered
+# (lib/cJSON.h, tests/qr_marker_render.h and three under tools/qr), so the hole
+# it set out to close was still open: appending `#error POISON` to lib/cJSON.h
+# and re-running printed 3147 passed.  A full rebuild is ~9 s, far cheaper than
+# one undetected stale run, so the globs are deliberately wide.
+#
+# QR_TEST_RUNNER and QR_HOST_DECODE share this: `verify` depends on
+# qr-test-host, so a stale QR oracle is a green verify.
+TEST_HEADERS := $(wildcard include/*.h) $(wildcard tests/*.h) \
+	$(wildcard lib/*.h) $(wildcard tools/qr/*.h) \
+	$(wildcard tools/qr/quirc/*.h) $(wildcard tools/qr/stb/*.h)
 
 $(TEST_RUNNER): $(TEST_SRCS) $(TEST_LIB_SRCS) $(TEST_HEADERS)
 	$(HOST_CC) $(HOST_CFLAGS) $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $@
@@ -513,8 +525,7 @@ QR_TEST_SRCS   := tests/test_qr_marker.c tools/qr/waybeam_qr_format.c \
 		  tools/qr/quirc/quirc.c tools/qr/quirc/decode.c \
 		  tools/qr/quirc/identify.c tools/qr/quirc/version_db.c
 
-$(QR_TEST_RUNNER): $(QR_TEST_SRCS) tools/qr/waybeam_qr_format.h \
-		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h
+$(QR_TEST_RUNNER): $(QR_TEST_SRCS) $(TEST_HEADERS)
 	$(HOST_CC) -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE \
 		$(QR_MATH_CFLAGS) -Itools/qr -Itools/qr/quirc \
 		$(QR_TEST_SRCS) -lm -o $@
@@ -522,9 +533,7 @@ $(QR_TEST_RUNNER): $(QR_TEST_SRCS) tools/qr/waybeam_qr_format.h \
 qr-test-host: $(QR_TEST_RUNNER)
 	./$(QR_TEST_RUNNER)
 
-$(QR_HOST_DECODE): $(QR_DECODE_SRC) tools/qr/waybeam_qr_format.h \
-		   tools/qr/quirc/quirc.h tools/qr/quirc/quirc_internal.h \
-		   tools/qr/stb/stb_image.h include/qr_scan.h
+$(QR_HOST_DECODE): $(QR_DECODE_SRC) $(TEST_HEADERS)
 	$(HOST_CC) $(QR_OPT_CFLAGS) -Wall -Wextra -std=c99 -D_GNU_SOURCE \
 		$(QR_MATH_CFLAGS) -Iinclude -Itools/qr -Itools/qr/quirc -Itools/qr/stb $(QR_DECODE_SRC) \
 		$(QR_GC_LDFLAGS) -lm -lrt -o $@

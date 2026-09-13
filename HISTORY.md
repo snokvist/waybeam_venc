@@ -1,5 +1,36 @@
 # History
 
+## [0.85.3] - 2026-09-13
+
+Completes the 0.85.2 build fix, which closed only part of the hole it
+described. No contract change — `contract_version` stays **0.32.0**.
+
+- **The stale-test-binary hole was still open for five headers.** 0.85.2
+  replaced a 20-header list with `$(wildcard include/*.h)`, but the tests also
+  compile from `lib/`, `tests/` and `tools/qr/`. Appending `#error POISON` to
+  `lib/cJSON.h` and re-running still printed "3147 passed, 0 failed" — the
+  binary never recompiled. `TEST_HEADERS` now globs every tree the oracles
+  reach, and each of the five is poison-verified to force a rebuild.
+- **`$(QR_TEST_RUNNER)` had the same hand-picked list** and is in the `verify`
+  path, so a stale QR oracle meant a green `make verify`. It and
+  `$(QR_HOST_DECODE)` now share `TEST_HEADERS`.
+- **The capacity test was blind to the case it advertised.** It looked for
+  `gateClosedMs` by name to prove the tail was intact, which cannot see a field
+  APPENDED after it — the old name is still present, just no longer last.
+  Appending two fields without growing the cap truncated the output at 191 of a
+  needed 213 bytes and the suite still passed. `frame_gate_status_json()` now
+  returns snprintf's would-be length, and the test asserts that instead, which
+  tracks the format string with no field names in it. `-Wformat-truncation`
+  cannot cover this: `cap` is a runtime parameter, not a constant.
+- **Dropped a tautological assertion.** `strlen(js) < sizeof(js)` cannot fail
+  for any snprintf output, since it always terminates within `cap`.
+- **Corrected the 0.85.2 arithmetic.** The fragment's worst case is 112 bytes
+  including the NUL, not 115: `gateClosedMs` is `closed_us / 1000`, so 17
+  digits rather than 20. The 128-byte buffers it replaced were therefore
+  sufficient, and 0.85.2 was a locality fix rather than the near-miss its notes
+  implied. The reason for the change is unaffected: one added field would have
+  overrun all three.
+
 ## [0.85.2] - 2026-09-13
 
 Two latent build and buffer faults found while evaluating a new gate counter.
@@ -8,12 +39,12 @@ stays **0.32.0**.
 
 - **The gate status buffer was sized by three hand-copied constants.** All
   three backends declared `char gate_json[128]` for the fragment
-  `frame_gate_status_json()` writes, whose worst case is 115 bytes including
-  the NUL — a 13-byte margin, held in a different file from the format string
-  that determines it. One more field would have overrun all three at once,
-  silently, because `snprintf` truncates and every caller discards its return.
-  `FRAME_GATE_STATUS_JSON_CAP` now lives beside the format string, and a test
-  saturates every counter and asserts the last field survives intact.
+  `frame_gate_status_json()` writes. The worst case is 112 bytes including the
+  NUL, so 128 was sufficient and no truncation was ever reachable — what was
+  wrong is that the number lived three files away from the format string that
+  determines it, with 16 bytes of headroom, so the next field added would have
+  overrun all three at once and done it silently.
+  `FRAME_GATE_STATUS_JSON_CAP` now lives beside the format string.
 - **The test runner depended on a hand-picked list of headers.** It named 20
   and was missing 34 of the headers its sources include, `include/frame_gate.h`
   among them. The tests build as one compiler invocation, so no `.d` files

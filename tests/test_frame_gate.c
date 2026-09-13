@@ -414,6 +414,7 @@ int test_frame_gate(void)
 	{
 		FrameGate f;
 		char js[FRAME_GATE_STATUS_JSON_CAP];
+		int need;
 
 		gate_on(&f, 3, 500);
 		/* Saturate every counter the fragment prints.  A field added to
@@ -427,17 +428,24 @@ int test_frame_gate(void)
 		f.open = 1;   /* no in-progress interval to fold in */
 
 		memset(js, 0x7F, sizeof(js));
-		frame_gate_status_json(&f, 0, js, sizeof(js));
+		need = frame_gate_status_json(&f, 0, js, sizeof(js));
 
-		CHECK("cap_fits", strlen(js) < sizeof(js));
-		/* The LAST field present in full is what proves the tail was not
-		 * cut — a NUL on its own only proves snprintf terminated. */
-		CHECK("cap_tail_intact",
-			strstr(js, "\"gateClosedMs\":18446744073709551")
-				!= NULL);
+		/* The would-be length is the assertion that matters, because it
+		 * tracks the format string with no field names in it: ANY field
+		 * added without growing the cap fails here, including one
+		 * APPENDED after the current last.  strlen() cannot do this job
+		 * — snprintf always terminates within cap, so a length check on
+		 * the OUTPUT is true even when the output was truncated. */
+		CHECK("cap_fragment_fits", need > 0 && need < (int)sizeof(js));
+		/* Corroborate against the real bound: 111 chars, 112 with the
+		 * NUL, every counter saturated.  If this ever trips, the format
+		 * string changed and FRAME_GATE_STATUS_JSON_CAP must be
+		 * re-derived rather than the number here simply updated. */
+		CHECK("cap_worst_case_is_112", need == 111);
 		CHECK("cap_counters_intact",
 			strstr(js, "\"gateCloseEvents\":4294967295") != NULL &&
-			strstr(js, "\"gateEscapeEvents\":4294967295") != NULL);
+			strstr(js, "\"gateEscapeEvents\":4294967295") != NULL &&
+			strstr(js, "\"gateClosedMs\":18446744073709551") != NULL);
 	}
 
 	/* ── the fragment splices, and an unarmed gate contributes none ─ */
