@@ -6,15 +6,19 @@
 /* Whole-file loader for the PQTools `.bin` import, split out so the size
  * policy is host-testable without the vendor blob or the SigmaStar SDK.
  *
- * The vendor NRX reader (PQ_BIN_SetNRDataV2 in libbin.so, memcpy_s at 0x12fc)
- * copies a fixed 1298 bytes from a section offset that grows with a count field
- * taken from the file, up to 12 + 4*16.  The import's library-size gate
- * (OT_PQ_GetStructParamLen) reports a smaller section than that copy can reach
- * -- 1350 against 1374 -- so a buffer sized exactly for the file can be read
- * past its end.  This loader therefore allocates that difference as zeroed
- * slack past the file's bytes.  The reader's exact interior offset is a blob
- * detail; the constant is the worst case it can reach. */
-#define CV610_PQ_NRX_VENDOR_MAX 1374u
+ * The vendor NRX reader reads a count out of the file and copies a fixed
+ * 1298 bytes from `count` 4-byte entries past a sub-header:
+ * `OT_PQ_BIN_ImportNRXData` passes `section + 36` to `PQ_BIN_SetPipeNRXParam`
+ * (which reaches `PQ_BIN_SetNRDataV2`, memcpy_s at 0x12fc), the count sits at
+ * sub-header +8, and the copy starts at sub-header +12 + 4*count.  With the
+ * accepted count ceiling of 16 the copy can therefore reach
+ * `36 + 12 + 4*16 + 1298 = 1410` bytes from the section start, while the
+ * import's library-size gate (`OT_PQ_GetStructParamLen`) reports only 1350 --
+ * so a buffer sized exactly for the file can be read up to 60 bytes past its
+ * end, and those bytes reach `ss_mpi_vi_set_pipe_3dnr_param`.  This loader
+ * allocates the reader's full reach as zeroed slack past the file's bytes, so
+ * the bound holds whatever the gate reports. */
+#define CV610_PQ_NRX_VENDOR_MAX 1410u
 
 /* Read `path` whole into a fresh buffer carrying CV610_PQ_NRX_VENDOR_MAX of
  * zeroed slack past the file.  Refuses files larger than `max_bytes`.

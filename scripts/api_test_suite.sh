@@ -486,7 +486,7 @@ fi
 # while a hand-edited config is still honoured.  Read-only, safe on any bench.
 if [[ "${BACKEND_NAME}" == "cv610" ]] && ok_field "${resp}"; then
 	for gate_key in video0.frame_gate_close_slots video0.frame_gate_max_closed_ms; do
-		gate_sup="$(echo "${resp}" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['fields']['${gate_key}']['supported'])")"
+		gate_sup="$(echo "${resp}" | python3 -c "import sys,json; f=json.load(sys.stdin)['data']['fields']; print(f.get('${gate_key}', {}).get('supported', 'missing'))" 2>/dev/null)" || gate_sup="parse-error"
 		if [[ "${gate_sup}" == "True" ]]; then
 			pass "capabilities: ${gate_key} supported on cv610"
 		else

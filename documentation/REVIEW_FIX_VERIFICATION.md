@@ -23,8 +23,8 @@ make verify      # both backends + webui-check
 The guards that would have caught the original defects:
 
 - `test_cv610_pq_bin_load`: loads a file, then performs the vendor reader's
-  worst-case copy (`12 + 4*16` into the section for 1298 bytes, ending 24 bytes
-  past the file). Under ASan an allocation sized for the file alone is a
+  worst-case copy (`36 + 12 + 4*16` into the section for 1298 bytes, ending 60
+  bytes past the file). Under ASan an allocation sized for the file alone is a
   heap-buffer-overflow — the original defect. It also checks the length cap,
   content round-trip, missing-file handling, and that the slack is zeroed.
 - `test_venc_api`: `frame gate close slots/max closed supported cv610` (plus
@@ -46,7 +46,14 @@ Run it once a bench is back; each step names its pass condition.
 
 ### HW-1 — CV610 `.bin` import safety (finding 1)
 
-Craft with `libbin.so` staged (`make stage SOC_BUILD=cv610` copies it).
+Craft with `libbin.so` staged. `make stage SOC_BUILD=cv610` skips the vendor
+lib unless `CV610_PQ_LIB` is overridden (its default `../hisilicon/...` does
+not exist in this checkout); point it at the local vendor copy:
+
+```sh
+make stage SOC_BUILD=cv610 \
+  CV610_PQ_LIB=/home/snokvist/dev/hisilicon/vendor/pq/libbin.so
+```
 
 ```sh
 HOST=<cv610-ip>
@@ -66,6 +73,17 @@ ssh root@$HOST "dmesg | tail -5"                 # no segfault/oops
 wget -qO- "http://$HOST/api/v1/iq/export_bin"    # {"path":"/tmp/isp_export.bin","bytes":N}
 ssh root@$HOST "cp /tmp/isp_export.bin /tmp/roundtrip.bin"
 wget -qO- "http://$HOST/api/v1/set?isp.sensorBin=/tmp/roundtrip.bin"
+
+# (d) the exact shape the fix exists for: 16 NRX records in a 1350-byte
+# section. imx662.bin carries count=1 at section+44, so (a)-(c) cannot overrun
+# even on the unfixed build. Patch the count to 16 (section = file_len - 1350).
+cp iq-profiles/cv610-bin/imx662.bin /tmp/tune-c16.bin
+printf '\x10' | dd of=/tmp/tune-c16.bin bs=1 \
+  seek=$(( $(stat -c %s /tmp/tune-c16.bin) - 1350 + 44 )) conv=notrunc
+scp /tmp/tune-c16.bin root@$HOST:/tmp/
+wget -qO- "http://$HOST/api/v1/set?isp.sensorBin=/tmp/tune-c16.bin"
+wget -qO- "http://$HOST/api/v1/version"          # still 200 -> daemon alive
+ssh root@$HOST "dmesg | tail -5"                 # no segfault/oops
 ```
 
 Pass: (a) the load line reads `... B ISP + 1350 B 3DNR` (nonzero 3DNR — a gate
@@ -73,17 +91,27 @@ tightened on the reader's internal layout would print `0 B 3DNR` here and
 silently drop the 3DNR half), 200, and the tuning line; (b) the log names the
 3DNR section as too short ("importing the ISP half only") or the import is
 refused, the API stays up and dmesg is clean; (c) the round-trip import also
-reports 1350 B 3DNR and `/api/v1/iq` reads back identically. Fail: any crash,
-hang, or silent no-op that leaves the daemon unreachable.
+reports 1350 B 3DNR and `/api/v1/iq` reads back identically; (d) the import
+proceeds with the API alive and dmesg clean. Note (b) and (d) do not
+discriminate fixed from unfixed by themselves: (b) leaves 476 B, below the
+1350-byte gate, so the 3DNR half is skipped on both; (d) is the overreading
+shape, but a 60-byte read past a heap block is typically silent on device — the
+host `make test-asan` run is the detector, (d) just exercises the shape. Fail:
+any crash, hang, or silent no-op that leaves the daemon unreachable.
 
 ### HW-2 — Maruko gated record/sidecar servicing (finding 2)
 
-Maruko bench, `outgoing.server=frame-shm://…` (the default), `record.format`
-`ts` or `hevc`. The point is to act **while the gate is closed**, so make a
-pre-fix hang unambiguous by raising the ceiling to 60 s.
+Maruko bench. `frame-shm://` is CV610's default; Maruko's `outgoing.server`
+defaults to `""`, and the gate is inert (with a warning) on any other
+transport. Set it explicitly and restart first. `record.format` must be `ts`
+or `hevc`, and `record.mode` mirror (the default) so `ctx->dual` is NULL. This
+fix has no automated coverage, so this bench run is the guard. The point is to
+act **while the gate is closed**, so make a pre-fix hang unambiguous by raising
+the ceiling to 60 s.
 
 ```sh
 HOST=<maruko-ip>
+wget -qO- "http://$HOST/api/v1/set?outgoing.server=frame-shm://venc_wfb"
 wget -qO- "http://$HOST/api/v1/set?video0.frameGateMaxClosedMs=60000&video0.frameGateCloseSlots=4"
 # restart if the response reported reinit_pending, then:
 wget -qO- "http://$HOST/api/v1/transport/status"   # confirm gateClosed:true, gateClosedMs climbing

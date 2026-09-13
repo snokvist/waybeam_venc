@@ -1,13 +1,17 @@
 /* test_cv610_pq_bin_load.c — the PQ bin loader's vendor-copy slack.
  *
  * The import's library-size gate accepts a 1350-byte 3DNR section, but the
- * vendor reader (PQ_BIN_SetNRDataV2 in libbin.so) copies a fixed 1298 bytes
- * from an offset that can reach 12 + 4*16 into the section, i.e. 1374 bytes
- * from its start.  The loader must allocate that difference as slack, or the
- * vendor's copy leaves the buffer -- the original heap overread.
+ * vendor reader copies a fixed 1298 bytes from `count` 4-byte entries past the
+ * OT_PQ_BIN_NRX sub-header it is handed: `OT_PQ_BIN_ImportNRXData` passes
+ * `section + 36`, the count sits at sub-header +8 (section +44), and the copy
+ * starts at sub-header +12 + 4*count.  With the accepted count ceiling of 16
+ * the copy reaches `36 + 12 + 4*16 + 1298 = 1410` bytes from the section start,
+ * i.e. up to 60 bytes past a minimal file.  The loader must allocate that
+ * reach as slack, or the vendor's copy leaves the buffer -- the original heap
+ * overread.
  *
  * The check performs the vendor's worst-case copy out of the loaded buffer.
- * On plain `make test` a 24-byte heap overread usually survives inside the
+ * On plain `make test` a 60-byte heap overread usually survives inside the
  * malloc rounding, so the guard that bites is `make test-asan` / `make test-ci`
  * (CI): there the loop is a heap-buffer-overflow, which a loader that sizes the
  * allocation for the file alone would trip. */
@@ -66,14 +70,15 @@ int test_cv610_pq_bin_load(void)
 			buf[file_len - 1] == (unsigned char)((file_len - 1) & 0xff));
 
 		/* Simulate the vendor's worst case: isp_len ends 1350 bytes
-		 * before the file end, the copy starts 12 + 4*16 into the
-		 * section and runs 1298 bytes, ending 24 bytes past the file.
-		 * Touching it is only in-bounds because of the loader slack. */
+		 * before the file end, the copy starts 36 + 12 + 4*16 into
+		 * the section and runs 1298 bytes, ending 60 bytes past the
+		 * file (1410 from the section start).  Touching it is only
+		 * in-bounds because of the loader slack. */
 		isp_len = file_len - section;
-		copy_start = isp_len + 12 + 4 * 16;
+		copy_start = isp_len + 36 + 12 + 4 * 16;
 		copy_end = copy_start + 1298;
 		CHECK("vendor copy extends past the file bytes",
-			copy_end > file_len);
+			copy_end == file_len + 60);
 		for (i = copy_start; i < copy_end; i++)
 			sum += buf[i];
 		CHECK("slack past the file is zeroed", buf[copy_end - 1] == 0);
