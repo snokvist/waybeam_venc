@@ -149,16 +149,16 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	return FRAME_GATE_ACTION_OPEN;
 }
 
-void frame_gate_status_json(const FrameGate *g, uint64_t now_us,
+int frame_gate_status_json(const FrameGate *g, uint64_t now_us,
 	char *out, size_t cap)
 {
 	uint64_t closed_us;
 
 	if (!out || cap == 0)
-		return;
+		return 0;
 	out[0] = '\0';
 	if (!g || !g->enabled)
-		return;
+		return 0;
 
 	/* closed_total_us only accrues on reopen, so a gate closed right now
 	 * would under-report by the whole current interval — and a caller polls
@@ -168,7 +168,12 @@ void frame_gate_status_json(const FrameGate *g, uint64_t now_us,
 	if (!g->open && now_us > g->closed_since_us)
 		closed_us += now_us - g->closed_since_us;
 
-	(void)snprintf(out, cap,
+	/* Return snprintf's would-be length rather than discarding it: that is
+	 * the only value that tracks the format string automatically, so a test
+	 * can assert the fragment fits without naming any field.  A test that
+	 * looks for the LAST field by name cannot see a field APPENDED after
+	 * it — the old name is still present, merely no longer at the end. */
+	return snprintf(out, cap,
 		",\"gateClosed\":%s,\"gateCloseEvents\":%u,"
 		"\"gateEscapeEvents\":%u,\"gateClosedMs\":%llu",
 		g->open ? "false" : "true",

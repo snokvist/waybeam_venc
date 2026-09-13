@@ -194,19 +194,33 @@ void frame_gate_force_open(FrameGate *g, uint64_t now_us);
  * `now_us` folds the in-progress closed interval into gateClosedMs, which
  * closed_total_us alone omits.  Writes at most `cap` bytes including the NUL
  * and always NUL-terminates; an unarmed gate yields an empty string. */
-void frame_gate_status_json(const FrameGate *g, uint64_t now_us,
+/* Returns what snprintf would have written, excluding the NUL — so a value
+ * >= cap means the fragment was truncated — or 0 when nothing was written.
+ * Callers may ignore it; the point of returning it is that a test can assert
+ * the fragment fits without hardcoding any field name, and so keeps tracking
+ * the format string as fields are added. */
+int frame_gate_status_json(const FrameGate *g, uint64_t now_us,
 	char *out, size_t cap);
 
 /* Buffer size that always holds the fragment above with every counter
- * saturated: 115 bytes today including the NUL, and the margin absorbs another
- * field or two before this has to be revisited.
+ * saturated: 111 chars, 112 including the NUL.  gateClosedMs is the uint64
+ * closed_us divided by 1000, so it tops out at 17 digits rather than 20 — the
+ * two event counters are uint32 and contribute 10 each.
  *
  * It lives here, not at the call sites, because the length is a property of
  * the format string in frame_gate.c.  Three backends declare this buffer, and
  * a field added to that format string would otherwise overrun a stale local
- * constant in each of them — silently, because snprintf truncates and the
- * caller discards its return.  The previous 128-byte locals were 13 bytes from
- * that. */
+ * constant in each of them — silently, because snprintf truncates and nothing
+ * downstream inspects the fragment.
+ *
+ * To be clear about what this did and did not fix: the 128-byte locals it
+ * replaces were NOT too small — 112 fits — so no truncation was ever
+ * reachable.  What was wrong is that the number lived three files away from
+ * the format string that determines it, with 16 bytes of headroom, so the
+ * next field added would have overrun all three at once.  Adding one uint32
+ * counter takes the worst case to 145.  This is a locality fix, not a bug
+ * fix; tests/test_frame_gate.c asserts the real bound so the two cannot
+ * drift. */
 #define FRAME_GATE_STATUS_JSON_CAP 192u
 
 /* Reading the gate on a live device.
