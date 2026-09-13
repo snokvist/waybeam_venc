@@ -40,9 +40,13 @@ make lint SOC_BUILD=cv610 \
 
 ## 2. Hardware verification
 
-The benches were offline when the fixes landed (ICMP failed to
-`192.168.1.13` and `192.168.2.12`), so nothing below has been run on a craft.
-Run it once a bench is back; each step names its pass condition.
+Run on 2026-09-13 on CV610 `192.168.2.181` (imx662) and Maruko `192.168.2.233`,
+both updated from 0.85.3 to 0.85.4 for the run. All three findings passed; the
+steps below double as a runbook, each naming its pass condition, with observed
+results and the run's two limits (HW-1(d) cannot discriminate fixed from
+unfixed on device, and the closed-gate window is bounded by
+`frameGateMaxClosedMs`) noted per step. Star6E was not exercised — none of the
+three fixes touch it.
 
 ### HW-1 — CV610 `.bin` import safety (finding 1)
 
@@ -86,18 +90,24 @@ wget -qO- "http://$HOST/api/v1/version"          # still 200 -> daemon alive
 ssh root@$HOST "dmesg | tail -5"                 # no segfault/oops
 ```
 
-Pass: (a) the load line reads `... B ISP + 1350 B 3DNR` (nonzero 3DNR — a gate
-tightened on the reader's internal layout would print `0 B 3DNR` here and
+Pass: (a) the load line reads `(143424 B ISP + 1350 B 3DNR)` (nonzero 3DNR — a
+gate tightened on the reader's internal layout would print `0 B 3DNR` here and
 silently drop the 3DNR half), 200, and the tuning line; (b) the log names the
-3DNR section as too short ("importing the ISP half only") or the import is
-refused, the API stays up and dmesg is clean; (c) the round-trip import also
-reports 1350 B 3DNR and `/api/v1/iq` reads back identically; (d) the import
-proceeds with the API alive and dmesg clean. Note (b) and (d) do not
-discriminate fixed from unfixed by themselves: (b) leaves 476 B, below the
-1350-byte gate, so the 3DNR half is skipped on both; (d) is the overreading
-shape, but a 60-byte read past a heap block is typically silent on device — the
-host `make test-asan` run is the detector, (d) just exercises the shape. Fail:
-any crash, hang, or silent no-op that leaves the daemon unreachable.
+3DNR section as too short ("importing the ISP half only") and reports
+`0 B 3DNR`, the API stays up and dmesg is clean; (c) the round-trip import also
+reports 1350 B 3DNR and applies; (d) the import is **refused** with HTTP 500 and
+`ERROR: [pq] OT_PQ_BIN_ImportBinData failed 0xcb000102` in the log, with the
+API alive and dmesg clean. Note (b) and (d) do not discriminate fixed from
+unfixed by themselves: (b) leaves 476 B, below the 1350-byte gate, so both
+builds skip 3DNR; (d) is the overreading shape, but the patched file fails the
+vendor's own import validation before the copy matters, and on the unfixed
+build a 60-byte read past a heap block is typically silent — the host
+`make test-asan` run is the detector, (d) just exercises the shape end to end.
+Fail: any crash, hang, or silent no-op that leaves the daemon unreachable.
+Observed: (a) the repo `imx662.bin` (md5 `be8313cc…`) equals the bench's
+`/etc/sensors/imx662.bin`; (b) 200, warning plus `0 B 3DNR`; (c) export returned
+`{"path":"/tmp/isp_export.bin","bytes":144774}` and reimported as 1350 B 3DNR;
+(d) 500 refusal, daemon alive, dmesg clean.
 
 ### HW-2 — Maruko gated record/sidecar servicing (finding 2)
 
@@ -107,13 +117,18 @@ transport. Set it explicitly and restart first. `record.format` must be `ts`
 or `hevc`, and `record.mode` mirror (the default) so `ctx->dual` is NULL. This
 fix has no automated coverage, so this bench run is the guard. The point is to
 act **while the gate is closed**, so make a pre-fix hang unambiguous by raising
-the ceiling to 60 s.
+the ceiling to 60 s. The API accepts one field per request — a combined
+`?a=..&b=..` query is rejected with 400 — and every restart-class set answers
+`reinit_pending:true`, so send each field on its own and let each restart
+settle before the next request.
 
 ```sh
 HOST=<maruko-ip>
-wget -qO- "http://$HOST/api/v1/set?outgoing.server=frame-shm://venc_wfb"
-wget -qO- "http://$HOST/api/v1/set?video0.frameGateMaxClosedMs=60000&video0.frameGateCloseSlots=4"
-# restart if the response reported reinit_pending, then:
+# one field per request; <name> must match the frame-shm consumer (bench used venc_frame):
+wget -qO- "http://$HOST/api/v1/set?outgoing.server=frame-shm://<name>"
+wget -qO- "http://$HOST/api/v1/set?video0.frameGateCloseSlots=4"
+# each set above reports reinit_pending:true; let the restart settle, then:
+wget -qO- "http://$HOST/api/v1/set?video0.frameGateMaxClosedMs=60000"
 wget -qO- "http://$HOST/api/v1/transport/status"   # confirm gateClosed:true, gateClosedMs climbing
 ```
 
@@ -121,6 +136,8 @@ With the gate confirmed closed (stop the frame-shm consumer so the ring fills,
 if it is not already):
 
 ```sh
+# the recorder does not create the target directory; make it first
+ssh root@$HOST "mkdir -p /tmp/gate-rec"
 wget -qO- "http://$HOST/api/v1/record/start?dir=/tmp/gate-rec"
 sleep 2
 wget -qO- "http://$HOST/api/v1/record/status"      # recording, not idle
@@ -128,12 +145,19 @@ ssh root@$HOST "ls -l /tmp/gate-rec"
 ```
 
 Pass: the recording opens within ~1 s of the request, i.e. NOT after the 60 s
-escape. Before the fix the start flag was only drained inside
-`maruko_pipeline_process_stream()`, which the gated branch returns before, so it
-waited for the escape pulse. Sidecar: run the link's sidecar probe while gated
-and confirm subscription/clock-sync replies within ~1 s (`gateClosed` still
-true throughout). Restore: `record/stop`, delete `/tmp/gate-rec`, reset both
-gate knobs, restart.
+escape, with `gateClosed` still true (observed: 0.28 s — the 0.25 s poll
+granularity — with `gateClosedMs` still climbing). Before the fix the start
+flag was only drained inside `maruko_pipeline_process_stream()`, which the gated
+branch returns before, so it waited for the escape pulse (observed pre-fix: not
+active after 12.5 s). Sidecar: run the link's sidecar probe while gated and
+confirm subscription/clock-sync replies with `gateClosed` still true throughout
+(observed: 8 replies, RTT 247–251 µs). Note the closed window is bounded: the
+gate is closed at most `frameGateMaxClosedMs`, after which the escape reopens
+it; with a dead consumer it then **stays open** — the ring overflowing and
+reporting `full_drops` is the designed outcome — so run the "act while closed"
+checks inside that window. Restore: `record/stop`, delete `/tmp/gate-rec`, set
+each gate knob back to 0 in its own request (a combined query is a 400), waiting
+for each restart, and restart the consumer.
 
 ### HW-3 — CV610 frame-gate capabilities (finding 3)
 
@@ -154,7 +178,7 @@ wget -qO- "http://$HOST/api/v1/capabilities" | python3 -c \
 wget -qO- "http://$HOST/api/v1/set?video0.frameGateMaxClosedMs=1000"
 ```
 
-Pass: `True True`, and the set returns 200 with `reinit_pending:true` (before
-the fix: 501). Then confirm the gate really arms on CV610 by repeating the
-HW-2 consumer-stall step and watching `gateCloseEvents` in
-`/api/v1/transport/status` increment.
+Pass: `True True`, and the set returns 200 with `reinit_pending:true`. Before
+the fix both were `False` and the set returned 501 (both observed on the bench).
+Then confirm the gate really arms on CV610 by repeating the HW-2 consumer-stall
+step and watching `gateCloseEvents` in `/api/v1/transport/status` increment.

@@ -1,5 +1,21 @@
 # History
 
+## [0.85.5] - 2026-09-13
+
+Documentation-only follow-up to 0.85.4. No contract change —
+`contract_version` stays **0.32.0**.
+
+- **Corrected the hardware verification runbook** in
+  `documentation/REVIEW_FIX_VERIFICATION.md` after the 0.85.4 fixes were
+  exercised on the benches (CV610 `192.168.2.181`, Maruko `192.168.2.233`).
+  All three findings passed; the run record is now in the doc and five
+  procedure inaccuracies are fixed: the HTTP API takes one field per request
+  (a combined query is 400), each restart-class set needs its own request and
+  a settle, `record/start?dir=` requires the target directory to exist, the
+  patched count=16 `.bin` is refused with HTTP 500 rather than imported, the
+  gate reopens at `frameGateMaxClosedMs` and stays open with a dead consumer,
+  and the observed sidecar RTT is ~250 µs rather than ~1 s.
+
 ## [0.85.4] - 2026-09-13
 
 Fixes the first three findings of the two-week adversarial review. No contract
