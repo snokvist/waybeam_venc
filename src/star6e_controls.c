@@ -1618,7 +1618,7 @@ static char *query_transport_status(void)
 				&ps->output.bad_au_drops, __ATOMIC_RELAXED));
 	} else if (ps->output.frame_ring) {
 		venc_frame_ring_fill_t fill;
-		char gate_json[128];
+		char gate_json[FRAME_GATE_STATUS_JSON_CAP];
 		int in_pressure;
 		if (venc_frame_ring_get_fill(ps->output.frame_ring, &fill) != 0)
 			return NULL;

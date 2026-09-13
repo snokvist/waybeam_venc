@@ -410,6 +410,59 @@ int test_frame_gate(void)
 		CHECK("dwell_open_at_equal_now", frame_gate_is_open(&b));
 	}
 
+	/* ── the status fragment never truncates ─────────────────────── */
+	{
+		FrameGate f;
+		char js[FRAME_GATE_STATUS_JSON_CAP];
+
+		gate_on(&f, 3, 500);
+		/* Saturate every counter the fragment prints.  A field added to
+		 * the format string without growing the cap truncates here, and
+		 * snprintf reports that to nobody — the three backends declare
+		 * this buffer from FRAME_GATE_STATUS_JSON_CAP precisely so one
+		 * assertion covers all of them. */
+		f.close_events    = 0xFFFFFFFFu;
+		f.escape_events   = 0xFFFFFFFFu;
+		f.closed_total_us = 0xFFFFFFFFFFFFFFFFull;
+		f.open = 1;   /* no in-progress interval to fold in */
+
+		memset(js, 0x7F, sizeof(js));
+		frame_gate_status_json(&f, 0, js, sizeof(js));
+
+		CHECK("cap_fits", strlen(js) < sizeof(js));
+		/* The LAST field present in full is what proves the tail was not
+		 * cut — a NUL on its own only proves snprintf terminated. */
+		CHECK("cap_tail_intact",
+			strstr(js, "\"gateClosedMs\":18446744073709551")
+				!= NULL);
+		CHECK("cap_counters_intact",
+			strstr(js, "\"gateCloseEvents\":4294967295") != NULL &&
+			strstr(js, "\"gateEscapeEvents\":4294967295") != NULL);
+	}
+
+	/* ── the fragment splices, and an unarmed gate contributes none ─ */
+	{
+		FrameGate f;
+		char js[FRAME_GATE_STATUS_JSON_CAP];
+
+		gate_on(&f, 3, 500);
+		(void)frame_gate_observe(&f, 5, 1000 * MS);
+		frame_gate_status_json(&f, 1000 * MS, js, sizeof(js));
+		/* Leading comma: the caller splices this before a closing brace,
+		 * so a missing one would produce invalid JSON on device. */
+		CHECK("json_leading_comma", js[0] == ',');
+		CHECK("json_reports_closed",
+			strstr(js, "\"gateClosed\":true") != NULL);
+
+		/* slot_count 0 means "not a frame ring": the gate does not arm,
+		 * and the caller must get an empty string rather than fields
+		 * describing a policy that is not running. */
+		(void)frame_gate_setup(&f, 3, 500, 0);
+		memset(js, 0x7F, sizeof(js));
+		frame_gate_status_json(&f, 0, js, sizeof(js));
+		CHECK("unarmed_json_empty", js[0] == '\0');
+	}
+
 	/* ── NULL safety ─────────────────────────────────────────────── */
 	CHECK("null_observe",
 		frame_gate_observe(NULL, 5, 0) == FRAME_GATE_ACTION_NONE);

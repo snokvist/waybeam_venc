@@ -1033,7 +1033,7 @@ static char *cv610_query_transport_status(void)
 	if (cv610_collect_transport(ctx, NULL, &ts) != 0)
 		return NULL;
 	if (ts.is_ring) {
-		char gate_json[128];
+		char gate_json[FRAME_GATE_STATUS_JSON_CAP];
 
 		frame_gate_status_json(&ctx->frame_gate, wb_monotonic_us(),
 			gate_json, sizeof(gate_json));
