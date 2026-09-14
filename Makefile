@@ -506,18 +506,27 @@ test: $(TEST_RUNNER) $(CV610_VALIDATION_TEST)
 	./$(TEST_RUNNER)
 	./$(CV610_VALIDATION_TEST)
 
-test-werror: HOST_CFLAGS += -Werror
-test-werror: $(TEST_RUNNER) $(CV610_VALIDATION_TEST)
-	./$(TEST_RUNNER)
-	./$(CV610_VALIDATION_TEST)
+# Distinct output binaries per variant.  Compiling each over $(TEST_RUNNER)
+# left the instrumented binary behind, and a later `make test` saw it
+# up-to-date and silently ran it.  `test-werror` was worse: a target-specific
+# HOST_CFLAGS with nothing to force a rebuild meant the -Werror compile was
+# skipped entirely once the runner existed, so it only ever re-ran the
+# non-werror binary.  These always rebuild (no prerequisites).
+TEST_RUNNER_WERROR := tests/test_runner.werror
+TEST_RUNNER_ASAN   := tests/test_runner.asan
+TEST_RUNNER_TSAN   := tests/test_runner.tsan
+
+test-werror:
+	$(HOST_CC) $(HOST_CFLAGS) -Werror $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER_WERROR)
+	./$(TEST_RUNNER_WERROR)
 
 test-asan:
-	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=address,undefined $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER)
-	./$(TEST_RUNNER)
+	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=address,undefined $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER_ASAN)
+	./$(TEST_RUNNER_ASAN)
 
 test-tsan:
-	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=thread $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER)
-	./$(TEST_RUNNER)
+	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=thread $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER_TSAN)
+	./$(TEST_RUNNER_TSAN)
 
 test-ci: test test-asan test-tsan
 
@@ -755,6 +764,7 @@ clean:
 	rm -rf out/star6e out/maruko out/cv610
 	rm -f $(TIMING_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
+	rm -f $(TEST_RUNNER_WERROR) $(TEST_RUNNER_ASAN) $(TEST_RUNNER_TSAN)
 	rm -f $(CV610_VALIDATION_TEST)
 	rm -f $(QR_TEST_RUNNER)
 	rm -f $(QR_HOST_DECODE)

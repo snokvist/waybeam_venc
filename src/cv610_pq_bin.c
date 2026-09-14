@@ -384,7 +384,8 @@ int cv610_pq_bin_export(const char *path)
 	 * different field value than the sizer does, and on a path this chip does
 	 * not take it would emit up to 1410 bytes into a 1350-byte region.  The
 	 * length argument must stay exact (the check is a != , not a <=), so the
-	 * only place to absorb that is the allocation. */
+	 * only place to absorb that is the allocation.  The worst-case overhang
+	 * is 1410 - 1350 = 60 bytes, inside PQ_EXPORT_SLACK (64). */
 	buf = calloc(1, (size_t)need + PQ_EXPORT_SLACK);
 	if (!buf) {
 		fprintf(stderr, "WARNING: %scannot allocate %u bytes for export\n",

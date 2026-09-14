@@ -32,6 +32,7 @@
 | `video0.qpDelta` | true | true | **false** |
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
+| `video0.frameGateCloseSlots` / `frameGateMaxClosedMs` | true | true | true (**from 0.85.4**) |
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
 | `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
 | `image.rotate` | true | true | **false** |
@@ -107,7 +108,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.85.5",
+    "app_version": "0.85.6",
     "contract_version": "0.32.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
@@ -133,7 +134,7 @@ Response `200`:
       "sensor": { "index": -1, "mode": -1 },
       "isp": { "sensorBin": "/etc/sensors/imx415_greg_fpvXVIII-gpt200.bin", "aeEngine": "sdk", "aeFps": 15, "gainMax": 0, "awbMode": "auto", "awbCt": 5500, "keepAspect": true },
       "image": { "mirror": false, "flip": false, "rotate": 0 },
-      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "intraRefreshQp": 0, "zoomX": 0.5, "zoomY": 0.5, "framing": "off" },
+      "video0": { "rcMode": "cbr", "fps": 90, "size": "auto", "bitrate": 8192, "gopSize": 1.0, "qpDelta": 0, "sceneThreshold": 0, "sceneHoldoff": 2, "sliceCount": 1, "resilience": "off", "intraRefreshQp": 0, "zoomX": 0.5, "zoomY": 0.5, "framing": "off", "frameGateCloseSlots": 3, "frameGateMaxClosedMs": 500 },
       "outgoing": { "enabled": true, "server": "udp://192.168.2.20:5600", "streamMode": "rtp", "maxPayloadSize": 1400, "connectedUdp": false, "allowUnixEncoderStall": false },
       "fpv": { "roiEnabled": false, "roiQp": -20, "roiSteps": 2, "roiCenter": 0.4, "noiseLevel": 0 },
       "record": { "enabled": false, "mode": "off", "dir": "/tmp/sdcard", "format": "ts", "maxSeconds": 300, "maxMB": 500 },
@@ -1993,6 +1994,14 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.32.0` (breaking — the adaptive frame gate loses its switch, frame-shm
+  transport status gains gate fields; from venc 0.85.0): removes the
+  `video0.frameGate` switch — `GET /api/v1/set` now rejects it and
+  `/api/v1/config` no longer carries it. `GET /api/v1/transport/status` gains
+  `gateClosed`, `gateCloseEvents`, `gateEscapeEvents` and `gateClosedMs` on
+  frame-shm outputs. Two restart-required `video0` fields remain —
+  `frameGateCloseSlots` and `frameGateMaxClosedMs` — and CV610 advertises them
+  from venc 0.85.4.
 - `0.29.0` (additive — CV610 gains PQTools `.bin` import and export):
     Adds `GET /api/v1/iq/export_bin`, which writes the live ISP state to a
     PQTools `.bin` at the fixed path `/tmp/isp_export.bin` and answers

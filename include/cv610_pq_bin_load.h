@@ -17,7 +17,17 @@
  * so a buffer sized exactly for the file can be read up to 60 bytes past its
  * end, and those bytes reach `ss_mpi_vi_set_pipe_3dnr_param`.  This loader
  * allocates the reader's full reach as zeroed slack past the file's bytes, so
- * the bound holds whatever the gate reports. */
+ * the bound holds whatever the gate reports.
+ *
+ * The "accepted count ceiling of 16" is not our assumption: it is enforced by
+ * the vendor reader itself.  Disassembled `libbin.so` (v7, ARM EABI5):
+ * `PQ_BIN_SetNRDataV2` loads the count with a 32-bit `ldr` from
+ * `src + 8` (i.e. section + 44) and, at offset 0x12e0, computes `count - 1`
+ * and rejects anything above 15 with a `bls` guard BEFORE the `memcpy_s` at
+ * 0x12fc.  `OT_PQ_BIN_ImportNRXData` (0x14e4) passes `r1 + 36` as that `src`.
+ * So no input can make the reader reach past `section + 1410`, and a file with
+ * a larger count is refused rather than over-read.  Verified 2026-09-14; no
+ * extra count validation is needed here. */
 #define CV610_PQ_NRX_VENDOR_MAX 1410u
 
 /* Read `path` whole into a fresh buffer carrying CV610_PQ_NRX_VENDOR_MAX of

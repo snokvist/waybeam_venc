@@ -2,6 +2,15 @@
 
 <!-- version: 19.0.0 -->
 
+> **Superseded — kept as the PR #287 takeover record.** Frozen at the
+> 2026-09-12 checkpoint. Since then: the gate shipped in 0.85.0 and was
+> followed up through 0.85.6; the `video0.frameGate` switch this document
+> describes was removed in 0.85.0 (see HISTORY), `FRAME_GATE_MIN_OPEN_US` was
+> renamed `FRAME_GATE_ESCAPE_BACKSTOP_US` in 0.85.1, and the suite is now
+> ~3177 assertions, not 3115. For the current state read `HISTORY.md` and
+> `documentation/REVIEW_FIX_VERIFICATION.md`; do not treat the commands below
+> as a live runbook.
+
 Written for a local agent taking over PR #287. Updated at the 2026-09-12
 checkpoint after the CV610 bench pass and the SigmaStar BUSY diagnosis. No
 device was modified during this final checkpoint. See §8 and §9 for exact

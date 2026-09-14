@@ -2205,21 +2205,24 @@ static int maruko_start_venc(const MarukoBackendConfig *cfg,
 	 * between CreateChn and StartRecvPic for both backends. */
 	(void)maruko_apply_ref_pred(venc_dev, *chn, cfg);
 
-	/* stab-fill: StartRecvPic (+ IntraRefresh, which must follow it) is
-	 * deferred to maruko_setup_stabfill_venc — after the rest of the graph
-	 * is assembled, before the fill module's first push. */
-	if (g_stab_fill_graph)
-		return 0;
-
 	/* Cap the bitstream buffer before encoding starts — see
 	 * FRAME_GATE_STREAM_BUF_FRAMES.  Advisory: a refusal leaves the SDK
-	 * default depth, which costs latency while gated and nothing else. */
+	 * default depth, which costs latency while gated and nothing else.
+	 * Must sit ABOVE the stab-fill early return so both StartRecvPic
+	 * paths (here and maruko_setup_stabfill_venc) get it; the SDK wants
+	 * it after channel creation and before encoding starts either way. */
 	if (!g_mi_venc.fnSetMaxStreamCnt ||
 	    g_mi_venc.fnSetMaxStreamCnt(venc_dev, *chn,
 		    FRAME_GATE_STREAM_BUF_FRAMES) != 0)
 		fprintf(stderr, "WARNING: [maruko] SetMaxStreamCnt(%u) "
 			"refused; keeping the SDK default depth\n",
 			FRAME_GATE_STREAM_BUF_FRAMES);
+
+	/* stab-fill: StartRecvPic (+ IntraRefresh, which must follow it) is
+	 * deferred to maruko_setup_stabfill_venc — after the rest of the graph
+	 * is assembled, before the fill module's first push. */
+	if (g_stab_fill_graph)
+		return 0;
 
 	ret = maruko_mi_venc_start_recv(venc_dev, *chn);
 	if (ret != 0) {

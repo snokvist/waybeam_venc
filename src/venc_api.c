@@ -1554,6 +1554,8 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.size",
 		"video0.scene_holdoff",
 		"video0.slice_count",
+		"video0.frame_gate_close_slots",
+		"video0.frame_gate_max_closed_ms",
 		"video0.zoom_x",
 		"video0.zoom_y",
 		"video0.framing",

@@ -1,5 +1,56 @@
 # History
 
+## [0.85.6] - 2026-09-14
+
+Follow-ups to the two-week adversarial review: four behavioural fixes its
+first pass missed, plus two build-gate traps. No contract change —
+`contract_version` stays **0.32.0**.
+
+- **CV610's gated loop froze the egress ring's low-water gauge.** While the
+  frame gate was closed the drain loop `continue`d before
+  `cv610_service_ring_low_water()`, so the 200 ms `low_water_slots` export
+  waybeam-link's rate model reads held its last value for the whole closed
+  interval (up to `frameGateMaxClosedMs`, 60 s) — hiding exactly the
+  congestion that closed the gate. The gated branch now reads the ring fill
+  and services the gauge, matching Star6E and Maruko. The latched pressure
+  flag is deliberately left frozen: `venc_observe_pressure()` counts frames in
+  pressure, and both other backends sample it per-frame (and, on Star6E, only
+  under a sidecar subscription), so advancing it on the ~500 Hz idle poll
+  would inflate `pressure_drops`.
+- **The two frame-gate knobs were validated only on the live API path.**
+  `frameGateCloseSlots` / `frameGateMaxClosedMs` carry 0-64 / 0-60000 rules in
+  `validate_field_cfg()`, but the keys were missing from
+  `venc_api_validate_loaded_config()`'s sweep, so a config FILE could carry any
+  `uint32`. `frameGateMaxClosedMs = 4294968` then wrapped the `*1000` in
+  `frame_gate_resolve()` to 704 µs, which the debounce floor raised to 20 ms,
+  making the safety escape fire almost immediately. Both keys are now in the
+  sweep and the multiply saturates in 64 bits. Covered by `test_frame_gate`
+  and `test_venc_api`.
+- **Maruko kept the SDK's 3-deep bitstream buffer under `framing=stab-fill`.**
+  The `SetMaxStreamCnt(FRAME_GATE_STREAM_BUF_FRAMES)` call sat below the
+  `g_stab_fill_graph` early return, so the stab-fill path never capped it —
+  contradicting 0.85.0's "all three backends". The cap now runs before the
+  early return, so both `StartRecvPic` paths get it.
+- **A drained reopen at the backstop deadline was counted as a safety
+  escape.** With `max_closed_ms` at or below the 20 ms debounce the two
+  deadlines coincide, and the escape test ran first, so a normal drain reopen
+  incremented `gateEscapeEvents` and armed a spurious pulse. The normal drain
+  reopen is now evaluated before the escape.
+- **`make test-werror` compiled nothing.** Its `-Werror` lived in a
+  target-specific `HOST_CFLAGS` with no prerequisite that forced a rebuild, so
+  once `tests/test_runner` existed the target only re-ran the non-werror
+  binary — a false green of the same class 0.85.2/0.85.3 set out to close.
+- **`test-asan`/`test-tsan` overwrote the normal test binary.** Compiling each
+  variant to `tests/test_runner` left the last instrumented build behind, so a
+  later `make test` ran it. Each now builds a distinct
+  `tests/test_runner.{werror,asan,tsan}`.
+- **Verified the CV610 `.bin` import bound, and documented the export
+  slack.** Disassembling `libbin.so` confirmed `PQ_BIN_SetNRDataV2` rejects any
+  NRX count outside [1,16] before its fixed 1298-byte copy, so the 1410-byte
+  reader reach the 0.85.4 loader sizes for is a true ceiling, not an
+  assumption. The export side's 64-byte slack already covers the vendor's
+  60-byte overhang.
+
 ## [0.85.5] - 2026-09-13
 
 Documentation-only follow-up to 0.85.4. No contract change —
@@ -8,7 +59,7 @@ Documentation-only follow-up to 0.85.4. No contract change —
 - **Corrected the hardware verification runbook** in
   `documentation/REVIEW_FIX_VERIFICATION.md` after the 0.85.4 fixes were
   exercised on the benches (CV610 `192.168.2.181`, Maruko `192.168.2.233`).
-  All three findings passed; the run record is now in the doc and five
+  All three findings passed; the run record is now in the doc and six
   procedure inaccuracies are fixed: the HTTP API takes one field per request
   (a combined query is 400), each restart-class set needs its own request and
   a settle, `record/start?dir=` requires the target directory to exist, the

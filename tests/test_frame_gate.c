@@ -42,6 +42,27 @@ int test_frame_gate(void)
 	CHECK("setup_escape_floor",
 		g.cfg.max_closed_us == FRAME_GATE_MIN_CLOSED_US);
 
+	/* A max_closed_ms whose *1000 overflows uint32 must saturate, not
+	 * wrap to an escape shorter than the debounce.  4294968 * 1000 wraps
+	 * to 704 in uint32 — the value a config file edited behind the
+	 * daemon's back could carry, with only the negative floor guarding
+	 * it before this. */
+	(void)frame_gate_setup(&g, 0, 4294968u, RING);
+	CHECK("setup_escape_no_wrap", g.cfg.max_closed_us == UINT32_MAX);
+
+	/* Drain on the exact poll the backstop expires: with max_closed_ms at
+	 * the debounce floor the two deadlines coincide, and the drain reopen
+	 * must win.  Otherwise every drained reopen is counted as an escape
+	 * and arms a spurious pulse. */
+	(void)frame_gate_setup(&g, 3, 20, RING);
+	CHECK("boundary_close",
+		frame_gate_observe(&g, 5, 0) == FRAME_GATE_ACTION_CLOSE);
+	CHECK("boundary_drain_reopen_not_escape",
+		frame_gate_observe(&g, 0, g.cfg.max_closed_us)
+			== FRAME_GATE_ACTION_OPEN);
+	CHECK("boundary_no_escape_counted", g.escape_events == 0);
+	CHECK("boundary_no_pulse_armed", g.escape_open_us == 0);
+
 	/* Status reporting: no ring and an unreachable threshold are both
 	 * flagged, and each still leaves a valid, inert gate. */
 	CHECK("setup_status_no_ring",
