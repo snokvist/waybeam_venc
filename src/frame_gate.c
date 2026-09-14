@@ -17,9 +17,20 @@ static void frame_gate_resolve(uint32_t close_slots,
 	if (out->close_slots <= out->open_slots)
 		out->close_slots = out->open_slots + 1u;
 
-	out->max_closed_us = (max_closed_ms ? max_closed_ms
+	{
+		/* Compute in 64 bits.  max_closed_ms is uint32 and the config
+		 * loader and the API both bound it, but a value above 4294967
+		 * would wrap the *1000 in uint32 and hand the gate an escape
+		 * shorter than its own debounce — silently, from a config file
+		 * edited behind the daemon's back.  Saturate instead. */
+		uint64_t max_us = (uint64_t)(max_closed_ms ? max_closed_ms
 					    : FRAME_GATE_DEFAULT_MAX_CLOSED_MS)
 				* 1000u;
+
+		if (max_us > UINT32_MAX)
+			max_us = UINT32_MAX;
+		out->max_closed_us = (uint32_t)max_us;
+	}
 	/* An escape shorter than the debounce would fire before the gate was
 	 * allowed to reopen normally, turning every close into an escape. */
 	if (out->max_closed_us < out->min_closed_us)
@@ -123,8 +134,23 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 	elapsed_us = (now_us > g->closed_since_us)
 		? now_us - g->closed_since_us : 0u;
 
-	/* Safety escape first: if the consumer died outright, used_slots never
-	 * falls and the stream would stop for good.  Reopening lets the ring
+	if (elapsed_us < g->cfg.min_closed_us)
+		return FRAME_GATE_ACTION_NONE;
+
+	/* Normal reopen: the consumer drained back to the healthy band.  This
+	 * is checked BEFORE the escape so that a gate which drained on the
+	 * very poll its backstop expires is not miscounted as an escape.
+	 * With max_closed_ms at or below the debounce the two deadlines
+	 * coincide (max_closed_us is floored to min_closed_us), and the
+	 * escape would otherwise always win, turning every drained reopen
+	 * into a spurious pulse in the counters. */
+	if (used_slots <= g->cfg.open_slots) {
+		frame_gate_force_open(g, now_us);
+		return FRAME_GATE_ACTION_OPEN;
+	}
+
+	/* Safety escape: if the consumer died outright, used_slots never falls
+	 * and the stream would stop for good.  Reopening lets the ring
 	 * overflow and report full_drops instead, which is a diagnosable
 	 * failure rather than a silent one. */
 	if (elapsed_us >= g->cfg.max_closed_us) {
@@ -139,14 +165,7 @@ FrameGateAction frame_gate_observe(FrameGate *g, uint32_t used_slots,
 		return FRAME_GATE_ACTION_OPEN;
 	}
 
-	if (elapsed_us < g->cfg.min_closed_us)
-		return FRAME_GATE_ACTION_NONE;
-
-	if (used_slots > g->cfg.open_slots)
-		return FRAME_GATE_ACTION_NONE;
-
-	frame_gate_force_open(g, now_us);
-	return FRAME_GATE_ACTION_OPEN;
+	return FRAME_GATE_ACTION_NONE;
 }
 
 int frame_gate_status_json(const FrameGate *g, uint64_t now_us,
