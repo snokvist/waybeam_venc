@@ -2632,8 +2632,32 @@ static int cv610_run(void *opaque)
 		 * gated continue first would hot-spin until the escape. */
 		if (ready < 0 && select_errno != EINTR)
 			return -1;
-		if (!frame_gate_is_open(&ctx->frame_gate))
+		if (!frame_gate_is_open(&ctx->frame_gate)) {
+			/* Gated: no frame is drained, but the ring's low-water
+			 * gauge is published unconditionally, so it must keep
+			 * being measured or it freezes for the whole closed
+			 * interval — hiding exactly the congestion that closed
+			 * the gate from waybeam-link's rate model.  Star6E and
+			 * Maruko service their low-water gauge in the gated
+			 * branch the same way.  Pass the reading through so the
+			 * transport switch resets the window exactly as the
+			 * per-frame path does when the ring read fails. */
+			venc_frame_ring_fill_t gfill;
+			const venc_frame_ring_fill_t *gfillp = NULL;
+
+			if (ctx->frame_ring &&
+			    venc_frame_ring_get_fill(ctx->frame_ring, &gfill) == 0)
+				gfillp = &gfill;
+			cv610_service_ring_low_water(ctx, gfillp);
+			/* The pressure flag is deliberately NOT advanced here:
+			 * venc_observe_pressure()'s counter counts frames in
+			 * pressure, and both other backends leave it frozen while
+			 * gated (their sampling is per-frame and, on Star6E,
+			 * subscription-gated).  Advancing it on this ~500 Hz idle
+			 * poll would inflate pressure_drops and diverge from the
+			 * wire. */
 			continue;
+		}
 		if (ready < 0)
 			continue;
 		if (ready == 0)
